@@ -18,6 +18,7 @@ pub enum TokenKind {
     KwReturn,
     KwIf,
     KwElse,
+    KwWhen,
     KwWhile,
     KwTrue,
     KwFalse,
@@ -46,6 +47,7 @@ pub enum TokenKind {
     AndAnd,   // &&
     OrOr,     // ||
     Not,      // !
+    Arrow,    // ->  (when arms, lambdas)
     // trivia / control
     Newline,
     Eof,
@@ -75,6 +77,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "return" => TokenKind::KwReturn,
         "if" => TokenKind::KwIf,
         "else" => TokenKind::KwElse,
+        "when" => TokenKind::KwWhen,
         "while" => TokenKind::KwWhile,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,

@@ -470,6 +470,7 @@ impl<'a> Parser<'a> {
                 e
             }
             TokenKind::KwIf => self.parse_if(),
+            TokenKind::KwWhen => self.parse_when(),
             TokenKind::LBrace => self.parse_block_expr(),
             _ => {
                 self.diags.error(span, "expected an expression");
@@ -501,9 +502,53 @@ impl<'a> Parser<'a> {
         self.file.add_expr(Expr::If { cond, then_branch, else_branch }, Span::new(start.lo, end.hi))
     }
 
+    fn parse_when(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // 'when'
+        let subject = if self.eat(TokenKind::LParen) {
+            let e = self.parse_expr();
+            self.expect(TokenKind::RParen, "')'");
+            Some(e)
+        } else {
+            None
+        };
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace, "'{'");
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            let mut conditions = Vec::new();
+            if self.eat(TokenKind::KwElse) {
+                // else arm — no conditions
+            } else {
+                conditions.push(self.parse_expr());
+                while self.eat(TokenKind::Comma) {
+                    self.skip_newlines();
+                    conditions.push(self.parse_expr());
+                }
+            }
+            self.expect(TokenKind::Arrow, "'->'");
+            self.skip_newlines();
+            let body = self.parse_branch();
+            arms.push(WhenArm { conditions, body });
+        }
+        let end = self.tok().span;
+        self.expect(TokenKind::RBrace, "'}'");
+        self.file.add_expr(Expr::When { subject, arms }, Span::new(start.lo, end.hi))
+    }
+
     fn parse_branch(&mut self) -> ExprId {
         if self.at(TokenKind::LBrace) {
             self.parse_block_expr()
+        } else if matches!(self.kind(), TokenKind::KwReturn | TokenKind::KwVal | TokenKind::KwVar | TokenKind::KwWhile) {
+            // A statement (e.g. `if (c) return x`) — wrap the single statement as a block branch.
+            let start = self.tok().span;
+            let s = self.parse_stmt();
+            let end = self.t[self.i.saturating_sub(1)].span;
+            self.file.add_expr(Expr::Block { stmts: vec![s], trailing: None }, Span::new(start.lo, end.hi))
         } else {
             self.parse_expr()
         }
@@ -650,6 +695,18 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn when_subject_and_subjectless() {
+        assert_eq!(
+            tree("fun f(n: Int): Int = when (n) { 0 -> 1; 1, 2 -> 2; else -> 9 }"),
+            "(fun f (param n Int) :Int (when n (arm 0 => 1) (arm 1 2 => 2) (arm else => 9)))\n"
+        );
+        assert_eq!(
+            tree("fun g(n: Int): Int = when { n < 0 -> 1; else -> 2 }"),
+            "(fun g (param n Int) :Int (when (arm (< n 0) => 1) (arm else => 2)))\n"
+        );
     }
 
     #[test]
