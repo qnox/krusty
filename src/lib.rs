@@ -5,6 +5,7 @@
 //! set is bounded by a single file rather than the whole-module IR graph that makes kotlinc's
 //! memory scale with module size. See `docs/SPEC.md`.
 
+pub mod cli;
 pub mod diag;
 pub mod token;
 pub mod lexer;
