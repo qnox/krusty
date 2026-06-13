@@ -96,11 +96,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - Compile a library with krust, then compile a *Kotlin consumer* of it with kotlinc; kotlinc must
   accept krust's `@Metadata` and resolve the API. (Drives Phase 4b correctness.)
 
-## Phase 6 — Real interop + scale  ⬜
-- `.class` signature reader (replace the hardcoded JDK table) so arbitrary JDK calls resolve.
-- Minimal Java *source* front end (signatures only) for mixed kt+java compilation.
-- Benchmark peak RSS vs kotlinc on `many_functions`/`multifile`/`bodyheavy`; confirm ~constant in
-  file count. Add `invokedynamic` string concat to match kotlinc structurally.
+## Phase 6 — Java interop + scale  🚧
+### 6a — `.class` signature reader ✅
+- ✅ `jvm/classreader.rs`: parses constant pool (modified-UTF-8), this/super, fields, methods →
+  `ClassInfo`/`MethodSig` (name, descriptor, public/static). Round-trips krust output; **validated
+  against real javac output** (`tests/classreader_e2e.rs`: static/instance/private, primitive &
+  reference descriptors, `<init>`). 2 unit + 1 e2e test.
+### 6b — resolve Java/JDK calls via the reader ⬜
+- Feed `ClassInfo` into resolution so calls to real classes on a `-classpath` resolve by reading
+  their `.class` (replacing the hardcoded `toString`/`println`/`length` intrinsics).
+### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
+### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
