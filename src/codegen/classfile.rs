@@ -411,6 +411,34 @@ impl CodeBuilder {
     }
     pub fn pop(&mut self) { self.op(0x57, -1); }
     pub fn pop2(&mut self) { self.op(0x58, -2); }
+    pub fn dup(&mut self) { self.op(0x59, 1); }
+    pub fn ixor(&mut self) { self.op(0x82, -1); }
+
+    /// `new <class>` (push uninitialized ref).
+    pub fn new_obj(&mut self, class_index: u16) {
+        self.op_u2(0xbb, class_index, 1);
+    }
+    pub fn invokespecial(&mut self, methodref: u16, arg_words: i32, ret_words: i32) {
+        self.op_u2(0xb7, methodref, ret_words - arg_words - 1);
+    }
+
+    /// Emit a numeric widening conversion from `from` to `to` (Int<Long<Double). No-op if equal.
+    pub fn widen(&mut self, from: crate::types::Ty, to: crate::types::Ty) {
+        use crate::types::Ty::*;
+        match (from, to) {
+            (Int, Long) => self.i2l(),
+            (Int, Double) => self.i2d(),
+            (Long, Double) => self.l2d(),
+            _ => {}
+        }
+    }
+}
+
+/// Constant-pool index of a `Class` entry, exposed for `new`.
+impl ClassWriter {
+    pub fn class_ref(&mut self, internal: &str) -> u16 {
+        self.cp.class(internal)
+    }
 }
 
 #[cfg(test)]
