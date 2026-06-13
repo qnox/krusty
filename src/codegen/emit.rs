@@ -979,6 +979,9 @@ struct MethodEmitter<'a> {
     companion_of: Option<String>,
     /// Enclosing loops' `(continue_target, break_target)` labels for `continue`/`break`.
     loop_labels: Vec<(crate::codegen::classfile::Label, crate::codegen::classfile::Label)>,
+    /// Implicit receiver for an inlined `run`/`with`/`apply` body: `(slot, class internal)`. When set,
+    /// `this` and unqualified member access target this slot/class instead of `this` (slot 0).
+    recv: Option<(u16, String)>,
 }
 
 impl<'a> MethodEmitter<'a> {
@@ -987,7 +990,22 @@ impl<'a> MethodEmitter<'a> {
             file, info, syms, class: class.to_string(), diags,
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
             class_props: HashMap::new(), is_instance: false, props_via_getter: false, companion_of: None,
-            loop_labels: Vec::new(),
+            loop_labels: Vec::new(), recv: None,
+        }
+    }
+
+    /// Load the current implicit receiver (`run`/`with`/`apply` slot, else `this` in slot 0).
+    fn emit_implicit_this(&self, code: &mut CodeBuilder) {
+        match &self.recv {
+            Some((slot, _)) => code.aload(*slot),
+            None => code.aload(0),
+        }
+    }
+    /// The internal class name of the current implicit receiver.
+    fn implicit_class(&self) -> String {
+        match &self.recv {
+            Some((_, internal)) => internal.clone(),
+            None => self.class.clone(),
         }
     }
 
@@ -1395,20 +1413,21 @@ impl<'a> MethodEmitter<'a> {
                 if let Some(&(slot, ty)) = self.slots.get(&name) {
                     self.emit_expr_as(value, ty, code, cw);
                     self.store(ty, slot, code);
-                } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance) {
-                    // implicit `this.<prop> = value`: write via the (virtual) setter in an open
-                    // class; otherwise write the backing field directly.
-                    code.aload(0);
+                } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance || self.recv.is_some()) {
+                    // implicit `this.<prop> = value`: write via the setter (open class / receiver
+                    // whose field is private) or the backing field directly.
+                    let owner = self.implicit_class();
+                    self.emit_implicit_this(code);
                     self.emit_expr_as(value, ty, code, cw);
-                    if self.props_via_getter {
+                    if self.recv.is_some() || self.props_via_getter {
                         let setter = format!("set{}", capitalize(&name));
-                        let m = cw.methodref(&self.class.clone(), &setter, &method_descriptor(&[ty], Ty::Unit));
+                        let m = cw.methodref(&owner, &setter, &method_descriptor(&[ty], Ty::Unit));
                         code.invokevirtual(m, slot_words(ty) as i32, 0);
                     } else {
-                        let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
+                        let f = cw.fieldref(&owner, &name, &ty.descriptor());
                         code.putfield(f, slot_words(ty) as i32);
                     }
-                } else if let Some(&(ty, _)) = self.syms.props.get(&name).filter(|_| !self.is_instance) {
+                } else if let Some(&(ty, _)) = self.syms.props.get(&name).filter(|_| !self.is_instance && self.recv.is_none()) {
                     // top-level `var` property write → putstatic on the file facade.
                     self.emit_expr_as(value, ty, code, cw);
                     let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
@@ -1791,8 +1810,8 @@ impl<'a> MethodEmitter<'a> {
                 code.aconst_null();
                 code.bind(end);
             }
-            Expr::Name(n) if n == "this" && self.is_instance => {
-                code.aload(0);
+            Expr::Name(n) if n == "this" && (self.is_instance || self.recv.is_some()) => {
+                self.emit_implicit_this(code);
             }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
@@ -1804,19 +1823,20 @@ impl<'a> MethodEmitter<'a> {
                         let ci = cw.class_ref(ref_internal(narrowed));
                         code.checkcast(ci);
                     }
-                } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
-                    // implicit `this.<prop>`: read via the (virtual) getter in an open class so
-                    // overrides dispatch correctly; otherwise read the backing field directly.
-                    code.aload(0);
-                    if self.props_via_getter {
+                } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance || self.recv.is_some()) {
+                    // implicit `this.<prop>`: read via the getter in an open class / `run`-`with`-`apply`
+                    // receiver (whose backing field is private to its own class); else the field.
+                    let owner = self.implicit_class();
+                    self.emit_implicit_this(code);
+                    if self.recv.is_some() || self.props_via_getter {
                         let getter = format!("get{}", capitalize(&n));
-                        let m = cw.methodref(&self.class.clone(), &getter, &method_descriptor(&[], ty));
+                        let m = cw.methodref(&owner, &getter, &method_descriptor(&[], ty));
                         code.invokevirtual(m, 0, slot_words(ty) as i32);
                     } else {
-                        let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
+                        let f = cw.fieldref(&owner, &n, &ty.descriptor());
                         code.getfield(f, slot_words(ty) as i32);
                     }
-                    if self.is_lateinit(&self.class.clone(), &n) {
+                    if self.is_lateinit(&owner, &n) {
                         self.emit_lateinit_guard(&n, code, cw);
                     }
                 } else if let Some((cls, ty)) = self
@@ -2317,6 +2337,45 @@ impl<'a> MethodEmitter<'a> {
         code.invokevirtual(append, words, 1);
     }
 
+    /// Inline a `run`/`with`/`apply` body with `recv_expr` as the implicit receiver: store the
+    /// receiver, set the receiver context, emit the body. `is_apply` yields the receiver, else the body.
+    fn emit_with_receiver(&mut self, e: ExprId, recv_expr: ExprId, body: ExprId, is_apply: bool, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let rt = self.info.ty(recv_expr);
+        let internal = match rt.obj_internal() {
+            Some(i) => i.to_string(),
+            None => return, // checker already rejected a non-class receiver
+        };
+        self.emit_expr(recv_expr, code, cw);
+        let slot = self.fresh_slot(rt);
+        code.ensure_locals(slot + slot_words(rt));
+        self.store(rt, slot, code);
+        // Enter the receiver context: implicit `this`/members target the stored receiver's class.
+        let prev_recv = self.recv.take();
+        let prev_props = std::mem::take(&mut self.class_props);
+        self.recv = Some((slot, internal.clone()));
+        self.class_props = self
+            .syms
+            .class_by_internal(&internal)
+            .map(|c| c.props.iter().map(|(n, t, _)| (n.clone(), *t)).collect())
+            .unwrap_or_default();
+        let result = self.info.ty(e);
+        if is_apply {
+            self.emit_expr(body, code, cw);
+            self.discard(self.info.ty(body), code);
+        } else if result == Ty::Unit {
+            self.emit_expr(body, code, cw);
+            self.discard(self.info.ty(body), code);
+        } else {
+            self.emit_expr_as(body, result, code, cw);
+        }
+        // Restore the enclosing context, then (for `apply`) leave the receiver as the result.
+        self.recv = prev_recv;
+        self.class_props = prev_props;
+        if is_apply && result != Ty::Unit {
+            load_local(rt, slot, code);
+        }
+    }
+
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
@@ -2353,6 +2412,22 @@ impl<'a> MethodEmitter<'a> {
                             self.slots.remove(&pname);
                         }
                     }
+                    return;
+                }
+            }
+            // `recv.run { … }` / `recv.apply { … }` — receiver becomes the body's implicit `this`.
+            if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
+                if let Expr::Lambda { param: None, body } = self.file.expr(args[0]).clone() {
+                    self.emit_with_receiver(e, receiver, body, name == "apply", code, cw);
+                    return;
+                }
+            }
+        }
+        // `with(x) { … }` — `x` becomes the body's implicit `this`.
+        if let Expr::Name(fname) = self.file.expr(callee).clone() {
+            if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
+                if let Expr::Lambda { param: None, body } = self.file.expr(args[1]).clone() {
+                    self.emit_with_receiver(e, args[0], body, false, code, cw);
                     return;
                 }
             }
@@ -2689,15 +2764,17 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
-                // Unqualified sibling instance-method call `foo()` → `this.foo()` (invokevirtual).
-                if self.is_instance && !self.syms.funs.contains_key(&fname) {
-                    if let Some(sig) = self.syms.method_of(&self.class.clone(), &fname) {
-                        code.aload(0);
+                // Unqualified sibling instance-method call `foo()` → `this.foo()` (invokevirtual),
+                // where `this` is the enclosing instance or a `run`/`with`/`apply` receiver.
+                if (self.is_instance || self.recv.is_some()) && !self.syms.funs.contains_key(&fname) {
+                    let owner = self.implicit_class();
+                    if let Some(sig) = self.syms.method_of(&owner, &fname) {
+                        self.emit_implicit_this(code);
                         for (a, pty) in args.iter().zip(&sig.params) {
                             self.emit_expr_as(*a, *pty, code, cw);
                         }
                         let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
-                        let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));
+                        let m = cw.methodref(&owner, &fname, &method_descriptor(&sig.params, sig.ret));
                         code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
                         return;
                     }

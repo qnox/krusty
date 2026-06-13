@@ -726,6 +726,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   conformance **164 OK / 0 FAIL** (up from 161). Foundational for `run`/`with`/`apply` (which rebind
   the implicit receiver) — the next lambda step.
 
+## Phase 55 — `run`/`with`/`apply` (implicit-receiver scope functions)  ✅
+- ✅ `recv.run { … }` / `with(recv) { … }` (yield the body) and `recv.apply { … }` (yield the
+  receiver) are inlined: the receiver is stored to a local and becomes the body's implicit receiver.
+  Inside the body, `this` and unqualified member access (properties *and* methods) target the
+  receiver — implemented via a `recv: Option<(slot, class)>` context on the emitter (`emit_implicit_this`
+  / `implicit_class`) and a `check_with_receiver` in the checker (sets `this_ty`, brings the
+  receiver's props into scope). Member reads/writes use the receiver's accessors (its fields are
+  private to its own class).
+- ✅ The `with(x) { }` form is intercepted before its arguments are type-checked (the trailing lambda
+  isn't a normal value). A receiver lambda with an explicit parameter is not treated as run/with/apply.
+- ✅ `tests/receiver_scope_fn_e2e.rs` (run/apply/with with unqualified method + property access and
+  mutation, on the JVM). Box conformance holds at **164 OK / 0 FAIL** (completes the scope-function
+  family; broader gains await higher-order functions / collections).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
