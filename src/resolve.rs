@@ -226,6 +226,30 @@ pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<(&'static
     })
 }
 
+/// Resolve an instance method on `java.lang.StringBuilder` (a curated subset). `append` accepts any
+/// primitive/String/reference and returns the builder (chainable); `toString`/`length` as expected.
+pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
+    let sb = Ty::obj("java/lang/StringBuilder");
+    Some(match (method, arg_tys) {
+        ("toString", []) => ("()Ljava/lang/String;".to_string(), Ty::String),
+        ("length", []) => ("()I".to_string(), Ty::Int),
+        ("append", [a]) => {
+            let argdesc = match a {
+                Ty::Int | Ty::Byte | Ty::Short => "I",
+                Ty::Long => "J",
+                Ty::Float => "F",
+                Ty::Double => "D",
+                Ty::Boolean => "Z",
+                Ty::Char => "C",
+                Ty::String => "Ljava/lang/String;",
+                _ => "Ljava/lang/Object;",
+            };
+            (format!("({argdesc})Ljava/lang/StringBuilder;"), sb)
+        }
+        _ => return None,
+    })
+}
+
 /// Resolve a static call `Class.method(args)` against the classpath by exact param-descriptor
 /// match. Returns `(owner internal name, method descriptor, return type)`.
 pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
@@ -1447,6 +1471,9 @@ impl<'a> Checker<'a> {
         if let (Ty::Array(_), "size") = (rt, name) {
             return Ty::Int;
         }
+        if rt == Ty::obj("java/lang/StringBuilder") && name == "length" {
+            return Ty::Int; // `sb.length` property → length()
+        }
         // Property read on a class value: `p.prop` (own or inherited).
         if let Ty::Obj(internal) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
@@ -1550,6 +1577,12 @@ impl<'a> Checker<'a> {
                         return target;
                     }
                 }
+                // Curated `java.lang.StringBuilder` instance methods (append/toString/length).
+                if rt == Ty::obj("java/lang/StringBuilder") {
+                    if let Some((_, ret)) = resolve_stringbuilder_instance(&name, &arg_tys) {
+                        return ret;
+                    }
+                }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal) = rt {
                     if let Some(sig) = self.lookup_method(internal, &name) {
@@ -1619,6 +1652,10 @@ impl<'a> Checker<'a> {
                         if ok {
                             return Ty::obj(internal);
                         }
+                    }
+                    // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
+                    if fname == "StringBuilder" && matches!(arg_tys.as_slice(), [] | [Ty::String] | [Ty::Int]) {
+                        return Ty::obj("java/lang/StringBuilder");
                     }
                 }
                 match self.syms.funs.get(&fname) {

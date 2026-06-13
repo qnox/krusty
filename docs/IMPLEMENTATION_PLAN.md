@@ -677,6 +677,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/preconditions_e2e.rs` (require/check/error + non-null-cast throw on the JVM). Box
   conformance **153 OK / 0 FAIL** (up from 149).
 
+## Phase 50 — Curated `StringBuilder`  ✅
+- ✅ `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)` construction, chained
+  `append(x)` (any primitive/String/reference → returns the builder, `invokevirtual`), `toString()`,
+  and the `.length` property (`length()`). Resolved via `resolve_stringbuilder_instance` (mirrors the
+  curated `java.lang.String` resolver). Not shadowable by a user function of the same name.
+- ✅ `tests/stringbuilder_e2e.rs` (construction, chained append of mixed types, `toString`, `.length`,
+  on the JVM). Box conformance holds at **153 OK / 0 FAIL** (StringBuilder-heavy box tests typically
+  need further stdlib surface to fully compile; this removes the construction blocker).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
