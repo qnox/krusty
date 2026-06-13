@@ -3,4 +3,5 @@
 pub mod protobuf;
 pub mod encoding;
 pub mod builder;
+pub mod class_builder;
 pub mod module;

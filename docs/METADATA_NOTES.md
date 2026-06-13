@@ -40,17 +40,34 @@ to the builtin via `predefinedIndex=8` = `kotlin/Int`.
 ```
 ⇒ krust types: Int→8, Long→9, Double→6, Boolean→11, String→14, Unit→2.
 
-## Open question (the blocker)
-`JvmStringTable.serializeTo` = `StringTableTypes.writeDelimitedTo` (varint-len + bytes), then
-`Package.writeTo`. That predicts `d1 = 08 <8-byte STT> <Package>`, but the reference has an **extra
-leading `00`** (`00 08 …`). Yet the reader is `StringTableTypes.parseDelimitedFrom(in)` then
-`Package.parseFrom(in)`, under which a leading `00` would mean an empty table and then a malformed
-`Package` (field 1 / field 0). So either the byte→char decode hides a transform, or `writeData`
-writes a leading byte not seen in the summarized source. Resolving this needs a live
-`kotlin-metadata-jvm` reader to probe, or byte-diffing generated output against the reference under
-the Phase 5b round-trip (kotlinc compiling a consumer of krust output).
+## Leading `00` — RESOLVED
+The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 payload begins with a
+`0x00` byte before the delimited `StringTableTypes`. The reader strips it before
+`parseDelimitedFrom`. krust emits it verbatim; confirmed by the round-trips below.
 
-## Status
-Encoding chain ✅, schema + builtin table ✅ (above). The generator (build `Package`/`Function`/
-`Type`/`ValueParameter` + `StringTableTypes` + the `@kotlin.Metadata` `RuntimeVisibleAnnotations`
-attribute) + the framing fix + the 5b round-trip remain. This is the path; it is large.
+## Class metadata (kind=1) — `ProtoBuf.Class`
+Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (see
+`metadata/class_builder.rs`). `d1 = 00 <delimited StringTableTypes> <Class>`, k=1, mv=[1,9,0], xi=48.
+
+`Class` fields: `f3 = fq_name` (a string-table class-id), `f6 = supertype` (`Type`),
+`f8 = constructor` (repeated), `f10 = property` (repeated). Class flags (f1) omitted ⇒ default
+(public/final).
+- `Type.class_name = f6`.
+- `Constructor`: `f2 = value_parameter` (repeated `{f2=name, f3=Type}`), `f100 = JvmMethodSignature`
+  ext (`f2 = desc`; name omitted ⇒ `<init>`).
+- `Property`: `f2 = name`, `f3 = return_type` (`Type`), `f11 = flags` (emitted as **1798** only for a
+  `var`; `val` ⇒ 0, omitted), `f100 = JvmPropertySignature` `{f1 = field (empty ⇒ derived backing
+  field), f3 = getter JvmMethodSignature, f4 = setter (var only)}`.
+- `JvmMethodSignature`: `f1 = name`, `f2 = desc`.
+
+String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
+`Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krust emits one
+record per string (no range compression) ⇒ semantically equivalent, not byte-identical, to
+kotlinc — accepted by the reader, which is the ABI goal.
+
+## Status — round-trips PASSING
+Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both round-trips pass**: a
+*Kotlin consumer* compiled by the real kotlinc resolves krust's top-level functions (facade
+`@Metadata` + `META-INF/*.kotlin_module`, Phase 5b) **and** uses krust's classes via property syntax
+(class `@Metadata` kind=1, Phase 8b). Remaining: richer language surface (data classes, methods in
+bodies, generics, nullability) — each extends these same builders.

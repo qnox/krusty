@@ -132,10 +132,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ **Differential ABI passes** (`tests/diff_class_kotlinc.rs`): krust + kotlinc produce **identical
   public member signatures** for `class Point(val x: Int, var y: String)` (ctor + getX/getY/setY),
   and both construct + run identically. Plus `tests/class_e2e.rs` (shape + `-Xverify:all` run).
-- ⬜ **Next:** Class `@Metadata` (kind=1: `ProtoBuf.Class` with constructor + properties) so a
-  *Kotlin* consumer sees it as a Kotlin class (Java consumers already match). Then: secondary
-  constructors, methods in class bodies, `data class` (equals/hashCode/toString/componentN/copy),
-  class-typed properties (`Ty::Obj`), inheritance/interfaces.
+### 8b — class `@Metadata` (kind=1) ✅ (Kotlin-consumer ABI for classes ACHIEVED)
+- ✅ `metadata/class_builder.rs` emits `ProtoBuf.Class` (kind=1): fq_name (class-id via
+  `DESC_TO_CLASS_ID`), supertype `kotlin/Any`, primary constructor (value params + JVM sig ext),
+  and one property per field (name, return type, getter/setter JVM sigs; `var` adds flags=1798 +
+  setter). Schema reverse-engineered + recorded in METADATA_NOTES.md.
+- ✅ **Round-trip passes** (`tests/class_roundtrip_e2e.rs`): krust compiles `class Point(val x, var y)`;
+  the real kotlinc compiles a Kotlin consumer using **property syntax** (`p.x`, `p.y = ...`) — which
+  only works if kotlinc reads the class `@Metadata` — and runs (`7:bye`).
+- Note: d1 is semantically equivalent, not byte-identical, to kotlinc's (per-string string-table
+  records vs kotlinc's range-compressed) — accepted by kotlinc, which is the ABI goal.
+- ⬜ **Next:** methods in class bodies, secondary constructors, `data class`
+  (equals/hashCode/toString/componentN/copy), class-typed properties (`Ty::Obj`),
+  inheritance/interfaces, nullability.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
