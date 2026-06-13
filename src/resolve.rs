@@ -1222,6 +1222,12 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ty);
                             }
                         }
+                        // `ObjectName.prop` — a property on a singleton `object`.
+                        if self.syms.objects.contains(&en) {
+                            if let Some((ty, _)) = self.syms.classes.get(&en).and_then(|c| c.prop(&name)) {
+                                return self.set(e, ty);
+                            }
+                        }
                     }
                 }
                 let rt = self.expr(receiver);
