@@ -167,6 +167,9 @@ struct MethodInfo {
     max_locals: u16,
     /// `None` for an abstract method (no `Code` attribute).
     code: Option<Vec<u8>>,
+    /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
+    /// constant-pool class index, or 0 for a catch-all.
+    exceptions: Vec<(u16, u16, u16, u16)>,
 }
 
 struct FieldInfo {
@@ -218,7 +221,7 @@ impl ClassWriter {
     pub fn add_abstract_method(&mut self, access: u16, name: &str, desc: &str) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
-        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None });
+        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None, exceptions: Vec::new() });
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
@@ -315,6 +318,7 @@ impl ClassWriter {
             max_stack: code.max_stack,
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
+            exceptions: code.resolved_exceptions(),
         });
     }
 
@@ -350,13 +354,19 @@ impl ClassWriter {
                     u2(&mut out, 1); // attributes: Code
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
-                    let attr_len = 2 + 2 + 4 + code_len + 2 + 2;
+                    let attr_len = 2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2;
                     u4(&mut out, attr_len as u32);
                     u2(&mut out, m.max_stack);
                     u2(&mut out, m.max_locals);
                     u4(&mut out, code_len as u32);
                     out.extend_from_slice(code);
-                    u2(&mut out, 0); // exception_table_length
+                    u2(&mut out, m.exceptions.len() as u16); // exception_table_length
+                    for &(start, end, handler, catch_type) in &m.exceptions {
+                        u2(&mut out, start);
+                        u2(&mut out, end);
+                        u2(&mut out, handler);
+                        u2(&mut out, catch_type);
+                    }
                     u2(&mut out, 0); // code attributes
                 }
             }
@@ -390,6 +400,8 @@ pub struct CodeBuilder {
     cur_stack: i32,
     labels: Vec<usize>,        // label id -> bound byte offset (usize::MAX until bound)
     fixups: Vec<(usize, u32)>, // (operand position, label id) to patch in link()
+    /// Exception-table entries by label: `(start, end, handler, catch_type)`, resolved in `link()`.
+    exceptions: Vec<(Label, Label, Label, u16)>,
 }
 
 impl CodeBuilder {
@@ -401,6 +413,37 @@ impl CodeBuilder {
             cur_stack: 0,
             labels: Vec::new(),
             fixups: Vec::new(),
+            exceptions: Vec::new(),
+        }
+    }
+
+    /// Register a `try` range `[start, end)` guarded by a handler at `handler`, catching `catch_type`
+    /// (a constant-pool class index, or 0 for catch-all).
+    pub fn add_exception(&mut self, start: Label, end: Label, handler: Label, catch_type: u16) {
+        self.exceptions.push((start, end, handler, catch_type));
+    }
+
+    /// Resolve the exception table to byte offsets (call after all labels are bound, e.g. in `link`).
+    pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
+        self.exceptions
+            .iter()
+            .map(|&(s, e, h, t)| {
+                (self.labels[s.0 as usize] as u16, self.labels[e.0 as usize] as u16, self.labels[h.0 as usize] as u16, t)
+            })
+            .collect()
+    }
+
+    /// The current (linearly tracked) operand-stack height.
+    pub fn stack_height(&self) -> i32 {
+        self.cur_stack
+    }
+
+    /// Force the current operand-stack height (e.g. an exception handler is entered with the caught
+    /// exception already on the stack). Keeps `max_stack` correct across non-linear control flow.
+    pub fn set_stack(&mut self, n: u16) {
+        self.cur_stack = n as i32;
+        if n > self.max_stack {
+            self.max_stack = n;
         }
     }
 

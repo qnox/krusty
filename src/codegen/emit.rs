@@ -843,6 +843,80 @@ impl<'a> MethodEmitter<'a> {
         slot
     }
 
+    /// The internal name for a `catch` clause's exception type (a JDK exception / import / declared
+    /// class) — mirrors the resolver's `catch_internal`.
+    fn catch_internal(&self, name: &str) -> String {
+        crate::resolve::builtin_exception(name)
+            .map(|s| s.to_string())
+            .or_else(|| self.imports.get(name).cloned())
+            .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+            .unwrap_or_else(|| "java/lang/Throwable".to_string())
+    }
+
+    /// `try { body } catch (e: T) { … } …`: the body is guarded by an exception-table range; each
+    /// handler stores the caught exception, binds the catch variable, and produces the result value
+    /// (or discards it, when the `try` is a statement). The body and handlers all converge at `after`.
+    fn emit_try(&mut self, e: ExprId, body: ExprId, catches: &[CatchClause], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let result = self.info.ty(e);
+        // A `try` is only sound where the operand stack is empty at entry: when the body throws, the
+        // JVM clears the whole stack to just the exception, so any partially-computed values that the
+        // surrounding expression left on the stack (e.g. `"" + try { … }`) would be destroyed. Reject
+        // (skip) such positions rather than emit code that fails verification / loses values.
+        if code.stack_height() != 0 {
+            self.diags.error(
+                self.file.expr_spans[e.0 as usize],
+                "krusty: try/catch is only supported in statement, initializer, return, or argument position (empty operand stack)".to_string(),
+            );
+            return;
+        }
+        let try_start = code.new_label();
+        let try_end = code.new_label();
+        let after = code.new_label();
+
+        let emit_value = |this: &mut Self, ex: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter| {
+            if result == Ty::Unit {
+                this.emit_expr(ex, code, cw);
+                this.discard(this.info.ty(ex), code);
+            } else {
+                this.emit_expr_as(ex, result, code, cw);
+            }
+        };
+
+        code.bind(try_start);
+        emit_value(self, body, code, cw);
+        code.bind(try_end);
+        if !self.expr_diverges(body) {
+            code.goto(after);
+        }
+
+        for c in catches {
+            let internal = self.catch_internal(&c.ty.name);
+            let cty = Ty::obj(&internal);
+            let handler = code.new_label();
+            code.bind(handler);
+            code.set_stack(1); // the JVM places the caught exception on the stack
+            let slot = self.fresh_slot(cty);
+            code.ensure_locals(slot + slot_words(cty));
+            self.store(cty, slot, code);
+            let prev = self.slots.insert(c.name.clone(), (slot, cty));
+            emit_value(self, c.body, code, cw);
+            match prev {
+                Some(p) => {
+                    self.slots.insert(c.name.clone(), p);
+                }
+                None => {
+                    self.slots.remove(&c.name);
+                }
+            }
+            if !self.expr_diverges(c.body) {
+                code.goto(after);
+            }
+            let cti = cw.class_ref(&internal);
+            code.add_exception(try_start, try_end, handler, cti);
+        }
+        code.bind(after);
+    }
+
     fn emit_fun(&mut self, f: &FunDecl, cw: &mut ClassWriter) {
         let sig = match self.syms.funs.get(&f.name) {
             Some(s) => s.clone(),
@@ -1089,6 +1163,7 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(operand, code, cw);
                 code.athrow();
             }
+            Expr::Try { body, catches } => self.emit_try(e, body, &catches, code, cw),
             Expr::Is { operand, ty, negated } => {
                 self.emit_expr(operand, code, cw);
                 let tt = resolve_ty(&ty, self.syms);

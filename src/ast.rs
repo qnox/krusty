@@ -44,6 +44,9 @@ pub enum Expr {
     SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
     /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
     Throw { operand: ExprId },
+    /// `try { body } catch (e: T) { … } …` — the value is the body's, or a matching catch's. `finally`
+    /// is not supported (rejected). Each `body`/handler is a `Block` expr.
+    Try { body: ExprId, catches: Vec<CatchClause> },
     /// `operand is T` / `operand !is T` — a type test (`instanceof`), evaluates to `Boolean`.
     Is { operand: ExprId, ty: TypeRef, negated: bool },
     /// `operand as T` / `operand as? T` — a cast (`checkcast`). `nullable` ⇒ `as?` (instanceof,
@@ -62,6 +65,13 @@ pub enum Expr {
     /// the `else`. With a subject, each condition is a value matched by `==`; without, each is a
     /// boolean expression.
     When { subject: Option<ExprId>, arms: Vec<WhenArm> },
+}
+
+#[derive(Clone, Debug)]
+pub struct CatchClause {
+    pub name: String,
+    pub ty: TypeRef,
+    pub body: ExprId,
 }
 
 #[derive(Clone, Debug)]
@@ -356,6 +366,15 @@ impl File {
             Expr::Throw { operand } => {
                 out.push_str("(throw ");
                 self.write_expr(*operand, out);
+                out.push(')');
+            }
+            Expr::Try { body, catches } => {
+                out.push_str("(try ");
+                self.write_expr(*body, out);
+                for c in catches {
+                    out.push_str(&format!(" catch {}:{} ", c.name, c.ty.name));
+                    self.write_expr(c.body, out);
+                }
                 out.push(')');
             }
             Expr::Is { operand, ty, negated } => {
