@@ -412,19 +412,21 @@ pub fn emit_class(
         .iter()
         .map(|p| (p, resolve_ty(&p.ty, syms)))
         .collect();
-    // Body properties (`class C { val x = … }`) with resolved types.
+    // Body properties (`class C { val x = … }`) with resolved types (parallel to `class.body_props`,
+    // so `init_order` `PropInit` indices stay valid). A *computed* property (custom getter, no
+    // initializer) has no backing field — excluded from the field/accessor set below.
     let body_props_t: Vec<(&PropDecl, Ty)> = class
         .body_props
         .iter()
         .map(|bp| (bp, bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| bp.init.map(|i| info.ty(i)).unwrap_or(Ty::Error))))
         .collect();
-    // (name, type, is_var) for every backing field: `val`/`var` ctor params then body properties.
-    // Plain (non-property) ctor params are not fields.
+    // (name, type, is_var) for every backing field: `val`/`var` ctor params then body properties
+    // (excluding computed properties, which have no field).
     let all_props: Vec<(String, Ty, bool)> = props
         .iter()
         .filter(|(p, _)| p.is_property)
         .map(|(p, t)| (p.name.clone(), *t, p.is_var))
-        .chain(body_props_t.iter().map(|(bp, t)| (bp.name.clone(), *t, bp.is_var)))
+        .chain(body_props_t.iter().filter(|(bp, _)| bp.getter.is_none()).map(|(bp, t)| (bp.name.clone(), *t, bp.is_var)))
         .collect();
 
     // Backing fields: `private final` for `val`, `private` for `var`.
@@ -584,6 +586,23 @@ pub fn emit_class(
             )
         })
         .collect();
+
+    // Computed properties (`val x: T get() = …`) → a `getX()` method running the getter body.
+    for bp in &class.body_props {
+        let Some(getter) = &bp.getter else { continue };
+        let ty = bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Error);
+        let getter_fn = FunDecl {
+            name: format!("get{}", capitalize(&bp.name)),
+            params: Vec::new(),
+            ret: bp.ty.clone(),
+            body: getter.clone(),
+            type_params: Vec::new(),
+            span: bp.span,
+        };
+        let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+        e.props_via_getter = class.is_open || class.is_abstract;
+        e.emit_method(&getter_fn, &[], ty, member_access, &mut cw);
+    }
 
     // `companion object` members → `static`/`static final` members on this class.
     for m in &class.companion_methods {

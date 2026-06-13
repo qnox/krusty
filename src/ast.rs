@@ -243,6 +243,9 @@ pub struct PropDecl {
     /// `true` if declared `lateinit` — a no-initializer property is only allowed when lateinit
     /// (otherwise it's an abstract/interface property, which krusty rejects).
     pub is_lateinit: bool,
+    /// A custom getter body (`val x: T get() = expr`/`get() { … }`) — a computed property with no
+    /// backing field.
+    pub getter: Option<FunBody>,
     pub span: Span,
 }
 

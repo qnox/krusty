@@ -215,22 +215,41 @@ impl<'a> Parser<'a> {
         self.bump(); // val/var
         let name = self.ident_or_error("property name");
         let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
-        // A property normally has an `= initializer`; a `lateinit var x: T` declares a type with no
-        // initializer. A no-initializer property that isn't `lateinit` is an abstract/interface
-        // property, which krusty does not support.
         let init = if self.eat(TokenKind::Eq) {
             self.skip_newlines();
             Some(self.parse_expr())
         } else {
-            if !is_lateinit && !abstract_ok {
-                self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
-            } else if ty.is_none() {
-                self.diags.error(start, "a property declared without an initializer must declare its type");
-            }
             None
         };
+        // Optional custom getter: `val x: T get() = expr` / `get() { … }` — a computed property.
+        let save = self.i;
+        self.skip_newlines();
+        let getter = if init.is_none() && self.at(TokenKind::Ident) && self.text() == "get"
+            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LParen)
+        {
+            self.bump(); // 'get'
+            self.expect(TokenKind::LParen, "'('");
+            self.expect(TokenKind::RParen, "')'");
+            if self.eat(TokenKind::Eq) {
+                self.skip_newlines();
+                Some(FunBody::Expr(self.parse_expr()))
+            } else if self.at(TokenKind::LBrace) {
+                Some(FunBody::Block(self.parse_block_expr()))
+            } else {
+                self.diags.error(self.tok().span, "expected '=' or '{' for a property getter");
+                None
+            }
+        } else {
+            self.i = save;
+            None
+        };
+        // A property with neither an initializer nor a getter must be `lateinit` (or an abstract
+        // interface property); otherwise it is unsupported.
+        if init.is_none() && getter.is_none() && !is_lateinit && !abstract_ok {
+            self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
+        }
         let end = self.t[self.i.saturating_sub(1)].span;
-        PropDecl { name, ty, is_var, init, is_lateinit, span: Span::new(start.lo, end.hi) }
+        PropDecl { name, ty, is_var, init, is_lateinit, getter, span: Span::new(start.lo, end.hi) }
     }
 
     /// `companion object [Name] [: Super] { fun…; val… }` — collect its functions/properties to be
