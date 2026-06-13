@@ -664,6 +664,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/computed_prop_e2e.rs` (expression + block getters reading other props, on the JVM). Box
   conformance **149 OK / 0 FAIL** (up from 148).
 
+## Phase 49 — Precondition intrinsics + non-null cast check  ✅
+- ✅ Stdlib precondition intrinsics (when not shadowed by a user function): `require(cond)` →
+  `IllegalArgumentException`, `check(cond)` → `IllegalStateException`, `assert(cond)` →
+  `AssertionError` (all → `Unit`); `error(msg)` → `throw IllegalStateException(msg)` and `TODO()`/
+  `TODO(msg)` → `throw RuntimeException` (both `Nothing`). Added `emit_string_of` to coerce a message
+  of any type to `String`.
+- ✅ `x as T` to a *non-nullable* `T` now throws on a null value (Kotlin's cast null check) — bare
+  `checkcast` let null through, so `null as TestKlass` wrongly succeeded; `x as T?` still keeps null.
+- ✅ A `try` used as a statement no longer requires its body/catches to share a type (lenient merge →
+  `Unit`); only an expression use that needs a value is constrained.
+- ✅ `tests/preconditions_e2e.rs` (require/check/error + non-null-cast throw on the JVM). Box
+  conformance **153 OK / 0 FAIL** (up from 149).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

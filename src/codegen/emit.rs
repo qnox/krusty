@@ -1035,6 +1035,24 @@ impl<'a> MethodEmitter<'a> {
 
     /// Allocate an array of `elem` whose length is already on the stack (`newarray` for a primitive
     /// element, `anewarray` for a reference element).
+    /// Emit `e` and leave its `String` form on the stack (identity for a `String`, `String.valueOf`
+    /// for a primitive, `Object.toString`/`String.valueOf(Object)` for a reference).
+    fn emit_string_of(&mut self, e: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let t = self.info.ty(e);
+        self.emit_expr(e, code, cw);
+        let (desc, words) = match t {
+            Ty::String => return,
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
+            Ty::Char => ("(C)Ljava/lang/String;", 1),
+            Ty::Long => ("(J)Ljava/lang/String;", 2),
+            Ty::Float => ("(F)Ljava/lang/String;", 1),
+            Ty::Double => ("(D)Ljava/lang/String;", 2),
+            _ => ("(Ljava/lang/Object;)Ljava/lang/String;", 1),
+        };
+        let m = cw.methodref("java/lang/String", "valueOf", desc);
+        code.invokestatic(m, words, 1);
+    }
+
     /// Emit a numeric conversion `from` → `to` (no-op if equal).
     fn emit_numeric_conversion(&self, from: Ty, to: Ty, code: &mut CodeBuilder) {
         use Ty::*;
@@ -1653,6 +1671,20 @@ impl<'a> MethodEmitter<'a> {
                     code.bind(end);
                 } else {
                     code.checkcast(ci);
+                    // `x as T` to a *non-nullable* `T`: a null value throws (Kotlin's null check —
+                    // `checkcast` alone lets null through). `x as T?` (nullable) keeps null.
+                    if !ty.nullable {
+                        code.dup();
+                        let ok = code.new_label();
+                        code.ifnonnull(ok);
+                        let npe = cw.class_ref("java/lang/NullPointerException");
+                        code.new_obj(npe);
+                        code.dup();
+                        let init = cw.methodref("java/lang/NullPointerException", "<init>", "()V");
+                        code.invokespecial(init, 0, 0);
+                        code.athrow();
+                        code.bind(ok);
+                    }
                 }
             }
             Expr::Elvis { lhs, rhs } => {
@@ -2421,6 +2453,40 @@ impl<'a> MethodEmitter<'a> {
                 let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = cw.methodref(internal, &name, &desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
+            }
+            // Precondition intrinsics (`require`/`check`/`assert(cond)`, `error(msg)`, `TODO()`).
+            Expr::Name(fname)
+                if !self.syms.funs.contains_key(&fname)
+                    && matches!(fname.as_str(), "require" | "check" | "assert" | "error" | "TODO") =>
+            {
+                let throw = |code: &mut CodeBuilder, cw: &mut ClassWriter, exc: &str, msg: Option<&ExprId>, this: &mut Self| {
+                    let c = cw.class_ref(exc);
+                    code.new_obj(c);
+                    code.dup();
+                    if let Some(m) = msg {
+                        this.emit_string_of(*m, code, cw);
+                        let init = cw.methodref(exc, "<init>", "(Ljava/lang/String;)V");
+                        code.invokespecial(init, 1, 0);
+                    } else {
+                        let init = cw.methodref(exc, "<init>", "()V");
+                        code.invokespecial(init, 0, 0);
+                    }
+                    code.athrow();
+                };
+                match fname.as_str() {
+                    "require" | "check" | "assert" => {
+                        let exc = if fname == "require" { "java/lang/IllegalArgumentException" } else if fname == "check" { "java/lang/IllegalStateException" } else { "java/lang/AssertionError" };
+                        self.emit_expr_as(args[0], Ty::Boolean, code, cw);
+                        let ok = code.new_label();
+                        code.ifne(ok); // condition true → continue
+                        throw(code, cw, exc, None, self);
+                        code.bind(ok);
+                    }
+                    "error" => throw(code, cw, "java/lang/IllegalStateException", Some(&args[0]), self),
+                    "TODO" => throw(code, cw, "java/lang/RuntimeException", args.first(), self),
+                    _ => unreachable!(),
+                }
+                return;
             }
             Expr::Name(fname) if fname == "println" => {
                 let out = cw.fieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
