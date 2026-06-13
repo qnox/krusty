@@ -385,6 +385,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         ret_ty: Ty::Unit,
         imports,
         tparams: Default::default(),
+        this_ty: None,
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -407,6 +408,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // Member functions are checked with the class's properties (resolved in Stage C)
                 // visible as an implicit `this` scope.
                 let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
+                c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods);
                 if let Some(internal) = syms.classes.get(&cl.name).map(|s| s.internal.clone()) {
@@ -448,6 +450,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 c.pop_scope();
                 c.tparams.clear();
+                c.this_ty = None;
             }
             Decl::Property(p) => {
                 let it = c.expr(p.init);
@@ -472,6 +475,8 @@ struct Checker<'a> {
     imports: HashMap<String, String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: std::collections::HashSet<String>,
+    /// The type of `this` when checking class members (`None` at top level).
+    this_ty: Option<Ty>,
 }
 
 impl<'a> Checker<'a> {
@@ -895,6 +900,13 @@ impl<'a> Checker<'a> {
                 }
                 result
             }
+            Expr::Name(n) if n == "this" => match self.this_ty {
+                Some(t) => t,
+                None => {
+                    self.diags.error(self.span(e), "'this' is not available outside a class member".to_string());
+                    Ty::Error
+                }
+            },
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
                 None => match self.syms.props.get(&n) {
@@ -1311,6 +1323,26 @@ impl<'a> Checker<'a> {
                             self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference: {name}"));
                         }
                     },
+                }
+            }
+            Stmt::AssignMember { receiver, name, value } => {
+                let rt = self.expr(receiver);
+                let vt = self.expr(value);
+                let span = self.file.stmt_spans[s.0 as usize];
+                match rt {
+                    Ty::Error => {}
+                    Ty::Obj(internal) => match self.syms.prop_of(internal, &name) {
+                        Some((lty, is_var)) => {
+                            if !is_var {
+                                self.diags.error(span, "val cannot be reassigned".to_string());
+                            }
+                            self.expect_assignable(lty, vt, span, "assignment");
+                        }
+                        None => {
+                            self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
+                        }
+                    },
+                    _ => self.diags.error(span, format!("cannot assign to a member of '{}'", rt.name())),
                 }
             }
             Stmt::Return(e) => {

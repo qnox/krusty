@@ -93,6 +93,8 @@ pub enum Stmt {
     Local { is_var: bool, name: String, ty: Option<TypeRef>, init: ExprId },
     /// `name = value`
     Assign { name: String, value: ExprId },
+    /// `receiver.name = value` — write a (mutable) property via its setter.
+    AssignMember { receiver: ExprId, name: String, value: ExprId },
     Return(Option<ExprId>),
     While { cond: ExprId, body: ExprId }, // body is a Block expr
     /// `for (name in start <op> end (step s)?) body` over an integer range.
@@ -494,6 +496,13 @@ impl File {
             }
             Stmt::Assign { name, value } => {
                 out.push_str(&format!("(set {name} "));
+                self.write_expr(*value, out);
+                out.push(')');
+            }
+            Stmt::AssignMember { receiver, name, value } => {
+                out.push_str("(set-member ");
+                self.write_expr(*receiver, out);
+                out.push_str(&format!(" {name} "));
                 self.write_expr(*value, out);
                 out.push(')');
             }

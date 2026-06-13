@@ -1045,6 +1045,18 @@ impl<'a> MethodEmitter<'a> {
                     code.putstatic(f, slot_words(ty) as i32);
                 }
             }
+            Stmt::AssignMember { receiver, name, value } => {
+                if let Ty::Obj(internal) = self.info.ty(receiver) {
+                    let prop_ty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
+                    self.emit_expr(receiver, code, cw);
+                    self.emit_expr_as(value, prop_ty, code, cw);
+                    // Write via the public setter (backing fields are private, so a cross-instance
+                    // putfield would fail; the setter also dispatches correctly for open classes).
+                    let setter = format!("set{}", capitalize(&name));
+                    let m = cw.methodref(internal, &setter, &method_descriptor(&[prop_ty], Ty::Unit));
+                    code.invokevirtual(m, slot_words(prop_ty) as i32, 0);
+                }
+            }
             Stmt::Return(e) => match e {
                 Some(ex) => {
                     self.emit_expr_as(ex, self.ret_ty, code, cw);
@@ -1287,6 +1299,9 @@ impl<'a> MethodEmitter<'a> {
                 code.pop(); // discard the null receiver copy
                 code.aconst_null();
                 code.bind(end);
+            }
+            Expr::Name(n) if n == "this" && self.is_instance => {
+                code.aload(0);
             }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
