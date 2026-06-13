@@ -40,6 +40,17 @@ pub enum Expr {
     If { cond: ExprId, then_branch: ExprId, else_branch: Option<ExprId> },
     /// `{ stmts; trailing? }` — block as an expression; trailing expr is its value.
     Block { stmts: Vec<StmtId>, trailing: Option<ExprId> },
+    /// `when (subject?) { conditions -> body ; else -> body }`. An arm with empty `conditions` is
+    /// the `else`. With a subject, each condition is a value matched by `==`; without, each is a
+    /// boolean expression.
+    When { subject: Option<ExprId>, arms: Vec<WhenArm> },
+}
+
+#[derive(Clone, Debug)]
+pub struct WhenArm {
+    /// Empty ⇒ the `else` arm.
+    pub conditions: Vec<ExprId>,
+    pub body: ExprId,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +257,27 @@ impl File {
                 if let Some(e) = else_branch {
                     out.push(' ');
                     self.write_expr(*e, out);
+                }
+                out.push(')');
+            }
+            Expr::When { subject, arms } => {
+                out.push_str("(when");
+                if let Some(s) = subject {
+                    out.push(' ');
+                    self.write_expr(*s, out);
+                }
+                for arm in arms {
+                    out.push_str(" (arm");
+                    for cnd in &arm.conditions {
+                        out.push(' ');
+                        self.write_expr(*cnd, out);
+                    }
+                    if arm.conditions.is_empty() {
+                        out.push_str(" else");
+                    }
+                    out.push_str(" => ");
+                    self.write_expr(arm.body, out);
+                    out.push(')');
                 }
                 out.push(')');
             }

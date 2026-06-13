@@ -208,6 +208,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/box_vendored_e2e.rs` + `tests/box_data/` vendor the in-subset cases (Apache-2.0, see
   PROVENANCE.md) so they also run in normal `cargo test`.
 
+## Phase 11 — `when`, control-flow & conformance hardening  ✅
+- ✅ **`when`** expressions, both forms: subject (`when (n) { 0 -> …; 1, 2 -> …; else -> … }`,
+  comma conditions, `==` match) and subjectless (`when { cond -> … }`). Lowered to an if-chain
+  (subject stored once in a temp local); `->` is a real `Arrow` token; ABI matches kotlinc.
+- ✅ **`if`/`when` branches may be statements** (`if (c) return x`) — wrapped as single-statement
+  block branches. **`;`** is accepted as a statement/arm separator. **Reference `==`/`!=`**
+  (String/class) lowers to `equals()`.
+- ✅ **Conformance-driven fixes** (caught by the box harness, which asserts krusty never miscompiles
+  a case it accepts):
+  - exhaustive/diverging trailing `when`/`if` (all arms `return`) emits a dead default-return so the
+    fall-through verifies (`when8.kt` → `OK`);
+  - **string templates** (`"$x"`, `"${…}"`) and **raw strings** (`"""…"""`) are now *rejected* by the
+    lexer (skipped, never silently miscompiled).
+- ✅ Box conformance after this phase: **10,009 scanned · 26 compiled · 26 `box()`=OK · 0 FAIL**
+  (up from 13); vendored set refreshed to the 26 in-subset cases.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

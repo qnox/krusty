@@ -542,6 +542,13 @@ impl<'a> MethodEmitter<'a> {
         slot
     }
 
+    /// Allocate an unnamed temporary local slot (e.g. a `when` subject).
+    fn fresh_slot(&mut self, ty: Ty) -> u16 {
+        let slot = self.next_slot;
+        self.next_slot += slot_words(ty);
+        slot
+    }
+
     fn emit_fun(&mut self, f: &FunDecl, cw: &mut ClassWriter) {
         let sig = match self.syms.funs.get(&f.name) {
             Some(s) => s.clone(),
@@ -575,6 +582,13 @@ impl<'a> MethodEmitter<'a> {
             self.emit_stmt(*s, code, cw);
         }
         match trailing {
+            // A trailing `when`/`if` that yields no value (Unit) but whose arms `return` (an
+            // exhaustive/diverging body): emit it as a statement, then a dead default return so the
+            // fall-through path still verifies. The arm `return`s carry the real result.
+            Some(te) if self.ret_ty != Ty::Unit && self.info.ty(te) == Ty::Unit => {
+                self.emit_expr(te, code, cw);
+                self.emit_default_return(self.ret_ty, code, cw);
+            }
             Some(te) if self.ret_ty != Ty::Unit => {
                 self.emit_expr_as(te, self.ret_ty, code, cw);
                 self.emit_return(self.ret_ty, code);
@@ -799,6 +813,82 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(te, code, cw);
                 }
             }
+            Expr::When { subject, arms } => self.emit_when(e, subject, &arms, code, cw),
+        }
+    }
+
+    /// Lower `when` to an if-chain. With a subject, it is stored once in a temp local and each arm
+    /// condition becomes a `subject == cond` test; without, each condition is a boolean test.
+    fn emit_when(&mut self, e: ExprId, subject: Option<ExprId>, arms: &[WhenArm], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let result = self.info.ty(e);
+        let end = code.new_label();
+        let subj = subject.map(|s| {
+            let st = self.info.ty(s);
+            self.emit_expr(s, code, cw);
+            let slot = self.fresh_slot(st);
+            self.store(st, slot, code);
+            (slot, st)
+        });
+
+        let emit_body = |this: &mut Self, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter| {
+            if result == Ty::Unit {
+                this.emit_expr(body, code, cw);
+                this.discard(this.info.ty(body), code);
+            } else {
+                this.emit_expr_as(body, result, code, cw);
+            }
+        };
+
+        for arm in arms.iter().filter(|a| !a.conditions.is_empty()) {
+            let body = code.new_label();
+            let next = code.new_label();
+            for &cnd in &arm.conditions {
+                match subj {
+                    Some((slot, st)) => self.emit_eq_jump(slot, st, cnd, body, code, cw),
+                    None => self.emit_cond_jump(cnd, body, true, code, cw),
+                }
+            }
+            code.goto(next); // no condition matched → try the next arm
+            code.bind(body);
+            emit_body(self, arm.body, code, cw);
+            code.goto(end);
+            code.bind(next);
+        }
+        // Falls here when nothing matched: the `else` body (if any) produces the value.
+        if let Some(arm) = arms.iter().find(|a| a.conditions.is_empty()) {
+            emit_body(self, arm.body, code, cw);
+        }
+        code.bind(end);
+    }
+
+    /// Emit `if (subject == cond) goto target`, with subject in local `slot` of type `st`.
+    fn emit_eq_jump(&mut self, slot: u16, st: Ty, cond: ExprId, target: Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match st {
+            Ty::Int | Ty::Boolean => {
+                code.iload(slot);
+                self.emit_expr_as(cond, st, code, cw);
+                code.if_icmpeq(target);
+            }
+            Ty::Long => {
+                code.lload(slot);
+                self.emit_expr_as(cond, st, code, cw);
+                code.lcmp();
+                code.ifeq(target);
+            }
+            Ty::Double => {
+                code.dload(slot);
+                self.emit_expr_as(cond, st, code, cw);
+                code.dcmpg();
+                code.ifeq(target);
+            }
+            _ => {
+                // reference: subject.equals(cond)
+                code.aload(slot);
+                self.emit_expr(cond, code, cw);
+                let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
+                code.invokevirtual(eqm, 1, 1);
+                code.ifne(target);
+            }
         }
     }
 
@@ -895,6 +985,16 @@ impl<'a> MethodEmitter<'a> {
             Ty::Double => {
                 code.dcmpg();
                 self.cmp0(op, target, code);
+            }
+            // Reference equality (`==`/`!=`) via `equals()` (Kotlin structural equality).
+            Ty::String | Ty::Obj(_) => {
+                let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
+                code.invokevirtual(eqm, 1, 1);
+                match op {
+                    BinOp::Eq => code.ifne(target), // equals==true ⇒ jump
+                    BinOp::Ne => code.ifeq(target), // equals==false ⇒ jump
+                    _ => self.diags.error(self.file.expr_spans[lhs.0 as usize], "krusty: only == / != on reference types"),
+                }
             }
             _ => {
                 self.diags.error(self.file.expr_spans[lhs.0 as usize], "krusty v0: unsupported comparison operand type");

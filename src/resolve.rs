@@ -375,6 +375,35 @@ impl<'a> Checker<'a> {
                 self.pop_scope();
                 t
             }
+            Expr::When { subject, arms } => {
+                let subj_ty = subject.map(|s| self.expr(s));
+                let mut result: Option<Ty> = None;
+                let mut has_else = false;
+                for arm in &arms {
+                    if arm.conditions.is_empty() {
+                        has_else = true;
+                    }
+                    for &cnd in &arm.conditions {
+                        let ct = self.expr(cnd);
+                        match subj_ty {
+                            // subject form: condition must be comparable to the subject
+                            Some(st) if st != Ty::Error && ct != Ty::Error && st != ct && Ty::promote(st, ct).is_none() => {
+                                self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
+                            }
+                            // subjectless form: condition must be Boolean
+                            None => self.expect_assignable(Ty::Boolean, ct, self.span(cnd), "when condition"),
+                            _ => {}
+                        }
+                    }
+                    let bt = self.expr(arm.body);
+                    result = Some(match result {
+                        Some(r) => self.join(r, bt, self.span(arm.body)),
+                        None => bt,
+                    });
+                }
+                // A `when` is only an expression (carries a value) when it is exhaustive (has `else`).
+                if has_else { result.unwrap_or(Ty::Unit) } else { Ty::Unit }
+            }
         };
         self.set(e, t)
     }

@@ -55,9 +55,11 @@ impl<'a> Lexer<'a> {
             b'{' => self.one(TokenKind::LBrace),
             b'}' => self.one(TokenKind::RBrace),
             b',' => self.one(TokenKind::Comma),
+            b';' => self.one(TokenKind::Newline), // `;` is a statement/arm separator like a newline
             b':' => self.one(TokenKind::Colon),
             b'.' if !self.peek2().is_ascii_digit() => self.one(TokenKind::Dot),
             b'+' => self.one(TokenKind::Plus),
+            b'-' if self.peek2() == b'>' => self.two(TokenKind::Arrow),
             b'-' => self.one(TokenKind::Minus),
             b'*' => self.one(TokenKind::Star),
             b'/' => self.one(TokenKind::Slash),
@@ -149,11 +151,25 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self, lo: u32) -> Token {
+        // Raw strings (`"""..."""`) and string templates (`"$x"`, `"${...}"`) are outside the
+        // supported subset — reject them so callers don't silently miscompile (the differential
+        // harness relies on krusty refusing what it can't compile correctly).
+        if self.peek2() == b'"' && self.b.get(self.i + 2) == Some(&b'"') {
+            self.i += 3;
+            self.diags.error(Span::new(lo, self.i as u32), "raw string literals are not supported");
+            return Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) };
+        }
         self.i += 1; // opening quote
         while self.i < self.b.len() && self.b[self.i] != b'"' {
             if self.b[self.i] == b'\\' && self.i + 1 < self.b.len() {
                 self.i += 2; // escape
             } else {
+                if self.b[self.i] == b'$' {
+                    let next = self.b.get(self.i + 1).copied().unwrap_or(0);
+                    if next == b'{' || is_ident_start(next) {
+                        self.diags.error(Span::new(lo, self.i as u32), "string templates are not supported");
+                    }
+                }
                 self.i += 1;
             }
         }
