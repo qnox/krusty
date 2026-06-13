@@ -297,6 +297,52 @@ fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<
     cw.finish()
 }
 
+/// Kotlin's `String.trimIndent()`: drop a blank first/last line, then strip the minimum common
+/// leading-whitespace of the non-blank lines from every line.
+fn trim_indent(s: &str) -> String {
+    let mut lines: Vec<&str> = s.split('\n').collect();
+    if lines.first().map_or(false, |l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    if lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let min_indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| if l.trim().is_empty() { String::new() } else { l[min_indent..].to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Kotlin's `String.trimMargin(prefix)`: drop a blank first/last line, then for each line remove
+/// leading whitespace up to and including the first `prefix` marker (default `|`).
+fn trim_margin(s: &str, prefix: &str) -> String {
+    let mut lines: Vec<&str> = s.split('\n').collect();
+    if lines.first().map_or(false, |l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    if lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+        .iter()
+        .map(|l| {
+            let t = l.trim_start();
+            match t.strip_prefix(prefix) {
+                Some(rest) => rest.to_string(),
+                None => l.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// True for the array-creation builtins krusty recognizes.
 fn is_array_builtin(name: &str) -> bool {
     matches!(
@@ -2556,6 +2602,20 @@ impl<'a> MethodEmitter<'a> {
                 let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = cw.methodref("java/lang/String", &name, desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
+            }
+            // `"literal".trimIndent()` / `.trimMargin()` — folded at compile time (the receiver must
+            // be a string literal, since krusty can't call the kotlin-stdlib extension).
+            Expr::Member { receiver, name }
+                if matches!(name.as_str(), "trimIndent" | "trimMargin")
+                    && args.is_empty()
+                    && self.info.ty(receiver) == Ty::String =>
+            {
+                if let Expr::StringLit(s) = self.file.expr(receiver).clone() {
+                    let folded = if name == "trimIndent" { trim_indent(&s) } else { trim_margin(&s, "|") };
+                    code.push_string(&folded, cw);
+                } else {
+                    self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty: '{name}' is only supported on a string literal"));
+                }
             }
             // Curated java.lang.StringBuilder instance method (append/toString/length).
             Expr::Member { receiver, name }

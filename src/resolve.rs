@@ -1627,6 +1627,11 @@ impl<'a> Checker<'a> {
                     if let Some((_, ret)) = resolve_string_instance(&name, &arg_tys) {
                         return ret;
                     }
+                    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
+                    // time on a string-literal receiver (codegen rejects a non-literal receiver).
+                    if matches!(name.as_str(), "trimIndent" | "trimMargin") && arg_tys.is_empty() {
+                        return Ty::String;
+                    }
                 }
                 // Numeric conversion intrinsics: `n.toInt()`/`toLong()`/`toFloat()`/`toDouble()`.
                 if rt.is_numeric() && arg_tys.is_empty() {
