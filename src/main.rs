@@ -72,7 +72,7 @@ fn main() {
                     Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
                     _ => c.name.clone(),
                 };
-                let bytes = krust::codegen::emit::emit_class(c, &internal, &syms);
+                let bytes = krust::codegen::emit::emit_class(c, file, &info, &internal, &syms, &mut diags);
                 if let Err(e) = write_class(&internal, &bytes) {
                     eprintln!("krust: cannot write {internal}.class: {e}");
                     std::process::exit(1);

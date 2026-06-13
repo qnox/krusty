@@ -95,6 +95,8 @@ pub struct PropParam {
 pub struct ClassDecl {
     pub name: String,
     pub props: Vec<PropParam>,
+    /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
+    pub methods: Vec<FunDecl>,
     pub span: Span,
 }
 
@@ -166,6 +168,19 @@ impl File {
                 out.push_str(&format!("(class {}", c.name));
                 for p in &c.props {
                     out.push_str(&format!(" ({} {} {})", if p.is_var { "var" } else { "val" }, p.name, p.ty.name));
+                }
+                for m in &c.methods {
+                    out.push(' ');
+                    let id = DeclId(u32::MAX); // not arena-backed; render inline
+                    let _ = id;
+                    out.push_str(&format!("(method {}", m.name));
+                    for p in &m.params {
+                        out.push_str(&format!(" (param {} {})", p.name, p.ty.name));
+                    }
+                    if let Some(r) = &m.ret {
+                        out.push_str(&format!(" :{}", r.name));
+                    }
+                    out.push(')');
                 }
                 out.push(')');
             }

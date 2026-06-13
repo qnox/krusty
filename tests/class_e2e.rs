@@ -12,7 +12,7 @@ use krust::diag::DiagSink;
 use krust::jvm::classreader::parse_class;
 use krust::lexer::lex;
 use krust::parser::parse;
-use krust::resolve::collect_signatures;
+use krust::resolve::{check_file, collect_signatures};
 
 fn compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let mut d = DiagSink::new();
@@ -21,6 +21,7 @@ fn compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     assert!(!d.has_errors(), "parse errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     let files = vec![file];
     let syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "resolve errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     let cd = files[0]
         .decls
@@ -30,7 +31,7 @@ fn compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
             _ => None,
         })
         .expect("class decl");
-    emit_class(&cd, internal, &syms)
+    emit_class(&cd, &files[0], &info, internal, &syms, &mut d)
 }
 
 #[test]
@@ -56,6 +57,45 @@ fn class_shape_matches_expected_abi() {
     assert!(ci.method("setY", "(Ljava/lang/String;)V").is_some(), "setY for var");
     // val property has no setter.
     assert!(ci.method("setX", "(I)V").is_none(), "val must not have a setter");
+}
+
+#[test]
+fn member_function_shape_and_run() {
+    let Ok(java_home) = std::env::var("KRUST_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+        eprintln!("skipping member_function_shape_and_run: set JAVA_HOME");
+        return;
+    };
+    let javac = format!("{java_home}/bin/javac");
+    let java = format!("{java_home}/bin/java");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+
+    let src = "class Calc(val base: Int) {\n  fun addTo(n: Int): Int = base + n\n}";
+    let bytes = compile_class(src, "Calc", "Calc");
+    let ci = parse_class(&bytes).expect("parse");
+    // Member function is a public (non-static) instance method with the derived JVM descriptor.
+    let m = ci.method("addTo", "(I)I").expect("addTo(I)I");
+    assert!(!m.is_static(), "member function must be an instance method");
+
+    let dir = std::env::temp_dir().join(format!("krust_mfn_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("Calc.class"), &bytes).unwrap();
+    let main = r#"
+public class Main {
+    public static void main(String[] a) {
+        Calc c = new Calc(10);
+        System.out.println(c.addTo(5));
+    }
+}"#;
+    fs::write(dir.join("Main.java"), main).unwrap();
+    let jc = Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("Main.java")).output().expect("javac");
+    assert!(jc.status.success(), "javac: {}", String::from_utf8_lossy(&jc.stderr));
+    let run = Command::new(&java).args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"]).output().expect("java");
+    assert!(run.status.success(), "java: {}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "15\n");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Compile the class, then a Java `Main` that constructs it and calls the accessors; run under

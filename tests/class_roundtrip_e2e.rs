@@ -13,7 +13,7 @@ use krust::codegen::emit::emit_class;
 use krust::diag::DiagSink;
 use krust::lexer::lex;
 use krust::parser::parse;
-use krust::resolve::collect_signatures;
+use krust::resolve::{check_file, collect_signatures};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -25,6 +25,7 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let file = parse(src, &toks, &mut d);
     let files = vec![file];
     let syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
     let cd = files[0]
         .decls
         .iter()
@@ -33,7 +34,7 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
             _ => None,
         })
         .expect("class decl");
-    let bytes = emit_class(&cd, internal, &syms);
+    let bytes = emit_class(&cd, &files[0], &info, internal, &syms, &mut d);
     assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
@@ -50,14 +51,14 @@ fn kotlinc_consumes_krust_class_via_property_syntax() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(lib.join("demo")).unwrap();
 
-    // krust compiles a Kotlin class in package `demo`.
-    let src = "package demo\nclass Point(val x: Int, var y: String)\n";
+    // krust compiles a Kotlin class in package `demo` (with a member function).
+    let src = "package demo\nclass Point(val x: Int, var y: String) {\n  fun shifted(d: Int): Int = x + d\n}\n";
     fs::write(lib.join("demo/Point.class"), krust_compile_class(src, "Point", "demo/Point")).unwrap();
 
-    // kotlinc compiles a consumer using KOTLIN PROPERTY SYNTAX (p.x, p.y = ...), which only works
-    // if kotlinc recognizes the class as Kotlin (reads its @Metadata) — a Java view would require
-    // getX()/setY() instead.
-    let consumer = "import demo.Point\nfun main() {\n  val p = Point(7, \"hi\")\n  p.y = \"bye\"\n  println(p.x.toString() + \":\" + p.y)\n}\n";
+    // kotlinc compiles a consumer using KOTLIN PROPERTY SYNTAX (p.x, p.y = ...) and a member call
+    // (p.shifted(..)), which only works if kotlinc recognizes the class as Kotlin (reads its
+    // @Metadata) — a Java view would require getX()/setY() instead.
+    let consumer = "import demo.Point\nfun main() {\n  val p = Point(7, \"hi\")\n  p.y = \"bye\"\n  println(p.x.toString() + \":\" + p.y + \":\" + p.shifted(3))\n}\n";
     fs::write(root.join("Consumer.kt"), consumer).unwrap();
 
     let mut cmd = Command::new(&kotlinc);
@@ -78,7 +79,7 @@ fn kotlinc_consumes_krust_class_via_property_syntax() {
         let cp = format!("{}:{}:{}", root.join("cout").to_str().unwrap(), lib.to_str().unwrap(), stdlib);
         let run = Command::new("java").args(["-cp", &cp, "ConsumerKt"]).output().expect("java");
         if run.status.success() {
-            assert_eq!(String::from_utf8_lossy(&run.stdout), "7:bye\n", "stderr={}", String::from_utf8_lossy(&run.stderr));
+            assert_eq!(String::from_utf8_lossy(&run.stdout), "7:bye:10\n", "stderr={}", String::from_utf8_lossy(&run.stderr));
         }
     }
 

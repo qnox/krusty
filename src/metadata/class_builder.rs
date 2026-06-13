@@ -23,6 +23,14 @@ pub struct PropMeta {
     pub setter: Option<(String, String)>, // present iff `var`
 }
 
+/// Member-function descriptor for class metadata (`Class.function` = f9). The JVM name/descriptor
+/// are derivable, so no signature extension is emitted (matching kotlinc).
+pub struct FnMeta {
+    pub name: String,
+    pub params: Vec<(String, Ty)>,
+    pub ret: Ty,
+}
+
 /// `predefinedIndex` of a builtin fq-name in `JvmNameResolverBase.PREDEFINED_STRINGS`.
 fn predefined_index(t: Ty) -> u64 {
     match t {
@@ -104,6 +112,7 @@ pub fn build_class(
     ctor_params: &[(String, Ty)],
     ctor_desc: &str,
     props: &[PropMeta],
+    methods: &[FnMeta],
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut class = Pb::new();
@@ -129,6 +138,22 @@ pub fn build_class(
     let ctor_sig = jvm_method_sig(&mut st, None, ctor_desc); // name omitted → <init>
     ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
     class.repeated_message(8, &ctor);
+
+    // f9 = member functions (name f2, return_type f3, value_parameter f6; JVM sig derivable).
+    for m in methods {
+        let mut func = Pb::new();
+        func.field_varint(2, st.local(&m.name) as u64);
+        let ret = type_pb(&mut st, m.ret);
+        func.field_message(3, &ret);
+        for (pname, pty) in &m.params {
+            let mut vp = Pb::new();
+            vp.field_varint(2, st.local(pname) as u64);
+            let ty = type_pb(&mut st, *pty);
+            vp.field_message(3, &ty);
+            func.repeated_message(6, &vp); // Function.value_parameter = 6
+        }
+        class.repeated_message(9, &func); // Class.function = 9
+    }
 
     // f10 = properties.
     for p in props {
@@ -181,6 +206,7 @@ mod tests {
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },
             ],
+            &[],
         );
         // The class id descriptor and the JVM signatures must all appear verbatim in d2.
         assert!(d2.contains(&"Ldemo/Point;".to_string()));

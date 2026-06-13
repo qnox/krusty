@@ -207,21 +207,26 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::RParen, "')'");
         }
-        // Optional class body — v0 accepts only an empty `{ }`.
+        // Optional class body — v0 accepts member `fun` declarations (instance methods).
+        let mut methods = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
-            self.skip_newlines();
-            if !self.eat(TokenKind::RBrace) {
-                self.diags.error(self.tok().span, "v0: class bodies must be empty");
-                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                    self.bump();
+            loop {
+                self.skip_newlines();
+                match self.kind() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    _ => {
+                        self.diags.error(self.tok().span, "v0: class bodies support only member 'fun' declarations");
+                        self.bump();
+                    }
                 }
-                self.eat(TokenKind::RBrace);
             }
+            self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
@@ -635,6 +640,14 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn class_with_member_function() {
+        assert_eq!(
+            tree("class Calc(val base: Int) {\n  fun addTo(n: Int): Int = base + n\n}"),
+            "(class Calc (val base Int) (method addTo (param n Int) :Int))\n"
+        );
     }
 
     #[test]

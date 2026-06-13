@@ -15,7 +15,7 @@ use krust::codegen::emit::emit_class;
 use krust::diag::DiagSink;
 use krust::lexer::lex;
 use krust::parser::parse;
-use krust::resolve::collect_signatures;
+use krust::resolve::{check_file, collect_signatures};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -27,6 +27,7 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let file = parse(src, &toks, &mut d);
     let files = vec![file];
     let syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
     let cd = files[0]
         .decls
         .iter()
@@ -35,7 +36,7 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
             _ => None,
         })
         .expect("class decl");
-    let bytes = emit_class(&cd, internal, &syms);
+    let bytes = emit_class(&cd, &files[0], &info, internal, &syms, &mut d);
     assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
