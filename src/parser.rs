@@ -120,6 +120,14 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // `object Name { … }` — a singleton (soft keyword `object` + a name).
+                TokenKind::Ident
+                    if self.text() == "object" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident) =>
+                {
+                    let d = self.parse_object();
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
                     self.bump(); // recover
@@ -313,7 +321,37 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, is_data: false, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, is_data: false, is_object: false, span: Span::new(start.lo, end.hi) }
+    }
+
+    /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
+    fn parse_object(&mut self) -> ClassDecl {
+        let start = self.tok().span;
+        self.bump(); // 'object'
+        let name = self.ident_or_error("object name");
+        let mut methods = Vec::new();
+        self.skip_newlines();
+        if self.at(TokenKind::LBrace) {
+            self.bump();
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    self.skip_decl_prefix();
+                    self.skip_newlines();
+                }
+                match self.kind() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    _ => {
+                        self.diags.error(self.tok().span, "v0: object bodies support only member 'fun' declarations");
+                        self.bump();
+                    }
+                }
+            }
+            self.expect(TokenKind::RBrace, "'}'");
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
