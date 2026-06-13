@@ -1231,6 +1231,23 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
+                // `super.method(args)` — dispatch to the base class's method (non-virtual).
+                if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                        let sup = self.syms.class_by_internal(internal).and_then(|c| c.super_internal.clone());
+                        if let Some(sup) = sup {
+                            if let Some(sig) = self.syms.method_of(&sup, &name) {
+                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                                return sig.ret;
+                            }
+                        }
+                    }
+                    self.diags.error(span, format!("krusty: unresolved super method '{name}'"));
+                    return Ty::Error;
+                }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
                 // (not a local/param) resolvable on the classpath.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {

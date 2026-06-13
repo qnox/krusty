@@ -521,6 +521,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/array_e2e.rs` (primitive + reference arrays, read/write/compound/`.size`/iteration on the
   JVM; `arrayOf`-of-primitive rejection). Box conformance **104 OK / 0 FAIL** (up from 99).
 
+## Phase 36 — `super` calls  ✅
+- ✅ `super.method(args)` resolves to the base class's method (via `method_of` up the declared chain)
+  and emits `aload 0; args; invokespecial Super.method` — non-virtual dispatch, so an `override` can
+  delegate to the implementation it overrides. A `super` method krusty can't resolve to a declared
+  supertype is rejected.
+- ✅ `tests/super_call_e2e.rs` (override delegating via `super`, called both directly and through the
+  base-typed reference, on the JVM). Box conformance **105 OK / 0 FAIL** (up from 104).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
