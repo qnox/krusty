@@ -42,6 +42,33 @@ fn interface_and_impl_shapes() {
 }
 
 #[test]
+fn interface_polymorphism_runs() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping interface polymorphism: set JAVA_HOME");
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_poly_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // An interface-typed value + a function taking the interface → invokeinterface + subtyping.
+    fs::write(dir.join("P.kt"),
+        "interface Shape { fun area(): Int }\nclass Square(val side: Int) : Shape { fun area(): Int = side * side }\nclass Rect(val w: Int, val h: Int) : Shape { fun area(): Int = w * h }\nfun describe(s: Shape): Int = s.area()\nfun box(): String {\n  val s: Shape = Square(3)\n  if (s.area() != 9) return \"f1\"\n  if (describe(Rect(2, 5)) != 10) return \"f2\"\n  return \"OK\"\n}\n").unwrap();
+    let kc = Command::new(krusty).args(["-d", dir.to_str().unwrap()]).arg(dir.join("P.kt")).output().unwrap();
+    assert!(kc.status.success(), "krusty: {}", String::from_utf8_lossy(&kc.stderr));
+    fs::write(dir.join("M.java"), "public class M { public static void main(String[] a) { System.out.println(PKt.box()); } }").unwrap();
+    assert!(Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap().status.success());
+    let run = Command::new(&java).args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "M"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK", "stderr={}", String::from_utf8_lossy(&run.stderr));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn interface_impl_runs() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping interface_e2e: set JAVA_HOME");

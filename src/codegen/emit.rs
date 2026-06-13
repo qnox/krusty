@@ -1472,14 +1472,23 @@ impl<'a> MethodEmitter<'a> {
                     && self.syms.class_by_internal(self.info.ty(receiver).obj_internal().unwrap()).map_or(false, |c| c.methods.contains_key(&name)) =>
             {
                 let internal = self.info.ty(receiver).obj_internal().unwrap();
-                let sig = self.syms.class_by_internal(internal).unwrap().methods.get(&name).unwrap().clone();
+                let cls = self.syms.class_by_internal(internal).unwrap();
+                let sig = cls.methods.get(&name).unwrap().clone();
+                let is_iface = cls.is_interface;
                 self.emit_expr(receiver, code, cw);
                 for (a, pty) in args.iter().zip(&sig.params) {
                     self.emit_expr_as(*a, *pty, code, cw);
                 }
                 let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = cw.methodref(internal, &name, &method_descriptor(&sig.params, sig.ret));
-                code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
+                let desc = method_descriptor(&sig.params, sig.ret);
+                // Dispatch through an interface uses `invokeinterface`; a class uses `invokevirtual`.
+                if is_iface {
+                    let m = cw.interface_methodref(internal, &name, &desc);
+                    code.invokeinterface(m, arg_words, slot_words(sig.ret) as i32);
+                } else {
+                    let m = cw.methodref(internal, &name, &desc);
+                    code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
+                }
             }
             // Instance method on a classpath Java object → invokevirtual via the `.class` reader.
             Expr::Member { receiver, name }
