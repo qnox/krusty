@@ -121,7 +121,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
             if let Decl::Class(c) = file.decl(d) {
                 let internal = class_internal(file, &c.name);
                 if class_names.insert(c.name.clone(), internal).is_some() {
-                    diags.error(c.span, format!("conflicting declaration of '{}'", c.name));
+                    diags.error(c.span, format!("conflicting declarations: {}", c.name));
                 }
             }
         }
@@ -139,7 +139,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         None => Ty::Unit, // v0: missing return type defaults to Unit
                     };
                     if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
-                        diags.error(f.span, format!("conflicting declaration of '{}'", f.name));
+                        diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
                 Decl::Class(c) => {
@@ -202,7 +202,7 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, diags: &mut DiagSin
     } else if let Some(internal) = classes.get(&r.name) {
         Ty::obj(internal)
     } else {
-        diags.error(r.span, format!("unknown type '{}'", r.name));
+        diags.error(r.span, format!("unresolved reference: {}", r.name));
         Ty::Error
     };
     // Nullable reference types share the non-null JVM descriptor; nullable primitives would need
@@ -361,7 +361,8 @@ impl<'a> Checker<'a> {
             return;
         }
         if expected != actual {
-            self.diags.error(span, format!("type mismatch in {ctx}: expected {}, found {}", expected.name(), actual.name()));
+            let _ = ctx;
+            self.diags.error(span, format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name()));
         }
     }
 
@@ -390,7 +391,7 @@ impl<'a> Checker<'a> {
                 None => match self.syms.props.get(&n) {
                     Some(&(ty, _)) => ty, // top-level property
                     None => {
-                        self.diags.error(self.span(e), format!("unresolved reference '{n}'"));
+                        self.diags.error(self.span(e), format!("unresolved reference: {n}"));
                         Ty::Error
                     }
                 },
@@ -679,19 +680,19 @@ impl<'a> Checker<'a> {
                     Some(l) => {
                         let (lty, is_var) = (l.ty, l.is_var);
                         if !is_var {
-                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' {name} cannot be reassigned"));
+                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("val cannot be reassigned"));
                         }
                         self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
                     }
                     None => match self.syms.props.get(&name).copied() {
                         Some((lty, is_var)) => {
                             if !is_var {
-                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' {name} cannot be reassigned"));
+                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("val cannot be reassigned"));
                             }
                             self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
                         }
                         None => {
-                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference '{name}'"));
+                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference: {name}"));
                         }
                     },
                 }
@@ -788,12 +789,12 @@ mod tests {
 
     #[test]
     fn return_type_mismatch() {
-        err_contains("fun f(a: Int): String = a", "type mismatch in function body");
+        err_contains("fun f(a: Int): String = a", "type mismatch: inferred type is Int but String was expected");
     }
 
     #[test]
     fn unresolved_reference() {
-        err_contains("fun f(): Int = q", "unresolved reference 'q'");
+        err_contains("fun f(): Int = q", "unresolved reference: q");
     }
 
     #[test]
@@ -810,7 +811,7 @@ mod tests {
     fn call_arity_and_types() {
         ok("fun a(x: Int): Int = x\nfun b(): Int = a(1)");
         err_contains("fun a(x: Int): Int = x\nfun b(): Int = a()", "expects 1 args");
-        err_contains("fun a(x: Int): Int = x\nfun b(): Int = a(\"s\")", "type mismatch in argument");
+        err_contains("fun a(x: Int): Int = x\nfun b(): Int = a(\"s\")", "type mismatch: inferred type is String but Int was expected");
     }
 
     #[test]
@@ -848,7 +849,7 @@ mod tests {
     fn reference_type_errors() {
         err_contains("class Point(val x: Int)\nfun f(p: Point): Int = p.z", "unresolved member 'z'");
         err_contains("class Point(val x: Int)\nfun f(): Point = Point()", "expects 1 args");
-        err_contains("fun f(p: Widget): Int = 0", "unknown type 'Widget'");
+        err_contains("fun f(p: Widget): Int = 0", "unresolved reference: Widget");
     }
 
     #[test]
