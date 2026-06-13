@@ -991,10 +991,20 @@ impl<'a> Parser<'a> {
             self.bump();
             RangeKind::DownTo
         } else {
-            // No range operator → iterate over `rstart` as a collection: `for (x in array)`.
             self.expect(TokenKind::RParen, "')'");
             self.skip_newlines();
             let body = self.parse_branch();
+            // `for (i in X.indices)` → counted loop `0 until X.size`.
+            if let Expr::Member { receiver, name: mname } = self.file.expr(rstart).clone() {
+                if mname == "indices" {
+                    let sp = self.file.expr_spans[rstart.0 as usize];
+                    let zero = self.file.add_expr(Expr::IntLit(0), sp);
+                    let size = self.file.add_expr(Expr::Member { receiver, name: "size".to_string() }, sp);
+                    let range = ForRange { start: zero, end: size, kind: RangeKind::Until, step: None };
+                    return self.finish_stmt(Stmt::For { name, range, body }, start);
+                }
+            }
+            // Otherwise iterate over `rstart` as a collection: `for (x in array)`.
             return self.finish_stmt(Stmt::ForEach { name, iterable: rstart, body }, start);
         };
         let rend = self.parse_expr();
