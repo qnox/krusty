@@ -1,0 +1,17 @@
+[package]
+name = "krust"
+version = "0.0.1"
+edition = "2021"
+description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
+
+[lib]
+name = "krust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "krust"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
