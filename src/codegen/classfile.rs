@@ -660,6 +660,8 @@ impl CodeBuilder {
     pub fn d2i(&mut self) { self.op(0x8e, -1); }
     pub fn d2l(&mut self) { self.op(0x8f, 0); }
     pub fn d2f(&mut self) { self.op(0x90, -1); }
+    pub fn i2b(&mut self) { self.op(0x91, 0); }
+    pub fn i2s(&mut self) { self.op(0x93, 0); }
 
     // returns
     pub fn ireturn(&mut self) { self.op(0xac, -1); }

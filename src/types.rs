@@ -35,6 +35,8 @@ pub fn intern_ty(t: Ty) -> &'static Ty {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Int,
+    Byte,
+    Short,
     Long,
     Float,
     Double,
@@ -78,6 +80,8 @@ impl Ty {
     pub fn from_name(name: &str) -> Option<Ty> {
         Some(match name {
             "Int" => Ty::Int,
+            "Byte" => Ty::Byte,
+            "Short" => Ty::Short,
             "Long" => Ty::Long,
             "Float" => Ty::Float,
             "Double" => Ty::Double,
@@ -106,6 +110,8 @@ impl Ty {
     pub fn name(self) -> &'static str {
         match self {
             Ty::Int => "Int",
+            Ty::Byte => "Byte",
+            Ty::Short => "Short",
             Ty::Long => "Long",
             Ty::Float => "Float",
             Ty::Double => "Double",
@@ -135,13 +141,15 @@ impl Ty {
     }
 
     pub fn is_numeric(self) -> bool {
-        matches!(self, Ty::Int | Ty::Long | Ty::Float | Ty::Double)
+        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double)
     }
 
     /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `Ljava/lang/String;`, `V`, `Lpkg/Name;`).
     pub fn descriptor(self) -> String {
         match self {
             Ty::Int => "I".into(),
+            Ty::Byte => "B".into(),
+            Ty::Short => "S".into(),
             Ty::Long => "J".into(),
             Ty::Float => "F".into(),
             Ty::Double => "D".into(),
@@ -160,7 +168,8 @@ impl Ty {
     /// Numeric promotion rank for binary arithmetic (Int < Long < Double).
     fn rank(self) -> u8 {
         match self {
-            Ty::Int => 1,
+            // Byte/Short share Int's rank: Kotlin arithmetic on them produces `Int`.
+            Ty::Byte | Ty::Short | Ty::Int => 1,
             Ty::Long => 2,
             Ty::Float => 3,
             Ty::Double => 4,
@@ -168,10 +177,12 @@ impl Ty {
         }
     }
 
-    /// Result type of numeric promotion, or `None` if either side isn't numeric.
+    /// Result type of numeric promotion, or `None` if either side isn't numeric. `Byte`/`Short`
+    /// promote to `Int` (Kotlin has no byte/short arithmetic — operands widen to `Int`).
     pub fn promote(a: Ty, b: Ty) -> Option<Ty> {
         if a.is_numeric() && b.is_numeric() {
-            Some(if a.rank() >= b.rank() { a } else { b })
+            let r = if a.rank() >= b.rank() { a } else { b };
+            Some(if matches!(r, Ty::Byte | Ty::Short) { Ty::Int } else { r })
         } else {
             None
         }

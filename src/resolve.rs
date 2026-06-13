@@ -152,6 +152,8 @@ pub fn builtin_exception(name: &str) -> Option<&'static str> {
 pub fn conversion_target(name: &str) -> Option<Ty> {
     Some(match name {
         "toInt" => Ty::Int,
+        "toByte" => Ty::Byte,
+        "toShort" => Ty::Short,
         "toLong" => Ty::Long,
         "toFloat" => Ty::Float,
         "toDouble" => Ty::Double,
@@ -891,6 +893,11 @@ impl<'a> Checker<'a> {
         }
         // `null` is assignable to any reference type (krusty is permissive about nullability).
         if actual == Ty::Null && expected.is_reference() {
+            return;
+        }
+        // An `Int` (typically a constant) is assignable to `Byte`/`Short` (Kotlin narrows integer
+        // literals); codegen emits `i2b`/`i2s`. `Byte`/`Short` are interchangeable with `Int` here.
+        if matches!(expected, Ty::Byte | Ty::Short) && matches!(actual, Ty::Int | Ty::Byte | Ty::Short) {
             return;
         }
         // Any reference type is assignable to `Any`/`Object` (e.g. an erased generic parameter).
