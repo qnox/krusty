@@ -84,8 +84,10 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            let is_open = mods.iter().any(|m| m == "open");
-            let is_abstract = mods.iter().any(|m| m == "abstract");
+            // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
+            let is_sealed = mods.iter().any(|m| m == "sealed");
+            let is_open = is_sealed || mods.iter().any(|m| m == "open");
+            let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
             match self.kind() {
                 TokenKind::Eof => break,
                 TokenKind::KwImport => {
@@ -1033,8 +1035,10 @@ impl<'a> Parser<'a> {
 const BP_PREFIX: u8 = 13;
 
 /// Soft modifiers that don't change a declaration's *kind* (so krusty can ignore them). Excludes
-/// `data`/`enum`/`annotation`/`sealed`/`value`/`object`/`companion`/`inner`/`expect`/`actual`,
-/// which would alter parsing/semantics and must remain unsupported.
+/// `data`/`enum`/`annotation`/`value`/`object`/`companion`/`inner`/`expect`/`actual`,
+/// which would alter parsing/semantics and must remain unsupported. `sealed` is included: it maps
+/// cleanly onto an abstract, open class (see the top-level dispatch), so ignoring its
+/// exhaustiveness aspect never miscompiles.
 fn is_modifier(text: &str) -> bool {
     // NOTE: `tailrec`/`external` are deliberately excluded — ignoring them changes semantics
     // (no tail-call optimization → stack overflow; no native body), which would *miscompile*
@@ -1043,7 +1047,7 @@ fn is_modifier(text: &str) -> bool {
         text,
         "public" | "private" | "internal" | "protected" | "open" | "final" | "abstract"
             | "inline" | "noinline" | "crossinline" | "operator" | "override" | "suspend"
-            | "lateinit" | "infix" | "reified" | "vararg" | "const"
+            | "lateinit" | "infix" | "reified" | "vararg" | "const" | "sealed"
     )
 }
 
