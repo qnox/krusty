@@ -628,6 +628,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/enum_args_e2e.rs` (enum ctor + per-entry args + methods + `name`/`ordinal`, and
   hex/binary/underscore literals, on the JVM). Box conformance **139 OK / 0 FAIL** (up from 137).
 
+## Phase 45 — `for` over arrays  ✅
+- ✅ `for (x in array)` (a `Stmt::ForEach`) is lowered to an index loop: store the array + an index,
+  loop while `i < arr.length`, bind `x = arr[i]` (the right `Xaload` per element type), `iinc` the
+  index. Works for primitive and reference arrays and composes with `break`/`continue` (continue →
+  the increment). Iterating a non-array (string, range object, collection) is rejected.
+- ✅ `tests/foreach_e2e.rs` (primitive + reference array iteration with break/continue on the JVM;
+  non-array rejection). Box conformance **147 OK / 0 FAIL** (up from 139).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

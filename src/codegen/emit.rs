@@ -1480,6 +1480,39 @@ impl<'a> MethodEmitter<'a> {
                 code.goto(start);
                 code.bind(end);
             }
+            Stmt::ForEach { name, iterable, body } => {
+                // Lower `for (x in arr)` to an index loop: arr, len, i; x = arr[i].
+                let elem = self.info.ty(iterable).array_elem().unwrap_or(Ty::Error);
+                self.emit_expr(iterable, code, cw);
+                let arr_slot = self.fresh_slot(Ty::obj("java/lang/Object"));
+                code.ensure_locals(arr_slot + 1);
+                code.astore(arr_slot);
+                let i_slot = self.fresh_slot(Ty::Int);
+                code.ensure_locals(i_slot + 1);
+                code.push_int(0, cw);
+                code.istore(i_slot);
+                let x_slot = self.alloc_slot(&name, elem);
+                let start = code.new_label();
+                let cont = code.new_label();
+                let end = code.new_label();
+                code.bind(start);
+                code.iload(i_slot);
+                code.aload(arr_slot);
+                code.arraylength();
+                code.if_icmpge(end); // i >= arr.length → done
+                code.aload(arr_slot);
+                code.iload(i_slot);
+                let (lop, lwords) = array_load_op(elem);
+                code.array_load(lop, lwords);
+                store_local(elem, x_slot, code);
+                self.loop_labels.push((cont, end));
+                self.emit_block_discard(body, code, cw);
+                self.loop_labels.pop();
+                code.bind(cont);
+                code.iinc(i_slot, 1);
+                code.goto(start);
+                code.bind(end);
+            }
             Stmt::Expr(e) => {
                 self.emit_expr(e, code, cw);
                 self.discard(self.info.ty(e), code);

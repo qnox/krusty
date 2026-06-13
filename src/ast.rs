@@ -107,6 +107,8 @@ pub enum Stmt {
     While { cond: ExprId, body: ExprId }, // body is a Block expr
     /// `for (name in start <op> end (step s)?) body` over an integer range.
     For { name: String, range: ForRange, body: ExprId },
+    /// `for (name in iterable) body` over an array (element iteration).
+    ForEach { name: String, iterable: ExprId, body: ExprId },
     Expr(ExprId),
 }
 
@@ -586,6 +588,13 @@ impl File {
                     self.write_expr(s, out);
                 }
                 out.push_str(") ");
+                self.write_expr(*body, out);
+                out.push(')');
+            }
+            Stmt::ForEach { name, iterable, body } => {
+                out.push_str(&format!("(for-each {name} "));
+                self.write_expr(*iterable, out);
+                out.push(' ');
                 self.write_expr(*body, out);
                 out.push(')');
             }

@@ -1713,6 +1713,22 @@ impl<'a> Checker<'a> {
                 self.expr(body);
                 self.pop_scope();
             }
+            Stmt::ForEach { name, iterable, body } => {
+                let it = self.expr(iterable);
+                let elem = match it.array_elem() {
+                    Some(e) => e,
+                    None => {
+                        if it != Ty::Error {
+                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays)", it.name()));
+                        }
+                        Ty::Error
+                    }
+                };
+                self.push_scope();
+                self.declare(&name, elem, false);
+                self.expr(body);
+                self.pop_scope();
+            }
             Stmt::Expr(e) => {
                 self.expr(e);
             }

@@ -663,6 +663,13 @@ impl CodeBuilder {
     pub fn d2i(&mut self) { self.op(0x8e, -1); }
     pub fn d2l(&mut self) { self.op(0x8f, 0); }
     pub fn d2f(&mut self) { self.op(0x90, -1); }
+    /// `iinc index, const` — increment a local int in place (no stack effect).
+    pub fn iinc(&mut self, idx: u16, delta: i8) {
+        self.bytes.push(0x84);
+        self.bytes.push(idx as u8);
+        self.bytes.push(delta as u8);
+        self.ensure_locals(idx + 1);
+    }
     pub fn i2b(&mut self) { self.op(0x91, 0); }
     pub fn i2s(&mut self) { self.op(0x93, 0); }
 

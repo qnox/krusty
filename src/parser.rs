@@ -880,8 +880,11 @@ impl<'a> Parser<'a> {
             self.bump();
             RangeKind::DownTo
         } else {
-            self.diags.error(self.tok().span, "v0 `for` supports only `a..b`, `a until b`, `a downTo b`");
-            RangeKind::Through
+            // No range operator → iterate over `rstart` as a collection: `for (x in array)`.
+            self.expect(TokenKind::RParen, "')'");
+            self.skip_newlines();
+            let body = self.parse_branch();
+            return self.finish_stmt(Stmt::ForEach { name, iterable: rstart, body }, start);
         };
         let rend = self.parse_expr();
         let step = if self.at(TokenKind::Ident) && self.text() == "step" {
