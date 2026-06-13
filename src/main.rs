@@ -12,11 +12,17 @@ use krust::resolve::{check_file, collect_signatures};
 
 fn main() {
     let mut out_dir = PathBuf::from("krust-out");
+    let mut cp_dirs: Vec<PathBuf> = Vec::new();
     let mut paths: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-d" => out_dir = PathBuf::from(args.next().unwrap_or_else(|| ".".into())),
+            "-cp" | "-classpath" => {
+                if let Some(v) = args.next() {
+                    cp_dirs.extend(v.split(':').map(PathBuf::from));
+                }
+            }
             _ => paths.push(a),
         }
     }
@@ -40,7 +46,8 @@ fn main() {
         sources.push(src);
     }
 
-    let syms = collect_signatures(&files, &mut diags);
+    let mut syms = collect_signatures(&files, &mut diags);
+    syms.classpath = krust::jvm::classpath::Classpath::new(cp_dirs);
 
     // Per-file: typecheck → emit → write → drop. Only one file's codegen state is live at a time.
     let mut emitted = 0;

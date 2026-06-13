@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::codegen::classfile::*;
 use crate::diag::DiagSink;
-use crate::resolve::{SymbolTable, TypeInfo};
+use crate::resolve::{import_map, resolve_java_static, SymbolTable, TypeInfo};
 use crate::types::Ty;
 
 /// Class name kotlinc derives for top-level decls: `<File>Kt` (capitalized).
@@ -46,9 +46,10 @@ pub fn emit_file(
     diags: &mut DiagSink,
 ) -> Vec<u8> {
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
+    let imports = import_map(file);
     for &d in &file.decls {
         let Decl::Fun(f) = file.decl(d);
-        let mut e = MethodEmitter::new(file, info, syms, internal_name, diags);
+        let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
         e.emit_fun(f, &mut cw);
     }
     cw.finish()
@@ -63,11 +64,12 @@ struct MethodEmitter<'a> {
     slots: HashMap<String, (u16, Ty)>,
     next_slot: u16,
     ret_ty: Ty,
+    imports: &'a HashMap<String, String>,
 }
 
 impl<'a> MethodEmitter<'a> {
-    fn new(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, diags: &'a mut DiagSink) -> Self {
-        MethodEmitter { file, info, syms, class: class.to_string(), diags, slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit }
+    fn new(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, imports: &'a HashMap<String, String>, diags: &'a mut DiagSink) -> Self {
+        MethodEmitter { file, info, syms, class: class.to_string(), diags, slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports }
     }
 
     fn alloc_slot(&mut self, name: &str, ty: Ty) -> u16 {
@@ -485,6 +487,25 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // Java static call: ClassName.method(args) resolved via the classpath.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if let Expr::Name(cls) = self.file.expr(receiver).clone() {
+                if !self.slots.contains_key(&cls) {
+                    if let Some(internal) = self.imports.get(&cls).cloned() {
+                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                        if let Some((owner, desc, ret)) = resolve_java_static(&self.syms.classpath, &internal, &name, &arg_tys) {
+                            for a in args {
+                                self.emit_expr(*a, code, cw);
+                            }
+                            let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                            let m = cw.methodref(&owner, &name, &desc);
+                            code.invokestatic(m, arg_words, slot_words(ret) as i32);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         match self.file.expr(callee).clone() {
             Expr::Member { receiver, name } if name == "toString" && args.is_empty() => {
                 let rt = self.info.ty(receiver);

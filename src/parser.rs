@@ -75,7 +75,12 @@ impl<'a> Parser<'a> {
             match self.kind() {
                 TokenKind::Eof => break,
                 TokenKind::KwImport => {
-                    // skip to end of line (imports unused in v0)
+                    self.bump(); // 'import'
+                    let fq = self.parse_qualified_name();
+                    if !fq.is_empty() {
+                        self.file.imports.push(fq);
+                    }
+                    // tolerate trailing tokens (e.g. `as alias`) to end of line
                     while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                         self.bump();
                     }

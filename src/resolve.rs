@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
+use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
 #[derive(Clone, Debug)]
@@ -22,6 +23,43 @@ pub struct Signature {
 #[derive(Default)]
 pub struct SymbolTable {
     pub funs: HashMap<String, Signature>,
+    /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
+    pub classpath: Classpath,
+}
+
+/// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
+pub fn import_map(file: &File) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for fq in &file.imports {
+        if let Some(simple) = fq.rsplit('.').next() {
+            m.insert(simple.to_string(), fq.replace('.', "/"));
+        }
+    }
+    m
+}
+
+/// Map a single JVM field descriptor to a krust `Ty` (the v0 supported set).
+pub fn desc_to_ty(d: &str) -> Ty {
+    match d {
+        "I" => Ty::Int,
+        "J" => Ty::Long,
+        "D" => Ty::Double,
+        "Z" => Ty::Boolean,
+        "V" => Ty::Unit,
+        "Ljava/lang/String;" => Ty::String,
+        _ => Ty::Error,
+    }
+}
+
+/// Resolve a static call `Class.method(args)` against the classpath by exact param-descriptor
+/// match. Returns `(owner internal name, method descriptor, return type)`.
+pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
+    let ci = cp.find(internal)?;
+    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
+    let prefix = format!("({params})");
+    let m = ci.methods.iter().find(|m| m.name == method && m.is_static() && m.descriptor.starts_with(&prefix))?;
+    let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
+    Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
 }
 
 /// Stage C: collect top-level function signatures across all files.
@@ -70,6 +108,7 @@ struct Local {
 }
 
 pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> TypeInfo {
+    let imports = import_map(file);
     let mut c = Checker {
         file,
         syms,
@@ -77,6 +116,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
+        imports,
     };
     for &d in &file.decls {
         let Decl::Fun(f) = file.decl(d);
@@ -92,6 +132,7 @@ struct Checker<'a> {
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
+    imports: HashMap<String, String>,
 }
 
 impl<'a> Checker<'a> {
@@ -277,6 +318,22 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
+                // Java static call: `ClassName.method(args)` where ClassName is an imported class
+                // (not a local/param) resolvable on the classpath.
+                if let Expr::Name(cls) = self.file.expr(receiver).clone() {
+                    if self.lookup(&cls).is_none() {
+                        if let Some(internal) = self.imports.get(&cls).cloned() {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            return match resolve_java_static(&self.syms.classpath, &internal, &name, &arg_tys) {
+                                Some((_, _, ret)) => ret,
+                                None => {
+                                    self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
+                                    Ty::Error
+                                }
+                            };
+                        }
+                    }
+                }
                 let rt = self.expr(receiver);
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                 if rt == Ty::Error {
