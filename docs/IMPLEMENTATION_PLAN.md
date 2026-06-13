@@ -39,13 +39,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - v0 decisions recorded: explicit return types required; exact-type assignment (no implicit widen);
   int literals = Int.
 
-## Phase 3 — JVM class-file writer  ⬜
-- `codegen/classfile.rs`: constant pool (Utf8/Class/NameAndType/Methodref/Fieldref/String/
-  Integer/Long/Double), method + `Code` attribute, stack-map-frame **computation** (or target
-  v50/`-noverify` first, then add frames for v51+). Emits a `FileKt`-style class with `public static`
-  methods.
-- Verify: `java -Xverify:all` loads emitted classes.
-- **Exit:** emit a hand-built `add(II)I` class that verifies and runs.
+## Phase 3 — JVM class-file writer  ✅
+- ✅ `codegen/classfile.rs`: `ConstPool` (Utf8/Integer/Long/Double/Class/String/NameAndType/
+  Method+Fieldref, deduped, long/double 2-slot), `ClassWriter` (major 52 = JVM 8, matches kotlinc),
+  method + `Code` attribute. `CodeBuilder` with **automatic max_stack/max_locals** tracking and the
+  core opcode set (loads/stores, int/long/double const+arith+conv, returns, invoke*/getstatic).
+- ✅ 5 unit tests (header/version, add builds, cp dedup, long 2-slot, stack tracking).
+- ✅ **Exit met:** `tests/classfile_e2e.rs` emits `FooKt.add(II)I`; javac accepts it, `java
+  -Xverify:all` verifies + runs it via a Java `Main` → `7`. Straight-line methods need no
+  StackMapTable at v52; branch frames come in Phase 4.
 
 ## Phase 4 — Lower + emit the subset  ⬜
 - `ir.rs`: minimal stack IR (or direct AST→bytecode for v0).

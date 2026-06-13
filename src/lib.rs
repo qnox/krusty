@@ -12,3 +12,4 @@ pub mod ast;
 pub mod parser;
 pub mod types;
 pub mod resolve;
+pub mod codegen;
