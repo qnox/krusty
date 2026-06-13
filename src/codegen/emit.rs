@@ -2170,11 +2170,11 @@ impl<'a> MethodEmitter<'a> {
                 code.ifeq(target);
             }
             _ => {
-                // reference: subject.equals(cond)
+                // reference: null-safe `Objects.equals(subject, cond)` (Kotlin's `==`).
                 code.aload(slot);
                 self.emit_expr(cond, code, cw);
-                let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
-                code.invokevirtual(eqm, 1, 1);
+                let eqm = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+                code.invokestatic(eqm, 2, 1);
                 code.ifne(target);
             }
         }
@@ -2289,13 +2289,14 @@ impl<'a> MethodEmitter<'a> {
                 code.fcmpg();
                 self.cmp0(op, target, code);
             }
-            // Reference equality (`==`/`!=`) via `equals()` (Kotlin structural equality).
-            Ty::String | Ty::Obj(_) => {
-                let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
-                code.invokevirtual(eqm, 1, 1);
+            // Reference equality (`==`/`!=`) via null-safe `Objects.equals` (Kotlin structural,
+            // null-safe equality — a plain `a.equals(b)` would NPE when `a` is null).
+            Ty::String | Ty::Obj(_) | Ty::Array(_) => {
+                let eqm = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+                code.invokestatic(eqm, 2, 1);
                 match op {
-                    BinOp::Eq => code.ifne(target), // equals==true ⇒ jump
-                    BinOp::Ne => code.ifeq(target), // equals==false ⇒ jump
+                    BinOp::Eq => code.ifne(target), // areEqual==true ⇒ jump
+                    BinOp::Ne => code.ifeq(target), // areEqual==false ⇒ jump
                     _ => self.diags.error(self.file.expr_spans[lhs.0 as usize], "krusty: only == / != on reference types"),
                 }
             }

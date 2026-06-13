@@ -846,6 +846,17 @@ impl<'a> Parser<'a> {
         self.file.add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
     }
 
+    /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
+    fn desugar_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
+        let end = self.t[self.i.saturating_sub(1)].span;
+        let sp = Span::new(start.lo, end.hi);
+        let lhs = self.file.add_expr(Expr::Name(name.clone()), sp);
+        let one = self.file.add_expr(Expr::IntLit(1), sp);
+        let op = if dec { BinOp::Sub } else { BinOp::Add };
+        let value = self.file.add_expr(Expr::Binary { op, lhs, rhs: one }, sp);
+        self.finish_stmt(Stmt::Assign { name, value }, start)
+    }
+
     fn parse_stmt(&mut self) -> StmtId {
         let start = self.tok().span;
         match self.kind() {
@@ -882,16 +893,29 @@ impl<'a> Parser<'a> {
                 let cond = self.parse_expr();
                 self.expect(TokenKind::RParen, "')'");
                 self.skip_newlines();
-                let body = if self.at(TokenKind::LBrace) {
-                    self.parse_block_expr()
-                } else {
-                    self.parse_expr()
-                };
+                // `parse_branch` handles a statement body (e.g. `while (c) i++`), not just an expression.
+                let body = self.parse_branch();
                 self.finish_stmt(Stmt::While { cond, body }, start)
             }
             TokenKind::KwFor => self.parse_for(start),
+            // Prefix increment/decrement statement: `++name` / `--name` → `name = name ± 1`.
+            TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                let dec = self.at(TokenKind::MinusMinus);
+                self.bump();
+                let name = self.ident_or_error("increment target");
+                return self.desugar_incdec(name, dec, start);
+            }
             _ => {
                 let e = self.parse_expr();
+                // Postfix increment/decrement statement: `name++` / `name--`.
+                if self.at(TokenKind::PlusPlus) || self.at(TokenKind::MinusMinus) {
+                    if let Expr::Name(n) = self.file.expr(e).clone() {
+                        let dec = self.at(TokenKind::MinusMinus);
+                        self.bump();
+                        return self.desugar_incdec(n, dec, start);
+                    }
+                    self.diags.error(self.tok().span, "krusty: '++'/'--' is only supported on a simple variable");
+                }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
                     match self.file.expr(e).clone() {
