@@ -18,6 +18,20 @@ pub fn intern(name: &str) -> &'static str {
     leaked
 }
 
+/// Intern a `Ty` to a canonical `&'static Ty` so array element types compare by value (the derived
+/// `Eq`/`Hash` on `Ty::Array` follow the reference, so equal elements must share one pointer).
+pub fn intern_ty(t: Ty) -> &'static Ty {
+    static I: OnceLock<Mutex<HashSet<&'static Ty>>> = OnceLock::new();
+    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = set.lock().unwrap();
+    if let Some(&v) = set.get(&t) {
+        return v;
+    }
+    let leaked: &'static Ty = Box::leak(Box::new(t));
+    set.insert(leaked);
+    leaked
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Int,
@@ -29,6 +43,9 @@ pub enum Ty {
     Unit,
     /// A JVM reference type identified by its internal name (e.g. `demo/Point`).
     Obj(&'static str),
+    /// A JVM array type with the given element type (`IntArray` → `Array(&Int)`, `Array<String>` →
+    /// `Array(&String)`). Element `Ty`s are interned (`intern_ty`) so equal arrays share a pointer.
+    Array(&'static Ty),
     /// The type of the `null` literal — assignable to any reference type.
     Null,
     /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
@@ -42,6 +59,19 @@ impl Ty {
     /// A class reference type from an internal name.
     pub fn obj(internal: &str) -> Ty {
         Ty::Obj(intern(internal))
+    }
+
+    /// An array type with the given element type.
+    pub fn array(elem: Ty) -> Ty {
+        Ty::Array(intern_ty(elem))
+    }
+
+    /// The element type if this is an array.
+    pub fn array_elem(self) -> Option<Ty> {
+        match self {
+            Ty::Array(e) => Some(*e),
+            _ => None,
+        }
     }
 
     pub fn from_name(name: &str) -> Option<Ty> {
@@ -58,6 +88,19 @@ impl Ty {
         })
     }
 
+    /// The element type of a specialized primitive array type name (`IntArray` → `Int`, …).
+    /// `Array<T>` is handled separately (it carries its element as a type argument).
+    pub fn primitive_array_element(name: &str) -> Option<Ty> {
+        Some(match name {
+            "IntArray" => Ty::Int,
+            "LongArray" => Ty::Long,
+            "DoubleArray" => Ty::Double,
+            "BooleanArray" => Ty::Boolean,
+            "CharArray" => Ty::Char,
+            _ => return None,
+        })
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Ty::Int => "Int",
@@ -70,6 +113,7 @@ impl Ty {
             Ty::Obj(n) => n,
             Ty::Null => "Null",
             Ty::Nothing => "Nothing",
+            Ty::Array(_) => "Array",
             Ty::Error => "<error>",
         }
     }
@@ -84,7 +128,7 @@ impl Ty {
 
     /// True for JVM reference types (where `null` is a valid value).
     pub fn is_reference(self) -> bool {
-        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null)
+        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_))
     }
 
     pub fn is_numeric(self) -> bool {
@@ -104,6 +148,7 @@ impl Ty {
             Ty::Obj(n) => format!("L{n};"),
             Ty::Null => "Ljava/lang/Object;".into(),
             Ty::Nothing => "Ljava/lang/Object;".into(),
+            Ty::Array(elem) => format!("[{}", elem.descriptor()),
             Ty::Error => "Ljava/lang/Object;".into(),
         }
     }

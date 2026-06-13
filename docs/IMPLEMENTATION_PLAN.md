@@ -506,6 +506,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/this_member_e2e.rs` (this read/receiver + cross-instance and compound member assignment on
   the JVM; `val`-member rejection). Box conformance **99 OK / 0 FAIL** (up from 91; 100 compiled).
 
+## Phase 35 — Arrays  ✅
+- ✅ Added `Ty::Array(&'static Ty)` (element types interned via `intern_ty` so equal arrays compare
+  by value) with descriptor `[<elem>`. Type syntax: `IntArray`/`LongArray`/`DoubleArray`/
+  `BooleanArray`/`CharArray` and `Array<T>` (the element type arg is captured on `TypeRef`); an
+  `Array` of a primitive (would box) is rejected.
+- ✅ Creation builtins: `intArrayOf(…)`/`charArrayOf(…)`/… (typed `newarray` + per-element store),
+  `arrayOf(…)` (element = common reference type of the args → `anewarray`), and the size constructors
+  `IntArray(n)`/… (zero-filled). `arrayOf` of a primitive is rejected (use `intArrayOf`).
+- ✅ Element read `a[i]` and write `a[i] = v` (and compound `a[i] += v`) select the right
+  `Xaload`/`Xastore` opcode per element type; `a.size` → `arraylength`.
+- ✅ `is`/`as` to an array type use the array *descriptor* (`[LData;`, `[I`) as the operand — fixing a
+  verify failure where `(arr as Array<Data>)[0]` cast to `Object` then `aaload`'d a non-array.
+- ✅ `tests/array_e2e.rs` (primitive + reference arrays, read/write/compound/`.size`/iteration on the
+  JVM; `arrayOf`-of-primitive rejection). Box conformance **104 OK / 0 FAIL** (up from 99).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

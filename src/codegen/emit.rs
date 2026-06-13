@@ -217,6 +217,38 @@ fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<
     cw.finish()
 }
 
+/// True for the array-creation builtins krusty recognizes.
+fn is_array_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "booleanArrayOf" | "charArrayOf"
+    ) || Ty::primitive_array_element(name).is_some()
+}
+
+/// `(opcode, value-words)` for an array element load (`Xaload`).
+fn array_load_op(elem: Ty) -> (u8, i32) {
+    match elem {
+        Ty::Int => (0x2e, 1),     // iaload
+        Ty::Long => (0x2f, 2),    // laload
+        Ty::Double => (0x31, 2),  // daload
+        Ty::Boolean => (0x33, 1), // baload
+        Ty::Char => (0x34, 1),    // caload
+        _ => (0x32, 1),           // aaload (reference)
+    }
+}
+
+/// `(opcode, value-words)` for an array element store (`Xastore`).
+fn array_store_op(elem: Ty) -> (u8, i32) {
+    match elem {
+        Ty::Int => (0x4f, 1),     // iastore
+        Ty::Long => (0x50, 2),    // lastore
+        Ty::Double => (0x52, 2),  // dastore
+        Ty::Boolean => (0x54, 1), // bastore
+        Ty::Char => (0x55, 1),    // castore
+        _ => (0x53, 1),           // aastore (reference)
+    }
+}
+
 /// The JVM internal name for a reference `Ty`, used as the `instanceof`/`checkcast` operand.
 /// `String` is special-cased (its `obj_internal()` is `None`); the resolver guarantees the type is a
 /// reference here, so any other shape erases to `Object`.
@@ -224,6 +256,8 @@ fn ref_internal(ty: Ty) -> &'static str {
     match ty {
         Ty::String => "java/lang/String",
         Ty::Obj(n) => n,
+        // An array's `instanceof`/`checkcast` operand is its descriptor (`[LData;`, `[I`), not a name.
+        Ty::Array(_) => crate::types::intern(&ty.descriptor()),
         _ => "java/lang/Object",
     }
 }
@@ -232,6 +266,14 @@ fn ref_internal(ty: Ty) -> &'static str {
 /// is an erased generic type parameter → `java/lang/Object` (valid code reaching codegen has already
 /// passed the resolver, so the only unknowns here are type parameters).
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
+    if let Some(elem) = Ty::primitive_array_element(&r.name) {
+        return Ty::array(elem);
+    }
+    if r.name == "Array" {
+        if let Some(a) = &r.arg {
+            return Ty::array(resolve_ty(a, syms));
+        }
+    }
     Ty::from_name(&r.name)
         .or_else(|| syms.classes.get(&r.name).map(|c| Ty::obj(&c.internal)))
         .unwrap_or_else(|| Ty::obj("java/lang/Object"))
@@ -843,6 +885,22 @@ impl<'a> MethodEmitter<'a> {
         slot
     }
 
+    /// Allocate an array of `elem` whose length is already on the stack (`newarray` for a primitive
+    /// element, `anewarray` for a reference element).
+    fn emit_new_array(&mut self, elem: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match elem {
+            Ty::Int => code.newarray(10),
+            Ty::Long => code.newarray(11),
+            Ty::Double => code.newarray(7),
+            Ty::Boolean => code.newarray(4),
+            Ty::Char => code.newarray(5),
+            _ => {
+                let ci = cw.class_ref(ref_internal(elem));
+                code.anewarray(ci);
+            }
+        }
+    }
+
     /// The internal name for a `catch` clause's exception type (a JDK exception / import / declared
     /// class) — mirrors the resolver's `catch_internal`.
     fn catch_internal(&self, name: &str) -> String {
@@ -980,7 +1038,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Int | Ty::Boolean | Ty::Char => code.ireturn(),
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
-            Ty::String | Ty::Obj(_) | Ty::Null => code.areturn(),
+            Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) => code.areturn(),
             // `Nothing` only reaches here if a diverging expression somehow fell through; it never
             // produces a value, so a void return is a safe (unreachable) default.
             Ty::Unit | Ty::Nothing | Ty::Error => code.ret_void(),
@@ -1056,6 +1114,14 @@ impl<'a> MethodEmitter<'a> {
                     let m = cw.methodref(internal, &setter, &method_descriptor(&[prop_ty], Ty::Unit));
                     code.invokevirtual(m, slot_words(prop_ty) as i32, 0);
                 }
+            }
+            Stmt::AssignIndex { array, index, value } => {
+                let elem = self.info.ty(array).array_elem().unwrap_or(Ty::Error);
+                self.emit_expr(array, code, cw);
+                self.emit_expr_as(index, Ty::Int, code, cw);
+                self.emit_expr_as(value, elem, code, cw);
+                let (op, words) = array_store_op(elem);
+                code.array_store(op, words);
             }
             Stmt::Return(e) => match e {
                 Some(ex) => {
@@ -1174,6 +1240,13 @@ impl<'a> MethodEmitter<'a> {
             Expr::Throw { operand } => {
                 self.emit_expr(operand, code, cw);
                 code.athrow();
+            }
+            Expr::Index { array, index } => {
+                let elem = self.info.ty(array).array_elem().unwrap_or(Ty::Error);
+                self.emit_expr(array, code, cw);
+                self.emit_expr_as(index, Ty::Int, code, cw);
+                let (op, words) = array_load_op(elem);
+                code.array_load(op, words);
             }
             Expr::Try { body, catches } => self.emit_try(e, body, &catches, code, cw),
             Expr::Is { operand, ty, negated } => {
@@ -1374,7 +1447,10 @@ impl<'a> MethodEmitter<'a> {
                         }
                     }
                 }
-                if name == "length" {
+                if name == "size" && matches!(self.info.ty(receiver), Ty::Array(_)) {
+                    self.emit_expr(receiver, code, cw);
+                    code.arraylength();
+                } else if name == "length" {
                     self.emit_expr(receiver, code, cw);
                     let m = cw.methodref("java/lang/String", "length", "()I");
                     code.invokevirtual(m, 0, 1);
@@ -1914,6 +1990,32 @@ impl<'a> MethodEmitter<'a> {
                 let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = cw.methodref(&internal, "<init>", &desc);
                 code.invokespecial(m, arg_words, 0);
+            }
+            // Array-creation builtins: `intArrayOf(…)`/`arrayOf(…)`/`IntArray(n)`/… (the result type
+            // recorded by the checker is the array `Ty`, so element/word sizing follows from it).
+            Expr::Name(fname)
+                if !self.slots.contains_key(&fname)
+                    && matches!(self.info.ty(e), Ty::Array(_))
+                    && is_array_builtin(&fname) =>
+            {
+                let arr = self.info.ty(e);
+                let elem = arr.array_elem().unwrap_or(Ty::Error);
+                if fname.ends_with("Of") {
+                    // `*ArrayOf(a, b, …)` — allocate `args.len()` and store each element.
+                    code.push_int(args.len() as i32, cw);
+                    self.emit_new_array(elem, code, cw);
+                    let (sop, swords) = array_store_op(elem);
+                    for (i, a) in args.iter().enumerate() {
+                        code.dup();
+                        code.push_int(i as i32, cw);
+                        self.emit_expr_as(*a, elem, code, cw);
+                        code.array_store(sop, swords);
+                    }
+                } else {
+                    // Size constructor `IntArray(n)` — allocate a zero-filled array of length `n`.
+                    self.emit_expr_as(args[0], Ty::Int, code, cw);
+                    self.emit_new_array(elem, code, cw);
+                }
             }
             // A common JDK exception by simple name (`RuntimeException("msg")`): new + dup + (msg) +
             // invokespecial <init>()V or <init>(String)V.

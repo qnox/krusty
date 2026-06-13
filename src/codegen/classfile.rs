@@ -663,6 +663,19 @@ impl CodeBuilder {
     pub fn pop(&mut self) { self.op(0x57, -1); }
     pub fn pop2(&mut self) { self.op(0x58, -2); }
     pub fn dup(&mut self) { self.op(0x59, 1); }
+
+    // ---- arrays ----
+    /// `arraylength`: pops arrayref, pushes int.
+    pub fn arraylength(&mut self) { self.op(0xbe, 0); }
+    /// `newarray <atype>`: pops count, pushes a primitive arrayref. (boolean=4 char=5 float=6
+    /// double=7 byte=8 short=9 int=10 long=11)
+    pub fn newarray(&mut self, atype: u8) { self.op_u1(0xbc, atype, 0); }
+    /// `anewarray <class>`: pops count, pushes a reference arrayref.
+    pub fn anewarray(&mut self, class_index: u16) { self.op_u2(0xbd, class_index, 0); }
+    /// Array load `Xaload`: pops arrayref + index, pushes a value `words` wide.
+    pub fn array_load(&mut self, opcode: u8, words: i32) { self.op(opcode, words - 2); }
+    /// Array store `Xastore`: pops arrayref + index + value (`words` wide).
+    pub fn array_store(&mut self, opcode: u8, words: i32) { self.op(opcode, -(2 + words)); }
     pub fn ixor(&mut self) { self.op(0x82, -1); }
     pub fn iand(&mut self) { self.op(0x7e, -1); }
     pub fn aconst_null(&mut self) { self.op(0x01, 1); }
