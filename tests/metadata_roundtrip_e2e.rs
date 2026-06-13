@@ -33,10 +33,6 @@ fn krust_compile(src: &str, internal: &str) -> Vec<u8> {
     bytes
 }
 
-// WIP (Phase 4b): the @Metadata structure is byte-exact vs kotlinc for single functions, but the
-// consumer round-trip still fails on a d1 string-encoding subtlety (UtfEncoding marker handling).
-// Ignored so the suite stays green; re-enable once the d1 encoding is resolved.
-#[ignore = "Phase 4b WIP: @Metadata d1 encoding not yet accepted by kotlinc reader"]
 #[test]
 fn kotlinc_consumes_krust_metadata() {
     let Some(kotlinc) = env("KRUST_KOTLINC") else {
@@ -52,6 +48,10 @@ fn kotlinc_consumes_krust_metadata() {
     // krust compiles a Kotlin library (top-level functions in package `demo`).
     let lib_src = "package demo\nfun greet(name: String): String = \"hi \" + name\nfun addk(a: Int, b: Int): Int = a + b\n";
     fs::write(lib.join("demo/LibKt.class"), krust_compile(lib_src, "demo/LibKt")).unwrap();
+    // The .kotlin_module file maps package `demo` to facade `LibKt` (required for resolution).
+    fs::create_dir_all(lib.join("META-INF")).unwrap();
+    let module = krust::metadata::module::build_kotlin_module(&[("demo".into(), vec!["LibKt".into()])]);
+    fs::write(lib.join("META-INF/main.kotlin_module"), module).unwrap();
 
     // The reference kotlinc compiles a Kotlin CONSUMER that imports those functions.
     // This only type-checks if kotlinc successfully reads krust's @Metadata.
