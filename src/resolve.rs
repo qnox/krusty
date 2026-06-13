@@ -1747,12 +1747,12 @@ impl<'a> Checker<'a> {
             }
             Stmt::ForEach { name, iterable, body } => {
                 let it = self.expr(iterable);
-                let elem = match it.array_elem() {
-                    Some(e) => e,
-                    None => {
-                        if it != Ty::Error {
-                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays)", it.name()));
-                        }
+                let elem = match it {
+                    Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
+                    Ty::String => Ty::Char, // iterating a String yields its chars
+                    Ty::Error => Ty::Error,
+                    _ => {
+                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays and String)", it.name()));
                         Ty::Error
                     }
                 };
