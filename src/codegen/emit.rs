@@ -1889,8 +1889,13 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(receiver, code, cw);
                     code.arraylength();
                 } else if name == "length" {
+                    let owner = if self.info.ty(receiver) == Ty::obj("java/lang/StringBuilder") {
+                        "java/lang/StringBuilder"
+                    } else {
+                        "java/lang/String"
+                    };
                     self.emit_expr(receiver, code, cw);
-                    let m = cw.methodref("java/lang/String", "length", "()I");
+                    let m = cw.methodref(owner, "length", "()I");
                     code.invokevirtual(m, 0, 1);
                 } else if let Ty::Obj(internal) = self.info.ty(receiver) {
                     // Enum `.name` / `.ordinal` → java.lang.Enum accessors.
@@ -2415,6 +2420,21 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref("java/lang/String", &name, desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
+            // Curated java.lang.StringBuilder instance method (append/toString/length).
+            Expr::Member { receiver, name }
+                if self.info.ty(receiver) == Ty::obj("java/lang/StringBuilder")
+                    && crate::resolve::resolve_stringbuilder_instance(&name, &args.iter().map(|a| self.info.ty(*a)).collect::<Vec<_>>()).is_some() =>
+            {
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                let (desc, ret) = crate::resolve::resolve_stringbuilder_instance(&name, &arg_tys).unwrap();
+                self.emit_expr(receiver, code, cw);
+                for a in args {
+                    self.emit_expr(*a, code, cw);
+                }
+                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = cw.methodref("java/lang/StringBuilder", &name, &desc);
+                code.invokevirtual(m, arg_words, slot_words(ret) as i32);
+            }
             // Instance method call on a class value: `p.method(args)` (own or inherited).
             Expr::Member { receiver, name }
                 if matches!(self.info.ty(receiver), Ty::Obj(_))
@@ -2566,6 +2586,26 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr_as(args[0], Ty::Int, code, cw);
                     self.emit_new_array(elem, code, cw);
                 }
+            }
+            // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
+            Expr::Name(fname)
+                if fname == "StringBuilder" && !self.slots.contains_key(&fname) && !self.syms.funs.contains_key(&fname) =>
+            {
+                let sb = cw.class_ref("java/lang/StringBuilder");
+                code.new_obj(sb);
+                code.dup();
+                let desc = match args.first().map(|a| self.info.ty(*a)) {
+                    Some(Ty::String) => "(Ljava/lang/String;)V",
+                    Some(_) => "(I)V",
+                    None => "()V",
+                };
+                let mut aw = 0;
+                if let Some(a) = args.first() {
+                    self.emit_expr(*a, code, cw);
+                    aw = 1;
+                }
+                let m = cw.methodref("java/lang/StringBuilder", "<init>", desc);
+                code.invokespecial(m, aw, 0);
             }
             // A common JDK exception by simple name (`RuntimeException("msg")`): new + dup + (msg) +
             // invokespecial <init>()V or <init>(String)V.
