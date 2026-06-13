@@ -640,6 +640,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::StringLit(v), span)
             }
+            TokenKind::CharLit => {
+                let raw = self.text();
+                let c = unquote_char(raw);
+                self.bump();
+                self.file.add_expr(Expr::CharLit(c), span)
+            }
             TokenKind::KwTrue => {
                 self.bump();
                 self.file.add_expr(Expr::BoolLit(true), span)
@@ -812,6 +818,28 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (7, 8),
         BinOp::Add | BinOp::Sub => (9, 10),
         BinOp::Mul | BinOp::Div | BinOp::Rem => (11, 12),
+    }
+}
+
+/// Decode a `'x'` char literal (with simple escapes) to a `char`.
+fn unquote_char(raw: &str) -> char {
+    let inner = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')).unwrap_or(raw);
+    let mut chars = inner.chars();
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('n') => '\n',
+            Some('t') => '\t',
+            Some('r') => '\r',
+            Some('\\') => '\\',
+            Some('\'') => '\'',
+            Some('"') => '"',
+            Some('0') => '\0',
+            Some('$') => '$',
+            Some(other) => other,
+            None => '\0',
+        },
+        Some(c) => c,
+        None => '\0',
     }
 }
 

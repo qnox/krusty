@@ -286,6 +286,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   round-trip verified (`Math2.sq(7)`). `tests/object_e2e.rs` (shape + JVM run + kotlinc consume).
 - ✅ Full suite 99 green; box conformance 34 / 34 OK / 0 FAIL.
 
+## Phase 18 — `Char` type + char literals  ✅
+- ✅ `'x'` char literals (with escapes) and the `Char` type (JVM descriptor `C`, handled with int
+  instructions). Comparison/equality (`if_icmp`), concat (`append(C)`), `toString` (`valueOf(C)`),
+  char-typed params/returns/locals. ABI matches kotlinc.
+- ✅ Conformance fix: the typechecker's `resolve_ty` now also rejects **nullable primitives**
+  (`Char?`/`Int?`/… need boxing) — previously it ignored `?` on a local, letting `a!!` run `ifnonnull`
+  on an int (`kt4251` VerifyError). Now such files are cleanly skipped.
+- ✅ `tests/char_e2e.rs` (JVM run + ABI vs kotlinc); full suite 103 green; box 33 / 33 OK / 0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -30,6 +30,7 @@ pub enum Expr {
     DoubleLit(f64),
     BoolLit(bool),
     StringLit(String),
+    CharLit(char),
     NullLit,
     Name(String),
     /// `operand!!` — not-null assertion (throws NPE if null, else the value).
@@ -268,6 +269,7 @@ impl File {
             Expr::DoubleLit(v) => out.push_str(&format!("{v}d")),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
             Expr::StringLit(s) => out.push_str(&format!("{s:?}")),
+            Expr::CharLit(c) => out.push_str(&format!("'{c}'")),
             Expr::NullLit => out.push_str("null"),
             Expr::Name(n) => out.push_str(n),
             Expr::NotNull { operand } => {

@@ -302,6 +302,7 @@ pub fn emit_class(
 fn sb_append(t: Ty) -> (&'static str, i32) {
     match t {
         Ty::Int => ("(I)Ljava/lang/StringBuilder;", 1),
+        Ty::Char => ("(C)Ljava/lang/StringBuilder;", 1),
         Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
         Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
         Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),
@@ -552,7 +553,7 @@ fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field
 
 fn store_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
     match ty {
-        Ty::Int | Ty::Boolean => code.istore(slot),
+        Ty::Int | Ty::Boolean | Ty::Char => code.istore(slot),
         Ty::Long => code.lstore(slot),
         Ty::Double => code.dstore(slot),
         _ => code.astore(slot),
@@ -561,7 +562,7 @@ fn store_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
 
 fn load_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
     match ty {
-        Ty::Int | Ty::Boolean => code.iload(slot),
+        Ty::Int | Ty::Boolean | Ty::Char => code.iload(slot),
         Ty::Long => code.lload(slot),
         Ty::Double => code.dload(slot),
         _ => code.aload(slot),
@@ -570,7 +571,7 @@ fn load_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
 
 fn emit_typed_return(ty: Ty, code: &mut CodeBuilder) {
     match ty {
-        Ty::Int | Ty::Boolean => code.ireturn(),
+        Ty::Int | Ty::Boolean | Ty::Char => code.ireturn(),
         Ty::Long => code.lreturn(),
         Ty::Double => code.dreturn(),
         _ => code.areturn(),
@@ -704,7 +705,7 @@ impl<'a> MethodEmitter<'a> {
 
     fn emit_return(&mut self, ret: Ty, code: &mut CodeBuilder) {
         match ret {
-            Ty::Int | Ty::Boolean => code.ireturn(),
+            Ty::Int | Ty::Boolean | Ty::Char => code.ireturn(),
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
             Ty::String | Ty::Obj(_) | Ty::Null => code.areturn(),
@@ -714,7 +715,7 @@ impl<'a> MethodEmitter<'a> {
 
     fn emit_default_return(&mut self, ret: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match ret {
-            Ty::Int | Ty::Boolean => { code.push_int(0, cw); code.ireturn(); }
+            Ty::Int | Ty::Boolean | Ty::Char => { code.push_int(0, cw); code.ireturn(); }
             Ty::Long => { code.push_long(0, cw); code.lreturn(); }
             Ty::Double => { code.push_double(0.0, cw); code.dreturn(); }
             Ty::String => { code.push_string("", cw); code.areturn(); }
@@ -820,13 +821,7 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn store(&self, ty: Ty, slot: u16, code: &mut CodeBuilder) {
-        match ty {
-            Ty::Int | Ty::Boolean => code.istore(slot),
-            Ty::Long => code.lstore(slot),
-            Ty::Double => code.dstore(slot),
-            Ty::String => code.astore(slot),
-            _ => code.astore(slot),
-        }
+        store_local(ty, slot, code);
     }
 
     /// Emit a block for its side effects, discarding any trailing value.
@@ -862,6 +857,7 @@ impl<'a> MethodEmitter<'a> {
             Expr::DoubleLit(v) => code.push_double(v, cw),
             Expr::BoolLit(b) => code.push_int(if b { 1 } else { 0 }, cw),
             Expr::StringLit(s) => code.push_string(&s, cw),
+            Expr::CharLit(c) => code.push_int(c as i32, cw),
             Expr::NullLit => code.aconst_null(),
             Expr::NotNull { operand } => {
                 self.emit_expr(operand, code, cw);
@@ -888,12 +884,7 @@ impl<'a> MethodEmitter<'a> {
             }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
-                    match ty {
-                        Ty::Int | Ty::Boolean => code.iload(slot),
-                        Ty::Long => code.lload(slot),
-                        Ty::Double => code.dload(slot),
-                        _ => code.aload(slot),
-                    }
+                    load_local(ty, slot, code);
                 } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
                     // implicit `this.<prop>` — read the backing field
                     code.aload(0);
@@ -1036,7 +1027,7 @@ impl<'a> MethodEmitter<'a> {
     /// Emit `if (subject == cond) goto target`, with subject in local `slot` of type `st`.
     fn emit_eq_jump(&mut self, slot: u16, st: Ty, cond: ExprId, target: Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match st {
-            Ty::Int | Ty::Boolean => {
+            Ty::Int | Ty::Boolean | Ty::Char => {
                 code.iload(slot);
                 self.emit_expr_as(cond, st, code, cw);
                 code.if_icmpeq(target);
@@ -1152,7 +1143,7 @@ impl<'a> MethodEmitter<'a> {
         self.emit_expr_as(lhs, common, code, cw);
         self.emit_expr_as(rhs, common, code, cw);
         match common {
-            Ty::Int | Ty::Boolean => match op {
+            Ty::Int | Ty::Boolean | Ty::Char => match op {
                 BinOp::Lt => code.if_icmplt(target),
                 BinOp::Le => code.if_icmple(target),
                 BinOp::Gt => code.if_icmpgt(target),
@@ -1246,6 +1237,7 @@ impl<'a> MethodEmitter<'a> {
         self.emit_expr(e, code, cw);
         let (desc, words) = match t {
             Ty::Int | Ty::Boolean => ("(I)Ljava/lang/StringBuilder;", 1),
+            Ty::Char => ("(C)Ljava/lang/StringBuilder;", 1),
             Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
             Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),
             Ty::String => ("(Ljava/lang/String;)Ljava/lang/StringBuilder;", 1),
@@ -1302,6 +1294,7 @@ impl<'a> MethodEmitter<'a> {
                 let (desc, words) = match rt {
                     Ty::String => return, // identity
                     Ty::Int | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
+                    Ty::Char => ("(C)Ljava/lang/String;", 1),
                     Ty::Long => ("(J)Ljava/lang/String;", 2),
                     Ty::Double => ("(D)Ljava/lang/String;", 2),
                     // reference type: virtual call to the object's real toString().
