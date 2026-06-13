@@ -759,6 +759,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/inc_dec_e2e.rs` (pre/post inc/dec incl. a `while` body, and null-safe `==`, on the JVM).
   Box conformance **168 OK / 0 FAIL** (up from 164).
 
+## Phase 58 — `for (i in arr.indices)`  ✅
+- ✅ `for (i in X.indices)` desugars (in the parser) to the counted loop `0 until X.size` — an Int
+  loop over the index range — reusing the existing range-`for` lowering (and `.size` →
+  `arraylength`). Works for primitive and reference arrays.
+- ✅ `tests/for_indices_e2e.rs` (index iteration over int and reference arrays, on the JVM). Box
+  conformance holds at **168 OK / 0 FAIL** (those files have further blockers; compounds).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
