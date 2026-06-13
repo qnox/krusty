@@ -217,6 +217,17 @@ fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<
     cw.finish()
 }
 
+/// The JVM internal name for a reference `Ty`, used as the `instanceof`/`checkcast` operand.
+/// `String` is special-cased (its `obj_internal()` is `None`); the resolver guarantees the type is a
+/// reference here, so any other shape erases to `Object`.
+fn ref_internal(ty: Ty) -> &'static str {
+    match ty {
+        Ty::String => "java/lang/String",
+        Ty::Obj(n) => n,
+        _ => "java/lang/Object",
+    }
+}
+
 /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`). An unknown name
 /// is an erased generic type parameter → `java/lang/Object` (valid code reaching codegen has already
 /// passed the resolver, so the only unknowns here are type parameters).
@@ -686,9 +697,10 @@ fn emit_data_members(
                     c.ifeq(eq);
                 }
                 _ => {
-                    // reference: this.field.equals(other.field)
-                    let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
-                    c.invokevirtual(eqm, 1, 1);
+                    // reference: null-safe `Objects.equals(this.field, other.field)` (a field may be
+                    // null — `data class A(val v: Any?)` — so a plain `.equals` would NPE).
+                    let eqm = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+                    c.invokestatic(eqm, 2, 1);
                     c.ifne(eq);
                 }
             }
@@ -1070,6 +1082,40 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(init, 0, 0);
                 code.athrow();
                 code.bind(ok);
+            }
+            Expr::Is { operand, ty, negated } => {
+                self.emit_expr(operand, code, cw);
+                let tt = resolve_ty(&ty, self.syms);
+                let internal = ref_internal(tt);
+                let ci = cw.class_ref(internal);
+                code.instance_of(ci);
+                if negated {
+                    // boolean NOT: x ^ 1
+                    code.push_int(1, cw);
+                    code.ixor();
+                }
+            }
+            Expr::As { operand, ty, nullable } => {
+                self.emit_expr(operand, code, cw);
+                let tt = resolve_ty(&ty, self.syms);
+                let internal = ref_internal(tt);
+                let ci = cw.class_ref(internal);
+                if nullable {
+                    // `as?`: keep the value if `instanceof T`, else replace with null.
+                    code.dup();
+                    code.instance_of(ci);
+                    let is_inst = code.new_label();
+                    let end = code.new_label();
+                    code.ifne(is_inst);
+                    code.pop();
+                    code.aconst_null();
+                    code.goto(end);
+                    code.bind(is_inst);
+                    code.checkcast(ci);
+                    code.bind(end);
+                } else {
+                    code.checkcast(ci);
+                }
             }
             Expr::Elvis { lhs, rhs } => {
                 let result = self.info.ty(e);
