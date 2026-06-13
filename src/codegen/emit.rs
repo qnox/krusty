@@ -2689,6 +2689,19 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
+                // Unqualified sibling instance-method call `foo()` → `this.foo()` (invokevirtual).
+                if self.is_instance && !self.syms.funs.contains_key(&fname) {
+                    if let Some(sig) = self.syms.method_of(&self.class.clone(), &fname) {
+                        code.aload(0);
+                        for (a, pty) in args.iter().zip(&sig.params) {
+                            self.emit_expr_as(*a, *pty, code, cw);
+                        }
+                        let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                        let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));
+                        code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
+                        return;
+                    }
+                }
                 // Unqualified companion (static) method call inside a companion member → invokestatic
                 // on the enclosing class.
                 if !self.syms.funs.contains_key(&fname) {
