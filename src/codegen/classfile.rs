@@ -9,7 +9,11 @@ pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_SUPER: u16 = 0x0020;
 
-const MAJOR_JAVA8: u16 = 52;
+// v0 targets major 50 (Java 6): its verifier falls back to the type-inference verifier when a
+// method has no StackMapTable, so branchy methods verify without us computing frames yet. Upgrading
+// to 52 (kotlinc's default) + StackMapTable is a hardening item (plan Phase 4e). Java 8+ JVMs load
+// v50 classes fine, so output stays consumable.
+const MAJOR_JAVA6: u16 = 50;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
@@ -210,7 +214,7 @@ impl ClassWriter {
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
-        u2(&mut out, MAJOR_JAVA8);
+        u2(&mut out, MAJOR_JAVA6);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);
@@ -249,16 +253,72 @@ fn u4(out: &mut Vec<u8>, v: u32) {
 
 // ---- CodeBuilder: opcode emission with automatic max_stack/max_locals tracking ----------------
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Label(u32);
+
 pub struct CodeBuilder {
     pub bytes: Vec<u8>,
     pub max_stack: u16,
     pub max_locals: u16,
     cur_stack: i32,
+    labels: Vec<usize>,        // label id -> bound byte offset (usize::MAX until bound)
+    fixups: Vec<(usize, u32)>, // (operand position, label id) to patch in link()
 }
 
 impl CodeBuilder {
     pub fn new(arg_locals: u16) -> CodeBuilder {
-        CodeBuilder { bytes: Vec::new(), max_stack: 0, max_locals: arg_locals, cur_stack: 0 }
+        CodeBuilder {
+            bytes: Vec::new(),
+            max_stack: 0,
+            max_locals: arg_locals,
+            cur_stack: 0,
+            labels: Vec::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    // ---- branches & labels ----
+    pub fn new_label(&mut self) -> Label {
+        let id = self.labels.len() as u32;
+        self.labels.push(usize::MAX);
+        Label(id)
+    }
+    pub fn bind(&mut self, l: Label) {
+        self.labels[l.0 as usize] = self.bytes.len();
+    }
+    fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
+        self.bytes.push(opcode);
+        let pos = self.bytes.len();
+        self.fixups.push((pos, l.0));
+        self.bytes.extend_from_slice(&[0, 0]);
+        self.adjust(delta);
+    }
+    pub fn goto(&mut self, l: Label) { self.branch(0xa7, l, 0); }
+    pub fn ifeq(&mut self, l: Label) { self.branch(0x99, l, -1); }
+    pub fn ifne(&mut self, l: Label) { self.branch(0x9a, l, -1); }
+    pub fn if_icmpeq(&mut self, l: Label) { self.branch(0x9f, l, -2); }
+    pub fn if_icmpne(&mut self, l: Label) { self.branch(0xa0, l, -2); }
+    pub fn if_icmplt(&mut self, l: Label) { self.branch(0xa1, l, -2); }
+    pub fn if_icmpge(&mut self, l: Label) { self.branch(0xa2, l, -2); }
+    pub fn if_icmpgt(&mut self, l: Label) { self.branch(0xa3, l, -2); }
+    pub fn if_icmple(&mut self, l: Label) { self.branch(0xa4, l, -2); }
+    pub fn lcmp(&mut self) { self.op(0x94, -3); }
+    pub fn dcmpg(&mut self) { self.op(0x98, -3); }
+    pub fn iflt(&mut self, l: Label) { self.branch(0x9b, l, -1); }
+    pub fn ifge(&mut self, l: Label) { self.branch(0x9c, l, -1); }
+    pub fn ifgt(&mut self, l: Label) { self.branch(0x9d, l, -1); }
+    pub fn ifle(&mut self, l: Label) { self.branch(0x9e, l, -1); }
+
+    /// Resolve all branch offsets. Call once after the method body is built.
+    pub fn link(&mut self) {
+        for &(pos, lid) in &self.fixups {
+            let target = self.labels[lid as usize];
+            debug_assert!(target != usize::MAX, "unbound label {lid}");
+            let off = target as i64 - (pos - 1) as i64; // opcode is 1 byte before operand
+            let b = (off as i16).to_be_bytes();
+            self.bytes[pos] = b[0];
+            self.bytes[pos + 1] = b[1];
+        }
     }
 
     /// Ensure the local-variable table is at least `n` slots.
@@ -450,7 +510,7 @@ mod tests {
         let cw = ClassWriter::new("FooKt", "java/lang/Object");
         let bytes = cw.finish();
         assert_eq!(&bytes[0..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
-        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), MAJOR_JAVA8);
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), MAJOR_JAVA6);
     }
 
     #[test]

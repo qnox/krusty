@@ -1,9 +1,9 @@
 //! Phase 4: lower a typechecked file to a `FileKt`-style class.
 //!
-//! v0 slice implemented here: numeric arithmetic, unary, free-function calls, `toString()` +
-//! string concat (via `StringBuilder`, the JVM-8 strategy), `println`, locals, and `return` in
-//! expression bodies. Branches (`if`/`while`/comparisons/`&&`/`||`) require `StackMapTable` and are
-//! emitted in Phase 4c.
+//! v0 covers: numeric arithmetic + widening, unary, comparisons, `&&`/`||` (short-circuit),
+//! `if`/`while`, block bodies with `val`/`var` locals and `return`, free-function calls,
+//! `toString()`, string concat (`StringBuilder`), `println`, `.length`. Branchy methods rely on the
+//! v50 type-inference verifier (no StackMapTable yet — see classfile.rs).
 
 use std::collections::HashMap;
 
@@ -13,8 +13,7 @@ use crate::diag::DiagSink;
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
 
-/// Class name kotlinc derives for top-level decls: `<File>Kt` (capitalized). For a file `foo.kt`
-/// the class is `FooKt`. With a package, the internal name is `pkg/path/FooKt`.
+/// Class name kotlinc derives for top-level decls: `<File>Kt` (capitalized).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
     let mut base = String::new();
     let mut chars = file_stem.chars();
@@ -39,7 +38,6 @@ pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
     s
 }
 
-/// Lower `file` into class bytes. `internal_name` is e.g. `demo/FooKt`.
 pub fn emit_file(
     file: &File,
     info: &TypeInfo,
@@ -64,11 +62,12 @@ struct MethodEmitter<'a> {
     diags: &'a mut DiagSink,
     slots: HashMap<String, (u16, Ty)>,
     next_slot: u16,
+    ret_ty: Ty,
 }
 
 impl<'a> MethodEmitter<'a> {
     fn new(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, diags: &'a mut DiagSink) -> Self {
-        MethodEmitter { file, info, syms, class: class.to_string(), diags, slots: HashMap::new(), next_slot: 0 }
+        MethodEmitter { file, info, syms, class: class.to_string(), diags, slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit }
     }
 
     fn alloc_slot(&mut self, name: &str, ty: Ty) -> u16 {
@@ -83,6 +82,7 @@ impl<'a> MethodEmitter<'a> {
             Some(s) => s.clone(),
             None => return,
         };
+        self.ret_ty = sig.ret;
         for (p, ty) in f.params.iter().zip(&sig.params) {
             self.alloc_slot(&p.name, *ty);
         }
@@ -92,15 +92,40 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr_as(*e, sig.ret, &mut code, cw);
                 self.emit_return(sig.ret, &mut code);
             }
-            FunBody::Block(_) => {
-                // Phase 4c: block bodies / branches. Emit a stub `return` so the class still
-                // verifies; real lowering lands with StackMapTable support.
-                self.diags.error(f.span, format!("krust v0: block-body functions not yet emitted ('{}')", f.name));
-                self.emit_default_return(sig.ret, &mut code, cw);
+            FunBody::Block(b) => {
+                self.emit_block_as_body(*b, &mut code, cw);
             }
             FunBody::None => self.emit_default_return(sig.ret, &mut code, cw),
         }
+        code.ensure_locals(self.next_slot);
+        code.link();
         cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &f.name, &method_descriptor(&sig.params, sig.ret), &code);
+    }
+
+    /// A `{ ... }` used directly as a function body: emit statements; a trailing expr (if the fn is
+    /// non-Unit) becomes the returned value; otherwise rely on explicit `return`s + a Unit fallthrough.
+    fn emit_block_as_body(&mut self, block: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let Expr::Block { stmts, trailing } = self.file.expr(block).clone() else { return };
+        for s in &stmts {
+            self.emit_stmt(*s, code, cw);
+        }
+        match trailing {
+            Some(te) if self.ret_ty != Ty::Unit => {
+                self.emit_expr_as(te, self.ret_ty, code, cw);
+                self.emit_return(self.ret_ty, code);
+            }
+            Some(te) => {
+                self.emit_expr(te, code, cw);
+                self.discard(self.info.ty(te), code);
+                code.ret_void();
+            }
+            None => {
+                if self.ret_ty == Ty::Unit {
+                    code.ret_void();
+                }
+                // non-Unit: explicit `return`s carry control flow (verifier checks completeness)
+            }
+        }
     }
 
     fn emit_return(&mut self, ret: Ty, code: &mut CodeBuilder) {
@@ -109,8 +134,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
             Ty::String => code.areturn(),
-            Ty::Unit => code.ret_void(),
-            Ty::Error => code.ret_void(),
+            Ty::Unit | Ty::Error => code.ret_void(),
         }
     }
 
@@ -124,7 +148,80 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
-    /// Emit `e`, then widen its value to `target` if numeric.
+    fn discard(&self, t: Ty, code: &mut CodeBuilder) {
+        match slot_words(t) {
+            1 => code.pop(),
+            2 => code.pop2(),
+            _ => {}
+        }
+    }
+
+    // ---- statements ----
+    fn emit_stmt(&mut self, s: StmtId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match self.file.stmt(s).clone() {
+            Stmt::Local { name, ty, init, .. } => {
+                let lty = ty.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or_else(|| self.info.ty(init));
+                self.emit_expr_as(init, lty, code, cw);
+                let slot = self.alloc_slot(&name, lty);
+                self.store(lty, slot, code);
+            }
+            Stmt::Assign { name, value } => {
+                if let Some(&(slot, ty)) = self.slots.get(&name) {
+                    self.emit_expr_as(value, ty, code, cw);
+                    self.store(ty, slot, code);
+                }
+            }
+            Stmt::Return(e) => match e {
+                Some(ex) => {
+                    self.emit_expr_as(ex, self.ret_ty, code, cw);
+                    self.emit_return(self.ret_ty, code);
+                }
+                None => code.ret_void(),
+            },
+            Stmt::While { cond, body } => {
+                let start = code.new_label();
+                let end = code.new_label();
+                code.bind(start);
+                self.emit_cond_jump(cond, end, false, code, cw); // if !cond goto end
+                self.emit_block_discard(body, code, cw);
+                code.goto(start);
+                code.bind(end);
+            }
+            Stmt::Expr(e) => {
+                self.emit_expr(e, code, cw);
+                self.discard(self.info.ty(e), code);
+            }
+        }
+    }
+
+    fn store(&self, ty: Ty, slot: u16, code: &mut CodeBuilder) {
+        match ty {
+            Ty::Int | Ty::Boolean => code.istore(slot),
+            Ty::Long => code.lstore(slot),
+            Ty::Double => code.dstore(slot),
+            Ty::String => code.astore(slot),
+            _ => code.astore(slot),
+        }
+    }
+
+    /// Emit a block for its side effects, discarding any trailing value.
+    fn emit_block_discard(&mut self, block: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        if let Expr::Block { stmts, trailing } = self.file.expr(block).clone() {
+            for s in &stmts {
+                self.emit_stmt(*s, code, cw);
+            }
+            if let Some(te) = trailing {
+                self.emit_expr(te, code, cw);
+                self.discard(self.info.ty(te), code);
+            }
+        } else {
+            // a non-block while body
+            self.emit_expr(block, code, cw);
+            self.discard(self.info.ty(block), code);
+        }
+    }
+
+    // ---- expressions ----
     fn emit_expr_as(&mut self, e: ExprId, target: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let from = self.info.ty(e);
         self.emit_expr(e, code, cw);
@@ -146,7 +243,6 @@ impl<'a> MethodEmitter<'a> {
                         Ty::Int | Ty::Boolean => code.iload(slot),
                         Ty::Long => code.lload(slot),
                         Ty::Double => code.dload(slot),
-                        Ty::String => code.aload(slot),
                         _ => code.aload(slot),
                     }
                 } else {
@@ -155,21 +251,26 @@ impl<'a> MethodEmitter<'a> {
             }
             Expr::Unary { op, operand } => {
                 let t = self.info.ty(e);
-                self.emit_expr(operand, code, cw);
                 match op {
-                    UnOp::Neg => match t {
-                        Ty::Int => code.ineg(),
-                        Ty::Long => code.lneg(),
-                        Ty::Double => code.dneg(),
-                        _ => {}
-                    },
-                    UnOp::Not => {
-                        code.push_int(1, cw);
-                        code.ixor();
+                    UnOp::Neg => {
+                        self.emit_expr(operand, code, cw);
+                        match t {
+                            Ty::Int => code.ineg(),
+                            Ty::Long => code.lneg(),
+                            Ty::Double => code.dneg(),
+                            _ => {}
+                        }
                     }
+                    UnOp::Not => self.emit_bool(e, code, cw),
                 }
             }
-            Expr::Binary { op, lhs, rhs } => self.emit_binary(e, op, lhs, rhs, code, cw),
+            Expr::Binary { op, lhs, rhs } => {
+                if is_arith(op) {
+                    self.emit_arith_expr(e, op, lhs, rhs, code, cw);
+                } else {
+                    self.emit_bool(e, code, cw); // comparison / && / ||
+                }
+            }
             Expr::Call { callee, args } => self.emit_call(e, callee, &args, code, cw),
             Expr::Member { receiver, name } => {
                 if name == "length" {
@@ -180,25 +281,160 @@ impl<'a> MethodEmitter<'a> {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krust v0: member '{name}' not emittable"));
                 }
             }
-            Expr::If { .. } | Expr::Block { .. } => {
-                self.diags.error(self.file.expr_spans[e.0 as usize], "krust v0: if/block expressions need branch support (Phase 4c)");
+            Expr::If { cond, then_branch, else_branch } => {
+                let result = self.info.ty(e);
+                match else_branch {
+                    Some(eb) => {
+                        let l_else = code.new_label();
+                        let l_end = code.new_label();
+                        self.emit_cond_jump(cond, l_else, false, code, cw); // if !cond goto else
+                        self.emit_expr_as(then_branch, result, code, cw);
+                        code.goto(l_end);
+                        code.bind(l_else);
+                        self.emit_expr_as(eb, result, code, cw);
+                        code.bind(l_end);
+                    }
+                    None => {
+                        // statement-if (Unit value)
+                        let l_end = code.new_label();
+                        self.emit_cond_jump(cond, l_end, false, code, cw);
+                        self.emit_block_discard(then_branch, code, cw);
+                        code.bind(l_end);
+                    }
+                }
+            }
+            Expr::Block { stmts, trailing } => {
+                for s in &stmts {
+                    self.emit_stmt(*s, code, cw);
+                }
+                if let Some(te) = trailing {
+                    self.emit_expr(te, code, cw);
+                }
             }
         }
     }
 
-    fn emit_binary(&mut self, e: ExprId, op: BinOp, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
-        let result = self.info.ty(e);
-        match op {
-            BinOp::Add if result == Ty::String => self.emit_concat(lhs, rhs, code, cw),
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                self.emit_expr_as(lhs, result, code, cw);
-                self.emit_expr_as(rhs, result, code, cw);
-                self.emit_arith(op, result, code);
+    /// Emit `e` as a boolean value (0/1 int on the stack).
+    fn emit_bool(&mut self, e: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match self.file.expr(e).clone() {
+            Expr::Binary { op, lhs, rhs } if is_cmp(op) || op == BinOp::And || op == BinOp::Or => {
+                let l_true = code.new_label();
+                let l_end = code.new_label();
+                // jump to l_true when the condition holds, else fall through to push 0
+                self.emit_cond_jump(e, l_true, true, code, cw);
+                code.push_int(0, cw);
+                code.goto(l_end);
+                code.bind(l_true);
+                code.push_int(1, cw);
+                code.bind(l_end);
+                let _ = (op, lhs, rhs);
+            }
+            Expr::Unary { op: UnOp::Not, operand } => {
+                self.emit_bool(operand, code, cw);
+                code.push_int(1, cw);
+                code.ixor();
+            }
+            _ => self.emit_expr(e, code, cw), // already a 0/1 boolean value (var/call)
+        }
+    }
+
+    /// Emit code that jumps to `target` when `cond` is `want` (true/false). Short-circuits `&&`/`||`.
+    fn emit_cond_jump(&mut self, cond: ExprId, target: Label, want: bool, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match self.file.expr(cond).clone() {
+            Expr::Binary { op: BinOp::And, lhs, rhs } => {
+                if want {
+                    // jump if (lhs && rhs): if !lhs skip; if rhs jump
+                    let skip = code.new_label();
+                    self.emit_cond_jump(lhs, skip, false, code, cw);
+                    self.emit_cond_jump(rhs, target, true, code, cw);
+                    code.bind(skip);
+                } else {
+                    // jump if !(lhs && rhs) = !lhs || !rhs
+                    self.emit_cond_jump(lhs, target, false, code, cw);
+                    self.emit_cond_jump(rhs, target, false, code, cw);
+                }
+            }
+            Expr::Binary { op: BinOp::Or, lhs, rhs } => {
+                if want {
+                    self.emit_cond_jump(lhs, target, true, code, cw);
+                    self.emit_cond_jump(rhs, target, true, code, cw);
+                } else {
+                    let skip = code.new_label();
+                    self.emit_cond_jump(lhs, skip, true, code, cw);
+                    self.emit_cond_jump(rhs, target, false, code, cw);
+                    code.bind(skip);
+                }
+            }
+            Expr::Unary { op: UnOp::Not, operand } => {
+                self.emit_cond_jump(operand, target, !want, code, cw);
+            }
+            Expr::Binary { op, lhs, rhs } if is_cmp(op) => {
+                let cmp = if want { op } else { negate_cmp(op) };
+                self.emit_compare_jump(cmp, lhs, rhs, target, code, cw);
             }
             _ => {
-                self.diags.error(self.file.expr_spans[e.0 as usize], "krust v0: comparison/logic needs branch support (Phase 4c)");
+                // arbitrary boolean value: compare against 0
+                self.emit_expr(cond, code, cw);
+                if want {
+                    code.ifne(target);
+                } else {
+                    code.ifeq(target);
+                }
             }
         }
+    }
+
+    fn emit_compare_jump(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, target: Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let lt = self.info.ty(lhs);
+        let rt = self.info.ty(rhs);
+        let common = Ty::promote(lt, rt).unwrap_or(lt);
+        self.emit_expr_as(lhs, common, code, cw);
+        self.emit_expr_as(rhs, common, code, cw);
+        match common {
+            Ty::Int | Ty::Boolean => match op {
+                BinOp::Lt => code.if_icmplt(target),
+                BinOp::Le => code.if_icmple(target),
+                BinOp::Gt => code.if_icmpgt(target),
+                BinOp::Ge => code.if_icmpge(target),
+                BinOp::Eq => code.if_icmpeq(target),
+                BinOp::Ne => code.if_icmpne(target),
+                _ => {}
+            },
+            Ty::Long => {
+                code.lcmp();
+                self.cmp0(op, target, code);
+            }
+            Ty::Double => {
+                code.dcmpg();
+                self.cmp0(op, target, code);
+            }
+            _ => {
+                self.diags.error(self.file.expr_spans[lhs.0 as usize], "krust v0: unsupported comparison operand type");
+            }
+        }
+    }
+
+    fn cmp0(&mut self, op: BinOp, target: Label, code: &mut CodeBuilder) {
+        match op {
+            BinOp::Lt => code.iflt(target),
+            BinOp::Le => code.ifle(target),
+            BinOp::Gt => code.ifgt(target),
+            BinOp::Ge => code.ifge(target),
+            BinOp::Eq => code.ifeq(target),
+            BinOp::Ne => code.ifne(target),
+            _ => {}
+        }
+    }
+
+    fn emit_arith_expr(&mut self, e: ExprId, op: BinOp, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let result = self.info.ty(e);
+        if op == BinOp::Add && result == Ty::String {
+            self.emit_concat(lhs, rhs, code, cw);
+            return;
+        }
+        self.emit_expr_as(lhs, result, code, cw);
+        self.emit_expr_as(rhs, result, code, cw);
+        self.emit_arith(op, result, code);
     }
 
     fn emit_arith(&mut self, op: BinOp, t: Ty, code: &mut CodeBuilder) {
@@ -222,7 +458,6 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
-    /// `a + b` where the result is String: `new StringBuilder().append(a).append(b).toString()`.
     fn emit_concat(&mut self, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let sb = cw.class_ref("java/lang/StringBuilder");
         let ctor = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
@@ -238,7 +473,6 @@ impl<'a> MethodEmitter<'a> {
     fn emit_append(&mut self, e: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let t = self.info.ty(e);
         self.emit_expr(e, code, cw);
-        // StringBuilder.append has overloads per primitive + String/Object.
         let (desc, words) = match t {
             Ty::Int | Ty::Boolean => ("(I)Ljava/lang/StringBuilder;", 1),
             Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
@@ -253,25 +487,17 @@ impl<'a> MethodEmitter<'a> {
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match self.file.expr(callee).clone() {
             Expr::Member { receiver, name } if name == "toString" && args.is_empty() => {
-                // primitive .toString() -> String.valueOf(x); String.toString() -> identity.
                 let rt = self.info.ty(receiver);
                 self.emit_expr(receiver, code, cw);
-                match rt {
-                    Ty::String => {} // already a String
-                    Ty::Int | Ty::Boolean => {
-                        let m = cw.methodref("java/lang/String", "valueOf", "(I)Ljava/lang/String;");
-                        code.invokestatic(m, 1, 1);
-                    }
-                    Ty::Long => {
-                        let m = cw.methodref("java/lang/String", "valueOf", "(J)Ljava/lang/String;");
-                        code.invokestatic(m, 2, 1);
-                    }
-                    Ty::Double => {
-                        let m = cw.methodref("java/lang/String", "valueOf", "(D)Ljava/lang/String;");
-                        code.invokestatic(m, 2, 1);
-                    }
-                    _ => {}
-                }
+                let (desc, words) = match rt {
+                    Ty::String => return, // identity
+                    Ty::Int | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
+                    Ty::Long => ("(J)Ljava/lang/String;", 2),
+                    Ty::Double => ("(D)Ljava/lang/String;", 2),
+                    _ => return,
+                };
+                let m = cw.methodref("java/lang/String", "valueOf", desc);
+                code.invokestatic(m, words, 1);
             }
             Expr::Name(fname) if fname == "println" => {
                 let out = cw.fieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
@@ -310,7 +536,24 @@ impl<'a> MethodEmitter<'a> {
     }
 }
 
-/// JVM stack/local words for a type: long/double are 2, everything else 1; Unit is 0 (no value).
+fn is_arith(op: BinOp) -> bool {
+    matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
+}
+fn is_cmp(op: BinOp) -> bool {
+    matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne)
+}
+fn negate_cmp(op: BinOp) -> BinOp {
+    match op {
+        BinOp::Lt => BinOp::Ge,
+        BinOp::Le => BinOp::Gt,
+        BinOp::Gt => BinOp::Le,
+        BinOp::Ge => BinOp::Lt,
+        BinOp::Eq => BinOp::Ne,
+        BinOp::Ne => BinOp::Eq,
+        other => other,
+    }
+}
+
 fn slot_words(t: Ty) -> u16 {
     match t {
         Ty::Long | Ty::Double => 2,

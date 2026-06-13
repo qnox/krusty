@@ -93,3 +93,79 @@ fn numeric_and_concat_pipeline() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn control_flow_pipeline() {
+    if !have("javac") || !have("java") {
+        eprintln!("skipping: javac/java unavailable");
+        return;
+    }
+
+    let src = r#"
+        fun max(a: Int, b: Int): Int = if (a > b) a else b
+        fun absdiff(a: Int, b: Int): Int = if (a > b) a - b else b - a
+        fun both(a: Int, b: Int): Boolean = a > 0 && b > 0
+        fun either(a: Int, b: Int): Boolean = a > 0 || b > 0
+        fun classify(n: Int): String = if (n > 0) "pos" else "nonpos"
+        fun fib(n: Int): Int {
+            var a = 0
+            var b = 1
+            var i = 0
+            while (i < n) {
+                val t = a + b
+                a = b
+                b = t
+                i = i + 1
+            }
+            return a
+        }
+    "#;
+
+    let bytes = match compile(src, "CtrlKt") {
+        Ok(b) => b,
+        Err(errs) => panic!("krust compile errors: {errs:?}"),
+    };
+
+    let dir = std::env::temp_dir().join(format!("krust_ctrl_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("CtrlKt.class"), &bytes).unwrap();
+
+    let main = r#"
+        public class Main {
+            public static void main(String[] x) {
+                System.out.println(CtrlKt.max(3, 7));
+                System.out.println(CtrlKt.max(9, 2));
+                System.out.println(CtrlKt.absdiff(3, 7));
+                System.out.println(CtrlKt.both(1, 1));
+                System.out.println(CtrlKt.both(1, -1));
+                System.out.println(CtrlKt.either(-1, 2));
+                System.out.println(CtrlKt.either(-1, -1));
+                System.out.println(CtrlKt.classify(5));
+                System.out.println(CtrlKt.classify(-1));
+                System.out.println(CtrlKt.fib(10));
+            }
+        }
+    "#;
+    fs::write(dir.join("Main.java"), main).unwrap();
+
+    let javac = Command::new("javac")
+        .args(["-cp", dir.to_str().unwrap(), "Main.java"])
+        .current_dir(&dir)
+        .output()
+        .expect("javac");
+    assert!(javac.status.success(), "javac rejected krust output:\n{}", String::from_utf8_lossy(&javac.stderr));
+
+    let run = Command::new("java")
+        .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
+        .output()
+        .expect("java");
+    let out = String::from_utf8_lossy(&run.stdout);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "java verify/run failed:\nstdout={out}\nstderr={err}");
+
+    let expected = "7\n9\n4\ntrue\nfalse\ntrue\nfalse\npos\nnonpos\n55\n";
+    assert_eq!(out, expected, "control-flow semantic mismatch; stderr={err}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

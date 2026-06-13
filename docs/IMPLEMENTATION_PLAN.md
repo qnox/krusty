@@ -59,12 +59,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ **Exit met:** `tests/compile_e2e.rs` runs the full pipeline (parse→check→emit) on 8 functions;
   javac accepts, `java -Xverify:all` verifies + runs, all results semantically correct
   (`7,14,3,-5,8,11.0,42!,hi bob`). 38 tests green.
-### 4c — branches (if/while/comparisons/`&&`/`||`) ⬜  ← next
-- Conditional jumps + **StackMapTable** computation (required at v52 for branch targets). Block
-  bodies, locals in blocks, `return` in blocks, `while`, `if`-expression value.
-- Exit: `control.kt` (`max`, `fib`) compiles, verifies, runs.
-### 4d — streaming driver ⬜
-- Wire emit into the driver per-file with arena drop; `--emit-stats` for peak/working-set.
+### 4c — branches (if/while/comparisons/`&&`/`||`) ✅
+- ✅ Label/branch support in `CodeBuilder` (if*/if_icmp*/goto/lcmp/dcmpg + offset linking).
+- ✅ Emitter: comparisons (Int/Long/Double), short-circuit `&&`/`||` via `emit_cond_jump`, `!`,
+  `if`-expression value + statement-`if`, `while`, block bodies, `val`/`var` locals + slots,
+  `return`. Target lowered to **v50** so the type-inference verifier handles branches without
+  StackMapTable (Java 8+ still loads v50; v52+frames is hardening, Phase 4e).
+- ✅ **Exit met:** `control_flow_pipeline` e2e — `max/absdiff/both/either/classify/fib` compile,
+  `java -Xverify:all` verifies + runs, all correct (`fib(10)=55`, `&&`/`||` short-circuit).
+### 4d — streaming driver ✅
+- ✅ `krust [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
+  `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
+### 4e — v52 + StackMapTable ⬜ (hardening, for exact version match with kotlinc)
 
 ## Phase 5 — Differential harness vs kotlinc  ⬜
 - `harness/`: (a) locate reference kotlinc (wrap the `kotlin-compiler` 2.4.0 jar in `~/.m2` via a
