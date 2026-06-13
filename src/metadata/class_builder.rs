@@ -92,7 +92,11 @@ impl StringTable {
 
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     let mut p = Pb::new();
-    p.field_varint(6, st.builtin(predefined_index(t)) as u64); // Type.class_name = 6
+    let class_name = match t {
+        Ty::Obj(internal) => st.class_id_from_desc(&format!("L{internal};")),
+        _ => st.builtin(predefined_index(t)),
+    };
+    p.field_varint(6, class_name as u64); // Type.class_name = 6
     p
 }
 

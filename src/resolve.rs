@@ -20,13 +20,35 @@ pub struct Signature {
     pub ret: Ty,
 }
 
+/// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
+/// primary-constructor properties (in order), and its member-function signatures.
+#[derive(Clone, Debug)]
+pub struct ClassSig {
+    pub internal: String,
+    pub props: Vec<(String, Ty, bool)>, // (name, type, is_var)
+    pub methods: HashMap<String, Signature>,
+}
+
+impl ClassSig {
+    pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
+        self.props.iter().find(|(n, _, _)| n == name).map(|(_, t, v)| (*t, *v))
+    }
+}
+
 #[derive(Default)]
 pub struct SymbolTable {
     pub funs: HashMap<String, Signature>,
-    /// Declared class simple-name -> internal name (e.g. `Point -> demo/Point`).
-    pub classes: HashMap<String, String>,
+    /// Declared classes by simple name (e.g. `Point`).
+    pub classes: HashMap<String, ClassSig>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
+}
+
+impl SymbolTable {
+    /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
+    pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
+        self.classes.values().find(|c| c.internal == internal)
+    }
 }
 
 /// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
@@ -80,16 +102,38 @@ pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys
     Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
 }
 
-/// Stage C: collect top-level function signatures across all files.
+fn class_internal(file: &File, name: &str) -> String {
+    match &file.package {
+        Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), name),
+        _ => name.to_string(),
+    }
+}
+
+/// Stage C: collect top-level function + class signatures across all files. Two passes so that a
+/// class type can be referenced before its declaration (and across files).
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
+    // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
+    let mut class_names: HashMap<String, String> = HashMap::new();
+    for file in files {
+        for &d in &file.decls {
+            if let Decl::Class(c) = file.decl(d) {
+                let internal = class_internal(file, &c.name);
+                if class_names.insert(c.name.clone(), internal).is_some() {
+                    diags.error(c.span, format!("conflicting declaration of '{}'", c.name));
+                }
+            }
+        }
+    }
+
+    // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
     for file in files {
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
-                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, diags)).collect();
+                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
                     let ret = match &f.ret {
-                        Some(r) => ty_of_ref(r, diags),
+                        Some(r) => ty_of_ref(r, &class_names, diags),
                         None => Ty::Unit, // v0: missing return type defaults to Unit
                     };
                     if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
@@ -97,17 +141,22 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     }
                 }
                 Decl::Class(c) => {
-                    // Validate property types now (so unknown types are reported once, globally).
-                    for p in &c.props {
-                        ty_of_ref(&p.ty, diags);
-                    }
-                    let internal = match &file.package {
-                        Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), c.name),
-                        _ => c.name.clone(),
-                    };
-                    if table.classes.insert(c.name.clone(), internal).is_some() {
-                        diags.error(c.span, format!("conflicting declaration of '{}'", c.name));
-                    }
+                    let internal = class_names.get(&c.name).cloned().unwrap_or_else(|| class_internal(file, &c.name));
+                    let props = c
+                        .props
+                        .iter()
+                        .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, diags), p.is_var))
+                        .collect();
+                    let methods = c
+                        .methods
+                        .iter()
+                        .map(|m| {
+                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
+                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, diags)).unwrap_or(Ty::Unit);
+                            (m.name.clone(), Signature { params, ret })
+                        })
+                        .collect();
+                    table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
                 }
             }
         }
@@ -115,14 +164,17 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     table
 }
 
-fn ty_of_ref(r: &TypeRef, diags: &mut DiagSink) -> Ty {
-    match Ty::from_name(&r.name) {
-        Some(t) => t,
-        None => {
-            diags.error(r.span, format!("unknown type '{}'", r.name));
-            Ty::Error
-        }
+/// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, or a declared class
+/// (→ `Ty::Obj` with the class's internal name).
+fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, diags: &mut DiagSink) -> Ty {
+    if let Some(t) = Ty::from_name(&r.name) {
+        return t;
     }
+    if let Some(internal) = classes.get(&r.name) {
+        return Ty::obj(internal);
+    }
+    diags.error(r.span, format!("unknown type '{}'", r.name));
+    Ty::Error
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.
@@ -156,12 +208,9 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         match file.decl(d) {
             Decl::Fun(f) => c.check_fun(f),
             Decl::Class(cl) => {
-                // Member functions are checked with the class's properties in an implicit scope.
-                let props: Vec<(String, Ty, bool)> = cl
-                    .props
-                    .iter()
-                    .map(|p| (p.name.clone(), Ty::from_name(&p.ty.name).unwrap_or(Ty::Error), p.is_var))
-                    .collect();
+                // Member functions are checked with the class's properties (resolved in Stage C)
+                // visible as an implicit `this` scope.
+                let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
@@ -203,12 +252,23 @@ impl<'a> Checker<'a> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
 
+    /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
+    fn resolve_ty(&self, r: &TypeRef) -> Ty {
+        if let Some(t) = Ty::from_name(&r.name) {
+            return t;
+        }
+        if let Some(cs) = self.syms.classes.get(&r.name) {
+            return Ty::obj(&cs.internal);
+        }
+        Ty::Error
+    }
+
     fn check_fun(&mut self, f: &FunDecl) {
         let sig = self.syms.funs.get(&f.name);
         self.ret_ty = sig.map(|s| s.ret).unwrap_or(Ty::Unit);
         self.push_scope();
         for p in &f.params {
-            let ty = Ty::from_name(&p.ty.name).unwrap_or(Ty::Error);
+            let ty = self.resolve_ty(&p.ty);
             self.declare(&p.name, ty, false);
         }
         self.check_fun_body(f);
@@ -218,14 +278,14 @@ impl<'a> Checker<'a> {
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
-        self.ret_ty = f.ret.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(Ty::Unit);
+        self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit);
         self.push_scope(); // implicit-this scope (properties)
         for (n, t, is_var) in props {
             self.declare(n, *t, *is_var);
         }
         self.push_scope(); // parameter scope
         for p in &f.params {
-            let ty = Ty::from_name(&p.ty.name).unwrap_or(Ty::Error);
+            let ty = self.resolve_ty(&p.ty);
             self.declare(&p.name, ty, false);
         }
         self.check_fun_body(f);
@@ -373,13 +433,17 @@ impl<'a> Checker<'a> {
         if rt == Ty::Error {
             return Ty::Error;
         }
-        match (rt, name) {
-            (Ty::String, "length") => Ty::Int,
-            _ => {
-                self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
-                Ty::Error
+        if let (Ty::String, "length") = (rt, name) {
+            return Ty::Int;
+        }
+        // Property read on a class value: `p.prop`.
+        if let Ty::Obj(internal) = rt {
+            if let Some((ty, _)) = self.syms.class_by_internal(internal).and_then(|c| c.prop(name)) {
+                return ty;
             }
         }
+        self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
+        Ty::Error
     }
 
     fn check_call(&mut self, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
@@ -415,6 +479,19 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Instance method call on a class value: `p.method(args)`.
+                if let Ty::Obj(internal) = rt {
+                    if let Some(sig) = self.syms.class_by_internal(internal).and_then(|c| c.methods.get(&name)).cloned() {
+                        if sig.params.len() != arg_tys.len() {
+                            self.diags.error(span, format!("method '{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                        } else {
+                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                        }
+                        return sig.ret;
+                    }
+                }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
                 Ty::Error
             }
@@ -423,6 +500,20 @@ impl<'a> Checker<'a> {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
+                }
+                // Constructor call: `ClassName(args)` (when not shadowed by a local).
+                if self.lookup(&fname).is_none() {
+                    if let Some(cls) = self.syms.classes.get(&fname).cloned() {
+                        let ctor_params: Vec<Ty> = cls.props.iter().map(|(_, t, _)| *t).collect();
+                        if ctor_params.len() != arg_tys.len() {
+                            self.diags.error(span, format!("constructor '{fname}' expects {} args, got {}", ctor_params.len(), arg_tys.len()));
+                        } else {
+                            for (i, (p, a)) in ctor_params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                        }
+                        return Ty::obj(&cls.internal);
+                    }
                 }
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
@@ -470,7 +561,7 @@ impl<'a> Checker<'a> {
         match self.file.stmt(s).clone() {
             Stmt::Local { is_var, name, ty, init } => {
                 let it = self.expr(init);
-                let declared = ty.as_ref().and_then(|r| Ty::from_name(&r.name));
+                let declared = ty.as_ref().map(|r| self.resolve_ty(r));
                 let bind = match declared {
                     Some(d) => {
                         self.expect_assignable(d, it, self.span(init), "initializer");
@@ -616,6 +707,24 @@ mod tests {
         ok("fun f(s: String): String = s.concat(\"y\")");
         err_contains("fun f(s: String): String = s.substring(\"x\")", "unresolved method");
         err_contains("fun f(a: Int): Int = a.substring(1)", "unresolved method");
+    }
+
+    #[test]
+    fn reference_types_resolve() {
+        // class-typed param + property read + construction + instance call all typecheck.
+        ok("class Point(val x: Int, val y: Int)\nfun ox(p: Point): Int = p.x");
+        ok("class Point(val x: Int)\nfun mk(): Point = Point(3)");
+        ok("class Point(val x: Int) {\n  fun get(): Int = x\n}\nfun use(p: Point): Int = p.get()");
+        ok("class Box(val v: Int)\nclass Pair(val a: Box, val b: Box)\nfun first(p: Pair): Int = p.a.v");
+        // forward reference: a function can mention a class declared later.
+        ok("fun ox(p: Point): Int = p.x\nclass Point(val x: Int)");
+    }
+
+    #[test]
+    fn reference_type_errors() {
+        err_contains("class Point(val x: Int)\nfun f(p: Point): Int = p.z", "unresolved member 'z'");
+        err_contains("class Point(val x: Int)\nfun f(): Point = Point()", "expects 1 args");
+        err_contains("fun f(p: Widget): Int = 0", "unknown type 'Widget'");
     }
 
     #[test]

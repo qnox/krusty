@@ -159,9 +159,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/class_e2e.rs::member_function_shape_and_run` (instance method, `-Xverify:all`, → `15`)
   and the class round-trip now exercises a member call from a Kotlin consumer (`p.shifted(3)` →
   `7:bye:10`).
-- ⬜ **Next:** secondary constructors, `data class`
-  (equals/hashCode/toString/componentN/copy), class-typed properties (`Ty::Obj`),
-  inheritance/interfaces, nullability.
+### 8d — reference types (`Ty::Obj`) ✅
+- ✅ `Ty::Obj(&'static str)` (interned class internal-name; `Ty` stays `Copy`). `descriptor()` now
+  returns `String` (`Lpkg/Name;` for classes). Two-pass `collect_signatures` builds a class universe
+  first, so class types resolve regardless of declaration order / across files. `SymbolTable` carries
+  `ClassSig` (internal name + ordered ctor properties + member-function signatures).
+- ✅ Typecheck: class-typed params/locals/returns; **construction** `Point(args)`; **property read**
+  `p.x`; **instance dispatch** `p.method(args)`; nested/chained (`l.to.translated(10).x`).
+- ✅ Codegen: `new`+`dup`+`invokespecial <init>` for construction; `invokevirtual get<Prop>` for
+  property reads; `invokevirtual` for instance calls; reference locals use `aload`/`astore`.
+- ✅ Class `@Metadata` `Type.class_name` encodes `Obj` via a `DESC_TO_CLASS_ID` class-id (not Any).
+- ✅ `tests/reftype_e2e.rs` (construct/access/dispatch across two classes, `-Xverify:all`, → `22`);
+  `tests/reftype_roundtrip_e2e.rs` (real kotlinc consumes class-typed members via Kotlin syntax →
+  `3:4:9`); resolver unit tests.
+- ⬜ **Next:** facade `@Metadata` for class-typed *top-level* function params (`builder.rs` still
+  encodes `Obj`→Any); secondary constructors, `data class`
+  (equals/hashCode/toString/componentN/copy), inheritance/interfaces, nullability, generics.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
