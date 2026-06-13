@@ -425,6 +425,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/is_as_e2e.rs` (is/!is/as/as? run on the JVM; unsafe-cast rejection). Box conformance
   **77 OK / 0 FAIL** (up from 70).
 
+## Phase 28 — Smart-casting  ✅
+- ✅ After `if (x is T) { … }`, a stable `x` (a `val` or parameter) is narrowed to `T` inside the
+  then-branch; `if (x !is T) … else` narrows it in the else-branch; and an early-return guard
+  `if (x !is T) return …` (a diverging then-branch, no else) narrows it for the rest of the block.
+- ✅ A `var` is never smart-cast (it could be reassigned) — the member access stays unresolved.
+  Only non-nullable, known reference targets narrow (consistent with the `is`/`as` rules).
+- ✅ Codegen inserts a `checkcast` to the narrowed type when loading the narrowed local (the slot
+  still holds the wider type), so member dispatch and the JVM verifier agree.
+- ✅ `tests/smartcast_e2e.rs` (if-then + early-return guard on the JVM; `var` non-narrowing). Box
+  conformance **80 OK / 0 FAIL** (up from 77).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

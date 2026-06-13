@@ -1210,6 +1210,13 @@ impl<'a> MethodEmitter<'a> {
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
                     load_local(ty, slot, code);
+                    // Smart-cast: the checker narrowed this use to a more specific reference type
+                    // (e.g. inside `if (x is T)`). The slot holds the wider type, so insert the cast.
+                    let narrowed = self.info.ty(e);
+                    if narrowed != ty && narrowed.is_reference() && ty.is_reference() {
+                        let ci = cw.class_ref(ref_internal(narrowed));
+                        code.checkcast(ci);
+                    }
                 } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
                     // implicit `this.<prop>`: read via the (virtual) getter in an open class so
                     // overrides dispatch correctly; otherwise read the backing field directly.
