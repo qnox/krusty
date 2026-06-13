@@ -72,6 +72,15 @@ impl<'a> Parser<'a> {
         }
         loop {
             self.skip_newlines();
+            if self.at(TokenKind::Eof) {
+                break;
+            }
+            // Skip leading annotations + declaration modifiers (krusty treats everything as
+            // public/final; modifiers it doesn't model are ignored, not errors).
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                self.skip_decl_prefix();
+                self.skip_newlines();
+            }
             match self.kind() {
                 TokenKind::Eof => break,
                 TokenKind::KwImport => {
@@ -113,6 +122,45 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume leading annotations (`@Foo`, `@file:Bar(...)`) and soft modifiers (`public`, `open`,
+    /// `inline`, `operator`, `suspend`, …) that precede a declaration. Modifiers that change the
+    /// declaration *kind* (`enum`, `annotation`, `sealed`, `data`, `value`, `object`, …) are NOT
+    /// skipped, so those declarations remain unsupported (and the file is cleanly skipped).
+    fn skip_decl_prefix(&mut self) {
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::At) {
+                self.skip_annotation();
+            } else if self.at(TokenKind::Ident) && is_modifier(self.text()) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn skip_annotation(&mut self) {
+        self.bump(); // '@'
+        // optional use-site target: `file:`, `get:`, `param:`, ...
+        if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Colon) {
+            self.bump();
+            self.bump(); // ':'
+        }
+        let _ = self.parse_qualified_name();
+        if self.at(TokenKind::LParen) {
+            // skip a balanced argument list
+            let mut depth = 0;
+            loop {
+                match self.kind() {
+                    TokenKind::LParen => { depth += 1; self.bump(); }
+                    TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
+                    TokenKind::Eof => break,
+                    _ => { self.bump(); }
+                }
+            }
+        }
+    }
+
     fn parse_qualified_name(&mut self) -> String {
         let mut s = String::new();
         if self.at(TokenKind::Ident) {
@@ -145,6 +193,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                self.skip_decl_prefix(); // `@Anno`, `vararg`, etc. on a parameter
+            }
             let pname = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -197,6 +248,9 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    self.skip_decl_prefix(); // `private val x`, `@Anno val y`, ...
+                }
                 let is_var = match self.kind() {
                     TokenKind::KwVal => { self.bump(); false }
                     TokenKind::KwVar => { self.bump(); true }
@@ -224,6 +278,10 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    self.skip_decl_prefix();
+                    self.skip_newlines();
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun()),
@@ -643,6 +701,21 @@ impl<'a> Parser<'a> {
 // ---- precedence ----
 const BP_PREFIX: u8 = 13;
 
+/// Soft modifiers that don't change a declaration's *kind* (so krusty can ignore them). Excludes
+/// `data`/`enum`/`annotation`/`sealed`/`value`/`object`/`companion`/`inner`/`expect`/`actual`,
+/// which would alter parsing/semantics and must remain unsupported.
+fn is_modifier(text: &str) -> bool {
+    // NOTE: `tailrec`/`external` are deliberately excluded — ignoring them changes semantics
+    // (no tail-call optimization → stack overflow; no native body), which would *miscompile*
+    // rather than skip. Leaving them unrecognized makes such declarations cleanly unsupported.
+    matches!(
+        text,
+        "public" | "private" | "internal" | "protected" | "open" | "final" | "abstract"
+            | "inline" | "noinline" | "crossinline" | "operator" | "override" | "suspend"
+            | "lateinit" | "infix" | "reified" | "vararg" | "const"
+    )
+}
+
 fn compound_op(k: TokenKind) -> Option<BinOp> {
     Some(match k {
         TokenKind::PlusEq => BinOp::Add,
@@ -791,6 +864,17 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn modifiers_and_annotations_are_skipped() {
+        // Leading modifiers + annotations are ignored; the declaration parses normally.
+        assert_eq!(tree("public inline fun f(): Int = 1"), "(fun f :Int 1)\n");
+        assert_eq!(tree("@JvmStatic fun g(): Int = 2"), "(fun g :Int 2)\n");
+        assert_eq!(tree("@Anno(1, 2) open class C(private val x: Int)"),
+            "(class C (val x Int))\n");
+        // `data` is NOT a skippable modifier — it stays a data class.
+        assert_eq!(tree("data class P(val x: Int)"), "(class P (val x Int))\n");
     }
 
     #[test]
