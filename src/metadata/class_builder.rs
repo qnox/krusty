@@ -29,7 +29,26 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// `Function.flags` (f9): e.g. operator (`componentN`) or the data-class `copy`. 0 ⇒ omitted.
+    pub flags: u64,
+    /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
+    /// for the synthesized `copy`.
+    pub params_have_defaults: bool,
 }
+
+impl FnMeta {
+    /// A plain member function (no special flags) — the common case.
+    pub fn plain(name: String, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
+        FnMeta { name, params, ret, flags: 0, params_have_defaults: false }
+    }
+}
+
+/// `Function.flags` kotlinc emits for a data class's synthesized `componentN` (public final
+/// operator member) and `copy` (public final member). Reverse-engineered from kotlinc 1.9.24.
+pub const COMPONENT_FN_FLAGS: u64 = 454;
+pub const COPY_FN_FLAGS: u64 = 198;
+/// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
+const DECLARES_DEFAULT_VALUE: u64 = 2;
 
 /// `predefinedIndex` of a builtin fq-name in `JvmNameResolverBase.PREDEFINED_STRINGS`.
 fn predefined_index(t: Ty) -> u64 {
@@ -111,15 +130,25 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 
 /// Build `(d1 bytes, d2 strings)` for a class. `class_internal` is e.g. `demo/Point`;
 /// `ctor_params` are the primary-constructor `(name, type)` pairs; `ctor_desc` its JVM descriptor.
+/// `Class.flags` value kotlinc emits for a simple `data class` (public/final + IS_DATA bit).
+/// A regular class serializes flags as 0 (omitted).
+const DATA_CLASS_FLAGS: u64 = 1030;
+
 pub fn build_class(
     class_internal: &str,
     ctor_params: &[(String, Ty)],
     ctor_desc: &str,
     props: &[PropMeta],
     methods: &[FnMeta],
+    is_data: bool,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut class = Pb::new();
+
+    // f1 = flags (omitted ⇒ 0 for a plain class; IS_DATA for a data class).
+    if is_data {
+        class.field_varint(1, DATA_CLASS_FLAGS);
+    }
 
     // f3 = fq_name: a class-id derived from the `L...;` descriptor.
     let fq = st.class_id_from_desc(&format!("L{class_internal};"));
@@ -143,7 +172,7 @@ pub fn build_class(
     ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
     class.repeated_message(8, &ctor);
 
-    // f9 = member functions (name f2, return_type f3, value_parameter f6; JVM sig derivable).
+    // f9 = member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
     for m in methods {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
@@ -151,10 +180,16 @@ pub fn build_class(
         func.field_message(3, &ret);
         for (pname, pty) in &m.params {
             let mut vp = Pb::new();
+            if m.params_have_defaults {
+                vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
+            }
             vp.field_varint(2, st.local(pname) as u64);
             let ty = type_pb(&mut st, *pty);
             vp.field_message(3, &ty);
             func.repeated_message(6, &vp); // Function.value_parameter = 6
+        }
+        if m.flags != 0 {
+            func.field_varint(9, m.flags); // Function.flags = 9
         }
         class.repeated_message(9, &func); // Class.function = 9
     }
@@ -211,6 +246,7 @@ mod tests {
                 },
             ],
             &[],
+            false,
         );
         // The class id descriptor and the JVM signatures must all appear verbatim in d2.
         assert!(d2.contains(&"Ldemo/Point;".to_string()));

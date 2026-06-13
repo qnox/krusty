@@ -142,12 +142,12 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 }
                 Decl::Class(c) => {
                     let internal = class_names.get(&c.name).cloned().unwrap_or_else(|| class_internal(file, &c.name));
-                    let props = c
+                    let props: Vec<(String, Ty, bool)> = c
                         .props
                         .iter()
                         .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, diags), p.is_var))
                         .collect();
-                    let methods = c
+                    let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
                         .map(|m| {
@@ -156,6 +156,14 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             (m.name.clone(), Signature { params, ret })
                         })
                         .collect();
+                    // `data class` synthesizes componentN() + copy(props...) callable members.
+                    if c.is_data {
+                        let self_ty = Ty::obj(&internal);
+                        for (i, (_, ty, _)) in props.iter().enumerate() {
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty });
+                        }
+                        methods.insert("copy".into(), Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty });
+                    }
                     table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
                 }
             }

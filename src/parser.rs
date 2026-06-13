@@ -95,6 +95,16 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // `data class` — `data` is a soft keyword (a plain identifier elsewhere).
+                TokenKind::Ident
+                    if self.text() == "data" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                {
+                    self.bump(); // 'data'
+                    let mut d = self.parse_class();
+                    d.is_data = true;
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
                     self.bump(); // recover
@@ -226,7 +236,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, is_data: false, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
@@ -640,6 +650,16 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn data_class_parses() {
+        // `data` is a soft keyword; the class is otherwise parsed normally.
+        assert_eq!(tree("data class Point(val x: Int, val y: Int)"),
+            "(class Point (val x Int) (val y Int))\n");
+        // `data` remains usable as an ordinary identifier.
+        assert_eq!(tree("fun f(data: Int): Int = data"),
+            "(fun f (param data Int) :Int data)\n");
     }
 
     #[test]

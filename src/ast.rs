@@ -97,6 +97,8 @@ pub struct ClassDecl {
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,
+    /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
+    pub is_data: bool,
     pub span: Span,
 }
 

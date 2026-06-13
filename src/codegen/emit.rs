@@ -169,13 +169,20 @@ pub fn emit_class(
             let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
             let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
             e.emit_method(m, &params, ret, &mut cw);
-            crate::metadata::class_builder::FnMeta {
-                name: m.name.clone(),
-                params: m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+            crate::metadata::class_builder::FnMeta::plain(
+                m.name.clone(),
+                m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
                 ret,
-            }
+            )
         })
         .collect();
+
+    // `data class`: synthesize equals/hashCode/toString/componentN/copy(+copy$default) and expose
+    // componentN/copy in the metadata so Kotlin consumers can call them.
+    let mut method_metas = method_metas;
+    if class.is_data {
+        method_metas.extend(emit_data_members(&mut cw, internal_name, &props));
+    }
 
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
     let ctor_params: Vec<(String, Ty)> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
@@ -193,11 +200,268 @@ pub fn emit_class(
             }
         })
         .collect();
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas);
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas, class.is_data);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
 
     cw.finish()
+}
+
+/// StringBuilder.append descriptor + stack words for a value of type `t`.
+fn sb_append(t: Ty) -> (&'static str, i32) {
+    match t {
+        Ty::Int => ("(I)Ljava/lang/StringBuilder;", 1),
+        Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
+        Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
+        Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),
+        Ty::String => ("(Ljava/lang/String;)Ljava/lang/StringBuilder;", 1),
+        _ => ("(Ljava/lang/Object;)Ljava/lang/StringBuilder;", 1),
+    }
+}
+
+/// Synthesize the `data class` members: `componentN`, `copy`, `copy$default`, `toString`,
+/// `hashCode`, `equals` — matching kotlinc's public ABI and behavior. Returns metadata entries for
+/// `componentN`/`copy` (so Kotlin consumers can call them).
+fn emit_data_members(
+    cw: &mut ClassWriter,
+    internal: &str,
+    props: &[(&PropParam, Ty)],
+) -> Vec<crate::metadata::class_builder::FnMeta> {
+    let simple = internal.rsplit('/').next().unwrap_or(internal).to_string();
+    let prop_tys: Vec<Ty> = props.iter().map(|(_, t)| *t).collect();
+    let total_words: u16 = prop_tys.iter().map(|t| slot_words(*t)).sum();
+    let self_ty = Ty::obj(internal);
+    let mut metas = Vec::new();
+
+    // componentN() — returns each property.
+    for (i, (p, ty)) in props.iter().enumerate() {
+        let mut c = CodeBuilder::new(1);
+        c.aload(0);
+        let f = cw.fieldref(internal, &p.name, &ty.descriptor());
+        c.getfield(f, slot_words(*ty) as i32);
+        emit_typed_return(*ty, &mut c);
+        c.link();
+        let name = format!("component{}", i + 1);
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, &name, &method_descriptor(&[], *ty), &c);
+        metas.push(crate::metadata::class_builder::FnMeta {
+            name,
+            params: vec![],
+            ret: *ty,
+            flags: crate::metadata::class_builder::COMPONENT_FN_FLAGS, // operator
+            params_have_defaults: false,
+        });
+    }
+
+    // copy(props...) -> Self.
+    {
+        let mut c = CodeBuilder::new(1 + total_words);
+        let cidx = cw.class_ref(internal);
+        c.new_obj(cidx);
+        c.dup();
+        let mut slot = 1u16;
+        for (_, ty) in props {
+            load_local(*ty, slot, &mut c);
+            slot += slot_words(*ty);
+        }
+        let init = cw.methodref(internal, "<init>", &method_descriptor(&prop_tys, Ty::Unit));
+        c.invokespecial(init, total_words as i32, 0);
+        c.areturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, "copy", &method_descriptor(&prop_tys, self_ty), &c);
+        let params = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+        metas.push(crate::metadata::class_builder::FnMeta {
+            name: "copy".into(),
+            params,
+            ret: self_ty,
+            flags: crate::metadata::class_builder::COPY_FN_FLAGS,
+            params_have_defaults: true, // each copy param defaults to the current value
+        });
+    }
+
+    // copy$default(self, props..., mask:int, marker:Object) -> Self — synthetic default-applier.
+    {
+        let mask_slot = 1 + total_words;
+        let total_locals = mask_slot + 2; // mask + marker
+        let mut c = CodeBuilder::new(total_locals);
+        let mut slot = 1u16;
+        for (i, (p, ty)) in props.iter().enumerate() {
+            c.iload(mask_slot);
+            c.push_int(1 << i, cw);
+            c.iand();
+            let skip = c.new_label();
+            c.ifeq(skip);
+            c.aload(0);
+            let f = cw.fieldref(internal, &p.name, &ty.descriptor());
+            c.getfield(f, slot_words(*ty) as i32);
+            store_local(*ty, slot, &mut c);
+            c.bind(skip);
+            slot += slot_words(*ty);
+        }
+        c.aload(0);
+        let mut slot = 1u16;
+        for (_, ty) in props {
+            load_local(*ty, slot, &mut c);
+            slot += slot_words(*ty);
+        }
+        let copy = cw.methodref(internal, "copy", &method_descriptor(&prop_tys, self_ty));
+        c.invokevirtual(copy, total_words as i32, 1);
+        c.areturn();
+        c.link();
+        let mut desc = String::from("(");
+        desc.push_str(&self_ty.descriptor());
+        for t in &prop_tys {
+            desc.push_str(&t.descriptor());
+        }
+        desc.push_str("ILjava/lang/Object;)");
+        desc.push_str(&self_ty.descriptor());
+        cw.add_method(ACC_PUBLIC | ACC_STATIC, "copy$default", &desc, &c);
+    }
+
+    // toString() -> "Name(p1=v1, p2=v2)".
+    {
+        let mut c = CodeBuilder::new(1);
+        let sb = cw.class_ref("java/lang/StringBuilder");
+        let sbinit = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+        c.new_obj(sb);
+        c.dup();
+        c.invokespecial(sbinit, 0, 0);
+        let app_str = cw.methodref("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
+        for (i, (p, ty)) in props.iter().enumerate() {
+            let lead = if i == 0 { format!("{simple}({}=", p.name) } else { format!(", {}=", p.name) };
+            c.push_string(&lead, cw);
+            c.invokevirtual(app_str, 1, 1);
+            c.aload(0);
+            let f = cw.fieldref(internal, &p.name, &ty.descriptor());
+            c.getfield(f, slot_words(*ty) as i32);
+            let (adesc, awords) = sb_append(*ty);
+            let appv = cw.methodref("java/lang/StringBuilder", "append", adesc);
+            c.invokevirtual(appv, awords, 1);
+        }
+        c.push_int(41, cw); // ')'
+        let app_char = cw.methodref("java/lang/StringBuilder", "append", "(C)Ljava/lang/StringBuilder;");
+        c.invokevirtual(app_char, 1, 1);
+        let tos = cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+        c.invokevirtual(tos, 0, 1);
+        c.areturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC, "toString", "()Ljava/lang/String;", &c);
+    }
+
+    // hashCode(): result = hash(p0); result = result*31 + hash(pN); ...
+    {
+        let mut c = CodeBuilder::new(1);
+        for (i, (p, ty)) in props.iter().enumerate() {
+            if i > 0 {
+                c.iload(1);
+                c.push_int(31, cw);
+                c.imul();
+            }
+            emit_hash_of(cw, &mut c, internal, &p.name, *ty);
+            if i > 0 {
+                c.iadd();
+            }
+            c.istore(1);
+        }
+        c.iload(1);
+        c.ireturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC, "hashCode", "()I", &c);
+    }
+
+    // equals(Object): identity, instanceof, then per-property comparison.
+    {
+        let mut c = CodeBuilder::new(2); // this=0, other=1; cast -> 2
+        let cidx = cw.class_ref(internal);
+        c.aload(0);
+        c.aload(1);
+        let ne = c.new_label();
+        c.if_acmpne(ne);
+        c.push_int(1, cw);
+        c.ireturn();
+        c.bind(ne);
+        c.aload(1);
+        c.instance_of(cidx);
+        let is_inst = c.new_label();
+        c.ifne(is_inst);
+        c.push_int(0, cw);
+        c.ireturn();
+        c.bind(is_inst);
+        c.aload(1);
+        c.checkcast(cidx);
+        c.astore(2);
+        for (p, ty) in props {
+            let f = cw.fieldref(internal, &p.name, &ty.descriptor());
+            c.aload(0);
+            c.getfield(f, slot_words(*ty) as i32);
+            c.aload(2);
+            c.getfield(f, slot_words(*ty) as i32);
+            let eq = c.new_label();
+            match ty {
+                Ty::Int | Ty::Boolean => c.if_icmpeq(eq),
+                Ty::Long => {
+                    c.lcmp();
+                    c.ifeq(eq);
+                }
+                Ty::Double => {
+                    c.dcmpg();
+                    c.ifeq(eq);
+                }
+                _ => {
+                    // reference: this.field.equals(other.field)
+                    let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
+                    c.invokevirtual(eqm, 1, 1);
+                    c.ifne(eq);
+                }
+            }
+            c.push_int(0, cw);
+            c.ireturn();
+            c.bind(eq);
+        }
+        c.push_int(1, cw);
+        c.ireturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z", &c);
+    }
+
+    metas
+}
+
+/// Emit `hash(this.<field>)` onto the stack as an int, matching kotlinc's per-type hashing.
+fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field: &str, ty: Ty) {
+    c.aload(0);
+    let f = cw.fieldref(internal, field, &ty.descriptor());
+    c.getfield(f, slot_words(ty) as i32);
+    match ty {
+        Ty::Int => {
+            let m = cw.methodref("java/lang/Integer", "hashCode", "(I)I");
+            c.invokestatic(m, 1, 1);
+        }
+        Ty::Boolean => {
+            let m = cw.methodref("java/lang/Boolean", "hashCode", "(Z)I");
+            c.invokestatic(m, 1, 1);
+        }
+        Ty::Long => {
+            let m = cw.methodref("java/lang/Long", "hashCode", "(J)I");
+            c.invokestatic(m, 2, 1);
+        }
+        Ty::Double => {
+            let m = cw.methodref("java/lang/Double", "hashCode", "(D)I");
+            c.invokestatic(m, 2, 1);
+        }
+        _ => {
+            let m = cw.methodref("java/lang/Object", "hashCode", "()I");
+            c.invokevirtual(m, 0, 1);
+        }
+    }
+}
+
+fn store_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
+    match ty {
+        Ty::Int | Ty::Boolean => code.istore(slot),
+        Ty::Long => code.lstore(slot),
+        Ty::Double => code.dstore(slot),
+        _ => code.astore(slot),
+    }
 }
 
 fn load_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
