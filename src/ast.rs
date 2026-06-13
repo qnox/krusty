@@ -229,7 +229,12 @@ pub struct PropDecl {
     pub name: String,
     pub ty: Option<TypeRef>,
     pub is_var: bool,
-    pub init: ExprId,
+    /// `None` for a `lateinit var` (declared without an initializer; the backing field defaults to
+    /// null and is assigned later).
+    pub init: Option<ExprId>,
+    /// `true` if declared `lateinit` — a no-initializer property is only allowed when lateinit
+    /// (otherwise it's an abstract/interface property, which krusty rejects).
+    pub is_lateinit: bool,
     pub span: Span,
 }
 
@@ -304,7 +309,10 @@ impl File {
                     out.push_str(&format!(" :{}", t.name));
                 }
                 out.push(' ');
-                self.write_expr(p.init, out);
+                match p.init {
+                    Some(i) => self.write_expr(i, out),
+                    None => out.push_str("<lateinit>"),
+                }
                 out.push(')');
             }
             Decl::Class(c) if c.is_interface => {

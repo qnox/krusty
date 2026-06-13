@@ -100,9 +100,11 @@ pub fn emit_file(
         {
             let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
             for (p, ty) in &tl_props {
-                e.emit_expr_as(p.init, *ty, &mut clinit, &mut cw);
-                let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
-                clinit.putstatic(f, slot_words(*ty) as i32);
+                if let Some(init) = p.init {
+                    e.emit_expr_as(init, *ty, &mut clinit, &mut cw);
+                    let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+                    clinit.putstatic(f, slot_words(*ty) as i32);
+                }
             }
         }
         clinit.ret_void();
@@ -336,7 +338,7 @@ pub fn emit_class(
     let body_props_t: Vec<(&PropDecl, Ty)> = class
         .body_props
         .iter()
-        .map(|bp| (bp, bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| info.ty(bp.init))))
+        .map(|bp| (bp, bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| bp.init.map(|i| info.ty(i)).unwrap_or(Ty::Error))))
         .collect();
     // (name, type, is_var) for every backing field: `val`/`var` ctor params then body properties.
     // Plain (non-property) ctor params are not fields.
@@ -410,10 +412,13 @@ pub fn emit_class(
             match step {
                 ClassInit::PropInit(idx) => {
                     let (bp, bty) = &body_props_t[*idx];
-                    code.aload(0);
-                    ie.emit_expr_as(bp.init, *bty, &mut code, &mut cw);
-                    let f = cw.fieldref(internal_name, &bp.name, &bty.descriptor());
-                    code.putfield(f, slot_words(*bty) as i32);
+                    // A `lateinit var` has no initializer — leave the field at its default (null).
+                    if let Some(init) = bp.init {
+                        code.aload(0);
+                        ie.emit_expr_as(init, *bty, &mut code, &mut cw);
+                        let f = cw.fieldref(internal_name, &bp.name, &bty.descriptor());
+                        code.putfield(f, slot_words(*bty) as i32);
+                    }
                 }
                 ClassInit::Block(b) => ie.emit_block_discard(*b, &mut code, &mut cw),
             }
@@ -514,13 +519,15 @@ pub fn emit_class(
         // static final fields, initialized in <clinit>.
         let mut clinit = CodeBuilder::new(0);
         for p in &class.companion_props {
-            let ty = p.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| info.ty(p.init));
+            let ty = p.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| p.init.map(|i| info.ty(i)).unwrap_or(Ty::Error));
             cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &p.name, &ty.descriptor());
-            let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
-            e.companion_of = Some(class.name.clone());
-            e.emit_expr_as(p.init, ty, &mut clinit, &mut cw);
-            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
-            clinit.putstatic(f, slot_words(ty) as i32);
+            if let Some(init) = p.init {
+                let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+                e.companion_of = Some(class.name.clone());
+                e.emit_expr_as(init, ty, &mut clinit, &mut cw);
+                let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+                clinit.putstatic(f, slot_words(ty) as i32);
+            }
         }
         clinit.ret_void();
         clinit.link();
@@ -979,6 +986,28 @@ impl<'a> MethodEmitter<'a> {
                 code.anewarray(ci);
             }
         }
+    }
+
+    /// True if property `name` on class `internal` is `lateinit`.
+    fn is_lateinit(&self, internal: &str, name: &str) -> bool {
+        self.syms.class_by_internal(internal).map_or(false, |c| c.lateinit_props.contains(name))
+    }
+
+    /// After a `lateinit` property's (reference) value is on the stack, throw if it is still null —
+    /// matching Kotlin's uninitialized-property access (a `RuntimeException`; krusty avoids the
+    /// stdlib `UninitializedPropertyAccessException`, but it is caught the same way).
+    fn emit_lateinit_guard(&mut self, prop: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        code.dup();
+        let ok = code.new_label();
+        code.ifnonnull(ok);
+        let exc = cw.class_ref("java/lang/RuntimeException");
+        code.new_obj(exc);
+        code.dup();
+        code.push_string(&format!("lateinit property {prop} has not been initialized"), cw);
+        let init = cw.methodref("java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V");
+        code.invokespecial(init, 1, 0);
+        code.athrow();
+        code.bind(ok);
     }
 
     /// The internal name for a `catch` clause's exception type (a JDK exception / import / declared
@@ -1597,6 +1626,9 @@ impl<'a> MethodEmitter<'a> {
                         let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                         code.getfield(f, slot_words(ty) as i32);
                     }
+                    if self.is_lateinit(&self.class.clone(), &n) {
+                        self.emit_lateinit_guard(&n, code, cw);
+                    }
                 } else if let Some((cls, ty)) = self
                     .companion_of
                     .as_ref()
@@ -1606,6 +1638,9 @@ impl<'a> MethodEmitter<'a> {
                     // Unqualified companion property inside a companion member → getstatic.
                     let f = cw.fieldref(&cls, &n, &ty.descriptor());
                     code.getstatic(f, slot_words(ty) as i32);
+                    if self.is_lateinit(&cls, &n) {
+                        self.emit_lateinit_guard(&n, code, cw);
+                    }
                 } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
                     // top-level property → static field on the file facade.
                     if self.is_instance {
@@ -1658,8 +1693,12 @@ impl<'a> MethodEmitter<'a> {
                         if let Some(cs) = self.syms.classes.get(&en) {
                             if let Some(&ty) = cs.static_props.get(&name) {
                                 let internal = cs.internal.clone();
+                                let lateinit = cs.lateinit_props.contains(&name);
                                 let f = cw.fieldref(&internal, &name, &ty.descriptor());
                                 code.getstatic(f, slot_words(ty) as i32);
+                                if lateinit {
+                                    self.emit_lateinit_guard(&name, code, cw);
+                                }
                                 return;
                             }
                         }
@@ -1689,10 +1728,14 @@ impl<'a> MethodEmitter<'a> {
                     // Property read on a class value: `p.prop` → invokevirtual get<Prop>() (own or
                     // inherited; invokevirtual resolves up the class hierarchy).
                     let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
+                    let lateinit = self.is_lateinit(internal, &name);
                     self.emit_expr(receiver, code, cw);
                     let getter = format!("get{}", capitalize(&name));
                     let m = cw.methodref(internal, &getter, &method_descriptor(&[], pty));
                     code.invokevirtual(m, 0, slot_words(pty) as i32);
+                    if lateinit {
+                        self.emit_lateinit_guard(&name, code, cw);
+                    }
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty v0: member '{name}' not emittable"));
                 }

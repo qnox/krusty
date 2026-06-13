@@ -38,6 +38,8 @@ pub struct ClassSig {
     pub static_methods: HashMap<String, Signature>,
     /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
     pub static_props: HashMap<String, Ty>,
+    /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
+    pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
     pub interfaces: Vec<String>,
     /// Internal name of the base class (`: Base(..)`), if any.
@@ -286,7 +288,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     for bp in &c.body_props {
                         let ty = match &bp.ty {
                             Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                            None => infer_lit_ty(file, bp.init),
+                            None => bp.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                         };
                         props.push((bp.name.clone(), ty, bp.is_var));
                     }
@@ -340,21 +342,28 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => infer_lit_ty(file, p.init),
+                                None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                             };
                             (p.name.clone(), ty)
                         })
                         .collect();
+                    let lateinit_props: std::collections::HashSet<String> = c
+                        .body_props
+                        .iter()
+                        .chain(c.companion_props.iter())
+                        .filter(|p| p.is_lateinit)
+                        .map(|p| p.name.clone())
+                        .collect();
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, interfaces, super_internal },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal },
                     );
                 }
                 Decl::Property(p) => {
                     // Type from the annotation, else a light inference from a literal initializer.
                     let ty = match &p.ty {
                         Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                        None => infer_lit_ty(file, p.init),
+                        None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                     };
                     table.props.insert(p.name.clone(), (ty, p.is_var));
                 }
@@ -496,10 +505,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     c.declare(&p.name, ty, p.is_var);
                 }
                 for bp in &cl.body_props {
-                    let it = c.expr(bp.init);
-                    if let Some(r) = &bp.ty {
-                        let declared = c.resolve_ty(r);
-                        c.expect_assignable(declared, it, c.span(bp.init), "property initializer");
+                    if let Some(init) = bp.init {
+                        let it = c.expr(init);
+                        if let Some(r) = &bp.ty {
+                            let declared = c.resolve_ty(r);
+                            c.expect_assignable(declared, it, c.span(init), "property initializer");
+                        }
                     }
                 }
                 for step in &cl.init_order {
@@ -535,10 +546,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                     c.companion_of = Some(cl.name.clone());
                     for p in &cl.companion_props {
-                        let it = c.expr(p.init);
-                        if let Some(r) = &p.ty {
-                            let declared = c.resolve_ty(r);
-                            c.expect_assignable(declared, it, c.span(p.init), "companion property");
+                        if let Some(init) = p.init {
+                            let it = c.expr(init);
+                            if let Some(r) = &p.ty {
+                                let declared = c.resolve_ty(r);
+                                c.expect_assignable(declared, it, c.span(init), "companion property");
+                            }
                         }
                     }
                     for m in &cl.companion_methods {
@@ -549,10 +562,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Property(p) => {
-                let it = c.expr(p.init);
-                if let Some((declared, _)) = syms.props.get(&p.name).copied().filter(|(t, _)| *t != Ty::Error) {
-                    if p.ty.is_some() {
-                        c.expect_assignable(declared, it, c.span(p.init), "property initializer");
+                if let Some(init) = p.init {
+                    let it = c.expr(init);
+                    if let Some((declared, _)) = syms.props.get(&p.name).copied().filter(|(t, _)| *t != Ty::Error) {
+                        if p.ty.is_some() {
+                            c.expect_assignable(declared, it, c.span(init), "property initializer");
+                        }
                     }
                 }
             }
