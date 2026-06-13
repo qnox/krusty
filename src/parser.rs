@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
-                    let d = self.parse_top_property();
+                    let d = self.parse_top_property(mods.iter().any(|m| m == "lateinit"));
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
@@ -209,17 +209,28 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_top_property(&mut self) -> PropDecl {
+    fn parse_top_property(&mut self, is_lateinit: bool) -> PropDecl {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
         let name = self.ident_or_error("property name");
         let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
-        self.expect(TokenKind::Eq, "'='"); // v0: top-level properties require an initializer
-        self.skip_newlines();
-        let init = self.parse_expr();
+        // A property normally has an `= initializer`; a `lateinit var x: T` declares a type with no
+        // initializer. A no-initializer property that isn't `lateinit` is an abstract/interface
+        // property, which krusty does not support.
+        let init = if self.eat(TokenKind::Eq) {
+            self.skip_newlines();
+            Some(self.parse_expr())
+        } else {
+            if !is_lateinit {
+                self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
+            } else if ty.is_none() {
+                self.diags.error(start, "a 'lateinit' property must declare its type");
+            }
+            None
+        };
         let end = self.t[self.i.saturating_sub(1)].span;
-        PropDecl { name, ty, is_var, init, span: Span::new(start.lo, end.hi) }
+        PropDecl { name, ty, is_var, init, is_lateinit, span: Span::new(start.lo, end.hi) }
     }
 
     /// `companion object [Name] [: Super] { fun…; val… }` — collect its functions/properties to be
@@ -238,14 +249,16 @@ impl<'a> Parser<'a> {
         }
         loop {
             self.skip_newlines();
+            let mut mods = Vec::new();
             if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                self.skip_decl_prefix();
+                mods = self.skip_decl_prefix();
                 self.skip_newlines();
             }
+            let lateinit = mods.iter().any(|m| m == "lateinit");
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::KwFun => methods.push(self.parse_fun()),
-                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property()),
+                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
                     self.bump();
@@ -432,15 +445,17 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
+                let mut mods = Vec::new();
                 if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                    self.skip_decl_prefix();
+                    mods = self.skip_decl_prefix();
                     self.skip_newlines();
                 }
+                let lateinit = mods.iter().any(|m| m == "lateinit");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun()),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property();
+                        let p = self.parse_top_property(lateinit);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }

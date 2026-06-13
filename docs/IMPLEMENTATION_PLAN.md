@@ -590,6 +590,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/try_finally_e2e.rs` (finally on normal, caught, and re-thrown paths on the JVM). Box
   conformance **128 OK / 0 FAIL** (up from 116).
 
+## Phase 42 — `lateinit`  ✅
+- ✅ A property may now be declared without an initializer (`PropDecl.init: Option`); `lateinit var
+  x: T` emits a backing field left at its default (null) and assigned later. Reads of a `lateinit`
+  property emit a null-check that throws (a `RuntimeException` standing in for the stdlib
+  `UninitializedPropertyAccessException`, caught the same way) — at implicit-`this`, explicit
+  `recv.prop`, qualified `Class.PROP`, and unqualified companion reads.
+- ✅ A no-initializer property that isn't `lateinit` (an `abstract`/interface property) is rejected —
+  this also fixed a regression where such a property let an `abstract` class compile and then hit a
+  separate free-function-from-`init` issue.
+- ✅ `tests/lateinit_e2e.rs` (set-then-read, read-before-init throws, on the JVM; abstract-property
+  rejection). Box conformance **132 OK / 0 FAIL** (up from 128).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
