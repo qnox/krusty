@@ -563,6 +563,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/break_continue_e2e.rs` (break + continue in for and while on the JVM; outside-loop
   rejection). Box conformance **113 OK / 0 FAIL** (up from 110).
 
+## Phase 40 — `Byte` / `Short`  ✅
+- ✅ `Ty::Byte` (`B`) and `Ty::Short` (`S`): int on the JVM stack, so they reuse the int opcode arms
+  (`iload`/`istore`/`ireturn`/`if_icmp`/append-as-`(I)`/…). Arithmetic promotes to `Int`
+  (`promote` maps a Byte/Short result to Int — Kotlin has no byte/short arithmetic). An integer is
+  assignable to Byte/Short (literal narrowing); `emit_expr_as` now narrows via `i2b`/`i2s`.
+- ✅ Conversions `.toByte()`/`.toShort()` truncate (source → `Int` → `i2b`/`i2s`), e.g.
+  `130.toByte()` == -126.
+- ✅ Fixed a latent miscompile this exposed: a `Char` field in a `data class` fell to the
+  `Objects.equals`/`Object.hashCode` *reference* path (passing a primitive char as `Object` →
+  verify failure); `Char` now uses `if_icmpeq`/`Integer.hashCode` like the other int-category types.
+- ✅ `tests/byte_short_e2e.rs` (literals, arithmetic→Int, truncating conversions, fields, comparison,
+  data-class equals incl. a Char field, on the JVM). Box conformance **116 OK / 0 FAIL** (up from 113).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
