@@ -91,6 +91,8 @@ pub enum Decl {
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
+    /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
+    pub imports: Vec<String>,
     pub decls: Vec<DeclId>,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,

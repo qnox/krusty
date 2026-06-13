@@ -57,6 +57,7 @@ pub enum ReadError {
 }
 
 /// Constant-pool entry (only the variants we need to resolve names/descriptors).
+#[allow(dead_code)] // NameAndType payload retained for completeness / future Methodref resolution
 enum C {
     Utf8(String),
     Class(u16),        // name_index
