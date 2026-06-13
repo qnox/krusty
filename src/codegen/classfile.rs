@@ -564,6 +564,14 @@ impl CodeBuilder {
     pub fn pop2(&mut self) { self.op(0x58, -2); }
     pub fn dup(&mut self) { self.op(0x59, 1); }
     pub fn ixor(&mut self) { self.op(0x82, -1); }
+    pub fn iand(&mut self) { self.op(0x7e, -1); }
+
+    /// `instanceof <class>` (pops ref, pushes int 0/1).
+    pub fn instance_of(&mut self, class_index: u16) { self.op_u2(0xc1, class_index, 0); }
+    /// `checkcast <class>` (ref -> ref).
+    pub fn checkcast(&mut self, class_index: u16) { self.op_u2(0xc0, class_index, 0); }
+    /// `if_acmpne` — branch if two refs are not the same object.
+    pub fn if_acmpne(&mut self, l: Label) { self.branch(0xa6, l, -2); }
 
     /// `new <class>` (push uninitialized ref).
     pub fn new_obj(&mut self, class_index: u16) {

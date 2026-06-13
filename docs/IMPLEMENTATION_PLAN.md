@@ -172,9 +172,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/reftype_e2e.rs` (construct/access/dispatch across two classes, `-Xverify:all`, → `22`);
   `tests/reftype_roundtrip_e2e.rs` (real kotlinc consumes class-typed members via Kotlin syntax →
   `3:4:9`); resolver unit tests.
-- ⬜ **Next:** facade `@Metadata` for class-typed *top-level* function params (`builder.rs` still
-  encodes `Obj`→Any); secondary constructors, `data class`
-  (equals/hashCode/toString/componentN/copy), inheritance/interfaces, nullability, generics.
+### 8e — `data class` ✅
+- ✅ `data` soft keyword (still usable as an identifier). Synthesizes `componentN`, `copy`,
+  `copy$default`, `toString` (`Name(p=v, …)`), `hashCode` (kotlinc's `result*31 + Type.hashCode`),
+  `equals` (identity → `instanceof` → per-property compare). **Public ABI is identical to kotlinc**
+  (`tests/data_class_e2e.rs` diffs `javap`); behavior matches under `-Xverify:all`.
+- ✅ Class `@Metadata` sets `Class.flags = IS_DATA`; `componentN` carry the *operator* function flag
+  and `copy` carries default-value param flags — so a Kotlin consumer compiled by the real kotlinc
+  can **destructure** (`val (a, b) = p`) and **copy with named/omitted args** (`p.copy(y = 9)`).
+  Verified end-to-end: consumer prints `Point(x=3, y=4)|true|Point(x=3, y=9)|3,4`.
+- ⬜ **Next:** secondary constructors, inheritance/interfaces, nullability, generics, `when`,
+  lambdas; facade `@Metadata` already encodes class-typed top-level function params.
 
 ## Phase 9 — kotlinc drop-in CLI  ✅
 - ✅ `src/cli.rs`: kotlinc-compatible argument parsing — `-d`, `-classpath`/`-cp`/`-class-path`,
