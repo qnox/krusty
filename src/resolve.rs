@@ -550,6 +550,63 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
+    /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
+    fn expr_diverges(&self, e: ExprId) -> bool {
+        match self.file.expr(e) {
+            Expr::Block { stmts, trailing } => {
+                if let Some(te) = trailing {
+                    self.expr_diverges(*te)
+                } else if let Some(&last) = stmts.last() {
+                    matches!(self.file.stmt(last), Stmt::Return(_))
+                } else {
+                    false
+                }
+            }
+            Expr::If { then_branch, else_branch: Some(eb), .. } => {
+                self.expr_diverges(*then_branch) && self.expr_diverges(*eb)
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
+    fn resolve_ty_no_diag(&self, r: &TypeRef) -> Ty {
+        if let Some(t) = Ty::from_name(&r.name) {
+            t
+        } else if self.tparams.contains(&r.name) {
+            Ty::obj("java/lang/Object")
+        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+            Ty::obj(&cs.internal)
+        } else {
+            Ty::Error
+        }
+    }
+
+    /// If `cond` is `x is T` (or `x !is T` when `for_else`) and `x` is a stable local/parameter and
+    /// `T` a non-nullable known reference type, return the smart-cast binding `(x, T)`.
+    fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
+        let Expr::Is { operand, ty, negated } = self.file.expr(cond).clone() else { return None };
+        // The then-branch narrows on a positive `is`; the else-branch on a negative `!is`.
+        if negated != for_else {
+            return None;
+        }
+        if ty.nullable {
+            return None;
+        }
+        let Expr::Name(n) = self.file.expr(operand).clone() else { return None };
+        // Only stable values (val/parameter) smart-cast soundly — a `var` could be reassigned.
+        if matches!(self.lookup(&n), Some(l) if l.is_var) {
+            return None;
+        }
+        let tt = self.resolve_ty_no_diag(&ty);
+        if tt.is_reference() {
+            Some((n, tt))
+        } else {
+            None
+        }
+    }
+
     fn check_fun(&mut self, f: &FunDecl) {
         let sig = self.syms.funs.get(&f.name);
         self.ret_ty = sig.map(|s| s.ret).unwrap_or(Ty::Unit);
@@ -779,10 +836,24 @@ impl<'a> Checker<'a> {
             Expr::If { cond, then_branch, else_branch } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
+                // Smart-cast: `if (x is T)` narrows a stable `x` to `T` in the then-branch (and
+                // `if (x !is T) … else` narrows it in the else-branch).
+                let then_cast = self.smartcast_binding(cond, false);
+                self.push_scope();
+                if let Some((n, t)) = &then_cast {
+                    self.declare(n, *t, false);
+                }
                 let tt = self.expr(then_branch);
+                self.pop_scope();
                 match else_branch {
                     Some(eb) => {
+                        let else_cast = self.smartcast_binding(cond, true);
+                        self.push_scope();
+                        if let Some((n, t)) = &else_cast {
+                            self.declare(n, *t, false);
+                        }
                         let et = self.expr(eb);
+                        self.pop_scope();
                         self.join(tt, et, self.span(e))
                     }
                     None => Ty::Unit,
@@ -792,6 +863,17 @@ impl<'a> Checker<'a> {
                 self.push_scope();
                 for s in &stmts {
                     self.stmt(*s);
+                    // Early-return guard: `if (x !is T) return …` (a diverging then, no else) narrows
+                    // a stable `x` to `T` for the remaining statements of this block.
+                    if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
+                        if let Expr::If { cond, then_branch, else_branch: None } = self.file.expr(ie).clone() {
+                            if self.expr_diverges(then_branch) {
+                                if let Some((n, t)) = self.smartcast_binding(cond, true) {
+                                    self.declare(&n, t, false);
+                                }
+                            }
+                        }
+                    }
                 }
                 let t = match trailing {
                     Some(te) => self.expr(te),
