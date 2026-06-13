@@ -176,6 +176,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   encodes `Obj`→Any); secondary constructors, `data class`
   (equals/hashCode/toString/componentN/copy), inheritance/interfaces, nullability, generics.
 
+## Phase 9 — kotlinc drop-in CLI  ✅
+- ✅ `src/cli.rs`: kotlinc-compatible argument parsing — `-d`, `-classpath`/`-cp`/`-class-path`,
+  `-module-name`, `-version`, `-help`, plus a table of accepted-but-ignored flags (with/without a
+  value: `-include-runtime`, `-jvm-target`, `-no-stdlib`, `-language-version`, …). Unknown `-flags`
+  are ignored with a note (never mistaken for sources). `@argfile`s expand inline.
+- ✅ Sources may be `.kt` files **or directories** (scanned recursively); `.java` inputs noted as
+  unsupported (no Java source front end yet).
+- ✅ Output to a directory **or a `.jar`** (`-d foo.jar` → zip with `META-INF/MANIFEST.MF`, the
+  `.class`es, and `META-INF/<module>.kotlin_module`).
+- ✅ `tests/cli_dropin_e2e.rs`: the `krusty` binary compiles a source **directory** to a `.jar` with
+  kotlinc-style flags; the real kotlinc compiles + runs a consumer against that jar (`8`). Plus
+  `cli.rs` unit tests for flag parsing.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

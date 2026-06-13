@@ -39,7 +39,12 @@ differential test harness against the real compiler:
   compiled by the real `kotlinc` resolves krusty's API (functions *and* classes via property
   syntax) and runs against it.
 - **Java interop** — reads `.class` signatures from directories **and `.jar`s** to resolve and call
-  real Java static methods.
+  real Java static methods; `java.lang.String` instance methods.
+- **Drop-in for `kotlinc`** — accepts kotlinc-style flags (`-d`, `-classpath`/`-cp`,
+  `-include-runtime`, `-module-name`, `-jvm-target`, `-version`, `-help`, …), compiles source files
+  **or directories**, and writes either a directory of `.class`es or a **`.jar`** (manifest +
+  classes + `<module>.kotlin_module`). Unsupported flags are ignored with a note so existing build
+  invocations keep working. A jar produced by krusty is consumable by the real `kotlinc`.
 
 ## Why
 
@@ -78,7 +83,12 @@ docs/METADATA_NOTES.md            reverse-engineered @Metadata schema
 ```sh
 cargo build
 cargo test                       # unit + e2e (kotlinc-gated tests skip without env)
-cargo run -- file.kt             # compile a .kt file to ./krusty-out
+
+# kotlinc-style usage (krusty is a drop-in for the supported subset):
+krusty src/ -d out/                          # compile a source tree to a class dir
+krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
+krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
+krusty -version | -help
 ```
 
 The differential tests against the real compiler are opt-in via environment variables:
