@@ -341,6 +341,24 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
 fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::collections::HashSet<String>, diags: &mut DiagSink) -> Ty {
     let base = if let Some(t) = Ty::from_name(&r.name) {
         t
+    } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
+        Ty::array(elem)
+    } else if r.name == "Array" {
+        match &r.arg {
+            Some(a) => {
+                let e = ty_of_ref(a, classes, tparams, diags);
+                if e.is_reference() {
+                    Ty::array(e)
+                } else {
+                    diags.error(r.span, "krusty: Array of a primitive (use IntArray/…) is not supported".to_string());
+                    Ty::Error
+                }
+            }
+            None => {
+                diags.error(r.span, "krusty: a raw Array type (no element) is not supported".to_string());
+                Ty::Error
+            }
+        }
     } else if tparams.contains(&r.name) {
         Ty::obj("java/lang/Object") // erased generic type parameter
     } else if let Some(internal) = classes.get(&r.name) {
@@ -507,6 +525,20 @@ impl<'a> Checker<'a> {
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
+        } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
+            Ty::array(elem)
+        } else if r.name == "Array" {
+            match &r.arg {
+                Some(a) => {
+                    let e = self.resolve_ty(a);
+                    if e.is_reference() {
+                        Ty::array(e)
+                    } else {
+                        Ty::Error
+                    }
+                }
+                None => Ty::Error,
+            }
         } else if self.tparams.contains(&r.name) {
             Ty::obj("java/lang/Object") // erased generic type parameter
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
@@ -808,6 +840,20 @@ impl<'a> Checker<'a> {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
             }
+            Expr::Index { array, index } => {
+                let at = self.expr(array);
+                let it = self.expr(index);
+                self.expect_assignable(Ty::Int, it, self.span(index), "array index");
+                match at.array_elem() {
+                    Some(elem) => elem,
+                    None => {
+                        if at != Ty::Error {
+                            self.diags.error(self.span(e), format!("'{}' is not an array (cannot index)", at.name()));
+                        }
+                        Ty::Error
+                    }
+                }
+            }
             Expr::Try { body, catches } => {
                 let bt = self.expr(body);
                 let mut result = bt;
@@ -1102,11 +1148,64 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
+    /// Recognize array-creation builtins: `intArrayOf(…)`/`charArrayOf(…)`/… and `arrayOf(…)`
+    /// (element = the common reference type of the arguments), and the size constructors
+    /// `IntArray(n)`/`CharArray(n)`/… Returns the array `Ty`, or `None` if `fname` isn't one of these.
+    fn check_array_builtin(&mut self, fname: &str, args: &[ExprId], arg_tys: &[Ty], span: Span) -> Option<Ty> {
+        let primitive_of = |f: &str| match f {
+            "intArrayOf" => Some(Ty::Int),
+            "longArrayOf" => Some(Ty::Long),
+            "doubleArrayOf" => Some(Ty::Double),
+            "booleanArrayOf" => Some(Ty::Boolean),
+            "charArrayOf" => Some(Ty::Char),
+            _ => None,
+        };
+        if let Some(elem) = primitive_of(fname) {
+            for (i, t) in arg_tys.iter().enumerate() {
+                self.expect_assignable(elem, *t, self.span(args[i]), "array element");
+            }
+            return Some(Ty::array(elem));
+        }
+        if fname == "arrayOf" {
+            // The element type is the common type of the arguments; it must be a reference type
+            // (an array of a primitive would require boxing — use `intArrayOf` etc.).
+            let mut elem: Option<Ty> = None;
+            for &t in arg_tys {
+                elem = Some(match elem {
+                    Some(prev) => self.join(prev, t, span),
+                    None => t,
+                });
+            }
+            match elem {
+                Some(e) if e.is_reference() => return Some(Ty::array(e)),
+                Some(_) => {
+                    self.diags.error(span, "krusty: arrayOf of a primitive (use intArrayOf/…) is not supported".to_string());
+                    return Some(Ty::Error);
+                }
+                None => {
+                    self.diags.error(span, "krusty: empty arrayOf() needs an explicit type (unsupported)".to_string());
+                    return Some(Ty::Error);
+                }
+            }
+        }
+        // Size constructor: `IntArray(n)` etc.
+        if let Some(elem) = Ty::primitive_array_element(fname) {
+            if arg_tys.len() == 1 {
+                self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
+                return Some(Ty::array(elem));
+            }
+        }
+        None
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
         }
         if let (Ty::String, "length") = (rt, name) {
+            return Ty::Int;
+        }
+        if let (Ty::Array(_), "size") = (rt, name) {
             return Ty::Int;
         }
         // Property read on a class value: `p.prop` (own or inherited).
@@ -1202,6 +1301,11 @@ impl<'a> Checker<'a> {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
+                }
+                if self.lookup(&fname).is_none() {
+                    if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
+                        return t;
+                    }
                 }
                 // Constructor call: `ClassName(args)` (when not shadowed by a local).
                 if self.lookup(&fname).is_none() {
@@ -1343,6 +1447,21 @@ impl<'a> Checker<'a> {
                         }
                     },
                     _ => self.diags.error(span, format!("cannot assign to a member of '{}'", rt.name())),
+                }
+            }
+            Stmt::AssignIndex { array, index, value } => {
+                let at = self.expr(array);
+                let it = self.expr(index);
+                let vt = self.expr(value);
+                let span = self.file.stmt_spans[s.0 as usize];
+                self.expect_assignable(Ty::Int, it, span, "array index");
+                match at.array_elem() {
+                    Some(elem) => self.expect_assignable(elem, vt, span, "array element assignment"),
+                    None => {
+                        if at != Ty::Error {
+                            self.diags.error(span, format!("'{}' is not an array (cannot index-assign)", at.name()));
+                        }
+                    }
                 }
             }
             Stmt::Return(e) => {

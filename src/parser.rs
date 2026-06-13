@@ -534,12 +534,29 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Ident) {
             let name = self.text().to_string();
             self.bump();
-            self.skip_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
+            // For `Array<T>`, capture the element type; other generic type arguments are erased.
+            let arg = if name == "Array" && self.at(TokenKind::Lt) {
+                self.bump(); // '<'
+                self.skip_variance(); // `out`/`in`
+                let elem = self.parse_type();
+                self.expect(TokenKind::Gt, "'>'");
+                Some(Box::new(elem))
+            } else {
+                self.skip_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
+                None
+            };
             let nullable = self.eat(TokenKind::Question); // `T?`
-            TypeRef { name, nullable, span }
+            TypeRef { name, nullable, arg, span }
         } else {
             self.diags.error(span, "expected a type");
-            TypeRef { name: "<error>".to_string(), nullable: false, span }
+            TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span }
+        }
+    }
+
+    /// Skip a leading `out`/`in` variance modifier inside a type-argument list.
+    fn skip_variance(&mut self) {
+        if self.at(TokenKind::Ident) && matches!(self.text(), "out" | "in") {
+            self.bump();
         }
     }
 
@@ -663,6 +680,12 @@ impl<'a> Parser<'a> {
                             let value = self.parse_expr();
                             return self.finish_stmt(Stmt::AssignMember { receiver, name, value }, start);
                         }
+                        Expr::Index { array, index } => {
+                            self.bump(); // '='
+                            self.skip_newlines();
+                            let value = self.parse_expr();
+                            return self.finish_stmt(Stmt::AssignIndex { array, index, value }, start);
+                        }
                         _ => self.diags.error(self.tok().span, "invalid assignment target"),
                     }
                 }
@@ -685,6 +708,14 @@ impl<'a> Parser<'a> {
                             let lhs = self.file.add_expr(Expr::Member { receiver, name: name.clone() }, op_span);
                             let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
                             return self.finish_stmt(Stmt::AssignMember { receiver, name, value }, start);
+                        }
+                        Expr::Index { array, index } => {
+                            self.bump();
+                            self.skip_newlines();
+                            let rhs = self.parse_expr();
+                            let lhs = self.file.add_expr(Expr::Index { array, index }, op_span);
+                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
+                            return self.finish_stmt(Stmt::AssignIndex { array, index, value }, start);
                         }
                         _ => self.diags.error(self.tok().span, "invalid assignment target"),
                     }
@@ -901,6 +932,17 @@ impl<'a> Parser<'a> {
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
                     lhs = self.file.add_expr(Expr::Call { callee: lhs, args }, Span::new(lspan.lo, end.hi));
+                }
+                // `array[index]` element access.
+                TokenKind::LBracket => {
+                    self.bump();
+                    self.skip_newlines();
+                    let index = self.parse_expr();
+                    self.skip_newlines();
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let end = self.tok().span;
+                    self.expect(TokenKind::RBracket, "']'");
+                    lhs = self.file.add_expr(Expr::Index { array: lhs, index }, Span::new(lspan.lo, end.hi));
                 }
                 _ => break,
             }

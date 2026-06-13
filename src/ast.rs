@@ -56,6 +56,8 @@ pub enum Expr {
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
     Member { receiver: ExprId, name: String },
+    /// `array[index]` — array element read.
+    Index { array: ExprId, index: ExprId },
     /// `callee(args)`. `callee` is `Name` (free function) or `Member` (method).
     Call { callee: ExprId, args: Vec<ExprId> },
     If { cond: ExprId, then_branch: ExprId, else_branch: Option<ExprId> },
@@ -95,6 +97,8 @@ pub enum Stmt {
     Assign { name: String, value: ExprId },
     /// `receiver.name = value` — write a (mutable) property via its setter.
     AssignMember { receiver: ExprId, name: String, value: ExprId },
+    /// `array[index] = value` — array element store.
+    AssignIndex { array: ExprId, index: ExprId, value: ExprId },
     Return(Option<ExprId>),
     While { cond: ExprId, body: ExprId }, // body is a Block expr
     /// `for (name in start <op> end (step s)?) body` over an integer range.
@@ -123,6 +127,8 @@ pub struct TypeRef {
     pub name: String,
     /// Trailing `?` — a nullable type (e.g. `String?`).
     pub nullable: bool,
+    /// The first generic type argument, captured for `Array<T>` (other type args are erased/skipped).
+    pub arg: Option<Box<TypeRef>>,
     pub span: Span,
 }
 
@@ -370,6 +376,13 @@ impl File {
                 self.write_expr(*operand, out);
                 out.push(')');
             }
+            Expr::Index { array, index } => {
+                out.push_str("(index ");
+                self.write_expr(*array, out);
+                out.push(' ');
+                self.write_expr(*index, out);
+                out.push(')');
+            }
             Expr::Try { body, catches } => {
                 out.push_str("(try ");
                 self.write_expr(*body, out);
@@ -503,6 +516,15 @@ impl File {
                 out.push_str("(set-member ");
                 self.write_expr(*receiver, out);
                 out.push_str(&format!(" {name} "));
+                self.write_expr(*value, out);
+                out.push(')');
+            }
+            Stmt::AssignIndex { array, index, value } => {
+                out.push_str("(set-index ");
+                self.write_expr(*array, out);
+                out.push(' ');
+                self.write_expr(*index, out);
+                out.push(' ');
                 self.write_expr(*value, out);
                 out.push(')');
             }
