@@ -126,6 +126,8 @@ pub struct FunDecl {
     pub params: Vec<Param>,
     pub ret: Option<TypeRef>,
     pub body: FunBody,
+    /// Generic type-parameter names (`fun <T, U> …`), erased to `Any`/`Object`.
+    pub type_params: Vec<String>,
     pub span: Span,
 }
 
@@ -144,6 +146,8 @@ pub struct PropParam {
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
+    /// Generic type-parameter names (`class C<T>`), erased to `Any`/`Object`.
+    pub type_params: Vec<String>,
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,

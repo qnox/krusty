@@ -184,9 +184,10 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
-                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
+                    let tp: std::collections::HashSet<String> = f.type_params.iter().cloned().collect();
+                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &tp, diags)).collect();
                     let ret = match &f.ret {
-                        Some(r) => ty_of_ref(r, &class_names, diags),
+                        Some(r) => ty_of_ref(r, &class_names, &tp, diags),
                         None => Ty::Unit, // v0: missing return type defaults to Unit
                     };
                     if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
@@ -195,19 +196,20 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 }
                 Decl::Class(c) => {
                     let internal = class_names.get(&c.name).cloned().unwrap_or_else(|| class_internal(file, &c.name));
+                    let ctp: std::collections::HashSet<String> = c.type_params.iter().cloned().collect();
                     // All primary-ctor params (in order) define the constructor signature.
-                    let ctor_params: Vec<Ty> = c.props.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
+                    let ctor_params: Vec<Ty> = c.props.iter().map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags)).collect();
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = c
                         .props
                         .iter()
                         .filter(|p| p.is_property)
-                        .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, diags), p.is_var))
+                        .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, &ctp, diags), p.is_var))
                         .collect();
                     // Body properties (`class C { val x = … }`) are also fields/accessors.
                     for bp in &c.body_props {
                         let ty = match &bp.ty {
-                            Some(r) => ty_of_ref(r, &class_names, diags),
+                            Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                             None => infer_lit_ty(file, bp.init),
                         };
                         props.push((bp.name.clone(), ty, bp.is_var));
@@ -216,8 +218,10 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .methods
                         .iter()
                         .map(|m| {
-                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
-                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, diags)).unwrap_or(Ty::Unit);
+                            let mut mtp = ctp.clone();
+                            mtp.extend(m.type_params.iter().cloned());
+                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
+                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
                             (m.name.clone(), Signature { params, ret })
                         })
                         .collect();
@@ -250,7 +254,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 Decl::Property(p) => {
                     // Type from the annotation, else a light inference from a literal initializer.
                     let ty = match &p.ty {
-                        Some(r) => ty_of_ref(r, &class_names, diags),
+                        Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
                         None => infer_lit_ty(file, p.init),
                     };
                     table.props.insert(p.name.clone(), (ty, p.is_var));
@@ -273,11 +277,13 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
     }
 }
 
-/// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, or a declared class
-/// (→ `Ty::Obj` with the class's internal name).
-fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, diags: &mut DiagSink) -> Ty {
+/// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
+/// (→ `Ty::Obj`), or a generic type parameter (erased to `java/lang/Object`).
+fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::collections::HashSet<String>, diags: &mut DiagSink) -> Ty {
     let base = if let Some(t) = Ty::from_name(&r.name) {
         t
+    } else if tparams.contains(&r.name) {
+        Ty::obj("java/lang/Object") // erased generic type parameter
     } else if let Some(internal) = classes.get(&r.name) {
         Ty::obj(internal)
     } else {
@@ -319,14 +325,31 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
         imports,
+        tparams: Default::default(),
     };
+    // Top-level functions that erase to the same JVM signature collide in the facade class.
+    let top_funs: Vec<&FunDecl> = file
+        .decls
+        .iter()
+        .filter_map(|&d| if let Decl::Fun(f) = file.decl(d) { Some(f) } else { None })
+        .collect();
+    c.check_no_erased_clash(&top_funs);
+
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) => c.check_fun(f),
+            Decl::Fun(f) => {
+                c.tparams = f.type_params.iter().cloned().collect();
+                c.check_fun(f);
+                c.tparams.clear();
+            }
             Decl::Class(cl) => {
+                // Class type parameters are in scope for all members.
+                c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)
                 // visible as an implicit `this` scope.
                 let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
+                let methods: Vec<&FunDecl> = cl.methods.iter().collect();
+                c.check_no_erased_clash(&methods);
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
@@ -353,6 +376,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                 }
                 c.pop_scope();
+                c.tparams.clear();
             }
             Decl::Property(p) => {
                 let it = c.expr(p.init);
@@ -375,6 +399,8 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     imports: HashMap<String, String>,
+    /// Generic type parameters in scope (erased to `java/lang/Object`).
+    tparams: std::collections::HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -405,6 +431,8 @@ impl<'a> Checker<'a> {
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
+        } else if self.tparams.contains(&r.name) {
+            Ty::obj("java/lang/Object") // erased generic type parameter
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
         } else {
@@ -415,6 +443,44 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         base
+    }
+
+    /// The erased JVM signature key (`name(paramDescs)`) of a function, using the type parameters
+    /// currently in `self.tparams` plus the function's own. Two functions that produce the same key
+    /// collide on the JVM after erasure — kotlinc erases each type parameter to its declared *bound*
+    /// (keeping bound-distinct overloads separate), which krusty does not model, so we reject the
+    /// file rather than emit a `ClassFormatError`-inducing duplicate method.
+    fn erased_sig_key(&self, f: &FunDecl) -> String {
+        let extra: std::collections::HashSet<&str> = f.type_params.iter().map(|s| s.as_str()).collect();
+        let descr = |r: &TypeRef| -> String {
+            if let Some(t) = Ty::from_name(&r.name) {
+                t.descriptor()
+            } else if self.tparams.contains(&r.name) || extra.contains(r.name.as_str()) {
+                "Ljava/lang/Object;".to_string()
+            } else if let Some(cs) = self.syms.classes.get(&r.name) {
+                Ty::obj(&cs.internal).descriptor()
+            } else {
+                "Ljava/lang/Object;".to_string()
+            }
+        };
+        let params: String = f.params.iter().map(|p| descr(&p.ty)).collect();
+        format!("{}({})", f.name, params)
+    }
+
+    /// Report (and thereby skip the file for) functions whose erased signatures collide.
+    fn check_no_erased_clash(&mut self, funs: &[&FunDecl]) {
+        let mut seen: HashMap<String, Span> = HashMap::new();
+        for f in funs {
+            let key = self.erased_sig_key(f);
+            if seen.contains_key(&key) {
+                self.diags.error(
+                    f.span,
+                    format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
+                );
+            } else {
+                seen.insert(key, f.span);
+            }
+        }
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
@@ -432,6 +498,7 @@ impl<'a> Checker<'a> {
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
+        let added: Vec<String> = f.type_params.iter().filter(|t| self.tparams.insert((*t).clone())).cloned().collect();
         self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit);
         self.push_scope(); // implicit-this scope (properties)
         for (n, t, is_var) in props {
@@ -445,6 +512,9 @@ impl<'a> Checker<'a> {
         self.check_fun_body(f);
         self.pop_scope();
         self.pop_scope();
+        for t in added {
+            self.tparams.remove(&t);
+        }
     }
 
     fn check_fun_body(&mut self, f: &FunDecl) {
@@ -503,6 +573,10 @@ impl<'a> Checker<'a> {
         }
         // `null` is assignable to any reference type (krusty is permissive about nullability).
         if actual == Ty::Null && expected.is_reference() {
+            return;
+        }
+        // Any reference type is assignable to `Any`/`Object` (e.g. an erased generic parameter).
+        if matches!(expected, Ty::Obj("java/lang/Object")) && actual.is_reference() {
             return;
         }
         // A class value is assignable to an interface (supertype) it implements.

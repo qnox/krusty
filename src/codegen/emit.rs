@@ -217,11 +217,13 @@ fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<
     cw.finish()
 }
 
-/// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
+/// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`). An unknown name
+/// is an erased generic type parameter → `java/lang/Object` (valid code reaching codegen has already
+/// passed the resolver, so the only unknowns here are type parameters).
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
     Ty::from_name(&r.name)
         .or_else(|| syms.classes.get(&r.name).map(|c| Ty::obj(&c.internal)))
-        .unwrap_or(Ty::Error)
+        .unwrap_or_else(|| Ty::obj("java/lang/Object"))
 }
 
 /// Capitalize the first character (`x` -> `X`) for Kotlin's `getX`/`setX` accessor naming.

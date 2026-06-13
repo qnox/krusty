@@ -385,6 +385,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/safe_call_e2e.rs` (safe method + property, with Elvis). Full suite 114 green; box
   conformance 67 / 67 OK / 0 FAIL.
 
+## Phase 26 — Generics via type erasure  ✅
+- ✅ Parse-tolerate type-parameter lists (`class Box<T>`, `fun <T, U> …`) and the modifiers/bounds
+  inside them (`reified`, `out`/`in`, `: Bound`), plus type *arguments* on types (`List<String>`)
+  — all skipped syntactically (`parse_type_params`, `skip_type_args`).
+- ✅ Erase every type-parameter reference to `java/lang/Object` in both the resolver and codegen
+  (`Checker.tparams`, `resolve_ty`; emit's `resolve_ty` falls back to `Object`). This matches the
+  bytecode kotlinc emits — a generic getter is `()Ljava/lang/Object;`, a generic param is `Object`.
+- ✅ Any reference type is assignable to an erased `T` (= `Object`); a value flowing *out* of `T`
+  into a more specific type would need a synthetic `checkcast` (not modelled) and is rejected, never
+  miscompiled. Nullable/primitive-over-generic cases likewise skip.
+- ✅ Overloads that collide after erasure (`<T> f(T)` vs `<U> f(U)` → both `f(Object)`) are rejected
+  with a "conflicting overloads … after type erasure" diagnostic — kotlinc keeps them distinct by
+  erasing each parameter to its *bound*, which krusty does not model, so we skip rather than emit a
+  duplicate method (`ClassFormatError`). Checked for top-level functions and class methods.
+- ✅ `tests/generics_e2e.rs` (generic class + inferred generic call run on the JVM; erased-getter
+  ABI assertion; erased-overload-clash rejection). Full suite green; box conformance **70 OK / 0
+  FAIL** (generic declarations + inferred usage now compile).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
