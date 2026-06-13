@@ -99,9 +99,9 @@ impl ConstPool {
             match c {
                 Const::Utf8(s) => {
                     out.push(1);
-                    let b = s.as_bytes();
+                    let b = crate::metadata::encoding::modified_utf8(s);
                     u2(out, b.len() as u16);
-                    out.extend_from_slice(b);
+                    out.extend_from_slice(&b);
                 }
                 Const::Integer(v) => {
                     out.push(3);
