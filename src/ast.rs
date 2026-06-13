@@ -142,6 +142,9 @@ pub struct TypeRef {
 pub struct Param {
     pub name: String,
     pub ty: TypeRef,
+    /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
+    /// trailing arguments into a fresh array.
+    pub is_vararg: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -18,6 +18,8 @@ use crate::types::Ty;
 pub struct Signature {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// True if the last parameter is `vararg` (its `Ty` is the array type; callers pack trailing args).
+    pub vararg: bool,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -284,12 +286,25 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
             match file.decl(d) {
                 Decl::Fun(f) => {
                     let tp: std::collections::HashSet<String> = f.type_params.iter().cloned().collect();
-                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &tp, diags)).collect();
+                    // A `vararg` parameter's runtime type is `Array<elem>`.
+                    let params: Vec<Ty> = f
+                        .params
+                        .iter()
+                        .map(|p| {
+                            let t = ty_of_ref(&p.ty, &class_names, &tp, diags);
+                            if p.is_vararg {
+                                Ty::array(t)
+                            } else {
+                                t
+                            }
+                        })
+                        .collect();
                     let ret = match &f.ret {
                         Some(r) => ty_of_ref(r, &class_names, &tp, diags),
                         None => Ty::Unit, // v0: missing return type defaults to Unit
                     };
-                    if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
+                    let vararg = f.params.last().map_or(false, |p| p.is_vararg);
+                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg }).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
@@ -321,16 +336,16 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             mtp.extend(m.type_params.iter().cloned());
                             let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), Signature { params, ret })
+                            (m.name.clone(), Signature { params, ret, vararg: false })
                         })
                         .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false });
                         }
-                        methods.insert("copy".into(), Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty });
+                        methods.insert("copy".into(), Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false });
                     }
                     if c.is_object {
                         table.objects.insert(c.name.clone());
@@ -354,7 +369,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             mtp.extend(m.type_params.iter().cloned());
                             let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), Signature { params, ret })
+                            (m.name.clone(), Signature { params, ret, vararg: false })
                         })
                         .collect();
                     let static_props: HashMap<String, Ty> = c
@@ -858,6 +873,7 @@ impl<'a> Checker<'a> {
         self.push_scope();
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
+            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
             self.declare(&p.name, ty, false);
         }
         self.check_fun_body(f);
@@ -876,6 +892,7 @@ impl<'a> Checker<'a> {
         self.push_scope(); // parameter scope
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
+            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
             self.declare(&p.name, ty, false);
         }
         self.check_fun_body(f);
@@ -1549,7 +1566,22 @@ impl<'a> Checker<'a> {
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
                         let sig = sig.clone();
-                        if sig.params.len() != arg_tys.len() {
+                        if sig.vararg {
+                            // Fixed params (all but the last) match by position; remaining args must
+                            // match the vararg element type (krusty doesn't support `*spread`).
+                            let fixed = sig.params.len() - 1;
+                            if arg_tys.len() < fixed {
+                                self.diags.error(span, format!("function '{fname}' expects at least {fixed} args, got {}", arg_tys.len()));
+                            } else {
+                                for i in 0..fixed {
+                                    self.expect_assignable(sig.params[i], arg_tys[i], self.span(args[i]), "argument");
+                                }
+                                let elem = sig.params[fixed].array_elem().unwrap_or(Ty::Error);
+                                for i in fixed..arg_tys.len() {
+                                    self.expect_assignable(elem, arg_tys[i], self.span(args[i]), "vararg argument");
+                                }
+                            }
+                        } else if sig.params.len() != arg_tys.len() {
                             self.diags.error(span, format!("function '{fname}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
                         } else {
                             for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {

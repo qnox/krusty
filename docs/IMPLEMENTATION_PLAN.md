@@ -636,6 +636,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/foreach_e2e.rs` (primitive + reference array iteration with break/continue on the JVM;
   non-array rejection). Box conformance **147 OK / 0 FAIL** (up from 139).
 
+## Phase 46 — `vararg` parameters  ✅
+- ✅ A `vararg xs: T` parameter (captured via `Param.is_vararg`, `Signature.vararg`) has runtime type
+  `Array<T>`; the body sees `xs` as the array. Callers of a vararg free function match fixed
+  parameters by position, then pack the trailing arguments into a fresh array (the right element
+  type / `Xastore`) — including zero trailing args (an empty array). `*spread` is not supported.
+- ✅ `tests/vararg_e2e.rs` (vararg sum/join with a leading fixed param and zero/var args, on the JVM).
+  Box conformance holds at **147 OK / 0 FAIL** (also removes a latent mis-handling where `vararg` was
+  silently skipped and the parameter mis-typed as its element type).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
