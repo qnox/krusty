@@ -1616,6 +1616,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Break | Stmt::Continue => {} // loop control — validated structurally at codegen
             Stmt::Return(e) => {
                 let rt = self.ret_ty;
                 match e {

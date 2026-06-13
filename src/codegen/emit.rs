@@ -872,6 +872,8 @@ struct MethodEmitter<'a> {
     /// When emitting a `companion object` member, the enclosing class — its static members are then
     /// reachable unqualified (`MAX` → `getstatic`, `create(…)` → `invokestatic`).
     companion_of: Option<String>,
+    /// Enclosing loops' `(continue_target, break_target)` labels for `continue`/`break`.
+    loop_labels: Vec<(crate::codegen::classfile::Label, crate::codegen::classfile::Label)>,
 }
 
 impl<'a> MethodEmitter<'a> {
@@ -880,6 +882,7 @@ impl<'a> MethodEmitter<'a> {
             file, info, syms, class: class.to_string(), diags,
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
             class_props: HashMap::new(), is_instance: false, props_via_getter: false, companion_of: None,
+            loop_labels: Vec::new(),
         }
     }
 
@@ -1192,12 +1195,28 @@ impl<'a> MethodEmitter<'a> {
                 }
                 None => code.ret_void(),
             },
+            Stmt::Break => {
+                if let Some(&(_, brk)) = self.loop_labels.last() {
+                    code.goto(brk);
+                } else {
+                    self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: 'break' outside a loop".to_string());
+                }
+            }
+            Stmt::Continue => {
+                if let Some(&(cont, _)) = self.loop_labels.last() {
+                    code.goto(cont);
+                } else {
+                    self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: 'continue' outside a loop".to_string());
+                }
+            }
             Stmt::While { cond, body } => {
                 let start = code.new_label();
                 let end = code.new_label();
                 code.bind(start);
                 self.emit_cond_jump(cond, end, false, code, cw); // if !cond goto end
+                self.loop_labels.push((start, end)); // continue → re-test, break → end
                 self.emit_block_discard(body, code, cw);
+                self.loop_labels.pop();
                 code.goto(start);
                 code.bind(end);
             }
@@ -1216,6 +1235,7 @@ impl<'a> MethodEmitter<'a> {
                     ss
                 });
                 let start = code.new_label();
+                let cont = code.new_label();
                 let end = code.new_label();
                 code.bind(start);
                 code.iload(i);
@@ -1225,7 +1245,10 @@ impl<'a> MethodEmitter<'a> {
                     RangeKind::Until => code.if_icmpge(end),   // exit when i >= end
                     RangeKind::DownTo => code.if_icmplt(end),  // exit when i < end
                 }
+                self.loop_labels.push((cont, end)); // continue → the increment step, break → end
                 self.emit_block_discard(body, code, cw);
+                self.loop_labels.pop();
+                code.bind(cont);
                 code.iload(i);
                 match step_slot {
                     Some(ss) => code.iload(ss),
