@@ -73,11 +73,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 ### 4e — v52 + StackMapTable ⬜ (hardening, for exact version match with kotlinc)
 
 ## Phase 4b — `@kotlin.Metadata` emitter (protobuf)  🚧 (load-bearing for Kotlin-library ABI)
-- ✅ `metadata/protobuf.rs`: protobuf wire writer (varint/len-delimited/nested/repeated), checked
-  against canonical vectors (`08 96 01`, etc.). 5 tests.
-- ⬜ `bytesToStrings`/`BitEncoding` for `d1` + modified-UTF-8 constant pool.
-- ⬜ `ProtoBuf.Package/Function/Type/ValueParameter` (file-facade kind=2) + JVM signature ext +
-  string table; `@kotlin.Metadata` annotation attribute; `mv` version. Validated in Phase 5b.
+- ✅ `metadata/protobuf.rs`: protobuf wire writer, checked vs canonical vectors. 5 tests.
+- ✅ `metadata/encoding.rs`: `bytesToStrings` (byte→char identity — **matches kotlinc 1.9.24's exact
+  d1 payload** for `fun f(a:Int):Int=a`) + JVM modified-UTF-8; const pool now uses it. 5 tests.
+- ✅ `writeData` layout known: `d1 = stringTable.serializeTo(out); message.writeTo(out)`; reference
+  decoded as `mv=[1,9,0] k=2 xi=48 d2=[f,"",a]`.
+- ⬜ **Remaining (the large part):** faithfully build `ProtoBuf.Package/Function/Type/ValueParameter`
+  + `StringTableTypes` + the **qualified-name/builtins table** (so `kotlin/Int` etc. resolve) +
+  JVM signature extension + the `@kotlin.Metadata` annotation attribute. This is effectively a
+  re-implementation of `kotlinx-metadata-jvm`'s writer (~thousands of LOC) and is the single biggest
+  remaining sub-project. Correctness gate = Phase 5b round-trip (kotlinc consumes krust output).
+  Note: a *Java* consumer needs none of this (it reads only the signatures, already matched in 5a);
+  `@Metadata` is required only for *Kotlin* consumers.
 
 ## Phase 5 — Differential harness vs kotlinc  🚧
 ### 5a — ABI signatures + execution ✅
