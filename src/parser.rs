@@ -90,6 +90,15 @@ impl<'a> Parser<'a> {
             let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
             match self.kind() {
                 TokenKind::Eof => break,
+                // A `package` directive may follow file-level annotations (`@file:...`), so also
+                // accept it here (the common case is consumed before the loop).
+                TokenKind::KwPackage => {
+                    self.bump(); // 'package'
+                    let pkg = self.parse_qualified_name();
+                    if self.file.package.is_none() && !pkg.is_empty() {
+                        self.file.package = Some(pkg);
+                    }
+                }
                 TokenKind::KwImport => {
                     self.bump(); // 'import'
                     let fq = self.parse_qualified_name();
@@ -158,6 +167,13 @@ impl<'a> Parser<'a> {
                     let d = self.parse_interface();
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
+                }
+                // `typealias Name = Type` — not modeled; skip the declaration (uses of the alias name
+                // then fail to resolve and that file is cleanly skipped).
+                TokenKind::Ident if self.text() == "typealias" => {
+                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
+                        self.bump();
+                    }
                 }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
