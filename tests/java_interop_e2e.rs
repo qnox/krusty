@@ -30,6 +30,57 @@ fn krust_compile(src: &str, internal: &str, cp_dirs: Vec<PathBuf>) -> Vec<u8> {
 }
 
 #[test]
+fn calls_java_static_from_jar() {
+    if !have("javac") || !have("java") || !have("jar") {
+        eprintln!("skipping: javac/java/jar unavailable");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("krust_jar_{}", std::process::id()));
+    let jdir = root.join("classes");
+    let kdir = root.join("kr");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&jdir).unwrap();
+    fs::create_dir_all(&kdir).unwrap();
+
+    fs::write(
+        root.join("Lib.java"),
+        "package libx; public class Lib { public static int sq(int x){ return x*x; } }",
+    )
+    .unwrap();
+    assert!(Command::new("javac").args(["-d", jdir.to_str().unwrap(), "Lib.java"]).current_dir(&root).output().unwrap().status.success());
+
+    // Package the compiled class into a real .jar.
+    let jar = root.join("libx.jar");
+    assert!(Command::new("jar")
+        .args(["cf", jar.to_str().unwrap(), "-C", jdir.to_str().unwrap(), "."])
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    // krust resolves libx.Lib.sq by reading the .class out of the JAR on the classpath.
+    let src = "import libx.Lib\nfun f(n: Int): Int = Lib.sq(n)\n";
+    let bytes = krust_compile(src, "DemoKt", vec![jar.clone()]);
+    fs::write(kdir.join("DemoKt.class"), &bytes).unwrap();
+
+    fs::write(
+        root.join("Main.java"),
+        "public class Main { public static void main(String[] a){ System.out.println(DemoKt.f(6)); } }",
+    )
+    .unwrap();
+    let cp = format!("{}:{}", kdir.to_str().unwrap(), jar.to_str().unwrap());
+    assert!(Command::new("javac").args(["-cp", &cp, "Main.java"]).current_dir(&root).output().unwrap().status.success());
+    let run = Command::new("java")
+        .args(["-cp", &format!("{}:{}", root.to_str().unwrap(), cp), "Main"])
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "run failed: {}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "36\n");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn calls_real_java_static_method() {
     if !have("javac") || !have("java") {
         eprintln!("skipping: javac/java unavailable");
