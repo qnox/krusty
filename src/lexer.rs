@@ -8,7 +8,7 @@ use crate::diag::{DiagSink, Span};
 use crate::token::{keyword, Token, TokenKind};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
-    Lexer { b: src.as_bytes(), i: 0, out: Vec::new(), diags }.run()
+    Lexer { b: src.as_bytes(), i: 0, out: Vec::new(), diags, pending: std::collections::VecDeque::new() }.run()
 }
 
 struct Lexer<'a> {
@@ -16,6 +16,8 @@ struct Lexer<'a> {
     i: usize,
     out: Vec<Token>,
     diags: &'a mut DiagSink,
+    /// Tokens produced ahead of time (string-template expansion), drained before lexing more.
+    pending: std::collections::VecDeque<Token>,
 }
 
 impl<'a> Lexer<'a> {
@@ -31,6 +33,14 @@ impl<'a> Lexer<'a> {
         self.out
     }
 
+    /// Return a queued token if any, else lex one fresh.
+    fn next_token(&mut self) -> Token {
+        if let Some(t) = self.pending.pop_front() {
+            return t;
+        }
+        self.lex_one()
+    }
+
     fn peek(&self) -> u8 {
         if self.i < self.b.len() { self.b[self.i] } else { 0 }
     }
@@ -38,7 +48,7 @@ impl<'a> Lexer<'a> {
         if self.i + 1 < self.b.len() { self.b[self.i + 1] } else { 0 }
     }
 
-    fn next_token(&mut self) -> Token {
+    fn lex_one(&mut self) -> Token {
         self.skip_trivia();
         let lo = self.i as u32;
         if self.i >= self.b.len() {
@@ -179,25 +189,20 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self, lo: u32) -> Token {
-        // Raw strings (`"""..."""`) and string templates (`"$x"`, `"${...}"`) are outside the
-        // supported subset — reject them so callers don't silently miscompile (the differential
-        // harness relies on krusty refusing what it can't compile correctly).
+        // Raw strings (`"""..."""`) are out of subset — reject so callers don't miscompile.
         if self.peek2() == b'"' && self.b.get(self.i + 2) == Some(&b'"') {
             self.i += 3;
             self.diags.error(Span::new(lo, self.i as u32), "raw string literals are not supported");
             return Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) };
+        }
+        if self.string_has_interpolation() {
+            return self.string_template(lo);
         }
         self.i += 1; // opening quote
         while self.i < self.b.len() && self.b[self.i] != b'"' {
             if self.b[self.i] == b'\\' && self.i + 1 < self.b.len() {
                 self.i += 2; // escape
             } else {
-                if self.b[self.i] == b'$' {
-                    let next = self.b.get(self.i + 1).copied().unwrap_or(0);
-                    if next == b'{' || is_ident_start(next) {
-                        self.diags.error(Span::new(lo, self.i as u32), "string templates are not supported");
-                    }
-                }
                 self.i += 1;
             }
         }
@@ -207,6 +212,93 @@ impl<'a> Lexer<'a> {
             self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
         }
         Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) }
+    }
+
+    /// Does the string starting at `self.i` (`"`) contain a `$ident` / `${` interpolation?
+    fn string_has_interpolation(&self) -> bool {
+        let mut j = self.i + 1;
+        while j < self.b.len() && self.b[j] != b'"' {
+            if self.b[j] == b'\\' {
+                j += 2;
+                continue;
+            }
+            if self.b[j] == b'$' {
+                let next = self.b.get(j + 1).copied().unwrap_or(0);
+                if next == b'{' || is_ident_start(next) {
+                    return true;
+                }
+            }
+            j += 1;
+        }
+        false
+    }
+
+    /// Lex an interpolated string into the token sequence
+    /// `TemplateStart (StrChunk | Dollar Ident | Dollar LBrace <expr> RBrace)* TemplateEnd`,
+    /// returning the first token and queueing the rest.
+    fn string_template(&mut self, lo: u32) -> Token {
+        let mut toks: Vec<Token> = vec![Token { kind: TokenKind::TemplateStart, span: Span::new(lo, lo + 1) }];
+        self.i += 1; // opening quote
+        let mut chunk_lo = self.i;
+        while self.i < self.b.len() && self.b[self.i] != b'"' {
+            let c = self.b[self.i];
+            if c == b'\\' && self.i + 1 < self.b.len() {
+                self.i += 2;
+                continue;
+            }
+            let next = self.b.get(self.i + 1).copied().unwrap_or(0);
+            if c == b'$' && (next == b'{' || is_ident_start(next)) {
+                if self.i > chunk_lo {
+                    toks.push(Token { kind: TokenKind::StrChunk, span: Span::new(chunk_lo as u32, self.i as u32) });
+                }
+                let dollar_lo = self.i;
+                self.i += 1; // consume `$`
+                toks.push(Token { kind: TokenKind::Dollar, span: Span::new(dollar_lo as u32, self.i as u32) });
+                if self.b[self.i] == b'{' {
+                    let lb = self.i;
+                    self.i += 1;
+                    toks.push(Token { kind: TokenKind::LBrace, span: Span::new(lb as u32, self.i as u32) });
+                    let mut depth = 1;
+                    loop {
+                        let t = self.lex_one();
+                        if t.kind == TokenKind::Eof {
+                            break;
+                        }
+                        if t.kind == TokenKind::LBrace {
+                            depth += 1;
+                        } else if t.kind == TokenKind::RBrace {
+                            depth -= 1;
+                            if depth == 0 {
+                                toks.push(t);
+                                break;
+                            }
+                        }
+                        toks.push(t);
+                    }
+                } else {
+                    let id_lo = self.i;
+                    while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
+                        self.i += 1;
+                    }
+                    toks.push(Token { kind: TokenKind::Ident, span: Span::new(id_lo as u32, self.i as u32) });
+                }
+                chunk_lo = self.i;
+            } else {
+                self.i += 1;
+            }
+        }
+        if self.i > chunk_lo {
+            toks.push(Token { kind: TokenKind::StrChunk, span: Span::new(chunk_lo as u32, self.i as u32) });
+        }
+        if self.i < self.b.len() {
+            self.i += 1; // closing quote
+        } else {
+            self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+        }
+        toks.push(Token { kind: TokenKind::TemplateEnd, span: Span::new(self.i as u32, self.i as u32) });
+        let first = toks.remove(0);
+        self.pending.extend(toks);
+        first
     }
 }
 

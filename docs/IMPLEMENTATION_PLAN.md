@@ -353,6 +353,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Deferred: `override`-flagged virtual re-dispatch nuances, abstract methods in classes,
   generics.
 
+## Phase 23 — String templates  ✅ (biggest single conformance jump)
+- ✅ Data-driven: `"$x"`/`"${…}"` was the #1 first-error (≈860 files). The lexer now expands an
+  interpolated string into inline tokens (`TemplateStart StrChunk (Dollar Ident | Dollar { expr })*
+  TemplateEnd`) via a token queue + `lex_one`, so `${expr}` parses into the same AST arena (no
+  cross-arena copying). `Expr::Template` lowers to `StringBuilder.append(...)` per part; ABI matches
+  kotlinc.
+- ✅ Fix: `emit_append` appended `Boolean` via `append(I)` (`0/1`) — corrected to `append(Z)`
+  (`true/false`), which templates/concat rely on.
+- ✅ `tests/string_template_e2e.rs` (JVM run + ABI vs kotlinc). Box conformance: **62 / 62 OK /
+  0 FAIL** (up from 46); full suite 110 green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

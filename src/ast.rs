@@ -37,6 +37,8 @@ pub enum Expr {
     NotNull { operand: ExprId },
     /// `lhs ?: rhs` — Elvis (lhs if non-null, else rhs).
     Elvis { lhs: ExprId, rhs: ExprId },
+    /// A string template `"a${e}b$c"` — alternating literal and interpolated-expression parts.
+    Template(Vec<TemplatePart>),
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -57,6 +59,12 @@ pub struct WhenArm {
     /// Empty ⇒ the `else` arm.
     pub conditions: Vec<ExprId>,
     pub body: ExprId,
+}
+
+#[derive(Clone, Debug)]
+pub enum TemplatePart {
+    Str(String),
+    Expr(ExprId),
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +318,19 @@ impl File {
                 self.write_expr(*lhs, out);
                 out.push(' ');
                 self.write_expr(*rhs, out);
+                out.push(')');
+            }
+            Expr::Template(parts) => {
+                out.push_str("(template");
+                for p in parts {
+                    match p {
+                        TemplatePart::Str(s) => out.push_str(&format!(" {s:?}")),
+                        TemplatePart::Expr(e) => {
+                            out.push(' ');
+                            self.write_expr(*e, out);
+                        }
+                    }
+                }
                 out.push(')');
             }
             Expr::Unary { op, operand } => {
