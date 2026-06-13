@@ -246,6 +246,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
   (nullable is foundational; it compounds once collections/`?.`/char literals land).
 
+## Phase 14 — Modifiers, annotations & conformance fixes  ✅
+- ✅ Data-driven (scanned the "expected a top-level declaration" bucket): **leading declaration
+  modifiers** (`public`/`private`/`open`/`abstract`/`inline`/`operator`/`override`/`suspend`/
+  `const`/… ) and **annotations** (`@Foo`, `@file:Bar(...)`) are now skipped before top-level decls,
+  class-body members, and parameters. `@`, `[`, `]` are lexed. krusty treats everything as
+  public/final (fine for the supported subset).
+- ✅ Kind-changing modifiers (`enum`/`annotation`/`sealed`/`data`/`value`/`object`/…) and
+  semantics-changing ones (`tailrec`/`external`) are deliberately **not** skipped, so such
+  declarations stay cleanly unsupported (skipped, never miscompiled).
+- ✅ Conformance fixes (caught by the box harness): a `data class` that manually declares
+  `equals`/`hashCode`/`toString`/`copy`/`componentN` no longer gets a duplicate synthesized member;
+  `.toString()` on a *reference* receiver now `invokevirtual`s the real `toString` (was a no-op).
+- ✅ Box conformance: **31 compiled / 31 OK / 0 FAIL** (up from 27); full suite 96 green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -32,6 +32,8 @@ pub enum TokenKind {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Colon,
     Dot,
@@ -58,6 +60,7 @@ pub enum TokenKind {
     SlashEq,  // /=
     PercentEq,// %=
     Question, // ?   (nullable types, ?. , ?:)
+    At,       // @   (annotations)
     // trivia / control
     Newline,
     Eof,

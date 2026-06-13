@@ -54,6 +54,8 @@ impl<'a> Lexer<'a> {
             b')' => self.one(TokenKind::RParen),
             b'{' => self.one(TokenKind::LBrace),
             b'}' => self.one(TokenKind::RBrace),
+            b'[' => self.one(TokenKind::LBracket),
+            b']' => self.one(TokenKind::RBracket),
             b',' => self.one(TokenKind::Comma),
             b';' => self.one(TokenKind::Newline), // `;` is a statement/arm separator like a newline
             b':' => self.one(TokenKind::Colon),
@@ -75,6 +77,7 @@ impl<'a> Lexer<'a> {
             b'!' if self.peek2() == b'=' => self.two(TokenKind::NotEq),
             b'!' => self.one(TokenKind::Not), // `!!` (not-null) is two `Not`s in postfix position
             b'?' => self.one(TokenKind::Question),
+            b'@' => self.one(TokenKind::At),
             b'<' if self.peek2() == b'=' => self.two(TokenKind::LtEq),
             b'<' => self.one(TokenKind::Lt),
             b'>' if self.peek2() == b'=' => self.two(TokenKind::GtEq),

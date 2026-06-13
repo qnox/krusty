@@ -181,7 +181,8 @@ pub fn emit_class(
     // componentN/copy in the metadata so Kotlin consumers can call them.
     let mut method_metas = method_metas;
     if class.is_data {
-        method_metas.extend(emit_data_members(&mut cw, internal_name, &props));
+        let user_methods: std::collections::HashSet<&str> = class.methods.iter().map(|m| m.name.as_str()).collect();
+        method_metas.extend(emit_data_members(&mut cw, internal_name, &props, &user_methods));
     }
 
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
@@ -226,6 +227,7 @@ fn emit_data_members(
     cw: &mut ClassWriter,
     internal: &str,
     props: &[(&PropParam, Ty)],
+    user_methods: &std::collections::HashSet<&str>,
 ) -> Vec<crate::metadata::class_builder::FnMeta> {
     let simple = internal.rsplit('/').next().unwrap_or(internal).to_string();
     let prop_tys: Vec<Ty> = props.iter().map(|(_, t)| *t).collect();
@@ -235,6 +237,9 @@ fn emit_data_members(
 
     // componentN() — returns each property.
     for (i, (p, ty)) in props.iter().enumerate() {
+        if user_methods.contains(format!("component{}", i + 1).as_str()) {
+            continue; // user declared it explicitly
+        }
         let mut c = CodeBuilder::new(1);
         c.aload(0);
         let f = cw.fieldref(internal, &p.name, &ty.descriptor());
@@ -253,7 +258,7 @@ fn emit_data_members(
     }
 
     // copy(props...) -> Self.
-    {
+    if !user_methods.contains("copy") {
         let mut c = CodeBuilder::new(1 + total_words);
         let cidx = cw.class_ref(internal);
         c.new_obj(cidx);
@@ -279,7 +284,7 @@ fn emit_data_members(
     }
 
     // copy$default(self, props..., mask:int, marker:Object) -> Self — synthetic default-applier.
-    {
+    if !user_methods.contains("copy") {
         let mask_slot = 1 + total_words;
         let total_locals = mask_slot + 2; // mask + marker
         let mut c = CodeBuilder::new(total_locals);
@@ -318,7 +323,7 @@ fn emit_data_members(
     }
 
     // toString() -> "Name(p1=v1, p2=v2)".
-    {
+    if !user_methods.contains("toString") {
         let mut c = CodeBuilder::new(1);
         let sb = cw.class_ref("java/lang/StringBuilder");
         let sbinit = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
@@ -348,7 +353,7 @@ fn emit_data_members(
     }
 
     // hashCode(): result = hash(p0); result = result*31 + hash(pN); ...
-    {
+    if !user_methods.contains("hashCode") {
         let mut c = CodeBuilder::new(1);
         for (i, (p, ty)) in props.iter().enumerate() {
             if i > 0 {
@@ -369,7 +374,7 @@ fn emit_data_members(
     }
 
     // equals(Object): identity, instanceof, then per-property comparison.
-    {
+    if !user_methods.contains("equals") {
         let mut c = CodeBuilder::new(2); // this=0, other=1; cast -> 2
         let cidx = cw.class_ref(internal);
         c.aload(0);
@@ -1176,6 +1181,12 @@ impl<'a> MethodEmitter<'a> {
                     Ty::Int | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
                     Ty::Long => ("(J)Ljava/lang/String;", 2),
                     Ty::Double => ("(D)Ljava/lang/String;", 2),
+                    // reference type: virtual call to the object's real toString().
+                    Ty::Obj(_) | Ty::Null => {
+                        let m = cw.methodref("java/lang/Object", "toString", "()Ljava/lang/String;");
+                        code.invokevirtual(m, 0, 1);
+                        return;
+                    }
                     _ => return,
                 };
                 let m = cw.methodref("java/lang/String", "valueOf", desc);
