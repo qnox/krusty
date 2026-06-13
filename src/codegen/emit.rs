@@ -2512,6 +2512,29 @@ impl<'a> MethodEmitter<'a> {
                     Some(s) => s.clone(),
                     None => return,
                 };
+                if sig.vararg {
+                    // Emit the fixed args, then pack the trailing args into a fresh array.
+                    let fixed = sig.params.len() - 1;
+                    for i in 0..fixed {
+                        self.emit_expr_as(args[i], sig.params[i], code, cw);
+                    }
+                    let arr_ty = sig.params[fixed];
+                    let elem = arr_ty.array_elem().unwrap_or(Ty::Error);
+                    let n = args.len() - fixed;
+                    code.push_int(n as i32, cw);
+                    self.emit_new_array(elem, code, cw);
+                    let (sop, swords) = array_store_op(elem);
+                    for (k, &a) in args[fixed..].iter().enumerate() {
+                        code.dup();
+                        code.push_int(k as i32, cw);
+                        self.emit_expr_as(a, elem, code, cw);
+                        code.array_store(sop, swords);
+                    }
+                    let arg_words: i32 = sig.params[..fixed].iter().map(|t| slot_words(*t) as i32).sum::<i32>() + 1;
+                    let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));
+                    code.invokestatic(m, arg_words, slot_words(sig.ret) as i32);
+                    return;
+                }
                 for (a, pty) in args.iter().zip(&sig.params) {
                     self.emit_expr_as(*a, *pty, code, cw);
                 }

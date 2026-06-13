@@ -411,9 +411,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            let mut pmods = Vec::new();
             if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                self.skip_decl_prefix(); // `@Anno`, `vararg`, etc. on a parameter
+                pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
             }
+            let is_vararg = pmods.iter().any(|m| m == "vararg");
             let pname = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -424,7 +426,7 @@ impl<'a> Parser<'a> {
             };
             self.expect(TokenKind::Colon, "':'");
             let ty = self.parse_type();
-            params.push(Param { name: pname, ty });
+            params.push(Param { name: pname, ty, is_vararg });
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;
