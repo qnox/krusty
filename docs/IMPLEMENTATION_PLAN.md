@@ -339,6 +339,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Deferred: class inheritance (`: Base()` — needs open/abstract + super-ctor), default interface
   methods, generics.
 
+## Phase 22 — Class inheritance  ✅
+- ✅ `open`/`abstract` classes are emitted non-`final` (`abstract` adds `ACC_ABSTRACT`); their
+  members are non-`final` so subclasses can override. `class Sub(...) : Base(args)` → JVM `extends`,
+  the primary constructor calls `super(args)` (args lowered through a constructor `MethodEmitter`).
+- ✅ Inherited methods/properties resolve up the base-class chain (`SymbolTable::method_of`/
+  `prop_of`); subtyping (`obj_is_subtype`) walks supers + interfaces; `invokevirtual` resolves
+  inherited members.
+- ✅ Conformance fix (box harness): an `open` class's overridden method was emitted `final`
+  (`IncompatibleClassChangeError` when subclassed) — fixed.
+- ✅ `tests/inheritance_e2e.rs` (super-ctor with args + inherited method + inherited property).
+  Box conformance: **46 / 46 OK / 0 FAIL** (up from 39); full suite 109 green.
+- ⬜ Deferred: `override`-flagged virtual re-dispatch nuances, abstract methods in classes,
+  generics.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

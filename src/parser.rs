@@ -75,12 +75,17 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Eof) {
                 break;
             }
-            // Skip leading annotations + declaration modifiers (krusty treats everything as
-            // public/final; modifiers it doesn't model are ignored, not errors).
-            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                self.skip_decl_prefix();
+            // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
+            // the following class; the rest are ignored (krusty treats everything as public).
+            let mods = if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                let m = self.skip_decl_prefix();
                 self.skip_newlines();
-            }
+                m
+            } else {
+                Vec::new()
+            };
+            let is_open = mods.iter().any(|m| m == "open");
+            let is_abstract = mods.iter().any(|m| m == "abstract");
             match self.kind() {
                 TokenKind::Eof => break,
                 TokenKind::KwImport => {
@@ -100,7 +105,9 @@ impl<'a> Parser<'a> {
                     self.file.decls.push(id);
                 }
                 TokenKind::KwClass => {
-                    let d = self.parse_class();
+                    let mut d = self.parse_class();
+                    d.is_open = is_open;
+                    d.is_abstract = is_abstract;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -156,17 +163,20 @@ impl<'a> Parser<'a> {
     /// `inline`, `operator`, `suspend`, …) that precede a declaration. Modifiers that change the
     /// declaration *kind* (`enum`, `annotation`, `sealed`, `data`, `value`, `object`, …) are NOT
     /// skipped, so those declarations remain unsupported (and the file is cleanly skipped).
-    fn skip_decl_prefix(&mut self) {
+    fn skip_decl_prefix(&mut self) -> Vec<String> {
+        let mut mods = Vec::new();
         loop {
             self.skip_newlines();
             if self.at(TokenKind::At) {
                 self.skip_annotation();
             } else if self.at(TokenKind::Ident) && is_modifier(self.text()) {
+                mods.push(self.text().to_string());
                 self.bump();
             } else {
                 break;
             }
         }
+        mods
     }
 
     fn skip_annotation(&mut self) {
@@ -243,8 +253,11 @@ impl<'a> Parser<'a> {
             is_enum: true,
             enum_entries: entries,
             is_interface: false,
+            is_open: false,
+            is_abstract: false,
             supertypes: Vec::new(),
-            has_base_class: false,
+            base_class: None,
+            base_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -361,7 +374,7 @@ impl<'a> Parser<'a> {
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
-        let (supertypes, has_base_class) = self.parse_supertypes();
+        let (supertypes, base_class, base_args) = self.parse_supertypes();
         // Optional class body — v0 accepts member `fun` declarations (instance methods).
         let mut methods = Vec::new();
         self.skip_newlines();
@@ -385,31 +398,35 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, supertypes, has_base_class, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
-    /// Parse an optional `: Type(args)?, Type, …` supertype list. Returns (interface names,
-    /// whether a base-class supertype — one with `()` — is present).
-    fn parse_supertypes(&mut self) -> (Vec<String>, bool) {
+    /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
+    /// base class (returns its name + ctor-arg expressions); the rest are implemented interfaces.
+    fn parse_supertypes(&mut self) -> (Vec<String>, Option<String>, Vec<ExprId>) {
         let mut ifaces = Vec::new();
-        let mut has_base = false;
+        let mut base: Option<String> = None;
+        let mut base_args = Vec::new();
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
                 let name = self.parse_qualified_name();
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
-                if self.at(TokenKind::LParen) {
-                    // constructor call → base class (v0 unsupported)
-                    has_base = true;
-                    let mut depth = 0;
-                    loop {
-                        match self.kind() {
-                            TokenKind::LParen => { depth += 1; self.bump(); }
-                            TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
-                            TokenKind::Eof => break,
-                            _ => { self.bump(); }
+                if self.eat(TokenKind::LParen) {
+                    // constructor call → base class
+                    self.skip_newlines();
+                    let mut args = Vec::new();
+                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        args.push(self.parse_expr());
+                        self.skip_newlines();
+                        if !self.eat(TokenKind::Comma) {
+                            break;
                         }
+                        self.skip_newlines();
                     }
+                    self.expect(TokenKind::RParen, "')'");
+                    base = Some(simple);
+                    base_args = args;
                 } else if !simple.is_empty() {
                     ifaces.push(simple);
                 }
@@ -418,7 +435,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (ifaces, has_base)
+        (ifaces, base, base_args)
     }
 
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
@@ -426,7 +443,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (supertypes, has_base_class) = self.parse_supertypes();
+        let (supertypes, _base, _base_args) = self.parse_supertypes();
         let mut methods = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
@@ -451,7 +468,8 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name, props: Vec::new(), methods, is_data: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), is_interface: true, supertypes, has_base_class,
+            enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false,
+            supertypes, base_class: None, base_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -483,7 +501,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, supertypes: Vec::new(), has_base_class: false, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

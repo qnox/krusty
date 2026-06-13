@@ -31,6 +31,8 @@ pub struct ClassSig {
     pub is_interface: bool,
     /// Internal names of interfaces this type implements (for subtyping).
     pub interfaces: Vec<String>,
+    /// Internal name of the base class (`: Base(..)`), if any.
+    pub super_internal: Option<String>,
 }
 
 impl ClassSig {
@@ -58,6 +60,26 @@ impl SymbolTable {
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         self.classes.values().find(|c| c.internal == internal)
+    }
+
+    /// A method (own or inherited up the base-class chain) on a class internal name.
+    pub fn method_of(&self, internal: &str, name: &str) -> Option<Signature> {
+        let c = self.class_by_internal(internal)?;
+        if let Some(sig) = c.methods.get(name) {
+            return Some(sig.clone());
+        }
+        let s = c.super_internal.clone()?;
+        self.method_of(&s, name)
+    }
+
+    /// A property (own or inherited) on a class internal name. Returns `(type, is_var)`.
+    pub fn prop_of(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
+        let c = self.class_by_internal(internal)?;
+        if let Some(p) = c.prop(name) {
+            return Some(p);
+        }
+        let s = c.super_internal.clone()?;
+        self.prop_of(&s, name)
     }
 }
 
@@ -205,9 +227,10 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .iter()
                         .map(|s| class_names.get(s).cloned().unwrap_or_else(|| s.clone()))
                         .collect();
+                    let super_internal = c.base_class.as_ref().map(|b| class_names.get(b).cloned().unwrap_or_else(|| b.clone()));
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, methods, is_interface: c.is_interface, interfaces },
+                        ClassSig { internal, props, methods, is_interface: c.is_interface, interfaces, super_internal },
                     );
                 }
                 Decl::Property(p) => {
@@ -400,14 +423,41 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Is `sub` a subtype of `sup`? Reflexive, plus a class is a subtype of any interface it
-    /// implements (v0 has no class inheritance, so the relation is one level deep).
+    /// Is `sub` a subtype of `sup`? Reflexive, through implemented interfaces, and up the base-class
+    /// chain.
     fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
-        sub == sup
-            || self
-                .syms
-                .class_by_internal(sub)
-                .map_or(false, |c| c.interfaces.iter().any(|i| i == sup))
+        if sub == sup {
+            return true;
+        }
+        if let Some(c) = self.syms.class_by_internal(sub) {
+            if c.interfaces.iter().any(|i| i == sup) {
+                return true;
+            }
+            if let Some(s) = &c.super_internal {
+                return self.obj_is_subtype(s, sup);
+            }
+        }
+        false
+    }
+
+    /// Resolve a method (own or inherited from the base-class chain) on a class internal name.
+    fn lookup_method(&self, internal: &str, name: &str) -> Option<Signature> {
+        let c = self.syms.class_by_internal(internal)?;
+        if let Some(sig) = c.methods.get(name) {
+            return Some(sig.clone());
+        }
+        let s = c.super_internal.clone()?;
+        self.lookup_method(&s, name)
+    }
+
+    /// Resolve a property (own or inherited) on a class internal name.
+    fn lookup_prop(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
+        let c = self.syms.class_by_internal(internal)?;
+        if let Some(p) = c.prop(name) {
+            return Some(p);
+        }
+        let s = c.super_internal.clone()?;
+        self.lookup_prop(&s, name)
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -608,9 +658,9 @@ impl<'a> Checker<'a> {
         if let (Ty::String, "length") = (rt, name) {
             return Ty::Int;
         }
-        // Property read on a class value: `p.prop`.
+        // Property read on a class value: `p.prop` (own or inherited).
         if let Ty::Obj(internal) = rt {
-            if let Some((ty, _)) = self.syms.class_by_internal(internal).and_then(|c| c.prop(name)) {
+            if let Some((ty, _)) = self.lookup_prop(internal, name) {
                 return ty;
             }
             // `java.lang.Enum` members (`name`, `ordinal`) available on any enum value.
@@ -676,9 +726,9 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Instance method call on a class value: `p.method(args)`.
+                // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal) = rt {
-                    if let Some(sig) = self.syms.class_by_internal(internal).and_then(|c| c.methods.get(&name)).cloned() {
+                    if let Some(sig) = self.lookup_method(internal, &name) {
                         if sig.params.len() != arg_tys.len() {
                             self.diags.error(span, format!("method '{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
                         } else {
