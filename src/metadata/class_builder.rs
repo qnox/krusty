@@ -130,24 +130,22 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 
 /// Build `(d1 bytes, d2 strings)` for a class. `class_internal` is e.g. `demo/Point`;
 /// `ctor_params` are the primary-constructor `(name, type)` pairs; `ctor_desc` its JVM descriptor.
-/// `Class.flags` value kotlinc emits for a simple `data class` (public/final + IS_DATA bit).
-/// A regular class serializes flags as 0 (omitted).
-const DATA_CLASS_FLAGS: u64 = 1030;
-
+/// `Class.flags` values kotlinc emits: a plain class = 0 (omitted), `data class` = 1030,
+/// `object` = 326. Passed in by the caller.
 pub fn build_class(
     class_internal: &str,
     ctor_params: &[(String, Ty)],
     ctor_desc: &str,
     props: &[PropMeta],
     methods: &[FnMeta],
-    is_data: bool,
+    class_flags: u64,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut class = Pb::new();
 
-    // f1 = flags (omitted ⇒ 0 for a plain class; IS_DATA for a data class).
-    if is_data {
-        class.field_varint(1, DATA_CLASS_FLAGS);
+    // f1 = flags (omitted ⇒ 0 for a plain class; IS_DATA / object bits otherwise).
+    if class_flags != 0 {
+        class.field_varint(1, class_flags);
     }
 
     // f3 = fq_name: a class-id derived from the `L...;` descriptor.
@@ -246,7 +244,7 @@ mod tests {
                 },
             ],
             &[],
-            false,
+            0,
         );
         // The class id descriptor and the JVM signatures must all appear verbatim in d2.
         assert!(d2.contains(&"Ldemo/Point;".to_string()));

@@ -134,6 +134,8 @@ pub struct ClassDecl {
     pub methods: Vec<FunDecl>,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
+    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
+    pub is_object: bool,
     pub span: Span,
 }
 
@@ -222,7 +224,7 @@ impl File {
                 out.push(')');
             }
             Decl::Class(c) => {
-                out.push_str(&format!("(class {}", c.name));
+                out.push_str(&format!("({} {}", if c.is_object { "object" } else { "class" }, c.name));
                 for p in &c.props {
                     out.push_str(&format!(" ({} {} {})", if p.is_var { "var" } else { "val" }, p.name, p.ty.name));
                 }

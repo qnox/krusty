@@ -202,7 +202,26 @@ pub fn emit_class(
     }
     code.ret_void();
     code.link();
-    cw.add_method(ACC_PUBLIC, "<init>", &ctor_desc, &code);
+    // An `object`'s constructor is private (the singleton owns the only instance).
+    let ctor_access = if class.is_object { ACC_PRIVATE } else { ACC_PUBLIC };
+    cw.add_method(ctor_access, "<init>", &ctor_desc, &code);
+
+    // An `object` exposes a single `public static final INSTANCE`, built in `<clinit>`.
+    if class.is_object {
+        let self_desc = Ty::obj(internal_name).descriptor();
+        cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, "INSTANCE", &self_desc);
+        let mut clinit = CodeBuilder::new(0);
+        let cidx = cw.class_ref(internal_name);
+        clinit.new_obj(cidx);
+        clinit.dup();
+        let init = cw.methodref(internal_name, "<init>", "()V");
+        clinit.invokespecial(init, 0, 0);
+        let inst = cw.fieldref(internal_name, "INSTANCE", &self_desc);
+        clinit.putstatic(inst, 1);
+        clinit.ret_void();
+        clinit.link();
+        cw.add_method(ACC_STATIC, "<clinit>", "()V", &clinit);
+    }
 
     // Accessors: `public final getX()` for every property; `setX(..)` for `var`.
     for (p, ty) in &props {
@@ -271,7 +290,8 @@ pub fn emit_class(
             }
         })
         .collect();
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas, class.is_data);
+    let class_flags = if class.is_data { 1030 } else if class.is_object { 326 } else { 0 };
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas, class_flags);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
 
@@ -1236,6 +1256,26 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // Object member call: `Object.method(args)` → getstatic INSTANCE; args; invokevirtual.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if let Expr::Name(cls) = self.file.expr(receiver).clone() {
+                if !self.slots.contains_key(&cls) && self.syms.objects.contains(&cls) {
+                    if let Some(sig) = self.syms.classes.get(&cls).and_then(|c| c.methods.get(&name)).cloned() {
+                        let internal = self.syms.classes[&cls].internal.clone();
+                        let self_desc = Ty::obj(&internal).descriptor();
+                        let inst = cw.fieldref(&internal, "INSTANCE", &self_desc);
+                        code.getstatic(inst, 1);
+                        for (a, pty) in args.iter().zip(&sig.params) {
+                            self.emit_expr_as(*a, *pty, code, cw);
+                        }
+                        let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                        let m = cw.methodref(&internal, &name, &method_descriptor(&sig.params, sig.ret));
+                        code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
+                        return;
+                    }
+                }
+            }
+        }
         // Java static call: ClassName.method(args) resolved via the classpath.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if let Expr::Name(cls) = self.file.expr(receiver).clone() {

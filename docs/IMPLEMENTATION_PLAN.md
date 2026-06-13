@@ -278,6 +278,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/diagnostics_match_kotlinc.rs` compiles erroneous snippets with **both** krusty and the
   real kotlinc and asserts the first `error:` text is identical.
 
+## Phase 17 — `object` declarations (singletons)  ✅
+- ✅ `object Name { fun … }` → a class with a `public static final INSTANCE`, a **private**
+  constructor, member functions (instance methods), built in `<clinit>` (`new`/`putstatic`).
+  `Name.member(args)` lowers to `getstatic INSTANCE` + `invokevirtual`. ABI matches kotlinc.
+- ✅ Class `@Metadata` flags = 326 (the `object` bit) so a Kotlin consumer sees it as an object —
+  round-trip verified (`Math2.sq(7)`). `tests/object_e2e.rs` (shape + JVM run + kotlinc consume).
+- ✅ Full suite 99 green; box conformance 34 / 34 OK / 0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

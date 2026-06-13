@@ -42,6 +42,8 @@ pub struct SymbolTable {
     pub classes: HashMap<String, ClassSig>,
     /// Top-level properties (name → type, is_var), backed by static fields on the file facade.
     pub props: HashMap<String, (Ty, bool)>,
+    /// Simple names declared as `object` singletons (accessed via `Name.member`).
+    pub objects: std::collections::HashSet<String>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
 }
@@ -165,6 +167,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty });
                         }
                         methods.insert("copy".into(), Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty });
+                    }
+                    if c.is_object {
+                        table.objects.insert(c.name.clone());
                     }
                     table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
                 }
@@ -550,6 +555,22 @@ impl<'a> Checker<'a> {
                 // (not a local/param) resolvable on the classpath.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if self.lookup(&cls).is_none() {
+                        // `Object.member(args)` — a singleton member call.
+                        if self.syms.objects.contains(&cls) {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            return match self.syms.classes.get(&cls).and_then(|c| c.methods.get(&name)).cloned() {
+                                Some(sig) => {
+                                    for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                        self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                    }
+                                    sig.ret
+                                }
+                                None => {
+                                    self.diags.error(span, format!("unresolved reference: {name}"));
+                                    Ty::Error
+                                }
+                            };
+                        }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                             return match resolve_java_static(&self.syms.classpath, &internal, &name, &arg_tys) {
