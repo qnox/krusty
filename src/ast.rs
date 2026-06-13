@@ -45,9 +45,9 @@ pub enum Expr {
     SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
     /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
     Throw { operand: ExprId },
-    /// `try { body } catch (e: T) { … } …` — the value is the body's, or a matching catch's. `finally`
-    /// is not supported (rejected). Each `body`/handler is a `Block` expr.
-    Try { body: ExprId, catches: Vec<CatchClause> },
+    /// `try { body } catch (e: T) { … } … [finally { … }]` — the value is the body's, or a matching
+    /// catch's; `finally` runs on every exit (for effect). Each `body`/handler/finally is a `Block`.
+    Try { body: ExprId, catches: Vec<CatchClause>, finally: Option<ExprId> },
     /// `operand is T` / `operand !is T` — a type test (`instanceof`), evaluates to `Boolean`.
     Is { operand: ExprId, ty: TypeRef, negated: bool },
     /// `operand as T` / `operand as? T` — a cast (`checkcast`). `nullable` ⇒ `as?` (instanceof,
@@ -394,12 +394,16 @@ impl File {
                 self.write_expr(*index, out);
                 out.push(')');
             }
-            Expr::Try { body, catches } => {
+            Expr::Try { body, catches, finally } => {
                 out.push_str("(try ");
                 self.write_expr(*body, out);
                 for c in catches {
                     out.push_str(&format!(" catch {}:{} ", c.name, c.ty.name));
                     self.write_expr(c.body, out);
+                }
+                if let Some(f) = finally {
+                    out.push_str(" finally ");
+                    self.write_expr(*f, out);
                 }
                 out.push(')');
             }

@@ -1153,6 +1153,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         let body = self.parse_block_expr();
         let mut catches = Vec::new();
+        let mut finally = None;
         loop {
             let save = self.i;
             self.skip_newlines();
@@ -1169,18 +1170,18 @@ impl<'a> Parser<'a> {
             } else if self.at(TokenKind::Ident) && self.text() == "finally" {
                 self.bump(); // 'finally'
                 self.skip_newlines();
-                let _ = self.parse_block_expr();
-                self.diags.error(start, "try/finally is not supported");
+                finally = Some(self.parse_block_expr());
+                break; // `finally` is always last
             } else {
                 self.i = save;
                 break;
             }
         }
-        if catches.is_empty() {
-            self.diags.error(start, "try without a catch is not supported");
+        if catches.is_empty() && finally.is_none() {
+            self.diags.error(start, "try without a catch or finally is not supported");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        self.file.add_expr(Expr::Try { body, catches }, Span::new(start.lo, end.hi))
+        self.file.add_expr(Expr::Try { body, catches, finally }, Span::new(start.lo, end.hi))
     }
 
     fn parse_when(&mut self) -> ExprId {
