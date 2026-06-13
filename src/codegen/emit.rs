@@ -1413,6 +1413,10 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr_as(value, ty, code, cw);
                     let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
                     code.putstatic(f, slot_words(ty) as i32);
+                } else if self.syms.props.contains_key(&name) {
+                    // top-level property write from an instance method/`init` → would target the
+                    // class, not the facade (and silently mis-store). Reject rather than miscompile.
+                    self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: top-level property access from a member method is not supported".to_string());
                 }
             }
             Stmt::AssignMember { receiver, name, value } => {
@@ -1881,6 +1885,20 @@ impl<'a> MethodEmitter<'a> {
                                     self.emit_lateinit_guard(&name, code, cw);
                                 }
                                 return;
+                            }
+                        }
+                        // `ObjectName.prop` — getstatic INSTANCE; invokevirtual getProp().
+                        if self.syms.objects.contains(&en) {
+                            if let Some(cs) = self.syms.classes.get(&en) {
+                                if let Some((ty, _)) = cs.prop(&name) {
+                                    let internal = cs.internal.clone();
+                                    let inst = cw.fieldref(&internal, "INSTANCE", &Ty::obj(&internal).descriptor());
+                                    code.getstatic(inst, 1);
+                                    let getter = format!("get{}", capitalize(&name));
+                                    let m = cw.methodref(&internal, &getter, &method_descriptor(&[], ty));
+                                    code.invokevirtual(m, 0, slot_words(ty) as i32);
+                                    return;
+                                }
                             }
                         }
                     }

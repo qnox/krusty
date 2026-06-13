@@ -657,21 +657,36 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'object'
         let name = self.ident_or_error("object name");
+        let _ = self.parse_supertypes(); // tolerate (ignore) an object's supertype list
         let mut methods = Vec::new();
+        let mut body_props: Vec<PropDecl> = Vec::new();
+        let mut init_order: Vec<ClassInit> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
             loop {
                 self.skip_newlines();
+                let mut mods = Vec::new();
                 if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                    self.skip_decl_prefix();
+                    mods = self.skip_decl_prefix();
                     self.skip_newlines();
                 }
+                let lateinit = mods.iter().any(|m| m == "lateinit");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwVal | TokenKind::KwVar => {
+                        let p = self.parse_top_property(lateinit, false);
+                        init_order.push(ClassInit::PropInit(body_props.len()));
+                        body_props.push(p);
+                    }
+                    TokenKind::Ident if self.text() == "init" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LBrace) => {
+                        self.bump();
+                        let block = self.parse_block_expr();
+                        init_order.push(ClassInit::Block(block));
+                    }
                     _ => {
-                        self.diags.error(self.tok().span, "v0: object bodies support only member 'fun' declarations");
+                        self.diags.error(self.tok().span, "krusty: object bodies support 'fun', 'val'/'var', and 'init' blocks");
                         self.bump();
                     }
                 }
@@ -679,7 +694,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

@@ -686,6 +686,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   on the JVM). Box conformance holds at **153 OK / 0 FAIL** (StringBuilder-heavy box tests typically
   need further stdlib surface to fully compile; this removes the construction blocker).
 
+## Phase 51 — `object` bodies with properties  ✅
+- ✅ `object` bodies now accept `val`/`var`/computed properties and `init` blocks (in addition to
+  `fun`): backing fields + accessors on the singleton, initialized in its `<init>` (run from
+  `<clinit>` when `INSTANCE` is built). `ObjectName.prop` reads via `getstatic INSTANCE;
+  invokevirtual getProp()` (checker + codegen). Optional supertype list is tolerated.
+- ✅ Fixed a latent miscompile this exposed: a top-level property *write* from an instance method /
+  `init` block was silently dropped (it would target the class, not the facade) — now rejected, like
+  the read path (`const val` not-triggering-init semantics aren't modeled, so such files skip).
+- ✅ `tests/object_props_e2e.rs` (object val/var/computed + mutation via a method, on the JVM). Box
+  conformance **158 OK / 0 FAIL** (up from 153).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
