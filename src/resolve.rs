@@ -303,15 +303,21 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
-    /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor).
-    fn resolve_ty(&self, r: &TypeRef) -> Ty {
-        if let Some(t) = Ty::from_name(&r.name) {
-            return t;
+    /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor), but a nullable
+    /// *primitive* (`Char?`, `Int?`, …) would need boxing — rejected (the file is skipped).
+    fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
+        let base = if let Some(t) = Ty::from_name(&r.name) {
+            t
+        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+            Ty::obj(&cs.internal)
+        } else {
+            Ty::Error
+        };
+        if r.nullable && !base.is_reference() && base != Ty::Error {
+            self.diags.error(r.span, format!("nullable primitive type '{}?' is not supported", r.name));
+            return Ty::Error;
         }
-        if let Some(cs) = self.syms.classes.get(&r.name) {
-            return Ty::obj(&cs.internal);
-        }
-        Ty::Error
+        base
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
@@ -378,6 +384,7 @@ impl<'a> Checker<'a> {
             Expr::DoubleLit(_) => Ty::Double,
             Expr::BoolLit(_) => Ty::Boolean,
             Expr::StringLit(_) => Ty::String,
+            Expr::CharLit(_) => Ty::Char,
             Expr::NullLit => Ty::Null,
             Expr::NotNull { operand } => self.expr(operand), // value with the same (non-null) type
             Expr::Elvis { lhs, rhs } => {
@@ -509,7 +516,7 @@ impl<'a> Checker<'a> {
                 Ty::promote(lt, rt).unwrap_or_else(|| self.bin_err(op, lt, rt, span))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                if Ty::promote(lt, rt).is_some() {
+                if Ty::promote(lt, rt).is_some() || (lt == Ty::Char && rt == Ty::Char) {
                     Ty::Boolean
                 } else {
                     self.bin_err(op, lt, rt, span)

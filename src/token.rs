@@ -10,6 +10,7 @@ pub enum TokenKind {
     LongLit,   // 123L
     DoubleLit, // 1.5
     StringLit, // "..."
+    CharLit,   // 'x'
     // keywords
     KwFun,
     KwClass,

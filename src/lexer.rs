@@ -85,6 +85,7 @@ impl<'a> Lexer<'a> {
             b'&' if self.peek2() == b'&' => self.two(TokenKind::AndAnd),
             b'|' if self.peek2() == b'|' => self.two(TokenKind::OrOr),
             b'"' => return self.string(lo),
+            b'\'' => return self.char_lit(lo),
             b'0'..=b'9' => return self.number(lo),
             b'.' => return self.number(lo), // .5
             c if is_ident_start(c) => return self.ident(lo),
@@ -158,6 +159,23 @@ impl<'a> Lexer<'a> {
             TokenKind::IntLit
         };
         Token { kind, span: Span::new(lo, self.i as u32) }
+    }
+
+    fn char_lit(&mut self, lo: u32) -> Token {
+        self.i += 1; // opening quote
+        while self.i < self.b.len() && self.b[self.i] != b'\'' {
+            if self.b[self.i] == b'\\' && self.i + 1 < self.b.len() {
+                self.i += 2; // escape
+            } else {
+                self.i += 1;
+            }
+        }
+        if self.i < self.b.len() {
+            self.i += 1; // closing quote
+        } else {
+            self.diags.error(Span::new(lo, self.i as u32), "unterminated character literal");
+        }
+        Token { kind: TokenKind::CharLit, span: Span::new(lo, self.i as u32) }
     }
 
     fn string(&mut self, lo: u32) -> Token {
