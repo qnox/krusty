@@ -144,6 +144,26 @@ pub fn emit_class(class: &ClassDecl, internal_name: &str, _syms: &SymbolTable) -
         }
     }
 
+    // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
+    let ctor_params: Vec<(String, Ty)> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+    let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
+    let prop_metas: Vec<crate::metadata::class_builder::PropMeta> = props
+        .iter()
+        .map(|(p, t)| {
+            let cap = capitalize(&p.name);
+            crate::metadata::class_builder::PropMeta {
+                name: p.name.clone(),
+                ty: *t,
+                is_var: p.is_var,
+                getter: (format!("get{cap}"), method_descriptor(&[], *t)),
+                setter: if p.is_var { Some((format!("set{cap}"), method_descriptor(&[*t], Ty::Unit))) } else { None },
+            }
+        })
+        .collect();
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas);
+    let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
+    cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
+
     cw.finish()
 }
 
