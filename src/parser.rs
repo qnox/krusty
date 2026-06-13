@@ -894,6 +894,13 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> ExprId {
         let span = self.tok().span;
+        // `try { … } catch (e: T) { … }` — a soft keyword followed by a block.
+        if self.at(TokenKind::Ident)
+            && self.text() == "try"
+            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LBrace)
+        {
+            return self.parse_try();
+        }
         match self.kind() {
             TokenKind::IntLit => {
                 let v = self.text().parse::<i64>().unwrap_or(0);
@@ -1019,6 +1026,44 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_expr(Expr::Template(parts), Span::new(start.lo, end.hi))
+    }
+
+    /// `try { … } catch (e: T) { … } …` — krusty supports one or more `catch` clauses; `finally` is
+    /// rejected (it needs duplicated-block / catch-all-rethrow lowering not yet implemented).
+    fn parse_try(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // 'try'
+        self.skip_newlines();
+        let body = self.parse_block_expr();
+        let mut catches = Vec::new();
+        loop {
+            let save = self.i;
+            self.skip_newlines();
+            if self.at(TokenKind::Ident) && self.text() == "catch" {
+                self.bump(); // 'catch'
+                self.expect(TokenKind::LParen, "'('");
+                let name = self.ident_or_error("catch parameter name");
+                self.expect(TokenKind::Colon, "':'");
+                let ty = self.parse_type();
+                self.expect(TokenKind::RParen, "')'");
+                self.skip_newlines();
+                let cbody = self.parse_block_expr();
+                catches.push(CatchClause { name, ty, body: cbody });
+            } else if self.at(TokenKind::Ident) && self.text() == "finally" {
+                self.bump(); // 'finally'
+                self.skip_newlines();
+                let _ = self.parse_block_expr();
+                self.diags.error(start, "try/finally is not supported");
+            } else {
+                self.i = save;
+                break;
+            }
+        }
+        if catches.is_empty() {
+            self.diags.error(start, "try without a catch is not supported");
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        self.file.add_expr(Expr::Try { body, catches }, Span::new(start.lo, end.hi))
     }
 
     fn parse_when(&mut self) -> ExprId {

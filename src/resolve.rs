@@ -631,6 +631,15 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The JVM internal name of a `catch` clause's exception type: a common JDK exception, an
+    /// imported class, or a declared class. `None` if krusty can't resolve it to a concrete class.
+    fn catch_internal(&self, name: &str) -> Option<String> {
+        builtin_exception(name)
+            .map(|s| s.to_string())
+            .or_else(|| self.imports.get(name).cloned())
+            .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+    }
+
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
     fn resolve_ty_no_diag(&self, r: &TypeRef) -> Ty {
         if let Some(t) = Ty::from_name(&r.name) {
@@ -793,6 +802,25 @@ impl<'a> Checker<'a> {
             Expr::Throw { operand } => {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
+            }
+            Expr::Try { body, catches } => {
+                let bt = self.expr(body);
+                let mut result = bt;
+                for c in &catches {
+                    let cty = match self.catch_internal(&c.ty.name) {
+                        Some(i) => Ty::obj(&i),
+                        None => {
+                            self.diags.error(c.ty.span, "krusty: catch type is not a known exception class".to_string());
+                            Ty::Error
+                        }
+                    };
+                    self.push_scope();
+                    self.declare(&c.name, cty, false);
+                    let ht = self.expr(c.body);
+                    self.pop_scope();
+                    result = self.join(result, ht, self.span(c.body));
+                }
+                result
             }
             Expr::Is { operand, ty, negated: _ } => {
                 let ot = self.expr(operand);

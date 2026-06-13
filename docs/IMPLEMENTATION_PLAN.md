@@ -482,6 +482,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/throw_e2e.rs` (throw as guard/body, exception thrown with message preserved, on the JVM;
   inline-class rejection). Box conformance **86 OK / 0 FAIL** (up from 81).
 
+## Phase 33 — `try`/`catch`  ✅
+- ✅ Added a `Code` exception table to the class-file writer (`CodeBuilder::add_exception` resolves
+  label offsets in `link`). `try { body } catch (e: T) { … } …` guards the body range; each handler
+  enters with the exception on the stack (`set_stack(1)`), stores it into the catch variable's slot,
+  binds the variable for the handler body, and produces the result. Multiple catches dispatch in
+  declaration order (place the subtype first). `try` is an expression (value = body or a catch body).
+- ✅ Catch types resolve via `catch_internal` (a JDK exception / import / declared class); an
+  unresolvable catch type is rejected. `finally` is rejected (needs duplicated-block lowering).
+- ✅ Soundness guard: a `try` is only emitted where the operand stack is empty at entry (statement,
+  initializer, `return`, argument). Elsewhere (`"" + try { … }`) an exception unwind would clear
+  partially-computed stack values, so it is rejected (skipped) — never miscompiled.
+- ✅ `tests/try_catch_e2e.rs` (try-as-expression + multi-catch hierarchy on the JVM; stack-nonempty
+  and `finally` rejection). Box conformance **91 OK / 0 FAIL** (up from 86).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
