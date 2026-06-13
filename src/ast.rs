@@ -137,10 +137,21 @@ pub struct ClassDecl {
     pub span: Span,
 }
 
+/// A top-level `val`/`var` property: `val name: Type = init`.
+#[derive(Clone, Debug)]
+pub struct PropDecl {
+    pub name: String,
+    pub ty: Option<TypeRef>,
+    pub is_var: bool,
+    pub init: ExprId,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub enum Decl {
     Fun(FunDecl),
     Class(ClassDecl),
+    Property(PropDecl),
 }
 
 /// One parsed source file: its package, and arenas for every node kind.
@@ -201,6 +212,15 @@ impl File {
 
     fn write_decl(&self, id: DeclId, out: &mut String) {
         match self.decl(id) {
+            Decl::Property(p) => {
+                out.push_str(&format!("({} {}", if p.is_var { "var" } else { "val" }, p.name));
+                if let Some(t) = &p.ty {
+                    out.push_str(&format!(" :{}", t.name));
+                }
+                out.push(' ');
+                self.write_expr(p.init, out);
+                out.push(')');
+            }
             Decl::Class(c) => {
                 out.push_str(&format!("(class {}", c.name));
                 for p in &c.props {

@@ -40,6 +40,8 @@ pub struct SymbolTable {
     pub funs: HashMap<String, Signature>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
+    /// Top-level properties (name → type, is_var), backed by static fields on the file facade.
+    pub props: HashMap<String, (Ty, bool)>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
 }
@@ -166,10 +168,30 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     }
                     table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
                 }
+                Decl::Property(p) => {
+                    // Type from the annotation, else a light inference from a literal initializer.
+                    let ty = match &p.ty {
+                        Some(r) => ty_of_ref(r, &class_names, diags),
+                        None => infer_lit_ty(file, p.init),
+                    };
+                    table.props.insert(p.name.clone(), (ty, p.is_var));
+                }
             }
         }
     }
     table
+}
+
+/// Best-effort type of a simple literal initializer (for an unannotated top-level property).
+fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
+    match file.expr(e) {
+        Expr::IntLit(_) => Ty::Int,
+        Expr::LongLit(_) => Ty::Long,
+        Expr::DoubleLit(_) => Ty::Double,
+        Expr::BoolLit(_) => Ty::Boolean,
+        Expr::StringLit(_) => Ty::String,
+        _ => Ty::Error,
+    }
 }
 
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, or a declared class
@@ -228,6 +250,14 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
                 for m in &cl.methods {
                     c.check_method(m, &props);
+                }
+            }
+            Decl::Property(p) => {
+                let it = c.expr(p.init);
+                if let Some((declared, _)) = syms.props.get(&p.name).copied().filter(|(t, _)| *t != Ty::Error) {
+                    if p.ty.is_some() {
+                        c.expect_assignable(declared, it, c.span(p.init), "property initializer");
+                    }
                 }
             }
         }
@@ -357,10 +387,13 @@ impl<'a> Checker<'a> {
             }
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
-                None => {
-                    self.diags.error(self.span(e), format!("unresolved reference '{n}'"));
-                    Ty::Error
-                }
+                None => match self.syms.props.get(&n) {
+                    Some(&(ty, _)) => ty, // top-level property
+                    None => {
+                        self.diags.error(self.span(e), format!("unresolved reference '{n}'"));
+                        Ty::Error
+                    }
+                },
             },
             Expr::Unary { op, operand } => {
                 let ot = self.expr(operand);
@@ -650,9 +683,17 @@ impl<'a> Checker<'a> {
                         }
                         self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
                     }
-                    None => {
-                        self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference '{name}'"));
-                    }
+                    None => match self.syms.props.get(&name).copied() {
+                        Some((lty, is_var)) => {
+                            if !is_var {
+                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' {name} cannot be reassigned"));
+                            }
+                            self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
+                        }
+                        None => {
+                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference '{name}'"));
+                        }
+                    },
                 }
             }
             Stmt::Return(e) => {

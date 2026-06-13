@@ -103,13 +103,57 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     p
 }
 
+/// A top-level property for the package metadata (`Package.property` = field 4).
+pub struct PropMeta {
+    pub name: String,
+    pub ty: Ty,
+    pub is_var: bool,
+    pub getter: (String, String),
+    pub setter: Option<(String, String)>,
+}
+
+/// `Package` property flags kotlinc emits for top-level `val`/`var` (public, with accessors).
+const PKG_VAL_FLAGS: u64 = 8710;
+const PKG_VAR_FLAGS: u64 = 1798;
+const DECLARES_DEFAULT_VALUE: u64 = 0; // (unused here; kept for symmetry)
+
+fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
+    let mut p = Pb::new();
+    p.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1
+    p.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
+    p
+}
+
+fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
+    let _ = DECLARES_DEFAULT_VALUE;
+    let mut p = Pb::new();
+    p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
+    let ret = type_pb(st, m.ty);
+    p.field_message(3, &ret); // Property.return_type = 3
+    p.field_varint(11, if m.is_var { PKG_VAR_FLAGS } else { PKG_VAL_FLAGS }); // flags
+    let mut jvm = Pb::new();
+    jvm.field_message(1, &Pb::new()); // field (empty → derived)
+    let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
+    jvm.field_message(3, &getter);
+    if let Some((sn, sd)) = &m.setter {
+        let setter = jvm_method_sig(st, sn, sd);
+        jvm.field_message(4, &setter);
+    }
+    p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+    p
+}
+
 /// Build `(d1 bytes, d2 strings)` for a file facade. `d1 = delimited(StringTableTypes) + Package`.
-pub fn build_package(funcs: &[FnMeta]) -> (Vec<u8>, Vec<String>) {
+pub fn build_package(funcs: &[FnMeta], props: &[PropMeta]) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
     let mut package = Pb::new();
     for f in funcs {
         let fp = function_pb(&mut st, f);
         package.repeated_message(3, &fp); // Package.function = 3
+    }
+    for m in props {
+        let pp = property_pb(&mut st, m);
+        package.repeated_message(4, &pp); // Package.property = 4
     }
     let stt = st.serialize_types();
 
@@ -144,7 +188,7 @@ mod tests {
             name: "f".into(),
             params: vec![("a".into(), Ty::Int)],
             ret: Ty::Int,
-        }]);
+        }], &[]);
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
     }
@@ -156,7 +200,7 @@ mod tests {
             name: "g".into(),
             params: vec![("x".into(), Ty::Int)],
             ret: Ty::Int,
-        }]);
+        }], &[]);
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }
 }

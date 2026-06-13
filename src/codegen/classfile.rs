@@ -554,6 +554,9 @@ impl CodeBuilder {
     pub fn getstatic(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb2, fieldref, words);
     }
+    pub fn putstatic(&mut self, fieldref: u16, words: i32) {
+        self.op_u2(0xb3, fieldref, -words);
+    }
     /// `getfield`: pops objectref, pushes the field value (`words` wide).
     pub fn getfield(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb4, fieldref, words - 1);

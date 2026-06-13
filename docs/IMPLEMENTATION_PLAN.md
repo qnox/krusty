@@ -260,6 +260,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `.toString()` on a *reference* receiver now `invokevirtual`s the real `toString` (was a no-op).
 - ✅ Box conformance: **31 compiled / 31 OK / 0 FAIL** (up from 27); full suite 96 green.
 
+## Phase 15 — Top-level `val`/`var` properties  ✅
+- ✅ Data-driven (≈416 first-errors). Top-level properties → a `private static` backing field
+  (`final` for `val`) + `public static final getX`/`setX` accessors on the file facade, initialized
+  in `<clinit>`. References resolve to `getstatic`/`putstatic`; ABI matches kotlinc.
+- ✅ `Package.property` (f4) metadata (name/type/flags/JVM-sig; `val`=8710, `var`=1798) so a Kotlin
+  consumer can `import` the properties — verified round-trip (`hi:6`). `tests/top_level_property_e2e.rs`.
+- ✅ Conformance fixes (box harness): `Unit`/unknown-typed properties (`val x = unitCall()`) are
+  rejected (no void-descriptor field → no stack underflow); the harness now also skips `// MODULE:`
+  multi-module tests (out of single-translation-unit scope).
+- ✅ Box conformance: **34 compiled / 34 OK / 0 FAIL** (up from 31); full suite 97 green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

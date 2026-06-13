@@ -94,8 +94,9 @@ fn kotlin_codegen_box_conformance() {
 
     for (i, file) in files.iter().enumerate() {
         let src = fs::read_to_string(file).unwrap_or_default();
-        // Multi-file tests use `// FILE:` markers — out of scope for the single-file driver.
-        if src.contains("// FILE:") || !src.contains("fun box()") {
+        // Multi-file (`// FILE:`) and multi-module (`// MODULE:`) tests are out of scope for the
+        // single-translation-unit driver.
+        if src.contains("// FILE:") || src.contains("// MODULE:") || !src.contains("fun box()") {
             skipped += 1;
             continue;
         }
