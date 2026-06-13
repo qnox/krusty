@@ -80,7 +80,8 @@ fn foreach_run() {
 }
 
 #[test]
-fn for_over_nonarray_is_rejected() {
-    let (_b, errs) = compile("fun box(): String { for (c in \"abc\") {}\n return \"OK\" }", "BadKt");
-    assert!(errs.iter().any(|m| m.contains("'for' over")), "expected non-array for rejection, got {errs:?}");
+fn for_over_unsupported_iterable_is_rejected() {
+    // A range object / collection (here a class instance) is neither an array nor a String → rejected.
+    let (_b, errs) = compile("class C\nfun box(): String { for (x in C()) {}\n return \"OK\" }", "BadKt");
+    assert!(errs.iter().any(|m| m.contains("'for' over")), "expected unsupported-iterable rejection, got {errs:?}");
 }

@@ -1481,12 +1481,14 @@ impl<'a> MethodEmitter<'a> {
                 code.bind(end);
             }
             Stmt::ForEach { name, iterable, body } => {
-                // Lower `for (x in arr)` to an index loop: arr, len, i; x = arr[i].
-                let elem = self.info.ty(iterable).array_elem().unwrap_or(Ty::Error);
+                // Lower `for (x in arr)` / `for (c in str)` to an index loop.
+                let iter_ty = self.info.ty(iterable);
+                let is_string = iter_ty == Ty::String;
+                let elem = if is_string { Ty::Char } else { iter_ty.array_elem().unwrap_or(Ty::Error) };
                 self.emit_expr(iterable, code, cw);
-                let arr_slot = self.fresh_slot(Ty::obj("java/lang/Object"));
-                code.ensure_locals(arr_slot + 1);
-                code.astore(arr_slot);
+                let recv_slot = self.fresh_slot(Ty::obj("java/lang/Object"));
+                code.ensure_locals(recv_slot + 1);
+                code.astore(recv_slot);
                 let i_slot = self.fresh_slot(Ty::Int);
                 code.ensure_locals(i_slot + 1);
                 code.push_int(0, cw);
@@ -1497,13 +1499,23 @@ impl<'a> MethodEmitter<'a> {
                 let end = code.new_label();
                 code.bind(start);
                 code.iload(i_slot);
-                code.aload(arr_slot);
-                code.arraylength();
-                code.if_icmpge(end); // i >= arr.length → done
-                code.aload(arr_slot);
+                code.aload(recv_slot);
+                if is_string {
+                    let m = cw.methodref("java/lang/String", "length", "()I");
+                    code.invokevirtual(m, 0, 1);
+                } else {
+                    code.arraylength();
+                }
+                code.if_icmpge(end); // i >= size → done
+                code.aload(recv_slot);
                 code.iload(i_slot);
-                let (lop, lwords) = array_load_op(elem);
-                code.array_load(lop, lwords);
+                if is_string {
+                    let m = cw.methodref("java/lang/String", "charAt", "(I)C");
+                    code.invokevirtual(m, 1, 1);
+                } else {
+                    let (lop, lwords) = array_load_op(elem);
+                    code.array_load(lop, lwords);
+                }
                 store_local(elem, x_slot, code);
                 self.loop_labels.push((cont, end));
                 self.emit_block_discard(body, code, cw);

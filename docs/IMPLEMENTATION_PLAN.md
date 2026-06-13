@@ -645,6 +645,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Box conformance holds at **147 OK / 0 FAIL** (also removes a latent mis-handling where `vararg` was
   silently skipped and the parameter mis-typed as its element type).
 
+## Phase 47 — String iteration  ✅
+- ✅ `for (c in str)` iterates a String's characters (`c: Char`), lowered to an index loop over
+  `String.length()` / `String.charAt(i)` (the same `ForEach` machinery as arrays, so it composes
+  with `break`/`continue`). Non-array / non-String iterables remain rejected.
+- ✅ (Verified `when` with comma conditions — `1, 2, 3 -> …` — already works via the existing
+  multi-condition arm.)
+- ✅ `tests/string_iter_e2e.rs` (char counting, accumulation, break, on the JVM). Box conformance
+  **148 OK / 0 FAIL** (up from 147).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
