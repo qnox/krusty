@@ -9,8 +9,13 @@ pub enum TokenKind {
     IntLit,    // 123
     LongLit,   // 123L
     DoubleLit, // 1.5
-    StringLit, // "..."
+    StringLit, // "..." (no interpolation)
     CharLit,   // 'x'
+    // string templates: TemplateStart StrChunk (Dollar Ident | Dollar LBrace expr RBrace | StrChunk)* TemplateEnd
+    TemplateStart,
+    TemplateEnd,
+    StrChunk, // a literal text piece of a template (text() is the raw chunk)
+    Dollar,   // `$` before an interpolation
     // keywords
     KwFun,
     KwClass,

@@ -1017,6 +1017,25 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr_as(rhs, result, code, cw);
                 code.bind(end);
             }
+            Expr::Template(parts) => {
+                let sb = cw.class_ref("java/lang/StringBuilder");
+                let ctor = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                code.new_obj(sb);
+                code.dup();
+                code.invokespecial(ctor, 0, 0);
+                for p in &parts {
+                    match p {
+                        TemplatePart::Str(s) => {
+                            code.push_string(s, cw);
+                            let m = cw.methodref("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
+                            code.invokevirtual(m, 1, 1);
+                        }
+                        TemplatePart::Expr(pe) => self.emit_append(*pe, code, cw),
+                    }
+                }
+                let tos = cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+                code.invokevirtual(tos, 0, 1);
+            }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
                     load_local(ty, slot, code);
@@ -1414,7 +1433,8 @@ impl<'a> MethodEmitter<'a> {
         let t = self.info.ty(e);
         self.emit_expr(e, code, cw);
         let (desc, words) = match t {
-            Ty::Int | Ty::Boolean => ("(I)Ljava/lang/StringBuilder;", 1),
+            Ty::Int => ("(I)Ljava/lang/StringBuilder;", 1),
+            Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
             Ty::Char => ("(C)Ljava/lang/StringBuilder;", 1),
             Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
             Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),

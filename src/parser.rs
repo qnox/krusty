@@ -796,6 +796,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::CharLit(c), span)
             }
+            TokenKind::TemplateStart => self.parse_template(),
             TokenKind::KwTrue => {
                 self.bump();
                 self.file.add_expr(Expr::BoolLit(true), span)
@@ -852,6 +853,45 @@ impl<'a> Parser<'a> {
         };
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_expr(Expr::If { cond, then_branch, else_branch }, Span::new(start.lo, end.hi))
+    }
+
+    /// Parse a string template: `TemplateStart (StrChunk | Dollar Ident | Dollar { expr })* TemplateEnd`.
+    fn parse_template(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // TemplateStart
+        let mut parts = Vec::new();
+        loop {
+            match self.kind() {
+                TokenKind::StrChunk => {
+                    parts.push(TemplatePart::Str(unescape_chunk(self.text())));
+                    self.bump();
+                }
+                TokenKind::Dollar => {
+                    self.bump();
+                    if self.eat(TokenKind::LBrace) {
+                        let e = self.parse_expr();
+                        self.expect(TokenKind::RBrace, "'}'");
+                        parts.push(TemplatePart::Expr(e));
+                    } else if self.at(TokenKind::Ident) {
+                        let sp = self.tok().span;
+                        let n = self.text().to_string();
+                        self.bump();
+                        let e = self.file.add_expr(Expr::Name(n), sp);
+                        parts.push(TemplatePart::Expr(e));
+                    }
+                }
+                TokenKind::TemplateEnd => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                _ => {
+                    self.bump(); // recover
+                }
+            }
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        self.file.add_expr(Expr::Template(parts), Span::new(start.lo, end.hi))
     }
 
     fn parse_when(&mut self) -> ExprId {
@@ -991,6 +1031,29 @@ fn unquote_char(raw: &str) -> char {
         Some(c) => c,
         None => '\0',
     }
+}
+
+/// Unescape a literal chunk of a string template (no surrounding quotes).
+fn unescape_chunk(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('$') => out.push('$'),
+                Some(other) => out.push(other),
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn unquote(raw: &str) -> String {

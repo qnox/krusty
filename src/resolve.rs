@@ -501,6 +501,14 @@ impl<'a> Checker<'a> {
                     self.join(lt, rt, self.span(e))
                 }
             }
+            Expr::Template(parts) => {
+                for p in &parts {
+                    if let TemplatePart::Expr(pe) = p {
+                        self.expr(*pe);
+                    }
+                }
+                Ty::String
+            }
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
                 None => match self.syms.props.get(&n) {
