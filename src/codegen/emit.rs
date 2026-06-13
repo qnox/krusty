@@ -143,6 +143,53 @@ pub fn emit_file(
     cw.finish()
 }
 
+/// Lower a (v0) `enum class Name { A, B }` to a class extending `java/lang/Enum`: one
+/// `public static final` field per entry, a private `(String,int)` constructor calling
+/// `Enum.<init>`, and a `<clinit>` that constructs each entry. (`values()`/`valueOf()`/`$VALUES`
+/// are deferred — programs needing them are skipped, not miscompiled.)
+fn emit_enum(class: &ClassDecl, internal: &str) -> Vec<u8> {
+    let mut cw = ClassWriter::new(internal, "java/lang/Enum");
+    let self_desc = Ty::obj(internal).descriptor();
+
+    for entry in &class.enum_entries {
+        cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, entry, &self_desc);
+    }
+
+    // private <init>(String name, int ordinal) { super(name, ordinal); }
+    let mut ctor = CodeBuilder::new(3);
+    ctor.aload(0);
+    ctor.aload(1);
+    ctor.iload(2);
+    let enum_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    ctor.invokespecial(enum_init, 2, 0);
+    ctor.ret_void();
+    ctor.link();
+    cw.add_method(ACC_PRIVATE, "<init>", "(Ljava/lang/String;I)V", &ctor);
+
+    // <clinit>: each entry = new Name("ENTRY", ordinal).
+    let mut cl = CodeBuilder::new(0);
+    let cidx = cw.class_ref(internal);
+    let self_init = cw.methodref(internal, "<init>", "(Ljava/lang/String;I)V");
+    for (i, entry) in class.enum_entries.iter().enumerate() {
+        cl.new_obj(cidx);
+        cl.dup();
+        cl.push_string(entry, &mut cw);
+        cl.push_int(i as i32, &mut cw);
+        cl.invokespecial(self_init, 2, 0);
+        let f = cw.fieldref(internal, entry, &self_desc);
+        cl.putstatic(f, 1);
+    }
+    cl.ret_void();
+    cl.link();
+    cw.add_method(ACC_STATIC, "<clinit>", "()V", &cl);
+
+    // @kotlin.Metadata (kind=1, enum flags) — minimal; entries are JVM static fields.
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &[], &[], &class.enum_entries, 32902);
+    let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
+    cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
+    cw.finish()
+}
+
 /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
     Ty::from_name(&r.name)
@@ -170,6 +217,9 @@ pub fn emit_class(
     syms: &SymbolTable,
     diags: &mut DiagSink,
 ) -> Vec<u8> {
+    if class.is_enum {
+        return emit_enum(class, internal_name);
+    }
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
 
     // Resolve property types (primitives/String or declared class reference types).
@@ -291,7 +341,7 @@ pub fn emit_class(
         })
         .collect();
     let class_flags = if class.is_data { 1030 } else if class.is_object { 326 } else { 0 };
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas, class_flags);
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas, &[], class_flags);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
 
@@ -737,9 +787,15 @@ impl<'a> MethodEmitter<'a> {
         match self.file.stmt(s).clone() {
             Stmt::Local { name, ty, init, .. } => {
                 let lty = ty.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or_else(|| self.info.ty(init));
-                self.emit_expr_as(init, lty, code, cw);
-                let slot = self.alloc_slot(&name, lty);
-                self.store(lty, slot, code);
+                // A `Unit`-typed local holds no JVM value: evaluate the initializer for its effect.
+                if lty == Ty::Unit {
+                    self.emit_expr(init, code, cw);
+                    self.discard(self.info.ty(init), code);
+                } else {
+                    self.emit_expr_as(init, lty, code, cw);
+                    let slot = self.alloc_slot(&name, lty);
+                    self.store(lty, slot, code);
+                }
             }
             Stmt::Assign { name, value } => {
                 if let Some(&(slot, ty)) = self.slots.get(&name) {
@@ -926,11 +982,37 @@ impl<'a> MethodEmitter<'a> {
             }
             Expr::Call { callee, args } => self.emit_call(e, callee, &args, code, cw),
             Expr::Member { receiver, name } => {
+                // `EnumName.ENTRY` → getstatic the entry's static field.
+                if let Expr::Name(en) = self.file.expr(receiver).clone() {
+                    if !self.slots.contains_key(&en) {
+                        if let Some(entries) = self.syms.enums.get(&en) {
+                            if entries.iter().any(|x| x == &name) {
+                                let internal = self.syms.classes.get(&en).map(|c| c.internal.clone()).unwrap_or(en.clone());
+                                let f = cw.fieldref(&internal, &name, &Ty::obj(&internal).descriptor());
+                                code.getstatic(f, 1);
+                                return;
+                            }
+                        }
+                    }
+                }
                 if name == "length" {
                     self.emit_expr(receiver, code, cw);
                     let m = cw.methodref("java/lang/String", "length", "()I");
                     code.invokevirtual(m, 0, 1);
                 } else if let Ty::Obj(internal) = self.info.ty(receiver) {
+                    // Enum `.name` / `.ordinal` → java.lang.Enum accessors.
+                    if (name == "name" || name == "ordinal")
+                        && self.syms.enums.keys().any(|en| self.syms.classes.get(en).map_or(false, |c| c.internal == internal))
+                    {
+                        self.emit_expr(receiver, code, cw);
+                        let (m, rw) = if name == "name" {
+                            (cw.methodref("java/lang/Enum", "name", "()Ljava/lang/String;"), 1)
+                        } else {
+                            (cw.methodref("java/lang/Enum", "ordinal", "()I"), 1)
+                        };
+                        code.invokevirtual(m, 0, rw);
+                        return;
+                    }
                     // Property read on a class value: `p.prop` → invokevirtual get<Prop>().
                     let pty = self
                         .syms
@@ -1014,7 +1096,11 @@ impl<'a> MethodEmitter<'a> {
             code.goto(next); // no condition matched → try the next arm
             code.bind(body);
             emit_body(self, arm.body, code, cw);
-            code.goto(end);
+            // Skip the (dead) jump to `end` if the body already diverges (e.g. all arms `return`),
+            // which would otherwise leave a branch targeting the method end.
+            if !self.expr_diverges(arm.body) {
+                code.goto(end);
+            }
             code.bind(next);
         }
         // Falls here when nothing matched: the `else` body (if any) produces the value.
@@ -1022,6 +1108,23 @@ impl<'a> MethodEmitter<'a> {
             emit_body(self, arm.body, code, cw);
         }
         code.bind(end);
+    }
+
+    /// Conservatively: does evaluating `e` always transfer control away (never fall through)?
+    /// True for a `return`, or a block whose last statement diverges.
+    fn expr_diverges(&self, e: ExprId) -> bool {
+        match self.file.expr(e) {
+            Expr::Block { stmts, trailing } => {
+                if let Some(te) = trailing {
+                    self.expr_diverges(*te)
+                } else if let Some(&last) = stmts.last() {
+                    matches!(self.file.stmt(last), Stmt::Return(_))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Emit `if (subject == cond) goto target`, with subject in local `slot` of type `st`.

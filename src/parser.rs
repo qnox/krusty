@@ -128,6 +128,14 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
+                TokenKind::Ident
+                    if self.text() == "enum" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                {
+                    let d = self.parse_enum();
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
                     self.bump(); // recover
@@ -186,6 +194,48 @@ impl<'a> Parser<'a> {
         let init = self.parse_expr();
         let end = self.t[self.i.saturating_sub(1)].span;
         PropDecl { name, ty, is_var, init, span: Span::new(start.lo, end.hi) }
+    }
+
+    /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
+    fn parse_enum(&mut self) -> ClassDecl {
+        let start = self.tok().span;
+        self.bump(); // 'enum'
+        self.bump(); // 'class'
+        let name = self.ident_or_error("enum name");
+        let mut entries = Vec::new();
+        self.skip_newlines();
+        if self.eat(TokenKind::LBrace) {
+            self.skip_newlines();
+            while self.at(TokenKind::Ident) {
+                entries.push(self.text().to_string());
+                self.bump();
+                self.skip_newlines();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.skip_newlines();
+            // v0: only simple entries; a `;` + members or entry args make it unsupported.
+            if !self.at(TokenKind::RBrace) {
+                self.diags.error(self.tok().span, "v0 enum: only simple entries are supported");
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.bump();
+                }
+            }
+            self.expect(TokenKind::RBrace, "'}'");
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        ClassDecl {
+            name,
+            props: Vec::new(),
+            methods: Vec::new(),
+            is_data: false,
+            is_object: false,
+            is_enum: true,
+            enum_entries: entries,
+            span: Span::new(start.lo, end.hi),
+        }
     }
 
     fn parse_qualified_name(&mut self) -> String {
@@ -321,7 +371,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, is_data: false, is_object: false, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
@@ -351,7 +401,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

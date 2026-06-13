@@ -138,6 +138,7 @@ pub fn build_class(
     ctor_desc: &str,
     props: &[PropMeta],
     methods: &[FnMeta],
+    enum_entries: &[String],
     class_flags: u64,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::default();
@@ -213,6 +214,13 @@ pub fn build_class(
         class.repeated_message(10, &prop);
     }
 
+    // f13 = enum entries (`EnumEntry { name = f1 }`).
+    for entry in enum_entries {
+        let mut ee = Pb::new();
+        ee.field_varint(1, st.local(entry) as u64);
+        class.repeated_message(13, &ee);
+    }
+
     let stt = st.serialize_types();
     let mut bytes = vec![0x00u8]; // UTF8 mode marker
     let mut prefix = Pb::new();
@@ -243,6 +251,7 @@ mod tests {
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },
             ],
+            &[],
             &[],
             0,
         );
