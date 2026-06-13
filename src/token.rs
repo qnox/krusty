@@ -9,6 +9,7 @@ pub enum TokenKind {
     IntLit,    // 123
     LongLit,   // 123L
     DoubleLit, // 1.5
+    FloatLit,  // 1.5f / 1f
     StringLit, // "..." (no interpolation)
     CharLit,   // 'x'
     // string templates: TemplateStart StrChunk (Dollar Ident | Dollar LBrace expr RBrace | StrChunk)* TemplateEnd

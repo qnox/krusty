@@ -529,6 +529,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/super_call_e2e.rs` (override delegating via `super`, called both directly and through the
   base-typed reference, on the JVM). Box conformance **105 OK / 0 FAIL** (up from 104).
 
+## Phase 37 — `Float` + numeric conversions  ✅
+- ✅ `Ty::Float` (descriptor `F`, promotion rank Int<Long<Float<Double): literal lexing `1.5f`/`1f`
+  (and an optional `d`/`D` on a Double), `Expr::FloatLit`, and the full `fload`/`fstore`/`freturn`/
+  `fadd`/`fsub`/`fmul`/`fdiv`/`frem`/`fneg`/`fcmpg` opcode set + `CONSTANT_Float`. Float flows through
+  fields, params/returns, comparison, string templates/`toString`/`println`, and data-class
+  `equals`/`hashCode`.
+- ✅ Numeric conversions `n.toInt()`/`toLong()`/`toFloat()`/`toDouble()` on any numeric receiver,
+  emitting the right `i2f`/`l2i`/`f2d`/`d2i`/… opcode (no-op when source == target).
+- ✅ Fixed a latent miscompile this exposed: elvis `?:` and `!!` on a *non-null primitive*
+  (`42 ?: 239`, `n!!`) were emitting `ifnonnull` on a non-reference (verify failure); they are now
+  the operand itself, matching kotlinc.
+- ✅ `tests/float_e2e.rs` (Float arithmetic/comparison/fields, conversions, primitive elvis/`!!` on
+  the JVM). Box conformance **109 OK / 0 FAIL** (up from 105).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

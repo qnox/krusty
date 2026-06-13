@@ -160,10 +160,16 @@ impl<'a> Lexer<'a> {
                 self.i += 1;
             }
         }
-        let kind = if self.peek() == b'L' && !is_double {
+        let kind = if self.peek() == b'f' || self.peek() == b'F' {
+            self.i += 1; // `1.5f` / `1f` — a Float literal
+            TokenKind::FloatLit
+        } else if self.peek() == b'L' && !is_double {
             self.i += 1;
             TokenKind::LongLit
         } else if is_double {
+            if self.peek() == b'd' || self.peek() == b'D' {
+                self.i += 1; // optional `d`/`D` suffix on a Double literal
+            }
             TokenKind::DoubleLit
         } else {
             TokenKind::IntLit

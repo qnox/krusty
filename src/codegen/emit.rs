@@ -541,6 +541,7 @@ fn sb_append(t: Ty) -> (&'static str, i32) {
         Ty::Char => ("(C)Ljava/lang/StringBuilder;", 1),
         Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
         Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
+        Ty::Float => ("(F)Ljava/lang/StringBuilder;", 1),
         Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),
         Ty::String => ("(Ljava/lang/String;)Ljava/lang/StringBuilder;", 1),
         _ => ("(Ljava/lang/Object;)Ljava/lang/StringBuilder;", 1),
@@ -738,6 +739,10 @@ fn emit_data_members(
                     c.dcmpg();
                     c.ifeq(eq);
                 }
+                Ty::Float => {
+                    c.fcmpg();
+                    c.ifeq(eq);
+                }
                 _ => {
                     // reference: null-safe `Objects.equals(this.field, other.field)` (a field may be
                     // null — `data class A(val v: Any?)` — so a plain `.equals` would NPE).
@@ -781,6 +786,10 @@ fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field
             let m = cw.methodref("java/lang/Double", "hashCode", "(D)I");
             c.invokestatic(m, 2, 1);
         }
+        Ty::Float => {
+            let m = cw.methodref("java/lang/Float", "hashCode", "(F)I");
+            c.invokestatic(m, 1, 1);
+        }
         _ => {
             let m = cw.methodref("java/lang/Object", "hashCode", "()I");
             c.invokevirtual(m, 0, 1);
@@ -792,6 +801,7 @@ fn store_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
     match ty {
         Ty::Int | Ty::Boolean | Ty::Char => code.istore(slot),
         Ty::Long => code.lstore(slot),
+        Ty::Float => code.fstore(slot),
         Ty::Double => code.dstore(slot),
         _ => code.astore(slot),
     }
@@ -801,6 +811,7 @@ fn load_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
     match ty {
         Ty::Int | Ty::Boolean | Ty::Char => code.iload(slot),
         Ty::Long => code.lload(slot),
+        Ty::Float => code.fload(slot),
         Ty::Double => code.dload(slot),
         _ => code.aload(slot),
     }
@@ -810,6 +821,7 @@ fn emit_typed_return(ty: Ty, code: &mut CodeBuilder) {
     match ty {
         Ty::Int | Ty::Boolean | Ty::Char => code.ireturn(),
         Ty::Long => code.lreturn(),
+        Ty::Float => code.freturn(),
         Ty::Double => code.dreturn(),
         _ => code.areturn(),
     }
@@ -887,6 +899,27 @@ impl<'a> MethodEmitter<'a> {
 
     /// Allocate an array of `elem` whose length is already on the stack (`newarray` for a primitive
     /// element, `anewarray` for a reference element).
+    /// Emit a numeric conversion `from` → `to` (no-op if equal).
+    fn emit_numeric_conversion(&self, from: Ty, to: Ty, code: &mut CodeBuilder) {
+        use Ty::*;
+        match (from, to) {
+            (a, b) if a == b => {}
+            (Int, Long) => code.i2l(),
+            (Int, Float) => code.i2f(),
+            (Int, Double) => code.i2d(),
+            (Long, Int) => code.l2i(),
+            (Long, Float) => code.l2f(),
+            (Long, Double) => code.l2d(),
+            (Float, Int) => code.f2i(),
+            (Float, Long) => code.f2l(),
+            (Float, Double) => code.f2d(),
+            (Double, Int) => code.d2i(),
+            (Double, Long) => code.d2l(),
+            (Double, Float) => code.d2f(),
+            _ => {}
+        }
+    }
+
     fn emit_new_array(&mut self, elem: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match elem {
             Ty::Int => code.newarray(10),
@@ -1037,6 +1070,7 @@ impl<'a> MethodEmitter<'a> {
         match ret {
             Ty::Int | Ty::Boolean | Ty::Char => code.ireturn(),
             Ty::Long => code.lreturn(),
+            Ty::Float => code.freturn(),
             Ty::Double => code.dreturn(),
             Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) => code.areturn(),
             // `Nothing` only reaches here if a diverging expression somehow fell through; it never
@@ -1220,10 +1254,15 @@ impl<'a> MethodEmitter<'a> {
             Expr::IntLit(v) => code.push_int(v as i32, cw),
             Expr::LongLit(v) => code.push_long(v, cw),
             Expr::DoubleLit(v) => code.push_double(v, cw),
+            Expr::FloatLit(v) => code.push_float(v, cw),
             Expr::BoolLit(b) => code.push_int(if b { 1 } else { 0 }, cw),
             Expr::StringLit(s) => code.push_string(&s, cw),
             Expr::CharLit(c) => code.push_int(c as i32, cw),
             Expr::NullLit => code.aconst_null(),
+            Expr::NotNull { operand } if !self.info.ty(operand).is_reference() => {
+                // `!!` on a non-null primitive (`42!!`) is the operand itself — no null check.
+                self.emit_expr(operand, code, cw);
+            }
             Expr::NotNull { operand } => {
                 self.emit_expr(operand, code, cw);
                 code.dup();
@@ -1285,13 +1324,18 @@ impl<'a> MethodEmitter<'a> {
             }
             Expr::Elvis { lhs, rhs } => {
                 let result = self.info.ty(e);
-                self.emit_expr(lhs, code, cw);
-                code.dup();
-                let end = code.new_label();
-                code.ifnonnull(end);
-                code.pop(); // discard the null
-                self.emit_expr_as(rhs, result, code, cw);
-                code.bind(end);
+                if !self.info.ty(lhs).is_reference() {
+                    // a non-null primitive lhs (`42 ?: 239`) is never null — the elvis is just the lhs.
+                    self.emit_expr_as(lhs, result, code, cw);
+                } else {
+                    self.emit_expr(lhs, code, cw);
+                    code.dup();
+                    let end = code.new_label();
+                    code.ifnonnull(end);
+                    code.pop(); // discard the null
+                    self.emit_expr_as(rhs, result, code, cw);
+                    code.bind(end);
+                }
             }
             Expr::Template(parts) => {
                 let sb = cw.class_ref("java/lang/StringBuilder");
@@ -1418,6 +1462,7 @@ impl<'a> MethodEmitter<'a> {
                         match t {
                             Ty::Int => code.ineg(),
                             Ty::Long => code.lneg(),
+                            Ty::Float => code.fneg(),
                             Ty::Double => code.dneg(),
                             _ => {}
                         }
@@ -1620,6 +1665,12 @@ impl<'a> MethodEmitter<'a> {
                 code.dcmpg();
                 code.ifeq(target);
             }
+            Ty::Float => {
+                code.fload(slot);
+                self.emit_expr_as(cond, st, code, cw);
+                code.fcmpg();
+                code.ifeq(target);
+            }
             _ => {
                 // reference: subject.equals(cond)
                 code.aload(slot);
@@ -1736,6 +1787,10 @@ impl<'a> MethodEmitter<'a> {
                 code.dcmpg();
                 self.cmp0(op, target, code);
             }
+            Ty::Float => {
+                code.fcmpg();
+                self.cmp0(op, target, code);
+            }
             // Reference equality (`==`/`!=`) via `equals()` (Kotlin structural equality).
             Ty::String | Ty::Obj(_) => {
                 let eqm = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
@@ -1792,6 +1847,11 @@ impl<'a> MethodEmitter<'a> {
             (BinOp::Mul, Ty::Double) => code.dmul(),
             (BinOp::Div, Ty::Double) => code.ddiv(),
             (BinOp::Rem, Ty::Double) => code.drem(),
+            (BinOp::Add, Ty::Float) => code.fadd(),
+            (BinOp::Sub, Ty::Float) => code.fsub(),
+            (BinOp::Mul, Ty::Float) => code.fmul(),
+            (BinOp::Div, Ty::Float) => code.fdiv(),
+            (BinOp::Rem, Ty::Float) => code.frem(),
             _ => {}
         }
     }
@@ -1816,6 +1876,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
             Ty::Char => ("(C)Ljava/lang/StringBuilder;", 1),
             Ty::Long => ("(J)Ljava/lang/StringBuilder;", 2),
+            Ty::Float => ("(F)Ljava/lang/StringBuilder;", 1),
             Ty::Double => ("(D)Ljava/lang/StringBuilder;", 2),
             Ty::String => ("(Ljava/lang/String;)Ljava/lang/StringBuilder;", 1),
             _ => ("(Ljava/lang/Object;)Ljava/lang/StringBuilder;", 1),
@@ -1894,6 +1955,7 @@ impl<'a> MethodEmitter<'a> {
                     Ty::Int | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
                     Ty::Char => ("(C)Ljava/lang/String;", 1),
                     Ty::Long => ("(J)Ljava/lang/String;", 2),
+                    Ty::Float => ("(F)Ljava/lang/String;", 1),
                     Ty::Double => ("(D)Ljava/lang/String;", 2),
                     // reference type: virtual call to the object's real toString().
                     Ty::Obj(_) | Ty::Null => {
@@ -1905,6 +1967,17 @@ impl<'a> MethodEmitter<'a> {
                 };
                 let m = cw.methodref("java/lang/String", "valueOf", desc);
                 code.invokestatic(m, words, 1);
+            }
+            // Numeric conversion intrinsic: `n.toInt()`/`toLong()`/`toFloat()`/`toDouble()`.
+            Expr::Member { receiver, name }
+                if args.is_empty()
+                    && self.info.ty(receiver).is_numeric()
+                    && crate::resolve::conversion_target(&name).is_some() =>
+            {
+                let from = self.info.ty(receiver);
+                let to = crate::resolve::conversion_target(&name).unwrap();
+                self.emit_expr(receiver, code, cw);
+                self.emit_numeric_conversion(from, to, code);
             }
             // java.lang.String instance method: recv.method(args) -> invokevirtual
             Expr::Member { receiver, name }
@@ -1971,6 +2044,7 @@ impl<'a> MethodEmitter<'a> {
                     Ty::Int | Ty::Boolean => ("(I)V", 1),
                     Ty::Char => ("(C)V", 1),
                     Ty::Long => ("(J)V", 2),
+                    Ty::Float => ("(F)V", 1),
                     Ty::Double => ("(D)V", 2),
                     Ty::String => ("(Ljava/lang/String;)V", 1),
                     _ => ("()V", 0),
