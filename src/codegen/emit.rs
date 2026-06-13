@@ -52,6 +52,23 @@ pub fn emit_file(
         let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
         e.emit_fun(f, &mut cw);
     }
+    // @kotlin.Metadata: describe the file facade so Kotlin consumers see the Kotlin API.
+    let funcs: Vec<crate::metadata::builder::FnMeta> = file
+        .decls
+        .iter()
+        .filter_map(|&d| {
+            let Decl::Fun(f) = file.decl(d);
+            let sig = syms.funs.get(&f.name)?;
+            Some(crate::metadata::builder::FnMeta {
+                name: f.name.clone(),
+                params: f.params.iter().zip(&sig.params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+                ret: sig.ret,
+            })
+        })
+        .collect();
+    let (d1_bytes, d2) = crate::metadata::builder::build_package(&funcs);
+    let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
+    cw.set_kotlin_metadata(2, &[1, 9, 0], 48, &d1, &d2);
     cw.finish()
 }
 

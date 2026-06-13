@@ -160,6 +160,7 @@ pub struct ClassWriter {
     this_class: u16,
     super_class: u16,
     methods: Vec<MethodInfo>,
+    class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
 }
 
 impl ClassWriter {
@@ -173,6 +174,61 @@ impl ClassWriter {
             this_class,
             super_class,
             methods: Vec::new(),
+            class_attributes: Vec::new(),
+        }
+    }
+
+    /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
+    /// `d1`/`d2` are the encoded protobuf payload + string table.
+    pub fn set_kotlin_metadata(&mut self, k: i32, mv: &[i32], xi: i32, d1: &[String], d2: &[String]) {
+        let anno_type = self.cp.utf8("Lkotlin/Metadata;");
+        let n_mv = self.cp.utf8("mv");
+        let n_k = self.cp.utf8("k");
+        let n_xi = self.cp.utf8("xi");
+        let n_d1 = self.cp.utf8("d1");
+        let n_d2 = self.cp.utf8("d2");
+
+        let mut body = Vec::new();
+        u2(&mut body, 1); // num_annotations
+        u2(&mut body, anno_type);
+        u2(&mut body, 5); // element_value_pairs: mv, k, xi, d1, d2
+        u2(&mut body, n_mv);
+        self.ev_int_array(&mut body, mv);
+        u2(&mut body, n_k);
+        self.ev_int(&mut body, k);
+        u2(&mut body, n_xi);
+        self.ev_int(&mut body, xi);
+        u2(&mut body, n_d1);
+        self.ev_str_array(&mut body, d1);
+        u2(&mut body, n_d2);
+        self.ev_str_array(&mut body, d2);
+
+        let name = self.cp.utf8("RuntimeVisibleAnnotations");
+        self.class_attributes.push((name, body));
+    }
+
+    fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
+        out.push(b'I');
+        let idx = self.cp.integer(v);
+        u2(out, idx);
+    }
+    fn ev_str(&mut self, out: &mut Vec<u8>, s: &str) {
+        out.push(b's');
+        let idx = self.cp.utf8(s);
+        u2(out, idx);
+    }
+    fn ev_int_array(&mut self, out: &mut Vec<u8>, vs: &[i32]) {
+        out.push(b'[');
+        u2(out, vs.len() as u16);
+        for &v in vs {
+            self.ev_int(out, v);
+        }
+    }
+    fn ev_str_array(&mut self, out: &mut Vec<u8>, ss: &[String]) {
+        out.push(b'[');
+        u2(out, ss.len() as u16);
+        for s in ss {
+            self.ev_str(out, s);
         }
     }
 
@@ -239,7 +295,12 @@ impl ClassWriter {
             u2(&mut out, 0); // exception_table_length
             u2(&mut out, 0); // code attributes (StackMapTable added in Phase 4)
         }
-        u2(&mut out, 0); // class attributes (SourceFile/@Metadata added later)
+        u2(&mut out, self.class_attributes.len() as u16);
+        for (name, bytes) in &self.class_attributes {
+            u2(&mut out, *name);
+            u4(&mut out, bytes.len() as u32);
+            out.extend_from_slice(bytes);
+        }
         out
     }
 }
