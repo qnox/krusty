@@ -34,6 +34,10 @@ pub struct ClassSig {
     /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
     /// `when` without an `else`.
     pub is_sealed: bool,
+    /// `companion object` functions, emitted as `static` methods and called as `ClassName.fn(...)`.
+    pub static_methods: HashMap<String, Signature>,
+    /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
+    pub static_props: HashMap<String, Ty>,
     /// Internal names of interfaces this type implements (for subtyping).
     pub interfaces: Vec<String>,
     /// Internal name of the base class (`: Base(..)`), if any.
@@ -316,9 +320,32 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .map(|s| class_names.get(s).cloned().unwrap_or_else(|| s.clone()))
                         .collect();
                     let super_internal = c.base_class.as_ref().map(|b| class_names.get(b).cloned().unwrap_or_else(|| b.clone()));
+                    // `companion object` members → static methods/props on this class.
+                    let static_methods: HashMap<String, Signature> = c
+                        .companion_methods
+                        .iter()
+                        .map(|m| {
+                            let mut mtp = ctp.clone();
+                            mtp.extend(m.type_params.iter().cloned());
+                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
+                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
+                            (m.name.clone(), Signature { params, ret })
+                        })
+                        .collect();
+                    let static_props: HashMap<String, Ty> = c
+                        .companion_props
+                        .iter()
+                        .map(|p| {
+                            let ty = match &p.ty {
+                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                None => infer_lit_ty(file, p.init),
+                            };
+                            (p.name.clone(), ty)
+                        })
+                        .collect();
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, interfaces, super_internal },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, interfaces, super_internal },
                     );
                 }
                 Decl::Property(p) => {
@@ -415,6 +442,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         imports,
         tparams: Default::default(),
         this_ty: None,
+        companion_of: None,
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -478,8 +506,45 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                 }
                 c.pop_scope();
-                c.tparams.clear();
                 c.this_ty = None;
+                // `companion object` members are checked statically, with companion props/methods in
+                // scope unqualified.
+                if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
+                    // krusty emits companion members as statics on the same class, so a companion
+                    // member whose name collides with an instance member would duplicate a field/
+                    // method (kotlinc separates them via a nested Companion class). Reject (skip).
+                    let inst_names: std::collections::HashSet<&str> = cl
+                        .props
+                        .iter()
+                        .filter(|p| p.is_property)
+                        .map(|p| p.name.as_str())
+                        .chain(cl.body_props.iter().map(|p| p.name.as_str()))
+                        .chain(cl.methods.iter().map(|m| m.name.as_str()))
+                        .collect();
+                    for cp in &cl.companion_props {
+                        if inst_names.contains(cp.name.as_str()) {
+                            c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cp.name));
+                        }
+                    }
+                    for cm in &cl.companion_methods {
+                        if inst_names.contains(cm.name.as_str()) {
+                            c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
+                        }
+                    }
+                    c.companion_of = Some(cl.name.clone());
+                    for p in &cl.companion_props {
+                        let it = c.expr(p.init);
+                        if let Some(r) = &p.ty {
+                            let declared = c.resolve_ty(r);
+                            c.expect_assignable(declared, it, c.span(p.init), "companion property");
+                        }
+                    }
+                    for m in &cl.companion_methods {
+                        c.check_fun(m);
+                    }
+                    c.companion_of = None;
+                }
+                c.tparams.clear();
             }
             Decl::Property(p) => {
                 let it = c.expr(p.init);
@@ -506,6 +571,9 @@ struct Checker<'a> {
     tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// When checking a `companion object` member, the enclosing class name — its companion
+    /// methods/properties are then in scope unqualified.
+    companion_of: Option<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -726,8 +794,12 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
-        let sig = self.syms.funs.get(&f.name);
-        self.ret_ty = sig.map(|s| s.ret).unwrap_or(Ty::Unit);
+        // Use the collected signature's return type; for a companion method (not in `funs`) fall back
+        // to the declared return type.
+        self.ret_ty = match self.syms.funs.get(&f.name).map(|s| s.ret) {
+            Some(r) => r,
+            None => f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit),
+        };
         self.push_scope();
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
@@ -967,13 +1039,27 @@ impl<'a> Checker<'a> {
             },
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
-                None => match self.syms.props.get(&n) {
-                    Some(&(ty, _)) => ty, // top-level property
-                    None => {
-                        self.diags.error(self.span(e), format!("unresolved reference: {n}"));
-                        Ty::Error
+                None => {
+                    // Unqualified companion property inside a companion member.
+                    if let Some(cls) = &self.companion_of {
+                        if let Some(&ty) = self.syms.classes.get(cls).and_then(|c| c.static_props.get(&n)) {
+                            return self.set(e, ty);
+                        }
+                        // A top-level property accessed from a companion member would target the wrong
+                        // class in codegen (the facade, not this class) — reject (skip).
+                        if self.syms.props.contains_key(&n) {
+                            self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
+                            return self.set(e, Ty::Error);
+                        }
                     }
-                },
+                    match self.syms.props.get(&n) {
+                        Some(&(ty, _)) => ty, // top-level property
+                        None => {
+                            self.diags.error(self.span(e), format!("unresolved reference: {n}"));
+                            Ty::Error
+                        }
+                    }
+                }
             },
             Expr::Unary { op, operand } => {
                 let ot = self.expr(operand);
@@ -992,6 +1078,12 @@ impl<'a> Checker<'a> {
                             if entries.iter().any(|e| e == &name) {
                                 let internal = self.syms.classes.get(&en).map(|c| c.internal.clone()).unwrap_or(en.clone());
                                 return self.set(e, Ty::obj(&internal));
+                            }
+                        }
+                        // `ClassName.PROP` — a companion (static) property read.
+                        if let Some(cs) = self.syms.classes.get(&en) {
+                            if let Some(&ty) = cs.static_props.get(&name) {
+                                return self.set(e, ty);
                             }
                         }
                     }
@@ -1264,6 +1356,18 @@ impl<'a> Checker<'a> {
                 // (not a local/param) resolvable on the classpath.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if self.lookup(&cls).is_none() {
+                        // `ClassName.fn(args)` — a companion (static) method call.
+                        if let Some(sig) = self.syms.classes.get(&cls).and_then(|c| c.static_methods.get(&name)).cloned() {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            if sig.params.len() != arg_tys.len() {
+                                self.diags.error(span, format!("static method '{cls}.{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                            } else {
+                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                            }
+                            return sig.ret;
+                        }
                         // `Object.member(args)` — a singleton member call.
                         if self.syms.objects.contains(&cls) {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
@@ -1340,6 +1444,15 @@ impl<'a> Checker<'a> {
                 if self.lookup(&fname).is_none() {
                     if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
                         return t;
+                    }
+                    // Unqualified companion (static) method call inside a companion member.
+                    if let Some(cls) = self.companion_of.clone() {
+                        if let Some(sig) = self.syms.classes.get(&cls).and_then(|c| c.static_methods.get(&fname)).cloned() {
+                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                            return sig.ret;
+                        }
                     }
                 }
                 // Constructor call: `ClassName(args)` (when not shadowed by a local).
@@ -1450,6 +1563,10 @@ impl<'a> Checker<'a> {
                             self.diags.error(self.file.stmt_spans[s.0 as usize], format!("val cannot be reassigned"));
                         }
                         self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
+                    }
+                    None if self.companion_of.is_some() && self.syms.props.contains_key(&name) => {
+                        // A top-level property write from a companion member targets the wrong class.
+                        self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: top-level property access from a companion member is not supported".to_string());
                     }
                     None => match self.syms.props.get(&name).copied() {
                         Some((lty, is_var)) => {
