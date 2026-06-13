@@ -697,6 +697,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/object_props_e2e.rs` (object val/var/computed + mutation via a method, on the JVM). Box
   conformance **158 OK / 0 FAIL** (up from 153).
 
+## Phase 52 — Lambdas (inlined `let`/`also`)  ✅
+- ✅ Lambda literals `{ param -> body }` / `{ body }` (single optional parameter, default `it`;
+  `Expr::Lambda`) parse as a trailing argument (`expr { … }` / `recv.m(args) { … }` appends the
+  lambda as the last call argument, same line).
+- ✅ The scope functions `recv.let { … }` and `recv.also { … }` are *inlined* (no anonymous class):
+  the receiver is stored to a local bound to the lambda parameter; `let` yields the body's value,
+  `also` the receiver. Foundational lambda infrastructure for future `run`/`with`/`apply`.
+- ✅ A lambda anywhere other than a `let`/`also` argument is rejected (checker + codegen).
+- ✅ `tests/scope_fn_e2e.rs` (let/also with `it`/named param, member access, mutation, chaining, on
+  the JVM; lambda-misuse rejection). Box conformance holds at **158 OK / 0 FAIL** (`run`/`with`/
+  `apply` — which rebind `this` — and higher-order functions are the next lambda steps).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

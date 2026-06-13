@@ -771,6 +771,41 @@ impl<'a> Parser<'a> {
     }
 
     // ---- statements ----
+    /// Parse a lambda literal `{ [param ->] stmts }` (single optional parameter; the body is a block).
+    fn parse_lambda(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.expect(TokenKind::LBrace, "'{'");
+        self.skip_newlines();
+        // Optional single parameter: `it -> …` / `x -> …`.
+        let param = if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Arrow) {
+            let n = self.text().to_string();
+            self.bump(); // name
+            self.bump(); // '->'
+            Some(n)
+        } else {
+            None
+        };
+        let mut stmts = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            stmts.push(self.parse_stmt());
+        }
+        let end = self.tok().span;
+        self.expect(TokenKind::RBrace, "'}'");
+        let mut trailing = None;
+        if let Some(&last) = stmts.last() {
+            if let Stmt::Expr(e) = self.file.stmt(last) {
+                trailing = Some(*e);
+                stmts.pop();
+            }
+        }
+        let body = self.file.add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi));
+        self.file.add_expr(Expr::Lambda { param, body }, Span::new(start.lo, end.hi))
+    }
+
     fn parse_block_expr(&mut self) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
@@ -1111,6 +1146,20 @@ impl<'a> Parser<'a> {
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
                     lhs = self.file.add_expr(Expr::Call { callee: lhs, args }, Span::new(lspan.lo, end.hi));
+                }
+                // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
+                // last call argument (same line only, to avoid swallowing an unrelated block).
+                TokenKind::LBrace => {
+                    let lambda = self.parse_lambda();
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let end = self.t[self.i.saturating_sub(1)].span;
+                    lhs = match self.file.expr(lhs).clone() {
+                        Expr::Call { callee, mut args } => {
+                            args.push(lambda);
+                            self.file.add_expr(Expr::Call { callee, args }, Span::new(lspan.lo, end.hi))
+                        }
+                        _ => self.file.add_expr(Expr::Call { callee: lhs, args: vec![lambda] }, Span::new(lspan.lo, end.hi)),
+                    };
                 }
                 // `array[index]` element access.
                 TokenKind::LBracket => {

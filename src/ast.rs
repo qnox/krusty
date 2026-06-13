@@ -45,6 +45,9 @@ pub enum Expr {
     SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
     /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
     Throw { operand: ExprId },
+    /// A lambda literal `{ param -> body }` / `{ body }` (implicit `it`). krusty only supports it as
+    /// the trailing argument of an *inlined* scope function (`let`/`also`); `body` is a `Block`.
+    Lambda { param: Option<String>, body: ExprId },
     /// `try { body } catch (e: T) { … } … [finally { … }]` — the value is the body's, or a matching
     /// catch's; `finally` runs on every exit (for effect). Each `body`/handler/finally is a `Block`.
     Try { body: ExprId, catches: Vec<CatchClause>, finally: Option<ExprId> },
@@ -404,6 +407,11 @@ impl File {
             Expr::Throw { operand } => {
                 out.push_str("(throw ");
                 self.write_expr(*operand, out);
+                out.push(')');
+            }
+            Expr::Lambda { param, body } => {
+                out.push_str(&format!("(lambda {} ", param.as_deref().unwrap_or("it")));
+                self.write_expr(*body, out);
                 out.push(')');
             }
             Expr::Index { array, index } => {
