@@ -1,22 +1,22 @@
-//! Java interop e2e: krust compiles Kotlin that calls a static method of a real javac-compiled
+//! Java interop e2e: krusty compiles Kotlin that calls a static method of a real javac-compiled
 //! Java class, resolving the call by reading that class's `.class` from the classpath.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krust::codegen::emit::emit_file;
-use krust::diag::DiagSink;
-use krust::jvm::classpath::Classpath;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::codegen::emit::emit_file;
+use krusty::diag::DiagSink;
+use krusty::jvm::classpath::Classpath;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn have(t: &str) -> bool {
     Command::new(t).arg("-version").output().is_ok()
 }
 
-fn krust_compile(src: &str, internal: &str, cp_dirs: Vec<PathBuf>) -> Vec<u8> {
+fn krusty_compile(src: &str, internal: &str, cp_dirs: Vec<PathBuf>) -> Vec<u8> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
@@ -25,7 +25,7 @@ fn krust_compile(src: &str, internal: &str, cp_dirs: Vec<PathBuf>) -> Vec<u8> {
     syms.classpath = Classpath::new(cp_dirs);
     let info = check_file(&files[0], &syms, &mut d);
     let bytes = emit_file(&files[0], &info, &syms, internal, &mut d);
-    assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
 
@@ -35,7 +35,7 @@ fn calls_java_static_from_jar() {
         eprintln!("skipping: javac/java/jar unavailable");
         return;
     }
-    let root = std::env::temp_dir().join(format!("krust_jar_{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("krusty_jar_{}", std::process::id()));
     let jdir = root.join("classes");
     let kdir = root.join("kr");
     let _ = fs::remove_dir_all(&root);
@@ -58,9 +58,9 @@ fn calls_java_static_from_jar() {
         .status
         .success());
 
-    // krust resolves libx.Lib.sq by reading the .class out of the JAR on the classpath.
+    // krusty resolves libx.Lib.sq by reading the .class out of the JAR on the classpath.
     let src = "import libx.Lib\nfun f(n: Int): Int = Lib.sq(n)\n";
-    let bytes = krust_compile(src, "DemoKt", vec![jar.clone()]);
+    let bytes = krusty_compile(src, "DemoKt", vec![jar.clone()]);
     fs::write(kdir.join("DemoKt.class"), &bytes).unwrap();
 
     fs::write(
@@ -86,7 +86,7 @@ fn calls_real_java_static_method() {
         eprintln!("skipping: javac/java unavailable");
         return;
     }
-    let root = std::env::temp_dir().join(format!("krust_javaint_{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("krusty_javaint_{}", std::process::id()));
     let jdir = root.join("javacp"); // holds util/Calc.class
     let kdir = root.join("kr"); // holds DemoKt.class
     let _ = fs::remove_dir_all(&root);
@@ -107,17 +107,17 @@ fn calls_real_java_static_method() {
     assert!(jc.status.success(), "javac failed: {}", String::from_utf8_lossy(&jc.stderr));
     assert!(jdir.join("util/Calc.class").exists());
 
-    // krust compiles Kotlin that calls the Java class, resolving via the classpath.
+    // krusty compiles Kotlin that calls the Java class, resolving via the classpath.
     let src = r#"
         import util.Calc
         fun f(n: Int): Int = Calc.triple(n)
         fun g(s: String): String = Calc.tag(s)
         fun combined(n: Int): String = Calc.tag(Calc.triple(n).toString())
     "#;
-    let bytes = krust_compile(src, "DemoKt", vec![jdir.clone()]);
+    let bytes = krusty_compile(src, "DemoKt", vec![jdir.clone()]);
     fs::write(kdir.join("DemoKt.class"), &bytes).unwrap();
 
-    // Run: DemoKt (krust) + util/Calc (javac) on the classpath.
+    // Run: DemoKt (krusty) + util/Calc (javac) on the classpath.
     let main = r#"
         public class Main {
             public static void main(String[] a) {

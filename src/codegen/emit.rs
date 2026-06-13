@@ -451,7 +451,7 @@ impl<'a> MethodEmitter<'a> {
                     let f = cw.fieldref(&self.class.clone(), &n, ty.descriptor());
                     code.getfield(f, slot_words(ty) as i32);
                 } else {
-                    self.diags.error(self.file.expr_spans[e.0 as usize], format!("krust: unbound local '{n}' in codegen"));
+                    self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty: unbound local '{n}' in codegen"));
                 }
             }
             Expr::Unary { op, operand } => {
@@ -483,7 +483,7 @@ impl<'a> MethodEmitter<'a> {
                     let m = cw.methodref("java/lang/String", "length", "()I");
                     code.invokevirtual(m, 0, 1);
                 } else {
-                    self.diags.error(self.file.expr_spans[e.0 as usize], format!("krust v0: member '{name}' not emittable"));
+                    self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty v0: member '{name}' not emittable"));
                 }
             }
             Expr::If { cond, then_branch, else_branch } => {
@@ -614,7 +614,7 @@ impl<'a> MethodEmitter<'a> {
                 self.cmp0(op, target, code);
             }
             _ => {
-                self.diags.error(self.file.expr_spans[lhs.0 as usize], "krust v0: unsupported comparison operand type");
+                self.diags.error(self.file.expr_spans[lhs.0 as usize], "krusty v0: unsupported comparison operand type");
             }
         }
     }
@@ -754,7 +754,7 @@ impl<'a> MethodEmitter<'a> {
                 code.invokestatic(m, arg_words, ret_words);
             }
             _ => {
-                self.diags.error(self.file.expr_spans[e.0 as usize], "krust v0: unsupported call form");
+                self.diags.error(self.file.expr_spans[e.0 as usize], "krusty v0: unsupported call form");
             }
         }
     }

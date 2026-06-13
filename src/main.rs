@@ -1,17 +1,17 @@
-//! krust CLI driver — the linear, per-file streaming pipeline:
+//! krusty CLI driver — the linear, per-file streaming pipeline:
 //! lex+parse all files → collect signatures globally → for each file: typecheck → emit `.class` →
-//! drop the file's arenas. `-d <dir>` sets the output directory (default `krust-out`).
+//! drop the file's arenas. `-d <dir>` sets the output directory (default `krusty-out`).
 
 use std::path::{Path, PathBuf};
 
-use krust::codegen::emit::{emit_file, file_class_name};
-use krust::diag::DiagSink;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::codegen::emit::{emit_file, file_class_name};
+use krusty::diag::DiagSink;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn main() {
-    let mut out_dir = PathBuf::from("krust-out");
+    let mut out_dir = PathBuf::from("krusty-out");
     let mut cp_dirs: Vec<PathBuf> = Vec::new();
     let mut paths: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -27,7 +27,7 @@ fn main() {
         }
     }
     if paths.is_empty() {
-        eprintln!("usage: krust [-d <out>] <file.kt> ...");
+        eprintln!("usage: krusty [-d <out>] <file.kt> ...");
         std::process::exit(2);
     }
 
@@ -37,7 +37,7 @@ fn main() {
     let mut stems = Vec::new();
     for path in &paths {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("krust: cannot read {path}: {e}");
+            eprintln!("krusty: cannot read {path}: {e}");
             std::process::exit(1);
         });
         let toks = lex(&src, &mut diags);
@@ -47,7 +47,7 @@ fn main() {
     }
 
     let mut syms = collect_signatures(&files, &mut diags);
-    syms.classpath = krust::jvm::classpath::Classpath::new(cp_dirs);
+    syms.classpath = krusty::jvm::classpath::Classpath::new(cp_dirs);
 
     // Per-file: typecheck → emit → write → drop. Only one file's codegen state is live at a time.
     let mut emitted = 0;
@@ -67,14 +67,14 @@ fn main() {
 
         // Each top-level `class` becomes its own `.class` file.
         for &d in &file.decls {
-            if let krust::ast::Decl::Class(c) = file.decl(d) {
+            if let krusty::ast::Decl::Class(c) = file.decl(d) {
                 let internal = match file.package.as_deref() {
                     Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
                     _ => c.name.clone(),
                 };
-                let bytes = krust::codegen::emit::emit_class(c, file, &info, &internal, &syms, &mut diags);
+                let bytes = krusty::codegen::emit::emit_class(c, file, &info, &internal, &syms, &mut diags);
                 if let Err(e) = write_class(&internal, &bytes) {
-                    eprintln!("krust: cannot write {internal}.class: {e}");
+                    eprintln!("krusty: cannot write {internal}.class: {e}");
                     std::process::exit(1);
                 }
                 emitted += 1;
@@ -82,13 +82,13 @@ fn main() {
         }
 
         // The file facade (`<File>Kt`) is emitted only if the file has top-level functions.
-        let has_funs = file.decls.iter().any(|&d| matches!(file.decl(d), krust::ast::Decl::Fun(_)));
+        let has_funs = file.decls.iter().any(|&d| matches!(file.decl(d), krusty::ast::Decl::Fun(_)));
         if has_funs {
             let internal = file_class_name(&stems[i], file.package.as_deref());
             let bytes = emit_file(file, &info, &syms, &internal, &mut diags);
             if !diags.has_errors() {
                 if let Err(e) = write_class(&internal, &bytes) {
-                    eprintln!("krust: cannot write {internal}.class: {e}");
+                    eprintln!("krusty: cannot write {internal}.class: {e}");
                     std::process::exit(1);
                 }
                 let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
@@ -103,7 +103,7 @@ fn main() {
     // consumers can resolve top-level declarations from the compiled module.
     if !diags.has_errors() && !module_packages.is_empty() {
         let packages: Vec<(String, Vec<String>)> = module_packages.into_iter().collect();
-        let module_bytes = krust::metadata::module::build_kotlin_module(&packages);
+        let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
         let mpath = out_dir.join("META-INF/main.kotlin_module");
         let _ = std::fs::create_dir_all(mpath.parent().unwrap());
         let _ = std::fs::write(&mpath, &module_bytes);
@@ -113,7 +113,7 @@ fn main() {
         for (path, src) in paths.iter().zip(&sources) {
             print!("{}", diags.render(path, src));
         }
-        eprintln!("krust: {} error(s)", diags.diags.len());
+        eprintln!("krusty: {} error(s)", diags.diags.len());
         std::process::exit(1);
     }
     println!("ok: emitted {emitted} class file(s) to {}", out_dir.display());

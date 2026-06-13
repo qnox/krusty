@@ -1,5 +1,5 @@
 //! Minimal JVM `.class` reader: parses the constant pool, this/super class, fields and methods to
-//! recover **public signatures**. This is how krust resolves Java/JDK dependencies — read the
+//! recover **public signatures**. This is how krusty resolves Java/JDK dependencies — read the
 //! callee's `.class`, learn its method descriptors — instead of hardcoding intrinsics (Phase 6,
 //! "java supported"). It reads enough to drive interop, not the full attribute set.
 
@@ -216,7 +216,7 @@ mod tests {
     use crate::codegen::classfile::*;
 
     #[test]
-    fn reads_krust_emitted_class_roundtrip() {
+    fn reads_krusty_emitted_class_roundtrip() {
         // Emit a class with the writer, then read it back and check the signature survives.
         let mut cw = ClassWriter::new("demo/RKt", "java/lang/Object");
         let mut code = CodeBuilder::new(2);

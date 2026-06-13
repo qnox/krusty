@@ -1,4 +1,4 @@
-# krust — implementation plan
+# krusty — implementation plan
 
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
@@ -23,7 +23,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Tests: 10 parser tests (precedence, assoc, paren, member-call, unary, if, block/while, package).
 - ✅ **Exit met:** all `tests/cases/*.kt` + the in-subset bench files parse (multifile×20,
   many_functions = 500 decls). 18 tests green total.
-- Note: `bodyheavy` uses `xor` (infix function) + `;` — **out of v0 subset**; not a krust target.
+- Note: `bodyheavy` uses `xor` (infix function) + `;` — **out of v0 subset**; not a krusty target.
 
 ## Phase 2 — Types & resolution  ✅
 - ✅ `types.rs`: `Ty` (Int/Long/Double/Boolean/String/Unit/Error), numeric promotion, JVM
@@ -68,7 +68,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ **Exit met:** `control_flow_pipeline` e2e — `max/absdiff/both/either/classify/fib` compile,
   `java -Xverify:all` verifies + runs, all correct (`fib(10)=55`, `&&`/`||` short-circuit).
 ### 4d — streaming driver ✅
-- ✅ `krust [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
+- ✅ `krusty [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
   `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
 ### 4e — v52 + StackMapTable ⬜ (hardening, for exact version match with kotlinc)
 
@@ -82,38 +82,38 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   + `StringTableTypes` + the **qualified-name/builtins table** (so `kotlin/Int` etc. resolve) +
   JVM signature extension + the `@kotlin.Metadata` annotation attribute. This is effectively a
   re-implementation of `kotlinx-metadata-jvm`'s writer (~thousands of LOC) and is the single biggest
-  remaining sub-project. Correctness gate = Phase 5b round-trip (kotlinc consumes krust output).
+  remaining sub-project. Correctness gate = Phase 5b round-trip (kotlinc consumes krusty output).
   Note: a *Java* consumer needs none of this (it reads only the signatures, already matched in 5a);
   `@Metadata` is required only for *Kotlin* consumers.
 
 ## Phase 5 — Differential harness vs kotlinc  🚧
 ### 5a — ABI signatures + execution ✅
 - ✅ Reference kotlinc: official 1.9.24 dist (run under JDK 21). `harness/run-diff.sh`.
-- ✅ `tests/diff_kotlinc.rs` (env-gated `KRUST_KOTLINC`): compile same source with krust + kotlinc;
+- ✅ `tests/diff_kotlinc.rs` (env-gated `KRUSTY_KOTLINC`): compile same source with krusty + kotlinc;
   **public ABI signatures (javap) match exactly** and **execution output is identical** across an
   8-function subset (arith/promotion/mixed/if/&&/concat).
 ### 5b — @Metadata round-trip ✅ (Kotlin-consumer ABI ACHIEVED)
 - ✅ The missing piece was the **`META-INF/<name>.kotlin_module`** file (maps package → file-facade
   class); `@Metadata` alone was already byte-exact. `metadata/module.rs` emits it (byte-exact vs
   kotlinc); driver writes `META-INF/main.kotlin_module`.
-- ✅ **Round-trip passes** (`tests/metadata_roundtrip_e2e.rs`): krust compiles a Kotlin library
+- ✅ **Round-trip passes** (`tests/metadata_roundtrip_e2e.rs`): krusty compiles a Kotlin library
   (`package demo`, `greet`/`addk`); the real kotlinc compiles a Kotlin **consumer** that imports
-  them — resolves via krust's `@Metadata` + `.kotlin_module` — and **runs** correctly (`hi bob`, `5`).
-- ⇒ krust output is consumable by both **Java** (signatures, 5a) and **Kotlin** (5b) consumers.
+  them — resolves via krusty's `@Metadata` + `.kotlin_module` — and **runs** correctly (`hi bob`, `5`).
+- ⇒ krusty output is consumable by both **Java** (signatures, 5a) and **Kotlin** (5b) consumers.
 - Remaining for full @Metadata: classes/properties (richer proto), the JVM `method_signature`
   extension for non-derivable JVM names, multi-file facades.
 
 ## Phase 6 — Java interop + scale  🚧
 ### 6a — `.class` signature reader ✅
 - ✅ `jvm/classreader.rs`: parses constant pool (modified-UTF-8), this/super, fields, methods →
-  `ClassInfo`/`MethodSig` (name, descriptor, public/static). Round-trips krust output; **validated
+  `ClassInfo`/`MethodSig` (name, descriptor, public/static). Round-trips krusty output; **validated
   against real javac output** (`tests/classreader_e2e.rs`: static/instance/private, primitive &
   reference descriptors, `<init>`). 2 unit + 1 e2e test.
 ### 6b — resolve Java static calls via the reader (dirs + jars) ✅
 - ✅ `jvm/classpath.rs`: dir **and `.jar`** entries (zip/DEFLATE via `zip` crate), cached;
   `SymbolTable.classpath`; `import` capture; `resolve_java_static` (exact param-descriptor overload
   match) in typecheck + emit; driver `-cp a/classes:lib.jar`.
-- ✅ **e2e**: krust calls a javac class from a **loose dir** (`util.Calc`) *and from a real `.jar`*
+- ✅ **e2e**: krusty calls a javac class from a **loose dir** (`util.Calc`) *and from a real `.jar`*
   (`libx.Lib.sq` packaged with `jar cf`) → runs correctly (`15/[hi]/[12]`, `36`). 57 tests green.
 - Remaining: instance-method calls, JDK classes (jimage), overload widening, multi-jar resolution.
 ### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
@@ -129,7 +129,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   AST `Decl::Class`/`ClassDecl`/`PropParam`; resolver registers `classes` (simple→internal name);
   `classfile.rs` field table + `getfield`/`putfield`; `emit::emit_class`; driver emits one `.class`
   per class and the `FileKt` facade only when the file has top-level functions.
-- ✅ **Differential ABI passes** (`tests/diff_class_kotlinc.rs`): krust + kotlinc produce **identical
+- ✅ **Differential ABI passes** (`tests/diff_class_kotlinc.rs`): krusty + kotlinc produce **identical
   public member signatures** for `class Point(val x: Int, var y: String)` (ctor + getX/getY/setY),
   and both construct + run identically. Plus `tests/class_e2e.rs` (shape + `-Xverify:all` run).
 ### 8b — class `@Metadata` (kind=1) ✅ (Kotlin-consumer ABI for classes ACHIEVED)
@@ -137,7 +137,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `DESC_TO_CLASS_ID`), supertype `kotlin/Any`, primary constructor (value params + JVM sig ext),
   and one property per field (name, return type, getter/setter JVM sigs; `var` adds flags=1798 +
   setter). Schema reverse-engineered + recorded in METADATA_NOTES.md.
-- ✅ **Round-trip passes** (`tests/class_roundtrip_e2e.rs`): krust compiles `class Point(val x, var y)`;
+- ✅ **Round-trip passes** (`tests/class_roundtrip_e2e.rs`): krusty compiles `class Point(val x, var y)`;
   the real kotlinc compiles a Kotlin consumer using **property syntax** (`p.x`, `p.y = ...`) — which
   only works if kotlinc reads the class `@Metadata` — and runs (`7:bye`).
 - Note: d1 is semantically equivalent, not byte-identical, to kotlinc's (per-string string-table

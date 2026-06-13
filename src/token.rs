@@ -1,4 +1,4 @@
-//! Token kinds for the krust Kotlin subset.
+//! Token kinds for the krusty Kotlin subset.
 
 use crate::diag::Span;
 

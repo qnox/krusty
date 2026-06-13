@@ -40,7 +40,7 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
     m
 }
 
-/// Map a single JVM field descriptor to a krust `Ty` (the v0 supported set).
+/// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
         "I" => Ty::Int,

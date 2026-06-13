@@ -1,25 +1,25 @@
-//! Phase 8b: the decisive class-metadata round-trip. krust compiles a Kotlin class; the REAL
+//! Phase 8b: the decisive class-metadata round-trip. krusty compiles a Kotlin class; the REAL
 //! kotlinc compiles a *Kotlin consumer* that uses it via **property syntax** (`p.x`, `p.y = ...`).
-//! This only type-checks if kotlinc reads krust's class `@kotlin.Metadata` (kind=1). If it passes,
-//! krust's classes are consumable as genuine Kotlin classes — Kotlin-side ABI for classes.
+//! This only type-checks if kotlinc reads krusty's class `@kotlin.Metadata` (kind=1). If it passes,
+//! krusty's classes are consumable as genuine Kotlin classes — Kotlin-side ABI for classes.
 //!
-//! Gated by KRUST_KOTLINC (+ KRUST_REF_JAVA_HOME, KRUST_KOTLIN_STDLIB).
+//! Gated by KRUSTY_KOTLINC (+ KRUSTY_REF_JAVA_HOME, KRUSTY_KOTLIN_STDLIB).
 
 use std::fs;
 use std::process::Command;
 
-use krust::ast::Decl;
-use krust::codegen::emit::emit_class;
-use krust::diag::DiagSink;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::ast::Decl;
+use krusty::codegen::emit::emit_class;
+use krusty::diag::DiagSink;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
-fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
+fn krusty_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
@@ -35,25 +35,25 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
         })
         .expect("class decl");
     let bytes = emit_class(&cd, &files[0], &info, internal, &syms, &mut d);
-    assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
 
 #[test]
-fn kotlinc_consumes_krust_class_via_property_syntax() {
-    let Some(kotlinc) = env("KRUST_KOTLINC") else {
-        eprintln!("skipping class_roundtrip: set KRUST_KOTLINC to enable");
+fn kotlinc_consumes_krusty_class_via_property_syntax() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping class_roundtrip: set KRUSTY_KOTLINC to enable");
         return;
     };
 
-    let root = std::env::temp_dir().join(format!("krust_crt_{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("krusty_crt_{}", std::process::id()));
     let lib = root.join("lib");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(lib.join("demo")).unwrap();
 
-    // krust compiles a Kotlin class in package `demo` (with a member function).
+    // krusty compiles a Kotlin class in package `demo` (with a member function).
     let src = "package demo\nclass Point(val x: Int, var y: String) {\n  fun shifted(d: Int): Int = x + d\n}\n";
-    fs::write(lib.join("demo/Point.class"), krust_compile_class(src, "Point", "demo/Point")).unwrap();
+    fs::write(lib.join("demo/Point.class"), krusty_compile_class(src, "Point", "demo/Point")).unwrap();
 
     // kotlinc compiles a consumer using KOTLIN PROPERTY SYNTAX (p.x, p.y = ...) and a member call
     // (p.shifted(..)), which only works if kotlinc recognizes the class as Kotlin (reads its
@@ -64,18 +64,18 @@ fn kotlinc_consumes_krust_class_via_property_syntax() {
     let mut cmd = Command::new(&kotlinc);
     cmd.arg(root.join("Consumer.kt"))
         .args(["-cp", lib.to_str().unwrap(), "-d", root.join("cout").to_str().unwrap()]);
-    if let Some(jh) = env("KRUST_REF_JAVA_HOME") {
+    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
         cmd.env("JAVA_HOME", jh);
     }
     let kc = cmd.output().expect("run kotlinc on consumer");
     assert!(
         kc.status.success(),
-        "kotlinc FAILED to consume krust class @Metadata:\n{}",
+        "kotlinc FAILED to consume krusty class @Metadata:\n{}",
         String::from_utf8_lossy(&kc.stderr)
     );
 
-    // Run it to confirm behavior (krust class + kotlinc consumer + stdlib).
-    if let Some(stdlib) = env("KRUST_KOTLIN_STDLIB") {
+    // Run it to confirm behavior (krusty class + kotlinc consumer + stdlib).
+    if let Some(stdlib) = env("KRUSTY_KOTLIN_STDLIB") {
         let cp = format!("{}:{}:{}", root.join("cout").to_str().unwrap(), lib.to_str().unwrap(), stdlib);
         let run = Command::new("java").args(["-cp", &cp, "ConsumerKt"]).output().expect("java");
         if run.status.success() {
