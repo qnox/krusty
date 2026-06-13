@@ -25,15 +25,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   many_functions = 500 decls). 18 tests green total.
 - Note: `bodyheavy` uses `xor` (infix function) + `;` — **out of v0 subset**; not a krust target.
 
-## Phase 2 — Types & resolution  ⬜
-- `types.rs`: `TypeId` + primitive table (Int/Long/Double/Boolean/String/Unit), join (common
-  supertype) for `if`.
-- `resolve.rs`:
-  - Stage C: collect top-level signatures → global `SymbolTable` (cheap, no bodies).
-  - Stage D: per-file typecheck — locals scope stack, name resolution, expr typing, `val`-reassign
-    error, arithmetic/concat typing rules, `if`/`while`/`return` checks.
-- Diagnostics for type errors. Tests assert types of expressions + expected errors.
-- **Exit:** typecheck passes/fails correctly on the §7 edge cases.
+## Phase 2 — Types & resolution  ✅
+- ✅ `types.rs`: `Ty` (Int/Long/Double/Boolean/String/Unit/Error), numeric promotion, JVM
+  descriptors, name↔type.
+- ✅ `resolve.rs`: Stage C `collect_signatures` (global, cheap) + Stage D `check_file` (per-file
+  typecheck): locals scope stack, name/call resolution, arithmetic+concat+comparison+logic typing,
+  `if`-branch join, `val`-reassign error, return/while/assign checks, `println`/`toString`/`.length`
+  intrinsics. Produces `TypeInfo { expr_types }` for codegen.
+- ✅ 11 tests (arith/promotion, concat, comparison, if-join, return mismatch, unresolved,
+  val-reassign, call arity/types, fib block, bool misuse).
+- ✅ **Exit met:** driver runs lex→parse→collect→check; multifile (5000 decls) + many_functions
+  (500) typecheck clean. 29 tests green.
+- v0 decisions recorded: explicit return types required; exact-type assignment (no implicit widen);
+  int literals = Int.
 
 ## Phase 3 — JVM class-file writer  ⬜
 - `codegen/classfile.rs`: constant pool (Utf8/Class/NameAndType/Methodref/Fieldref/String/
