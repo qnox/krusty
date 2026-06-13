@@ -461,7 +461,13 @@ impl<'a> Parser<'a> {
             };
             self.expect(TokenKind::Colon, "':'");
             let ty = self.parse_type();
-            params.push(Param { name: pname, ty, is_vararg });
+            let default = if self.eat(TokenKind::Eq) {
+                self.skip_newlines();
+                Some(self.parse_expr())
+            } else {
+                None
+            };
+            params.push(Param { name: pname, ty, is_vararg, default });
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;

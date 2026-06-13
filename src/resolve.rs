@@ -20,6 +20,9 @@ pub struct Signature {
     pub ret: Ty,
     /// True if the last parameter is `vararg` (its `Ty` is the array type; callers pack trailing args).
     pub vararg: bool,
+    /// Minimum number of arguments a caller must supply — params beyond this have default values
+    /// that the caller fills in. Equals `params.len()` when there are no defaults.
+    pub required: usize,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -328,7 +331,24 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         None => Ty::Unit, // v0: missing return type defaults to Unit
                     };
                     let vararg = f.params.last().map_or(false, |p| p.is_vararg);
-                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg }).is_some() {
+                    // Trailing params with defaults may be omitted by callers (positional only).
+                    let trailing_defaults = if vararg {
+                        0
+                    } else {
+                        f.params.iter().rev().take_while(|p| p.default.is_some()).count()
+                    };
+                    let required = f.params.len() - trailing_defaults;
+                    // Call-site substitution copies the default expression to the caller, so a default
+                    // that reads another parameter can't be reproduced there — reject such functions.
+                    let pnames: std::collections::HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+                    for p in &f.params {
+                        if let Some(dx) = p.default {
+                            if expr_refs_param(file, dx, &pnames) {
+                                diags.error(f.span, "krusty: a default argument that references another parameter is not supported");
+                            }
+                        }
+                    }
+                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required }).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
@@ -363,18 +383,21 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .map(|m| {
                             let mut mtp = ctp.clone();
                             mtp.extend(m.type_params.iter().cloned());
-                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
+                            let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), Signature { params, ret, vararg: false })
+                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required } })
                         })
                         .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0 });
                         }
-                        methods.insert("copy".into(), Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false });
+                        methods.insert(
+                            "copy".into(),
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len() },
+                        );
                     }
                     if c.is_object {
                         table.objects.insert(c.name.clone());
@@ -396,9 +419,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .map(|m| {
                             let mut mtp = ctp.clone();
                             mtp.extend(m.type_params.iter().cloned());
-                            let params = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
+                            let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), Signature { params, ret, vararg: false })
+                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required } })
                         })
                         .collect();
                     let static_props: HashMap<String, Ty> = c
@@ -441,6 +464,28 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 /// Light type inference for an unannotated computed-property getter body (`val x get() = expr`),
 /// against the class's already-collected properties (`locals`). Handles literals, property/`this.x`
 /// references, `.size`/`.length`, unary, and binary ops; anything else is `Error` (the file skips).
+/// Does the default-argument expression `e` read any of `names` (the function's own parameters)?
+/// Statement-bearing expressions (blocks, lambdas, try, when) are conservatively treated as a
+/// reference so we never silently mis-substitute a default we can't fully analyse.
+fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+    let r = |x: ExprId| expr_refs_param(file, x, names);
+    match file.expr(e) {
+        Expr::Name(n) => names.contains(n.as_str()),
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit => false,
+        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. } => r(*operand),
+        Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
+        Expr::Member { receiver, .. } => r(*receiver),
+        Expr::Index { array, index } => r(*array) || r(*index),
+        Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
+        Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
+        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
+        Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
+        // Statement-bearing — analysing param flow through these isn't worth it; reject the default.
+        Expr::Lambda { .. } | Expr::Try { .. } | Expr::Block { .. } | Expr::When { .. } => true,
+    }
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -960,6 +1005,17 @@ impl<'a> Checker<'a> {
             Some(r) => r,
             None => f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit),
         };
+        // Default arguments are evaluated in the caller's context (they may not read other params —
+        // enforced in collect_signatures), so check each in a fresh scope and populate its types.
+        self.push_scope();
+        for p in &f.params {
+            if let Some(dx) = p.default {
+                let pty = self.resolve_ty(&p.ty);
+                let dty = self.expr(dx);
+                self.expect_assignable(pty, dty, self.span(dx), "default argument");
+            }
+        }
+        self.pop_scope();
         self.push_scope();
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
@@ -1636,6 +1692,11 @@ impl<'a> Checker<'a> {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                             return match self.syms.classes.get(&cls).and_then(|c| c.methods.get(&name)).cloned() {
                                 Some(sig) => {
+                                    // Default arguments on object/companion methods aren't filled by the
+                                    // emitter yet, so the call must supply exactly the declared params.
+                                    if sig.params.len() != arg_tys.len() {
+                                        self.diags.error(span, format!("method '{cls}.{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                                    }
                                     for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
                                         self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                                     }
@@ -1801,11 +1862,17 @@ impl<'a> Checker<'a> {
                                     self.expect_assignable(elem, arg_tys[i], self.span(args[i]), "vararg argument");
                                 }
                             }
-                        } else if sig.params.len() != arg_tys.len() {
-                            self.diags.error(span, format!("function '{fname}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                        } else if arg_tys.len() < sig.required || arg_tys.len() > sig.params.len() {
+                            let want = if sig.required == sig.params.len() {
+                                format!("{}", sig.params.len())
+                            } else {
+                                format!("{} to {}", sig.required, sig.params.len())
+                            };
+                            self.diags.error(span, format!("function '{fname}' expects {want} args, got {}", arg_tys.len()));
                         } else {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            // Supplied args match by position; omitted trailing params use their defaults.
+                            for (i, a) in arg_tys.iter().enumerate() {
+                                self.expect_assignable(sig.params[i], *a, self.span(args[i]), "argument");
                             }
                         }
                         sig.ret

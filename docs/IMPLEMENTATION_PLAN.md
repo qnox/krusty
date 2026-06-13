@@ -776,6 +776,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   conformance holds at **168 OK / 0 FAIL** (clears 124 first-errors; those files have further
   blockers, so it compounds).
 
+## Phase 60 — Default parameter values  ✅
+- ✅ Free functions may declare default values (`fun f(x: Int = 5, y: String = "hi")`). The parser
+  reads `= expr` after a parameter type; `Param` gains a `default` field. `Signature` gains
+  `required` (the minimum arg count = params without a trailing default). A call may now supply
+  `required..=params.len()` positional args; the checker type-checks each default against its
+  param type, and the emitter fills omitted trailing params with their default expressions at the
+  call site (the emitted method keeps the full parameter list).
+- ✅ Correctness guards (keep the never-miscompile invariant):
+  - A default that references *another parameter* can't be reproduced at the call site → rejected.
+  - Defaults on object/companion/instance methods aren't call-site-filled yet, so a call that
+    omits them is rejected (arity-checked), not miscompiled. (Caught 3 `jvmStatic` cases that a
+    missing object-method arity check would otherwise have let through to a `VerifyError`.)
+- ✅ `tests/default_args_e2e.rs` (literal/bool/top-level-val defaults, run on the JVM). Box
+  conformance **168 → 170 OK / 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
