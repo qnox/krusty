@@ -137,6 +137,9 @@ pub struct ClassDecl {
     pub is_data: bool,
     /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
     pub is_object: bool,
+    /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
+    pub is_enum: bool,
+    pub enum_entries: Vec<String>,
     pub span: Span,
 }
 
@@ -222,6 +225,13 @@ impl File {
                 }
                 out.push(' ');
                 self.write_expr(p.init, out);
+                out.push(')');
+            }
+            Decl::Class(c) if c.is_enum => {
+                out.push_str(&format!("(enum {}", c.name));
+                for e in &c.enum_entries {
+                    out.push_str(&format!(" {e}"));
+                }
                 out.push(')');
             }
             Decl::Class(c) => {

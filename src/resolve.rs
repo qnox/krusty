@@ -44,6 +44,8 @@ pub struct SymbolTable {
     pub props: HashMap<String, (Ty, bool)>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
     pub objects: std::collections::HashSet<String>,
+    /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
+    pub enums: HashMap<String, Vec<String>>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
 }
@@ -189,6 +191,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     }
                     if c.is_object {
                         table.objects.insert(c.name.clone());
+                    }
+                    if c.is_enum {
+                        table.enums.insert(c.name.clone(), c.enum_entries.clone());
                     }
                     table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
                 }
@@ -437,6 +442,17 @@ impl<'a> Checker<'a> {
                 self.check_binary(op, lt, rt, self.span(e))
             }
             Expr::Member { receiver, name } => {
+                // `EnumName.ENTRY` — a static enum entry access (receiver is the enum type name).
+                if let Expr::Name(en) = self.file.expr(receiver).clone() {
+                    if self.lookup(&en).is_none() {
+                        if let Some(entries) = self.syms.enums.get(&en) {
+                            if entries.iter().any(|e| e == &name) {
+                                let internal = self.syms.classes.get(&en).map(|c| c.internal.clone()).unwrap_or(en.clone());
+                                return self.set(e, Ty::obj(&internal));
+                            }
+                        }
+                    }
+                }
                 let rt = self.expr(receiver);
                 self.check_member(rt, &name, self.span(e))
             }
@@ -567,6 +583,15 @@ impl<'a> Checker<'a> {
         if let Ty::Obj(internal) = rt {
             if let Some((ty, _)) = self.syms.class_by_internal(internal).and_then(|c| c.prop(name)) {
                 return ty;
+            }
+            // `java.lang.Enum` members (`name`, `ordinal`) available on any enum value.
+            let is_enum_val = self.syms.enums.keys().any(|en| self.syms.classes.get(en).map_or(false, |c| c.internal == internal));
+            if is_enum_val {
+                match name {
+                    "name" => return Ty::String,
+                    "ordinal" => return Ty::Int,
+                    _ => {}
+                }
             }
         }
         self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));

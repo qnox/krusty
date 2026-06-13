@@ -306,6 +306,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Remaining Java: JDK types via jimage, instance methods in signatures (needs per-file imports in
   Stage C), overload widening, `.java` source front end.
 
+## Phase 20 — `enum class`  ✅
+- ✅ (v0) `enum class Name { A, B }` → a class extending `java/lang/Enum`: one `public static final`
+  field per entry, a private `(String,int)` constructor calling `Enum.<init>`, and a `<clinit>`
+  constructing each entry. `Name.ENTRY` → `getstatic`; `==` (reference); `.name`/`.ordinal` →
+  `java.lang.Enum` accessors. `@Metadata` flags=32902 + `enum_entry` (f13) so Kotlin consumers
+  resolve the entries.
+- ✅ Conformance fixes (box harness): `val u: Unit = when(...)` no longer emits a `Unit` store
+  (stack underflow); a `when` arm that diverges (`return`) no longer emits a dead `goto` to method
+  end (`Expecting a stackmap frame` VerifyError).
+- ✅ `tests/enum_e2e.rs` (shape + JVM run incl. `.name`/`.ordinal`). Box conformance: **39 / 39 OK /
+  0 FAIL** (up from 33); full suite 104 green.
+- ⬜ Deferred (Kotlin-consumer parity): `values()`/`valueOf()`/`$VALUES`, the `kotlin/Enum<T>`
+  generic supertype in metadata (so consumers get `.ordinal`), entry constructor args + bodies.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
