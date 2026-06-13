@@ -189,11 +189,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self, lo: u32) -> Token {
-        // Raw strings (`"""..."""`) are out of subset — reject so callers don't miscompile.
+        // Raw strings (`"""..."""`): no escape processing, may span lines. Interpolation (`$x`/`${}`)
+        // is not yet supported — reject (skip) rather than mis-lex it as literal text.
         if self.peek2() == b'"' && self.b.get(self.i + 2) == Some(&b'"') {
-            self.i += 3;
-            self.diags.error(Span::new(lo, self.i as u32), "raw string literals are not supported");
-            return Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) };
+            return self.raw_string(lo);
         }
         if self.string_has_interpolation() {
             return self.string_template(lo);
@@ -210,6 +209,49 @@ impl<'a> Lexer<'a> {
             self.i += 1; // closing quote
         } else {
             self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+        }
+        Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) }
+    }
+
+    /// Lex a raw string `"""..."""`. Content is verbatim (no escapes); the closing delimiter is a run
+    /// of three quotes (a run of >3 leaves the surplus quotes in the content). The emitted `StringLit`
+    /// token spans the whole literal; the parser strips the three leading/trailing quotes.
+    fn raw_string(&mut self, lo: u32) -> Token {
+        self.i += 3; // opening `"""`
+        let content_lo = self.i;
+        let close_start;
+        loop {
+            if self.i >= self.b.len() {
+                self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+                close_start = self.i;
+                break;
+            }
+            if self.b[self.i] == b'"' {
+                let mut q = 0;
+                while self.b.get(self.i + q) == Some(&b'"') {
+                    q += 1;
+                }
+                if q >= 3 {
+                    close_start = self.i;
+                    self.i += q; // consume the whole quote run; the final three are the delimiter
+                    break;
+                }
+                self.i += q; // a run of one or two quotes is ordinary content
+            } else {
+                self.i += 1;
+            }
+        }
+        // Interpolation inside a raw string isn't supported yet — reject so it isn't taken literally.
+        let mut j = content_lo;
+        while j < close_start {
+            if self.b[j] == b'$' {
+                let next = self.b.get(j + 1).copied().unwrap_or(0);
+                if next == b'{' || is_ident_start(next) {
+                    self.diags.error(Span::new(lo, self.i as u32), "raw string interpolation is not supported");
+                    break;
+                }
+            }
+            j += 1;
         }
         Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) }
     }
