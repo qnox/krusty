@@ -740,6 +740,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   mutation, on the JVM). Box conformance holds at **164 OK / 0 FAIL** (completes the scope-function
   family; broader gains await higher-order functions / collections).
 
+## Phase 56 — Compile-time `trimIndent`/`trimMargin`  ✅
+- ✅ `"…".trimIndent()` / `"…".trimMargin()` are kotlin-stdlib extensions (no JDK method; krusty
+  doesn't link the stdlib), so krusty *folds* them at compile time when the receiver is a string
+  literal: `trimIndent` drops a blank first/last line then strips the minimum common leading
+  whitespace; `trimMargin` strips each line up to the `|` marker. A non-literal receiver is rejected.
+- ✅ `tests/trim_indent_e2e.rs` (both fold correctly on multi-line raw strings, on the JVM). Box
+  conformance holds at **164 OK / 0 FAIL** (clears the #1 String-method blocker, 125 first-errors;
+  those files have further blockers, so it compounds rather than landing alone).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
