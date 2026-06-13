@@ -49,14 +49,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   -Xverify:all` verifies + runs it via a Java `Main` → `7`. Straight-line methods need no
   StackMapTable at v52; branch frames come in Phase 4.
 
-## Phase 4 — Lower + emit the subset  ⬜
-- `ir.rs`: minimal stack IR (or direct AST→bytecode for v0).
-- `codegen/emit.rs`: literals, arithmetic (with Int 32-bit / Long / Double opcodes), comparisons &
-  branches, boolean short-circuit, string concat (v0: `StringBuilder` sequence — simplest verifiable
-  form; document that kotlinc uses `invokedynamic`), local slots, `if`/`while`, calls, `return`.
-- `driver.rs`: the **streaming loop** with explicit per-file arena drop + a `--emit-stats` flag
-  printing peak/working-set.
-- **Exit:** `cargo run -- tests/cases/arith.kt` produces a verifying, running `.class`.
+## Phase 4 — Lower + emit the subset  🚧
+### 4a — straight-line subset ✅
+- ✅ `codegen/emit.rs`: direct AST→bytecode. Literals, numeric arithmetic (Int/Long/Double with
+  widening), unary neg/not, free-function calls (`invokestatic` to the file class), `toString()`
+  (→`String.valueOf`), string concat (→`StringBuilder`, the JVM-8 strategy; kotlinc uses
+  `invokedynamic` — structural, not behavioral, difference), `println`, `.length`. Class naming
+  `<File>Kt` + descriptors.
+- ✅ **Exit met:** `tests/compile_e2e.rs` runs the full pipeline (parse→check→emit) on 8 functions;
+  javac accepts, `java -Xverify:all` verifies + runs, all results semantically correct
+  (`7,14,3,-5,8,11.0,42!,hi bob`). 38 tests green.
+### 4c — branches (if/while/comparisons/`&&`/`||`) ⬜  ← next
+- Conditional jumps + **StackMapTable** computation (required at v52 for branch targets). Block
+  bodies, locals in blocks, `return` in blocks, `while`, `if`-expression value.
+- Exit: `control.kt` (`max`, `fib`) compiles, verifies, runs.
+### 4d — streaming driver ⬜
+- Wire emit into the driver per-file with arena drop; `--emit-stats` for peak/working-set.
 
 ## Phase 5 — Differential harness vs kotlinc  ⬜
 - `harness/`: (a) locate reference kotlinc (wrap the `kotlin-compiler` 2.4.0 jar in `~/.m2` via a
