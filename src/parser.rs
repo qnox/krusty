@@ -244,10 +244,11 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Ident) {
             let name = self.text().to_string();
             self.bump();
-            TypeRef { name, span }
+            let nullable = self.eat(TokenKind::Question); // `T?`
+            TypeRef { name, nullable, span }
         } else {
             self.diags.error(span, "expected a type");
-            TypeRef { name: "<error>".to_string(), span }
+            TypeRef { name: "<error>".to_string(), nullable: false, span }
         }
     }
 
@@ -393,7 +394,22 @@ impl<'a> Parser<'a> {
 
     // ---- expressions (Pratt) ----
     fn parse_expr(&mut self) -> ExprId {
-        self.parse_bp(0)
+        self.parse_elvis()
+    }
+
+    /// Elvis `?:` is the lowest-precedence binary operator (below `||`).
+    fn parse_elvis(&mut self) -> ExprId {
+        let mut lhs = self.parse_bp(0);
+        while self.at(TokenKind::Question) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Colon) {
+            self.bump(); // '?'
+            self.bump(); // ':'
+            self.skip_newlines();
+            let rhs = self.parse_bp(0);
+            let lspan = self.file.expr_spans[lhs.0 as usize];
+            let rspan = self.file.expr_spans[rhs.0 as usize];
+            lhs = self.file.add_expr(Expr::Elvis { lhs, rhs }, Span::new(lspan.lo, rspan.hi));
+        }
+        lhs
     }
 
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
@@ -439,6 +455,21 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
         loop {
             match self.kind() {
+                // `!!` not-null assertion in postfix position = two consecutive `Not` tokens.
+                TokenKind::Not if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Not) => {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    self.bump();
+                    let end = self.tok().span;
+                    self.bump();
+                    lhs = self.file.add_expr(Expr::NotNull { operand: lhs }, Span::new(lspan.lo, end.hi));
+                }
+                // `?.` safe calls are not yet supported — reject so the file is skipped, not miscompiled.
+                TokenKind::Question if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Dot) => {
+                    self.diags.error(self.tok().span, "safe calls (?.) are not supported");
+                    self.bump();
+                    self.bump();
+                    let _ = self.ident_or_error("member name");
+                }
                 TokenKind::Dot => {
                     self.bump();
                     let name = self.ident_or_error("member name");
@@ -501,6 +532,10 @@ impl<'a> Parser<'a> {
             TokenKind::KwFalse => {
                 self.bump();
                 self.file.add_expr(Expr::BoolLit(false), span)
+            }
+            TokenKind::KwNull => {
+                self.bump();
+                self.file.add_expr(Expr::NullLit, span)
             }
             TokenKind::Ident => {
                 let n = self.text().to_string();
@@ -756,6 +791,19 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn nullable_null_notnull_elvis() {
+        assert_eq!(tree("fun f(s: String?): String = s ?: \"d\""),
+            "(fun f (param s String) :String (?: s \"d\"))\n");
+        assert_eq!(tree("fun g(s: String?): String = s!!"),
+            "(fun g (param s String) :String (!! s))\n");
+        assert_eq!(tree("fun h(): String = null"),
+            "(fun h :String null)\n");
+        // chained prefix `!` must NOT be confused with the postfix `!!` operator.
+        assert_eq!(tree("fun n(p: Boolean): Boolean = !!!p"),
+            "(fun n (param p Boolean) :Boolean (not (not (not p))))\n");
     }
 
     #[test]

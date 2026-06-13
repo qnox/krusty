@@ -73,7 +73,8 @@ impl<'a> Lexer<'a> {
             b'=' if self.peek2() == b'=' => self.two(TokenKind::EqEq),
             b'=' => self.one(TokenKind::Eq),
             b'!' if self.peek2() == b'=' => self.two(TokenKind::NotEq),
-            b'!' => self.one(TokenKind::Not),
+            b'!' => self.one(TokenKind::Not), // `!!` (not-null) is two `Not`s in postfix position
+            b'?' => self.one(TokenKind::Question),
             b'<' if self.peek2() == b'=' => self.two(TokenKind::LtEq),
             b'<' => self.one(TokenKind::Lt),
             b'>' if self.peek2() == b'=' => self.two(TokenKind::GtEq),

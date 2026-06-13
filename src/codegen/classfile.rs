@@ -387,6 +387,8 @@ impl CodeBuilder {
     pub fn if_icmple(&mut self, l: Label) { self.branch(0xa4, l, -2); }
     pub fn lcmp(&mut self) { self.op(0x94, -3); }
     pub fn dcmpg(&mut self) { self.op(0x98, -3); }
+    pub fn ifnull(&mut self, l: Label) { self.branch(0xc6, l, -1); }
+    pub fn ifnonnull(&mut self, l: Label) { self.branch(0xc7, l, -1); }
     pub fn iflt(&mut self, l: Label) { self.branch(0x9b, l, -1); }
     pub fn ifge(&mut self, l: Label) { self.branch(0x9c, l, -1); }
     pub fn ifgt(&mut self, l: Label) { self.branch(0x9d, l, -1); }
@@ -565,6 +567,8 @@ impl CodeBuilder {
     pub fn dup(&mut self) { self.op(0x59, 1); }
     pub fn ixor(&mut self) { self.op(0x82, -1); }
     pub fn iand(&mut self) { self.op(0x7e, -1); }
+    pub fn aconst_null(&mut self) { self.op(0x01, 1); }
+    pub fn athrow(&mut self) { self.op(0xbf, -1); }
 
     /// `instanceof <class>` (pops ref, pushes int 0/1).
     pub fn instance_of(&mut self, class_index: u16) { self.op_u2(0xc1, class_index, 0); }
