@@ -1614,6 +1614,11 @@ impl<'a> MethodEmitter<'a> {
             Expr::StringLit(s) => code.push_string(&s, cw),
             Expr::CharLit(c) => code.push_int(c as i32, cw),
             Expr::NullLit => code.aconst_null(),
+            // A lambda only reaches codegen as an intercepted `let`/`also` argument (handled in
+            // `emit_call`); a bare one is unsupported (the checker already rejected it).
+            Expr::Lambda { .. } => {
+                self.diags.error(self.file.expr_spans[e.0 as usize], "krusty: unsupported lambda".to_string());
+            }
             Expr::NotNull { operand } if !self.info.ty(operand).is_reference() => {
                 // `!!` on a non-null primitive (`42!!`) is the operand itself — no null check.
                 self.emit_expr(operand, code, cw);
@@ -2313,6 +2318,45 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
+                if let Expr::Lambda { param, body } = self.file.expr(args[0]).clone() {
+                    let rt = self.info.ty(receiver);
+                    self.emit_expr(receiver, code, cw);
+                    let slot = self.fresh_slot(rt);
+                    code.ensure_locals(slot + slot_words(rt));
+                    self.store(rt, slot, code);
+                    let pname = param.unwrap_or_else(|| "it".to_string());
+                    let prev = self.slots.insert(pname.clone(), (slot, rt));
+                    let result = self.info.ty(e);
+                    if name == "let" {
+                        if result == Ty::Unit {
+                            self.emit_expr(body, code, cw);
+                            self.discard(self.info.ty(body), code);
+                        } else {
+                            self.emit_expr_as(body, result, code, cw);
+                        }
+                    } else {
+                        // `also`: run the body for effect, then the receiver is the result.
+                        self.emit_expr(body, code, cw);
+                        self.discard(self.info.ty(body), code);
+                        if result != Ty::Unit {
+                            load_local(rt, slot, code);
+                        }
+                    }
+                    match prev {
+                        Some(p) => {
+                            self.slots.insert(pname, p);
+                        }
+                        None => {
+                            self.slots.remove(&pname);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // `super.method(args)` → aload 0; args; invokespecial Super.method (non-virtual dispatch).
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {

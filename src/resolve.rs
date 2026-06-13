@@ -1047,6 +1047,12 @@ impl<'a> Checker<'a> {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
             }
+            Expr::Lambda { .. } => {
+                // A bare lambda is only supported as the argument of an inlined scope function
+                // (`let`/`also`), which intercepts it before this point — anywhere else is unsupported.
+                self.diags.error(self.span(e), "krusty: lambdas are only supported as a 'let'/'also' argument".to_string());
+                Ty::Error
+            }
             Expr::Index { array, index } => {
                 let at = self.expr(array);
                 let it = self.expr(index);
@@ -1503,6 +1509,18 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
+                // Inlined scope functions `recv.let { … }` / `recv.also { … }`: bind the lambda's
+                // parameter (default `it`) to the receiver; `let` yields the body, `also` the receiver.
+                if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
+                    if let Expr::Lambda { param, body } = self.file.expr(args[0]).clone() {
+                        let rt = self.expr(receiver);
+                        self.push_scope();
+                        self.declare(param.as_deref().unwrap_or("it"), rt, false);
+                        let bt = self.expr(body);
+                        self.pop_scope();
+                        return if name == "let" { bt } else { rt };
+                    }
+                }
                 // `super.method(args)` — dispatch to the base class's method (non-virtual).
                 if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
