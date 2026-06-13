@@ -636,7 +636,14 @@ pub fn emit_class(
     // Computed properties (`val x: T get() = …`) → a `getX()` method running the getter body.
     for bp in &class.body_props {
         let Some(getter) = &bp.getter else { continue };
-        let ty = bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Error);
+        // Use the property's resolved type from the symbol table (which holds the *inferred* type for
+        // an unannotated computed getter), so `getX`'s descriptor matches what callers expect.
+        let ty = syms
+            .class_by_internal(internal_name)
+            .and_then(|c| c.prop(&bp.name))
+            .map(|(t, _)| t)
+            .or_else(|| bp.ty.as_ref().map(|r| resolve_ty(r, syms)))
+            .unwrap_or(Ty::Error);
         let getter_fn = FunDecl {
             name: format!("get{}", capitalize(&bp.name)),
             params: Vec::new(),
