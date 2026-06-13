@@ -446,6 +446,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   holds at **80 OK / 0 FAIL** (exhaustive `when` without `else` over sealed types — needed for many
   such files to fully compile — is a separate follow-up).
 
+## Phase 30 — Raw string literals  ✅
+- ✅ `"""..."""` lexes as a single `StringLit` whose content is verbatim — no escape processing
+  (`\n` is backslash-n), may span lines, and may contain one or two consecutive quotes. The closing
+  delimiter is a run of three quotes (a longer run leaves the surplus quotes in the content).
+- ✅ Interpolation inside a raw string (`$x` / `${…}`) is not yet supported and is rejected (skipped)
+  rather than mis-lexed as literal text.
+- ✅ `tests/raw_string_e2e.rs` (multi-line + embedded quotes run on the JVM; verbatim value;
+  interpolation rejection). Box conformance **81 OK / 0 FAIL** (up from 80).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

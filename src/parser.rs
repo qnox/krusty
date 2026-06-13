@@ -1198,6 +1198,11 @@ fn unescape_chunk(inner: &str) -> String {
 }
 
 fn unquote(raw: &str) -> String {
+    // Raw string `"""..."""`: content is verbatim (no escape processing), three quotes each side.
+    if raw.starts_with("\"\"\"") {
+        let inner = raw.strip_prefix("\"\"\"").and_then(|s| s.strip_suffix("\"\"\"")).unwrap_or(raw);
+        return inner.to_string();
+    }
     let inner = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(raw);
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
