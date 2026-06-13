@@ -142,10 +142,15 @@ pub struct ClassDecl {
     pub enum_entries: Vec<String>,
     /// `interface Name { … }` — a JVM interface (abstract methods).
     pub is_interface: bool,
-    /// Implemented interface names from a supertype list (`class C : I1, I2`). v0 supports only
-    /// interface supertypes; a base-class supertype (`: Base()`) sets `has_base_class`.
+    /// `open`/`abstract` — the class is not `final` (may be subclassed); `abstract` also adds
+    /// `ACC_ABSTRACT`.
+    pub is_open: bool,
+    pub is_abstract: bool,
+    /// Implemented interface names from a supertype list (`class C : I1, I2`).
     pub supertypes: Vec<String>,
-    pub has_base_class: bool,
+    /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
+    pub base_class: Option<String>,
+    pub base_args: Vec<ExprId>,
     pub span: Span,
 }
 

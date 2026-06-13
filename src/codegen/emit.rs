@@ -250,12 +250,21 @@ pub fn emit_class(
     if class.is_interface {
         return emit_interface(class, internal_name, syms);
     }
-    if class.has_base_class {
-        // v0 supports implementing interfaces but not extending a base class.
-        diags.error(class.span, "krusty v0: extending a base class is not supported".to_string());
-        return Vec::new();
+    // Base class (`: Base(args)`) → JVM super; otherwise `java/lang/Object`.
+    let base_internal = class
+        .base_class
+        .as_ref()
+        .map(|b| syms.classes.get(b).map(|c| c.internal.clone()).unwrap_or_else(|| b.clone()));
+    let super_internal = base_internal.clone().unwrap_or_else(|| "java/lang/Object".to_string());
+    let mut cw = ClassWriter::new(internal_name, &super_internal);
+    // `open`/`abstract` classes are not `final`; `abstract` adds ACC_ABSTRACT.
+    if class.is_open || class.is_abstract {
+        let mut access = ACC_PUBLIC | ACC_SUPER;
+        if class.is_abstract {
+            access |= ACC_ABSTRACT;
+        }
+        cw.set_access(access);
     }
-    let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
     // Implemented interfaces (supertypes without constructor args).
     for st in &class.supertypes {
         let iface_internal = syms.classes.get(st).map(|c| c.internal.clone()).unwrap_or_else(|| st.clone());
@@ -275,13 +284,40 @@ pub fn emit_class(
         cw.add_field(access, &p.name, &ty.descriptor());
     }
 
-    // Primary constructor: super() then store each parameter into its backing field.
+    // Primary constructor: super(base args) then store each parameter into its backing field.
     let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
     let total_locals: u16 = 1 + props.iter().map(|(_, t)| slot_words(*t)).sum::<u16>();
+    let class_props_map: HashMap<String, Ty> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+    let ctor_imports = import_map(file);
     let mut code = CodeBuilder::new(total_locals);
-    code.aload(0);
-    let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
-    code.invokespecial(obj_init, 0, 0);
+    {
+        // A MethodEmitter gives `this` (slot 0) + the ctor params (= the properties) so base-class
+        // constructor arguments (which reference those params) can be lowered.
+        let mut ce = MethodEmitter::new_instance(file, info, syms, internal_name, &ctor_imports, class_props_map.clone(), diags);
+        let mut slot = 1u16;
+        for (p, ty) in &props {
+            ce.slots.insert(p.name.clone(), (slot, *ty));
+            slot += slot_words(*ty);
+        }
+        ce.next_slot = slot;
+        code.aload(0);
+        match &base_internal {
+            Some(base) => {
+                let base_tys: Vec<Ty> = syms.class_by_internal(base).map(|c| c.props.iter().map(|(_, t, _)| *t).collect()).unwrap_or_default();
+                for (arg, pty) in class.base_args.iter().zip(&base_tys) {
+                    ce.emit_expr_as(*arg, *pty, &mut code, &mut cw);
+                }
+                let base_words: i32 = base_tys.iter().take(class.base_args.len()).map(|t| slot_words(*t) as i32).sum();
+                let bdesc = method_descriptor(&base_tys[..class.base_args.len().min(base_tys.len())], Ty::Unit);
+                let m = cw.methodref(base, "<init>", &bdesc);
+                code.invokespecial(m, base_words, 0);
+            }
+            None => {
+                let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
+                code.invokespecial(obj_init, 0, 0);
+            }
+        }
+    }
     let mut slot = 1u16;
     for (p, ty) in &props {
         code.aload(0);
@@ -313,7 +349,10 @@ pub fn emit_class(
         cw.add_method(ACC_STATIC, "<clinit>", "()V", &clinit);
     }
 
-    // Accessors: `public final getX()` for every property; `setX(..)` for `var`.
+    // Members of an `open`/`abstract` class must not be `final` (so subclasses can override).
+    let member_access = if class.is_open || class.is_abstract { ACC_PUBLIC } else { ACC_PUBLIC | ACC_FINAL };
+
+    // Accessors: `getX()` for every property; `setX(..)` for `var`.
     for (p, ty) in &props {
         let cap = capitalize(&p.name);
         // getter
@@ -323,7 +362,7 @@ pub fn emit_class(
         g.getfield(f, slot_words(*ty) as i32);
         emit_typed_return(*ty, &mut g);
         g.link();
-        cw.add_method(ACC_PUBLIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+        cw.add_method(member_access, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
         // setter (var only)
         if p.is_var {
             let mut s = CodeBuilder::new(1 + slot_words(*ty));
@@ -333,7 +372,7 @@ pub fn emit_class(
             s.putfield(f, slot_words(*ty) as i32);
             s.ret_void();
             s.link();
-            cw.add_method(ACC_PUBLIC | ACC_FINAL, &format!("set{cap}"), &method_descriptor(&[*ty], Ty::Unit), &s);
+            cw.add_method(member_access, &format!("set{cap}"), &method_descriptor(&[*ty], Ty::Unit), &s);
         }
     }
 
@@ -347,7 +386,7 @@ pub fn emit_class(
             let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
             let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
             let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
-            e.emit_method(m, &params, ret, &mut cw);
+            e.emit_method(m, &params, ret, member_access, &mut cw);
             crate::metadata::class_builder::FnMeta::plain(
                 m.name.clone(),
                 m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
@@ -702,7 +741,7 @@ impl<'a> MethodEmitter<'a> {
     }
 
     /// Emit an instance method: `this` in slot 0, params from slot 1, `public final` (non-static).
-    fn emit_method(&mut self, f: &FunDecl, params: &[Ty], ret: Ty, cw: &mut ClassWriter) {
+    fn emit_method(&mut self, f: &FunDecl, params: &[Ty], ret: Ty, access: u16, cw: &mut ClassWriter) {
         self.ret_ty = ret;
         for (p, ty) in f.params.iter().zip(params) {
             self.alloc_slot(&p.name, *ty);
@@ -718,7 +757,7 @@ impl<'a> MethodEmitter<'a> {
         }
         code.ensure_locals(self.next_slot);
         code.link();
-        cw.add_method(ACC_PUBLIC | ACC_FINAL, &f.name, &method_descriptor(params, ret), &code);
+        cw.add_method(access, &f.name, &method_descriptor(params, ret), &code);
     }
 
     fn alloc_slot(&mut self, name: &str, ty: Ty) -> u16 {
@@ -1053,13 +1092,9 @@ impl<'a> MethodEmitter<'a> {
                         code.invokevirtual(m, 0, rw);
                         return;
                     }
-                    // Property read on a class value: `p.prop` → invokevirtual get<Prop>().
-                    let pty = self
-                        .syms
-                        .class_by_internal(internal)
-                        .and_then(|c| c.prop(&name))
-                        .map(|(t, _)| t)
-                        .unwrap_or(Ty::Error);
+                    // Property read on a class value: `p.prop` → invokevirtual get<Prop>() (own or
+                    // inherited; invokevirtual resolves up the class hierarchy).
+                    let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
                     self.emit_expr(receiver, code, cw);
                     let getter = format!("get{}", capitalize(&name));
                     let m = cw.methodref(internal, &getter, &method_descriptor(&[], pty));
@@ -1466,15 +1501,14 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref("java/lang/String", &name, desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
-            // Instance method call on a class value: `p.method(args)` → invokevirtual.
+            // Instance method call on a class value: `p.method(args)` (own or inherited).
             Expr::Member { receiver, name }
                 if matches!(self.info.ty(receiver), Ty::Obj(_))
-                    && self.syms.class_by_internal(self.info.ty(receiver).obj_internal().unwrap()).map_or(false, |c| c.methods.contains_key(&name)) =>
+                    && self.syms.method_of(self.info.ty(receiver).obj_internal().unwrap(), &name).is_some() =>
             {
                 let internal = self.info.ty(receiver).obj_internal().unwrap();
-                let cls = self.syms.class_by_internal(internal).unwrap();
-                let sig = cls.methods.get(&name).unwrap().clone();
-                let is_iface = cls.is_interface;
+                let sig = self.syms.method_of(internal, &name).unwrap();
+                let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
                 self.emit_expr(receiver, code, cw);
                 for (a, pty) in args.iter().zip(&sig.params) {
                     self.emit_expr_as(*a, *pty, code, cw);
