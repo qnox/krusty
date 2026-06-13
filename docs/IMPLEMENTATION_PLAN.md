@@ -295,6 +295,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   on an int (`kt4251` VerifyError). Now such files are cleanly skipped.
 - ✅ `tests/char_e2e.rs` (JVM run + ABI vs kotlinc); full suite 103 green; box 33 / 33 OK / 0 FAIL.
 
+## Phase 19 — Java interop breadth: construction + instance methods  ✅
+- ✅ Construct a classpath Java object (`val c = util.Calc(10)`) → `new` + `invokespecial <init>`
+  (constructor resolved via the `.class` reader by arg descriptors), typed `Ty::Obj(internal)`.
+- ✅ Call **instance methods** on a classpath Java object (`c.add(5)`, `c.tag()`) → `invokevirtual`
+  (method resolved via the reader). Java now covers: static calls, instance calls, construction,
+  from loose dirs **and** jars; plus `java.lang.String` instance methods.
+- ✅ `println(Char)` → `(C)V`. `tests/java_instance_e2e.rs` (real javac class, construct + call,
+  `-Xverify:all`). Full suite 104 green; box 33 / 33 OK / 0 FAIL.
+- ⬜ Remaining Java: JDK types via jimage, instance methods in signatures (needs per-file imports in
+  Stage C), overload widening, `.java` source front end.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

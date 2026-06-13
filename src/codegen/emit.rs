@@ -1338,6 +1338,22 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref(internal, &name, &method_descriptor(&sig.params, sig.ret));
                 code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
             }
+            // Instance method on a classpath Java object → invokevirtual via the `.class` reader.
+            Expr::Member { receiver, name }
+                if matches!(self.info.ty(receiver), Ty::Obj(_))
+                    && crate::resolve::resolve_java_instance(&self.syms.classpath, self.info.ty(receiver).obj_internal().unwrap(), &name, &args.iter().map(|a| self.info.ty(*a)).collect::<Vec<_>>()).is_some() =>
+            {
+                let internal = self.info.ty(receiver).obj_internal().unwrap();
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                let (desc, ret) = crate::resolve::resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys).unwrap();
+                self.emit_expr(receiver, code, cw);
+                for a in args {
+                    self.emit_expr(*a, code, cw);
+                }
+                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = cw.methodref(internal, &name, &desc);
+                code.invokevirtual(m, arg_words, slot_words(ret) as i32);
+            }
             Expr::Name(fname) if fname == "println" => {
                 let out = cw.fieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
                 code.getstatic(out, 1);
@@ -1347,6 +1363,7 @@ impl<'a> MethodEmitter<'a> {
                 }
                 let (desc, words) = match at {
                     Ty::Int | Ty::Boolean => ("(I)V", 1),
+                    Ty::Char => ("(C)V", 1),
                     Ty::Long => ("(J)V", 2),
                     Ty::Double => ("(D)V", 2),
                     Ty::String => ("(Ljava/lang/String;)V", 1),
@@ -1368,6 +1385,24 @@ impl<'a> MethodEmitter<'a> {
                 }
                 let arg_words: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&ctor_tys, Ty::Unit);
+                let m = cw.methodref(&internal, "<init>", &desc);
+                code.invokespecial(m, arg_words, 0);
+            }
+            // Constructing a classpath Java type: `Calc()` → new + dup + args + invokespecial <init>.
+            Expr::Name(fname)
+                if !self.slots.contains_key(&fname)
+                    && self.imports.get(&fname).and_then(|internal| crate::resolve::resolve_java_ctor(&self.syms.classpath, internal, &args.iter().map(|a| self.info.ty(*a)).collect::<Vec<_>>())).is_some() =>
+            {
+                let internal = self.imports.get(&fname).unwrap().clone();
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                let desc = crate::resolve::resolve_java_ctor(&self.syms.classpath, &internal, &arg_tys).unwrap();
+                let class_idx = cw.class_ref(&internal);
+                code.new_obj(class_idx);
+                code.dup();
+                for a in args {
+                    self.emit_expr(*a, code, cw);
+                }
+                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = cw.methodref(&internal, "<init>", &desc);
                 code.invokespecial(m, arg_words, 0);
             }

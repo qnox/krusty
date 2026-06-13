@@ -106,6 +106,25 @@ pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys
     Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
 }
 
+/// Resolve an *instance* method on a classpath Java type by name + exact param descriptors.
+/// Returns `(method descriptor, return type)` for `invokevirtual`.
+pub fn resolve_java_instance(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
+    let ci = cp.find(internal)?;
+    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
+    let prefix = format!("({params})");
+    let m = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.descriptor.starts_with(&prefix))?;
+    let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
+    Some((m.descriptor.clone(), desc_to_ty(&ret)))
+}
+
+/// Resolve a constructor on a classpath Java type by argument descriptors. Returns its descriptor.
+pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Option<String> {
+    let ci = cp.find(internal)?;
+    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
+    let prefix = format!("({params})");
+    ci.methods.iter().find(|m| m.name == "<init>" && m.descriptor.starts_with(&prefix)).map(|m| m.descriptor.clone())
+}
+
 fn class_internal(file: &File, name: &str) -> String {
     match &file.package {
         Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), name),
@@ -615,6 +634,10 @@ impl<'a> Checker<'a> {
                         }
                         return sig.ret;
                     }
+                    // A classpath Java object: resolve the instance method via the `.class` reader.
+                    if let Some((_, ret)) = resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys) {
+                        return ret;
+                    }
                 }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
                 Ty::Error
@@ -637,6 +660,12 @@ impl<'a> Checker<'a> {
                             }
                         }
                         return Ty::obj(&cls.internal);
+                    }
+                    // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
+                    if let Some(internal) = self.imports.get(&fname).cloned() {
+                        if resolve_java_ctor(&self.syms.classpath, &internal, &arg_tys).is_some() {
+                            return Ty::obj(&internal);
+                        }
                     }
                 }
                 match self.syms.funs.get(&fname) {
