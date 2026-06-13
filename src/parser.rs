@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
-                    let d = self.parse_top_property(mods.iter().any(|m| m == "lateinit"));
+                    let d = self.parse_top_property(mods.iter().any(|m| m == "lateinit"), false);
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
@@ -209,7 +209,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_top_property(&mut self, is_lateinit: bool) -> PropDecl {
+    fn parse_top_property(&mut self, is_lateinit: bool, abstract_ok: bool) -> PropDecl {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
@@ -222,10 +222,10 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             Some(self.parse_expr())
         } else {
-            if !is_lateinit {
+            if !is_lateinit && !abstract_ok {
                 self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
             } else if ty.is_none() {
-                self.diags.error(start, "a 'lateinit' property must declare its type");
+                self.diags.error(start, "a property declared without an initializer must declare its type");
             }
             None
         };
@@ -258,7 +258,7 @@ impl<'a> Parser<'a> {
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::KwFun => methods.push(self.parse_fun()),
-                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit)),
+                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit, false)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
                     self.bump();
@@ -455,7 +455,7 @@ impl<'a> Parser<'a> {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun()),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property(lateinit);
+                        let p = self.parse_top_property(lateinit, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -528,6 +528,7 @@ impl<'a> Parser<'a> {
         let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
         let (supertypes, _base, _base_args) = self.parse_supertypes();
         let mut methods = Vec::new();
+        let mut body_props: Vec<PropDecl> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -539,9 +540,25 @@ impl<'a> Parser<'a> {
                 }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwFun => {
+                        let f = self.parse_fun();
+                        // A default method (a `fun` with a body) needs a Java-8 interface (classfile
+                        // v52 + StackMapTable), which krusty doesn't emit — only abstract methods.
+                        if !matches!(f.body, FunBody::None) {
+                            self.diags.error(f.span, "krusty: interface default methods (with a body) are not supported");
+                        }
+                        methods.push(f);
+                    }
+                    // Abstract interface property: `val`/`var x: T` (no initializer/getter).
+                    TokenKind::KwVal | TokenKind::KwVar => {
+                        let p = self.parse_top_property(false, true);
+                        if p.init.is_some() {
+                            self.diags.error(p.span, "krusty: interface properties with an initializer/getter are not supported");
+                        }
+                        body_props.push(p);
+                    }
                     _ => {
-                        self.diags.error(self.tok().span, "v0: interface bodies support only abstract 'fun' declarations");
+                        self.diags.error(self.tok().span, "v0: interface bodies support abstract 'fun' and 'val'/'var' declarations");
                         self.bump();
                     }
                 }
@@ -550,7 +567,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
-            name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(),
+            name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(),

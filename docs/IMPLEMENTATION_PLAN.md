@@ -602,6 +602,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/lateinit_e2e.rs` (set-then-read, read-before-init throws, on the JVM; abstract-property
   rejection). Box conformance **132 OK / 0 FAIL** (up from 128).
 
+## Phase 43 — Interface properties  ✅
+- ✅ Abstract interface properties (`val`/`var x: T`, no initializer/getter) → abstract `getX`
+  (and `setX` for `var`) on the interface; implementing classes provide them via their own property
+  accessors. Access through an interface-typed value dispatches via `invokeinterface` (read and
+  write). Registered in the interface's `ClassSig.props`/metadata for resolution.
+- ✅ Interface default methods (a `fun` with a body) are rejected — they need a Java-8 interface
+  (classfile v52 + StackMapTable), which krusty doesn't emit (it targets v50). A property with an
+  initializer/custom getter is likewise rejected.
+- ✅ Extended bridge detection to *property getters*: a supertype property whose erased type differs
+  from the class's own (a generic interface `val x: T` → `Object` overridden with a concrete type)
+  needs a bridge `getX` krusty doesn't synthesize → rejected (`supertype_internals` helper).
+- ✅ `tests/interface_property_e2e.rs` (interface val/var read+write through an interface-typed value
+  on the JVM; default-method rejection). Box conformance **137 OK / 0 FAIL** (up from 132).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
