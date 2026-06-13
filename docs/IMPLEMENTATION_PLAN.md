@@ -92,9 +92,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/diff_kotlinc.rs` (env-gated `KRUST_KOTLINC`): compile same source with krust + kotlinc;
   **public ABI signatures (javap) match exactly** and **execution output is identical** across an
   8-function subset (arith/promotion/mixed/if/&&/concat).
-### 5b — @Metadata round-trip ⬜
-- Compile a library with krust, then compile a *Kotlin consumer* of it with kotlinc; kotlinc must
-  accept krust's `@Metadata` and resolve the API. (Drives Phase 4b correctness.)
+### 5b — @Metadata round-trip ✅ (Kotlin-consumer ABI ACHIEVED)
+- ✅ The missing piece was the **`META-INF/<name>.kotlin_module`** file (maps package → file-facade
+  class); `@Metadata` alone was already byte-exact. `metadata/module.rs` emits it (byte-exact vs
+  kotlinc); driver writes `META-INF/main.kotlin_module`.
+- ✅ **Round-trip passes** (`tests/metadata_roundtrip_e2e.rs`): krust compiles a Kotlin library
+  (`package demo`, `greet`/`addk`); the real kotlinc compiles a Kotlin **consumer** that imports
+  them — resolves via krust's `@Metadata` + `.kotlin_module` — and **runs** correctly (`hi bob`, `5`).
+- ⇒ krust output is consumable by both **Java** (signatures, 5a) and **Kotlin** (5b) consumers.
+- Remaining for full @Metadata: classes/properties (richer proto), the JVM `method_signature`
+  extension for non-derivable JVM names, multi-file facades.
 
 ## Phase 6 — Java interop + scale  🚧
 ### 6a — `.class` signature reader ✅

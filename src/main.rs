@@ -51,6 +51,7 @@ fn main() {
 
     // Per-file: typecheck → emit → write → drop. Only one file's codegen state is live at a time.
     let mut emitted = 0;
+    let mut module_packages: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (i, file) in files.iter().enumerate() {
         let info = check_file(file, &syms, &mut diags);
         if diags.has_errors() {
@@ -67,9 +68,21 @@ fn main() {
                 eprintln!("krust: cannot write {}: {e}", path.display());
                 std::process::exit(1);
             }
+            let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
+            module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
             emitted += 1;
         }
         // `info` (per-file typecheck state) drops here, before the next file.
+    }
+
+    // META-INF/main.kotlin_module — maps packages to their file-facade classes so Kotlin
+    // consumers can resolve top-level declarations from the compiled module.
+    if !diags.has_errors() && !module_packages.is_empty() {
+        let packages: Vec<(String, Vec<String>)> = module_packages.into_iter().collect();
+        let module_bytes = krust::metadata::module::build_kotlin_module(&packages);
+        let mpath = out_dir.join("META-INF/main.kotlin_module");
+        let _ = std::fs::create_dir_all(mpath.parent().unwrap());
+        let _ = std::fs::write(&mpath, &module_bytes);
     }
 
     if diags.has_errors() {
