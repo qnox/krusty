@@ -248,6 +248,8 @@ impl<'a> Parser<'a> {
             name,
             props: Vec::new(),
             methods: Vec::new(),
+            body_props: Vec::new(),
+            init_order: Vec::new(),
             is_data: false,
             is_object: false,
             is_enum: true,
@@ -352,18 +354,15 @@ impl<'a> Parser<'a> {
                 if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
                     self.skip_decl_prefix(); // `private val x`, `@Anno val y`, ...
                 }
-                let is_var = match self.kind() {
-                    TokenKind::KwVal => { self.bump(); false }
-                    TokenKind::KwVar => { self.bump(); true }
-                    _ => {
-                        self.diags.error(self.tok().span, "v0: primary-constructor parameters must be 'val' or 'var' properties");
-                        false
-                    }
+                let (is_property, is_var) = match self.kind() {
+                    TokenKind::KwVal => { self.bump(); (true, false) }
+                    TokenKind::KwVar => { self.bump(); (true, true) }
+                    _ => (false, false), // a plain constructor parameter (not a property)
                 };
-                let pname = self.ident_or_error("property name");
+                let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
-                props.push(PropParam { name: pname, ty, is_var });
+                props.push(PropParam { name: pname, ty, is_var, is_property });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -375,8 +374,10 @@ impl<'a> Parser<'a> {
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
         let (supertypes, base_class, base_args) = self.parse_supertypes();
-        // Optional class body — v0 accepts member `fun` declarations (instance methods).
+        // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
+        let mut body_props: Vec<PropDecl> = Vec::new();
+        let mut init_order: Vec<ClassInit> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -389,8 +390,18 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwVal | TokenKind::KwVar => {
+                        let p = self.parse_top_property();
+                        init_order.push(ClassInit::PropInit(body_props.len()));
+                        body_props.push(p);
+                    }
+                    TokenKind::Ident if self.text() == "init" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LBrace) => {
+                        self.bump(); // 'init'
+                        let block = self.parse_block_expr();
+                        init_order.push(ClassInit::Block(block));
+                    }
                     _ => {
-                        self.diags.error(self.tok().span, "v0: class bodies support only member 'fun' declarations");
+                        self.diags.error(self.tok().span, "v0: class bodies support member 'fun', 'val'/'var', and 'init' blocks");
                         self.bump();
                     }
                 }
@@ -398,7 +409,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -467,7 +478,8 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
-            name, props: Vec::new(), methods, is_data: false, is_object: false, is_enum: false,
+            name, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(),
+            is_data: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false,
             supertypes, base_class: None, base_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -501,7 +513,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

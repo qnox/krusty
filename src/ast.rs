@@ -133,6 +133,9 @@ pub struct PropParam {
     pub name: String,
     pub ty: TypeRef,
     pub is_var: bool,
+    /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
+    /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
+    pub is_property: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +144,12 @@ pub struct ClassDecl {
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,
+    /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
+    /// initialized in the primary constructor.
+    pub body_props: Vec<PropDecl>,
+    /// Constructor init steps in source order: a body-property initializer (index into `body_props`)
+    /// or an `init { … }` block.
+    pub init_order: Vec<ClassInit>,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
     /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
@@ -160,6 +169,13 @@ pub struct ClassDecl {
     pub base_class: Option<String>,
     pub base_args: Vec<ExprId>,
     pub span: Span,
+}
+
+/// A primary-constructor init step (source-ordered): a body-property initializer or an `init` block.
+#[derive(Clone, Debug)]
+pub enum ClassInit {
+    PropInit(usize), // index into ClassDecl.body_props
+    Block(ExprId),   // an `init { … }` block expression
 }
 
 /// A top-level `val`/`var` property: `val name: Type = init`.

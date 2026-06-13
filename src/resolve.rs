@@ -25,7 +25,9 @@ pub struct Signature {
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: String,
-    pub props: Vec<(String, Ty, bool)>, // (name, type, is_var)
+    pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
+    /// Full primary-constructor parameter types in order (includes non-property params).
+    pub ctor_params: Vec<Ty>,
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
@@ -193,11 +195,23 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 }
                 Decl::Class(c) => {
                     let internal = class_names.get(&c.name).cloned().unwrap_or_else(|| class_internal(file, &c.name));
-                    let props: Vec<(String, Ty, bool)> = c
+                    // All primary-ctor params (in order) define the constructor signature.
+                    let ctor_params: Vec<Ty> = c.props.iter().map(|p| ty_of_ref(&p.ty, &class_names, diags)).collect();
+                    // Only `val`/`var` params (+ body props) are backing-field properties.
+                    let mut props: Vec<(String, Ty, bool)> = c
                         .props
                         .iter()
+                        .filter(|p| p.is_property)
                         .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, diags), p.is_var))
                         .collect();
+                    // Body properties (`class C { val x = … }`) are also fields/accessors.
+                    for bp in &c.body_props {
+                        let ty = match &bp.ty {
+                            Some(r) => ty_of_ref(r, &class_names, diags),
+                            None => infer_lit_ty(file, bp.init),
+                        };
+                        props.push((bp.name.clone(), ty, bp.is_var));
+                    }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
@@ -230,7 +244,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     let super_internal = c.base_class.as_ref().map(|b| class_names.get(b).cloned().unwrap_or_else(|| b.clone()));
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, methods, is_interface: c.is_interface, interfaces, super_internal },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, interfaces, super_internal },
                     );
                 }
                 Decl::Property(p) => {
@@ -316,6 +330,29 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
+                // Body-property initializers and `init` blocks see the properties (implicit `this`)
+                // and the primary-constructor parameters (including non-property ones).
+                c.push_scope();
+                for (n, t, is_var) in &props {
+                    c.declare(n, *t, *is_var);
+                }
+                for p in &cl.props {
+                    let ty = c.resolve_ty(&p.ty);
+                    c.declare(&p.name, ty, p.is_var);
+                }
+                for bp in &cl.body_props {
+                    let it = c.expr(bp.init);
+                    if let Some(r) = &bp.ty {
+                        let declared = c.resolve_ty(r);
+                        c.expect_assignable(declared, it, c.span(bp.init), "property initializer");
+                    }
+                }
+                for step in &cl.init_order {
+                    if let ClassInit::Block(b) = step {
+                        c.expr(*b);
+                    }
+                }
+                c.pop_scope();
             }
             Decl::Property(p) => {
                 let it = c.expr(p.init);
@@ -763,7 +800,7 @@ impl<'a> Checker<'a> {
                 // Constructor call: `ClassName(args)` (when not shadowed by a local).
                 if self.lookup(&fname).is_none() {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
-                        let ctor_params: Vec<Ty> = cls.props.iter().map(|(_, t, _)| *t).collect();
+                        let ctor_params: Vec<Ty> = cls.ctor_params.clone();
                         if ctor_params.len() != arg_tys.len() {
                             self.diags.error(span, format!("constructor '{fname}' expects {} args, got {}", ctor_params.len(), arg_tys.len()));
                         } else {
