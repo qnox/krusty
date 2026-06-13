@@ -271,23 +271,37 @@ pub fn emit_class(
         cw.add_interface(&iface_internal);
     }
 
-    // Resolve property types (primitives/String or declared class reference types).
+    // Resolve constructor-parameter property types (primitives/String or declared class types).
     let props: Vec<(&PropParam, Ty)> = class
         .props
         .iter()
         .map(|p| (p, resolve_ty(&p.ty, syms)))
         .collect();
+    // Body properties (`class C { val x = … }`) with resolved types.
+    let body_props_t: Vec<(&PropDecl, Ty)> = class
+        .body_props
+        .iter()
+        .map(|bp| (bp, bp.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| info.ty(bp.init))))
+        .collect();
+    // (name, type, is_var) for every backing field: `val`/`var` ctor params then body properties.
+    // Plain (non-property) ctor params are not fields.
+    let all_props: Vec<(String, Ty, bool)> = props
+        .iter()
+        .filter(|(p, _)| p.is_property)
+        .map(|(p, t)| (p.name.clone(), *t, p.is_var))
+        .chain(body_props_t.iter().map(|(bp, t)| (bp.name.clone(), *t, bp.is_var)))
+        .collect();
 
     // Backing fields: `private final` for `val`, `private` for `var`.
-    for (p, ty) in &props {
-        let access = if p.is_var { ACC_PRIVATE } else { ACC_PRIVATE | ACC_FINAL };
-        cw.add_field(access, &p.name, &ty.descriptor());
+    for (name, ty, is_var) in &all_props {
+        let access = if *is_var { ACC_PRIVATE } else { ACC_PRIVATE | ACC_FINAL };
+        cw.add_field(access, name, &ty.descriptor());
     }
 
     // Primary constructor: super(base args) then store each parameter into its backing field.
     let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
     let total_locals: u16 = 1 + props.iter().map(|(_, t)| slot_words(*t)).sum::<u16>();
-    let class_props_map: HashMap<String, Ty> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+    let class_props_map: HashMap<String, Ty> = all_props.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
     let ctor_imports = import_map(file);
     let mut code = CodeBuilder::new(total_locals);
     {
@@ -320,11 +334,35 @@ pub fn emit_class(
     }
     let mut slot = 1u16;
     for (p, ty) in &props {
-        code.aload(0);
-        load_local(*ty, slot, &mut code);
-        let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
-        code.putfield(f, slot_words(*ty) as i32);
+        if p.is_property {
+            code.aload(0);
+            load_local(*ty, slot, &mut code);
+            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+            code.putfield(f, slot_words(*ty) as i32);
+        }
         slot += slot_words(*ty);
+    }
+    // Body-property initializers and `init { }` blocks, in source order (after ctor-param stores).
+    if !class.init_order.is_empty() {
+        let mut ie = MethodEmitter::new_instance(file, info, syms, internal_name, &ctor_imports, class_props_map.clone(), diags);
+        let mut s = 1u16;
+        for (p, ty) in &props {
+            ie.slots.insert(p.name.clone(), (s, *ty));
+            s += slot_words(*ty);
+        }
+        ie.next_slot = s;
+        for step in &class.init_order {
+            match step {
+                ClassInit::PropInit(idx) => {
+                    let (bp, bty) = &body_props_t[*idx];
+                    code.aload(0);
+                    ie.emit_expr_as(bp.init, *bty, &mut code, &mut cw);
+                    let f = cw.fieldref(internal_name, &bp.name, &bty.descriptor());
+                    code.putfield(f, slot_words(*bty) as i32);
+                }
+                ClassInit::Block(b) => ie.emit_block_discard(*b, &mut code, &mut cw),
+            }
+        }
     }
     code.ret_void();
     code.link();
@@ -349,26 +387,38 @@ pub fn emit_class(
         cw.add_method(ACC_STATIC, "<clinit>", "()V", &clinit);
     }
 
+    // Two properties whose accessor names collide (e.g. case-only-differing names, as `@JvmField`
+    // would otherwise allow) can't both get a `getX` — reject rather than emit a duplicate method.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _, _) in &all_props {
+            if !seen.insert(capitalize(name)) {
+                diags.error(class.span, format!("krusty: property accessor name clash on '{name}'"));
+                return Vec::new();
+            }
+        }
+    }
+
     // Members of an `open`/`abstract` class must not be `final` (so subclasses can override).
     let member_access = if class.is_open || class.is_abstract { ACC_PUBLIC } else { ACC_PUBLIC | ACC_FINAL };
 
-    // Accessors: `getX()` for every property; `setX(..)` for `var`.
-    for (p, ty) in &props {
-        let cap = capitalize(&p.name);
+    // Accessors: `getX()` for every property (ctor + body); `setX(..)` for `var`.
+    for (name, ty, is_var) in &all_props {
+        let cap = capitalize(name);
         // getter
         let mut g = CodeBuilder::new(1);
         g.aload(0);
-        let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+        let f = cw.fieldref(internal_name, name, &ty.descriptor());
         g.getfield(f, slot_words(*ty) as i32);
         emit_typed_return(*ty, &mut g);
         g.link();
         cw.add_method(member_access, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
         // setter (var only)
-        if p.is_var {
+        if *is_var {
             let mut s = CodeBuilder::new(1 + slot_words(*ty));
             s.aload(0);
             load_local(*ty, 1, &mut s);
-            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+            let f = cw.fieldref(internal_name, name, &ty.descriptor());
             s.putfield(f, slot_words(*ty) as i32);
             s.ret_void();
             s.link();
@@ -376,8 +426,9 @@ pub fn emit_class(
         }
     }
 
-    // Member functions → instance methods. Property names resolve to backing-field access.
-    let class_props: HashMap<String, Ty> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+    // Member functions → instance methods. Own property names (ctor + body) resolve to backing-field
+    // access; inherited members are reached via accessors on a typed receiver.
+    let class_props: HashMap<String, Ty> = class_props_map.clone();
     let imports = import_map(file);
     let method_metas: Vec<crate::metadata::class_builder::FnMeta> = class
         .methods
@@ -386,6 +437,7 @@ pub fn emit_class(
             let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
             let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
             let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+            e.props_via_getter = class.is_open || class.is_abstract;
             e.emit_method(m, &params, ret, member_access, &mut cw);
             crate::metadata::class_builder::FnMeta::plain(
                 m.name.clone(),
@@ -406,16 +458,16 @@ pub fn emit_class(
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
     let ctor_params: Vec<(String, Ty)> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
     let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
-    let prop_metas: Vec<crate::metadata::class_builder::PropMeta> = props
+    let prop_metas: Vec<crate::metadata::class_builder::PropMeta> = all_props
         .iter()
-        .map(|(p, t)| {
-            let cap = capitalize(&p.name);
+        .map(|(name, t, is_var)| {
+            let cap = capitalize(name);
             crate::metadata::class_builder::PropMeta {
-                name: p.name.clone(),
+                name: name.clone(),
                 ty: *t,
-                is_var: p.is_var,
+                is_var: *is_var,
                 getter: (format!("get{cap}"), method_descriptor(&[], *t)),
-                setter: if p.is_var { Some((format!("set{cap}"), method_descriptor(&[*t], Ty::Unit))) } else { None },
+                setter: if *is_var { Some((format!("set{cap}"), method_descriptor(&[*t], Ty::Unit))) } else { None },
             }
         })
         .collect();
@@ -721,6 +773,9 @@ struct MethodEmitter<'a> {
     class_props: HashMap<String, Ty>,
     /// True when emitting an instance method (slot 0 = `this`; bare property names → getfield).
     is_instance: bool,
+    /// In an `open`/`abstract` class, `this.<prop>` must dispatch through the (virtual) accessor so
+    /// overrides are honored, instead of reading the backing field directly.
+    props_via_getter: bool,
 }
 
 impl<'a> MethodEmitter<'a> {
@@ -728,7 +783,7 @@ impl<'a> MethodEmitter<'a> {
         MethodEmitter {
             file, info, syms, class: class.to_string(), diags,
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
-            class_props: HashMap::new(), is_instance: false,
+            class_props: HashMap::new(), is_instance: false, props_via_getter: false,
         }
     }
 
@@ -881,11 +936,18 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr_as(value, ty, code, cw);
                     self.store(ty, slot, code);
                 } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance) {
-                    // implicit `this.<prop> = value` — write the backing field
+                    // implicit `this.<prop> = value`: write via the (virtual) setter in an open
+                    // class; otherwise write the backing field directly.
                     code.aload(0);
                     self.emit_expr_as(value, ty, code, cw);
-                    let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
-                    code.putfield(f, slot_words(ty) as i32);
+                    if self.props_via_getter {
+                        let setter = format!("set{}", capitalize(&name));
+                        let m = cw.methodref(&self.class.clone(), &setter, &method_descriptor(&[ty], Ty::Unit));
+                        code.invokevirtual(m, slot_words(ty) as i32, 0);
+                    } else {
+                        let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
+                        code.putfield(f, slot_words(ty) as i32);
+                    }
                 } else if let Some(&(ty, _)) = self.syms.props.get(&name).filter(|_| !self.is_instance) {
                     // top-level `var` property write → putstatic on the file facade.
                     self.emit_expr_as(value, ty, code, cw);
@@ -1040,10 +1102,17 @@ impl<'a> MethodEmitter<'a> {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
                     load_local(ty, slot, code);
                 } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
-                    // implicit `this.<prop>` — read the backing field
+                    // implicit `this.<prop>`: read via the (virtual) getter in an open class so
+                    // overrides dispatch correctly; otherwise read the backing field directly.
                     code.aload(0);
-                    let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
-                    code.getfield(f, slot_words(ty) as i32);
+                    if self.props_via_getter {
+                        let getter = format!("get{}", capitalize(&n));
+                        let m = cw.methodref(&self.class.clone(), &getter, &method_descriptor(&[], ty));
+                        code.invokevirtual(m, 0, slot_words(ty) as i32);
+                    } else {
+                        let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
+                        code.getfield(f, slot_words(ty) as i32);
+                    }
                 } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
                     // top-level property → static field on the file facade.
                     if self.is_instance {
@@ -1582,7 +1651,7 @@ impl<'a> MethodEmitter<'a> {
             Expr::Name(fname) if !self.slots.contains_key(&fname) && self.syms.classes.contains_key(&fname) => {
                 let cls = self.syms.classes.get(&fname).unwrap();
                 let internal = cls.internal.clone();
-                let ctor_tys: Vec<Ty> = cls.props.iter().map(|(_, t, _)| *t).collect();
+                let ctor_tys: Vec<Ty> = cls.ctor_params.clone();
                 let class_idx = cw.class_ref(&internal);
                 code.new_obj(class_idx);
                 code.dup();

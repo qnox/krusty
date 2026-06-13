@@ -364,6 +364,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/string_template_e2e.rs` (JVM run + ABI vs kotlinc). Box conformance: **62 / 62 OK /
   0 FAIL** (up from 46); full suite 110 green.
 
+## Phase 24 — Class-body properties, plain ctor params, `init` blocks  ✅
+- ✅ Class bodies accept `val`/`var` **properties** (backing field + accessor, initialized in the
+  primary constructor) and `init { }` blocks; both run in source order after the ctor-param stores.
+- ✅ **Plain (non-property) primary-constructor parameters** (`class C(start: Int)`) — in scope for
+  `init`/body-property initializers, not fields. `ClassSig` now separates `ctor_params` (full
+  signature) from `props` (backing fields); construction uses `ctor_params`.
+- ✅ Conformance fixes (box harness): an `open` property read inside its class now dispatches through
+  the (virtual) getter so overrides win (`kt1170`); colliding accessor names (case-only-differing,
+  `@JvmField`-style) are rejected instead of emitting a duplicate method (`kt12189`).
+- ✅ `tests/class_body_e2e.rs` (body props + `init` + plain param; open-property dispatch).
+  Box conformance: **67 / 67 OK / 0 FAIL** (up from 62); full suite 112 green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
