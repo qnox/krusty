@@ -642,6 +642,20 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 self.expr(body);
             }
+            Stmt::For { name, range, body } => {
+                let st = self.expr(range.start);
+                self.expect_assignable(Ty::Int, st, self.span(range.start), "range start");
+                let et = self.expr(range.end);
+                self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
+                if let Some(step) = range.step {
+                    let stp = self.expr(step);
+                    self.expect_assignable(Ty::Int, stp, self.span(step), "range step");
+                }
+                self.push_scope();
+                self.declare(&name, Ty::Int, true); // loop variable (mutated by the lowering)
+                self.expr(body);
+                self.pop_scope();
+            }
             Stmt::Expr(e) => {
                 self.expr(e);
             }

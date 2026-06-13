@@ -224,6 +224,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Box conformance after this phase: **10,009 scanned · 26 compiled · 26 `box()`=OK · 0 FAIL**
   (up from 13); vendored set refreshed to the 26 in-subset cases.
 
+## Phase 12 — `for` loops & compound assignment  ✅
+- ✅ **`for (x in a..b)`** plus `a until b`, `a downTo b`, and `step s` over integer ranges, lowered
+  to a counted while loop (start/end/step each evaluated once into locals; `DotDot`/`KwFor`/`KwIn`
+  tokens). ABI matches kotlinc.
+- ✅ **Compound assignment** `+=` `-=` `*=` `/=` `%=` (desugared to `x = x op e`).
+- ✅ `parse_branch` generalized: an `if`/`when`/`for` body may be any single statement (e.g.
+  `for (i in 1..n) s += i`), not just an expression.
+- ✅ `tests/for_loop_e2e.rs` (runs on JVM, ABI vs kotlinc). Box conformance: 27 compiled / 27 OK /
+  0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

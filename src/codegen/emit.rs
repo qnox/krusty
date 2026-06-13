@@ -672,6 +672,45 @@ impl<'a> MethodEmitter<'a> {
                 code.goto(start);
                 code.bind(end);
             }
+            Stmt::For { name, range, body } => {
+                // Lower an integer range `for` to a counted while loop.
+                self.emit_expr_as(range.start, Ty::Int, code, cw);
+                let i = self.alloc_slot(&name, Ty::Int);
+                code.istore(i);
+                self.emit_expr_as(range.end, Ty::Int, code, cw);
+                let end_slot = self.fresh_slot(Ty::Int);
+                code.istore(end_slot);
+                let step_slot = range.step.map(|s| {
+                    self.emit_expr_as(s, Ty::Int, code, cw);
+                    let ss = self.fresh_slot(Ty::Int);
+                    code.istore(ss);
+                    ss
+                });
+                let start = code.new_label();
+                let end = code.new_label();
+                code.bind(start);
+                code.iload(i);
+                code.iload(end_slot);
+                match range.kind {
+                    RangeKind::Through => code.if_icmpgt(end), // exit when i > end
+                    RangeKind::Until => code.if_icmpge(end),   // exit when i >= end
+                    RangeKind::DownTo => code.if_icmplt(end),  // exit when i < end
+                }
+                self.emit_block_discard(body, code, cw);
+                code.iload(i);
+                match step_slot {
+                    Some(ss) => code.iload(ss),
+                    None => code.push_int(1, cw),
+                }
+                if range.kind == RangeKind::DownTo {
+                    code.isub();
+                } else {
+                    code.iadd();
+                }
+                code.istore(i);
+                code.goto(start);
+                code.bind(end);
+            }
             Stmt::Expr(e) => {
                 self.emit_expr(e, code, cw);
                 self.discard(self.info.ty(e), code);
