@@ -149,8 +149,23 @@ impl<'a> Lexer<'a> {
     }
 
     fn number(&mut self, lo: u32) -> Token {
+        // Hex (`0xFF`) / binary (`0b1010`) integer literals (digits, `_` separators, optional `L`).
+        if self.b[self.i] == b'0' && matches!(self.peek2(), b'x' | b'X' | b'b' | b'B') {
+            self.i += 2; // consume `0x`/`0b`
+            // hex digits (a superset of binary) or `_` separators — stops at the `L` long suffix.
+            while self.i < self.b.len() && (self.b[self.i].is_ascii_hexdigit() || self.b[self.i] == b'_') {
+                self.i += 1;
+            }
+            let kind = if self.peek() == b'L' {
+                self.i += 1;
+                TokenKind::LongLit
+            } else {
+                TokenKind::IntLit
+            };
+            return Token { kind, span: Span::new(lo, self.i as u32) };
+        }
         let mut is_double = false;
-        while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
+        while self.i < self.b.len() && (self.b[self.i].is_ascii_digit() || self.b[self.i] == b'_') {
             self.i += 1;
         }
         if self.peek() == b'.' && self.peek2().is_ascii_digit() {

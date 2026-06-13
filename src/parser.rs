@@ -274,23 +274,78 @@ impl<'a> Parser<'a> {
         self.bump(); // 'enum'
         self.bump(); // 'class'
         let name = self.ident_or_error("enum name");
-        let mut entries = Vec::new();
-        self.skip_newlines();
-        if self.eat(TokenKind::LBrace) {
+        // Optional primary constructor: `enum class C(val rgb: Int, …)`.
+        let mut props = Vec::new();
+        if self.eat(TokenKind::LParen) {
             self.skip_newlines();
-            while self.at(TokenKind::Ident) {
-                entries.push(self.text().to_string());
-                self.bump();
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                self.skip_decl_prefix();
+                let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
+                let is_var = self.at(TokenKind::KwVar);
+                if is_property {
+                    self.bump();
+                }
+                let pname = self.ident_or_error("parameter name");
+                self.expect(TokenKind::Colon, "':'");
+                let ty = self.parse_type();
+                props.push(PropParam { name: pname, ty, is_var, is_property });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
                 self.skip_newlines();
             }
+            self.expect(TokenKind::RParen, "')'");
+        }
+        let mut entries = Vec::new();
+        let mut entry_args: Vec<Vec<ExprId>> = Vec::new();
+        let mut methods = Vec::new();
+        self.skip_newlines();
+        if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
-            // v0: only simple entries; a `;` + members or entry args make it unsupported.
+            while self.at(TokenKind::Ident) {
+                entries.push(self.text().to_string());
+                self.bump();
+                // Optional constructor arguments: `RED(0xFF0000)`.
+                let mut args = Vec::new();
+                if self.eat(TokenKind::LParen) {
+                    self.skip_newlines();
+                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        args.push(self.parse_expr());
+                        self.skip_newlines();
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RParen, "')'");
+                }
+                // A per-entry class body (`RED { … }`) is an anonymous subclass — unsupported.
+                if self.at(TokenKind::LBrace) {
+                    self.diags.error(self.tok().span, "krusty: enum entries with a body are not supported");
+                }
+                entry_args.push(args);
+                self.skip_newlines();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    self.skip_decl_prefix();
+                    self.skip_newlines();
+                }
+                match self.kind() {
+                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    _ => break,
+                }
+            }
+            self.skip_newlines();
             if !self.at(TokenKind::RBrace) {
-                self.diags.error(self.tok().span, "v0 enum: only simple entries are supported");
+                self.diags.error(self.tok().span, "krusty: unsupported enum member");
                 while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                     self.bump();
                 }
@@ -301,8 +356,8 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             type_params: Vec::new(),
-            props: Vec::new(),
-            methods: Vec::new(),
+            props,
+            methods,
             companion_methods: Vec::new(),
             companion_props: Vec::new(),
             body_props: Vec::new(),
@@ -311,6 +366,7 @@ impl<'a> Parser<'a> {
             is_object: false,
             is_enum: true,
             enum_entries: entries,
+            enum_entry_args: entry_args,
             is_interface: false,
             is_open: false,
             is_abstract: false,
@@ -480,7 +536,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -569,7 +625,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
@@ -602,7 +658,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
@@ -1045,13 +1101,13 @@ impl<'a> Parser<'a> {
         }
         match self.kind() {
             TokenKind::IntLit => {
-                let v = self.text().parse::<i64>().unwrap_or(0);
+                let v = parse_int_literal(self.text());
                 self.bump();
                 self.file.add_expr(Expr::IntLit(v), span)
             }
             TokenKind::LongLit => {
                 let t = self.text();
-                let v = t[..t.len() - 1].parse::<i64>().unwrap_or(0);
+                let v = parse_int_literal(&t[..t.len() - 1]); // strip trailing `L`
                 self.bump();
                 self.file.add_expr(Expr::LongLit(v), span)
             }
@@ -1404,6 +1460,24 @@ fn unescape_chunk(inner: &str) -> String {
         }
     }
     out
+}
+
+/// Parse an integer literal: decimal, `0x`/`0X` hex, or `0b`/`0B` binary, with `_` separators.
+/// Parses into `u64` (so `0xFFFFFFFF`/`0xFFFFFFFFFFFFFFFF` fit) then reinterprets as `i64`.
+fn parse_int_literal(text: &str) -> i64 {
+    let t: String = text.chars().filter(|c| *c != '_').collect();
+    let (radix, digits) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (16, h)
+    } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (2, b)
+    } else {
+        (10, t.as_str())
+    };
+    if radix == 10 {
+        digits.parse::<i64>().unwrap_or(0)
+    } else {
+        u64::from_str_radix(digits, radix).map(|v| v as i64).unwrap_or(0)
+    }
 }
 
 fn unquote(raw: &str) -> String {

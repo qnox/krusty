@@ -149,35 +149,81 @@ pub fn emit_file(
 /// `public static final` field per entry, a private `(String,int)` constructor calling
 /// `Enum.<init>`, and a `<clinit>` that constructs each entry. (`values()`/`valueOf()`/`$VALUES`
 /// are deferred — programs needing them are skipped, not miscompiled.)
-fn emit_enum(class: &ClassDecl, internal: &str) -> Vec<u8> {
+fn emit_enum(class: &ClassDecl, file: &File, info: &TypeInfo, internal: &str, syms: &SymbolTable, diags: &mut DiagSink) -> Vec<u8> {
     let mut cw = ClassWriter::new(internal, "java/lang/Enum");
     let self_desc = Ty::obj(internal).descriptor();
+    let imports = import_map(file);
 
     for entry in &class.enum_entries {
         cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, entry, &self_desc);
     }
 
-    // private <init>(String name, int ordinal) { super(name, ordinal); }
-    let mut ctor = CodeBuilder::new(3);
+    // Primary-constructor properties (`enum class C(val rgb: Int)`) → backing fields + getters.
+    let props: Vec<(String, Ty)> = class
+        .props
+        .iter()
+        .filter(|p| p.is_property)
+        .map(|p| (p.name.clone(), resolve_ty(&p.ty, syms)))
+        .collect();
+    let ctor_param_tys: Vec<Ty> = class.props.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+    for (name, ty) in &props {
+        cw.add_field(ACC_PRIVATE | ACC_FINAL, name, &ty.descriptor());
+        let cap = capitalize(name);
+        let mut g = CodeBuilder::new(1);
+        g.aload(0);
+        let f = cw.fieldref(internal, name, &ty.descriptor());
+        g.getfield(f, slot_words(*ty) as i32);
+        emit_typed_return(*ty, &mut g);
+        g.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+    }
+
+    // <init>(String name, int ordinal, <ctor params>) { super(name, ordinal); store property fields }
+    let ctor_desc = {
+        let mut d = String::from("(Ljava/lang/String;I");
+        for t in &ctor_param_tys {
+            d.push_str(&t.descriptor());
+        }
+        d.push_str(")V");
+        d
+    };
+    let mut ctor = CodeBuilder::new(3 + ctor_param_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
     ctor.aload(0);
     ctor.aload(1);
     ctor.iload(2);
     let enum_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(enum_init, 2, 0);
+    // store each property param (slots start at 3) into its field
+    let mut slot = 3u16;
+    for (pp, ty) in class.props.iter().zip(&ctor_param_tys) {
+        if pp.is_property {
+            ctor.aload(0);
+            load_local(*ty, slot, &mut ctor);
+            let f = cw.fieldref(internal, &pp.name, &ty.descriptor());
+            ctor.putfield(f, slot_words(*ty) as i32);
+        }
+        slot += slot_words(*ty);
+    }
     ctor.ret_void();
     ctor.link();
-    cw.add_method(ACC_PRIVATE, "<init>", "(Ljava/lang/String;I)V", &ctor);
+    cw.add_method(ACC_PRIVATE, "<init>", &ctor_desc, &ctor);
 
-    // <clinit>: each entry = new Name("ENTRY", ordinal).
+    // <clinit>: each entry = new C("ENTRY", ordinal, <args>).
     let mut cl = CodeBuilder::new(0);
     let cidx = cw.class_ref(internal);
-    let self_init = cw.methodref(internal, "<init>", "(Ljava/lang/String;I)V");
+    let self_init = cw.methodref(internal, "<init>", &ctor_desc);
     for (i, entry) in class.enum_entries.iter().enumerate() {
         cl.new_obj(cidx);
         cl.dup();
         cl.push_string(entry, &mut cw);
         cl.push_int(i as i32, &mut cw);
-        cl.invokespecial(self_init, 2, 0);
+        let args = class.enum_entry_args.get(i).cloned().unwrap_or_default();
+        let mut ie = MethodEmitter::new(file, info, syms, internal, &imports, diags);
+        for (a, ty) in args.iter().zip(&ctor_param_tys) {
+            ie.emit_expr_as(*a, *ty, &mut cl, &mut cw);
+        }
+        let aw: i32 = ctor_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+        cl.invokespecial(self_init, 2 + aw, 0);
         let f = cw.fieldref(internal, entry, &self_desc);
         cl.putstatic(f, 1);
     }
@@ -185,8 +231,23 @@ fn emit_enum(class: &ClassDecl, internal: &str) -> Vec<u8> {
     cl.link();
     cw.add_method(ACC_STATIC, "<clinit>", "()V", &cl);
 
-    // @kotlin.Metadata (kind=1, enum flags) — minimal; entries are JVM static fields.
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &[], &[], &class.enum_entries, 32902);
+    // Member methods (after the `;`).
+    let class_props: HashMap<String, Ty> = props.iter().cloned().collect();
+    let mut method_metas = Vec::new();
+    for m in &class.methods {
+        let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+        let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+        let mut e = MethodEmitter::new_instance(file, info, syms, internal, &imports, class_props.clone(), diags);
+        e.emit_method(m, &params, ret, ACC_PUBLIC | ACC_FINAL, &mut cw);
+        method_metas.push(crate::metadata::class_builder::FnMeta::plain(
+            m.name.clone(),
+            m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+            ret,
+        ));
+    }
+
+    // @kotlin.Metadata (kind=1, enum flags) — entries are JVM static fields.
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &[], &method_metas, &class.enum_entries, 32902);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
     cw.finish()
@@ -319,7 +380,7 @@ pub fn emit_class(
     diags: &mut DiagSink,
 ) -> Vec<u8> {
     if class.is_enum {
-        return emit_enum(class, internal_name);
+        return emit_enum(class, file, info, internal_name, syms, diags);
     }
     if class.is_interface {
         return emit_interface(class, internal_name, syms);
