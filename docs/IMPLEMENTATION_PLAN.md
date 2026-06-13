@@ -234,6 +234,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/for_loop_e2e.rs` (runs on JVM, ABI vs kotlinc). Box conformance: 27 compiled / 27 OK /
   0 FAIL.
 
+## Phase 13 — Nullable reference types  ✅
+- ✅ Targeted via a data-driven scan of krusty's first-error across the box suite: `?` was the #1
+  blocker (677 files). Implemented **`T?`** (nullable reference types; nullable *primitives* are
+  rejected as out-of-subset), **`null`** literal, **`== null`/`!= null`** (→ `ifnull`/`ifnonnull`),
+  **`!!`** not-null assertion (NPE throw; correctly distinguished from chained prefix `!`), and
+  **`?:`** elvis. Reference `==` already lowered to `equals()`.
+- ✅ Nullability shares the non-null JVM descriptor, so ABI matches kotlinc; krusty is permissive
+  about null-safety (it never *miscompiles* an accepted program — the conformance invariant).
+- ✅ `tests/nullable_e2e.rs` (runs on JVM incl. `!!`→NPE, ABI vs kotlinc). `?.` safe-calls are
+  explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
+  (nullable is foundational; it compounds once collections/`?.`/char literals land).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

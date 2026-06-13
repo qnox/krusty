@@ -28,6 +28,8 @@ pub enum Ty {
     Unit,
     /// A JVM reference type identified by its internal name (e.g. `demo/Point`).
     Obj(&'static str),
+    /// The type of the `null` literal — assignable to any reference type.
+    Null,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
 }
@@ -59,6 +61,7 @@ impl Ty {
             Ty::String => "String",
             Ty::Unit => "Unit",
             Ty::Obj(n) => n,
+            Ty::Null => "Null",
             Ty::Error => "<error>",
         }
     }
@@ -69,6 +72,11 @@ impl Ty {
             Ty::Obj(n) => Some(n),
             _ => None,
         }
+    }
+
+    /// True for JVM reference types (where `null` is a valid value).
+    pub fn is_reference(self) -> bool {
+        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null)
     }
 
     pub fn is_numeric(self) -> bool {
@@ -85,6 +93,7 @@ impl Ty {
             Ty::String => "Ljava/lang/String;".into(),
             Ty::Unit => "V".into(),
             Ty::Obj(n) => format!("L{n};"),
+            Ty::Null => "Ljava/lang/Object;".into(),
             Ty::Error => "Ljava/lang/Object;".into(),
         }
     }

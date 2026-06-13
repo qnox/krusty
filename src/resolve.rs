@@ -175,14 +175,21 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, or a declared class
 /// (→ `Ty::Obj` with the class's internal name).
 fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, diags: &mut DiagSink) -> Ty {
-    if let Some(t) = Ty::from_name(&r.name) {
-        return t;
+    let base = if let Some(t) = Ty::from_name(&r.name) {
+        t
+    } else if let Some(internal) = classes.get(&r.name) {
+        Ty::obj(internal)
+    } else {
+        diags.error(r.span, format!("unknown type '{}'", r.name));
+        Ty::Error
+    };
+    // Nullable reference types share the non-null JVM descriptor; nullable primitives would need
+    // boxing (out of subset) so they are rejected (the file is skipped, never miscompiled).
+    if r.nullable && !base.is_reference() && base != Ty::Error {
+        diags.error(r.span, format!("nullable primitive type '{}?' is not supported", r.name));
+        return Ty::Error;
     }
-    if let Some(internal) = classes.get(&r.name) {
-        return Ty::obj(internal);
-    }
-    diags.error(r.span, format!("unknown type '{}'", r.name));
-    Ty::Error
+    base
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.
@@ -261,6 +268,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
+    /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor).
     fn resolve_ty(&self, r: &TypeRef) -> Ty {
         if let Some(t) = Ty::from_name(&r.name) {
             return t;
@@ -318,6 +326,10 @@ impl<'a> Checker<'a> {
         if expected == Ty::Error || actual == Ty::Error {
             return;
         }
+        // `null` is assignable to any reference type (krusty is permissive about nullability).
+        if actual == Ty::Null && expected.is_reference() {
+            return;
+        }
         if expected != actual {
             self.diags.error(span, format!("type mismatch in {ctx}: expected {}, found {}", expected.name(), actual.name()));
         }
@@ -330,6 +342,19 @@ impl<'a> Checker<'a> {
             Expr::DoubleLit(_) => Ty::Double,
             Expr::BoolLit(_) => Ty::Boolean,
             Expr::StringLit(_) => Ty::String,
+            Expr::NullLit => Ty::Null,
+            Expr::NotNull { operand } => self.expr(operand), // value with the same (non-null) type
+            Expr::Elvis { lhs, rhs } => {
+                let lt = self.expr(lhs);
+                let rt = self.expr(rhs);
+                if lt == Ty::Null {
+                    rt
+                } else if rt == Ty::Null {
+                    lt
+                } else {
+                    self.join(lt, rt, self.span(e))
+                }
+            }
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
                 None => {
@@ -452,7 +477,7 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::Eq | BinOp::Ne => {
-                if lt == rt || Ty::promote(lt, rt).is_some() {
+                if lt == rt || Ty::promote(lt, rt).is_some() || (lt.is_reference() && rt.is_reference()) {
                     Ty::Boolean
                 } else {
                     self.bin_err(op, lt, rt, span)
@@ -589,6 +614,13 @@ impl<'a> Checker<'a> {
         }
         if let Some(t) = Ty::promote(a, b) {
             return t;
+        }
+        // `null` joins with any reference type to that (nullable) reference type.
+        if a == Ty::Null && b.is_reference() {
+            return b;
+        }
+        if b == Ty::Null && a.is_reference() {
+            return a;
         }
         self.diags.error(span, format!("incompatible if branches: '{}' and '{}'", a.name(), b.name()));
         Ty::Error

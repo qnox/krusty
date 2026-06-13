@@ -30,7 +30,12 @@ pub enum Expr {
     DoubleLit(f64),
     BoolLit(bool),
     StringLit(String),
+    NullLit,
     Name(String),
+    /// `operand!!` — not-null assertion (throws NPE if null, else the value).
+    NotNull { operand: ExprId },
+    /// `lhs ?: rhs` — Elvis (lhs if non-null, else rhs).
+    Elvis { lhs: ExprId, rhs: ExprId },
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -85,6 +90,8 @@ pub struct ForRange {
 #[derive(Clone, Debug)]
 pub struct TypeRef {
     pub name: String,
+    /// Trailing `?` — a nullable type (e.g. `String?`).
+    pub nullable: bool,
     pub span: Span,
 }
 
@@ -239,7 +246,20 @@ impl File {
             Expr::DoubleLit(v) => out.push_str(&format!("{v}d")),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
             Expr::StringLit(s) => out.push_str(&format!("{s:?}")),
+            Expr::NullLit => out.push_str("null"),
             Expr::Name(n) => out.push_str(n),
+            Expr::NotNull { operand } => {
+                out.push_str("(!! ");
+                self.write_expr(*operand, out);
+                out.push(')');
+            }
+            Expr::Elvis { lhs, rhs } => {
+                out.push_str("(?: ");
+                self.write_expr(*lhs, out);
+                out.push(' ');
+                self.write_expr(*rhs, out);
+                out.push(')');
+            }
             Expr::Unary { op, operand } => {
                 out.push_str(&format!("({} ", unop(*op)));
                 self.write_expr(*operand, out);

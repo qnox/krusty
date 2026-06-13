@@ -612,7 +612,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Int | Ty::Boolean => code.ireturn(),
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
-            Ty::String | Ty::Obj(_) => code.areturn(),
+            Ty::String | Ty::Obj(_) | Ty::Null => code.areturn(),
             Ty::Unit | Ty::Error => code.ret_void(),
         }
     }
@@ -623,6 +623,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Long => { code.push_long(0, cw); code.lreturn(); }
             Ty::Double => { code.push_double(0.0, cw); code.dreturn(); }
             Ty::String => { code.push_string("", cw); code.areturn(); }
+            Ty::Obj(_) | Ty::Null => { code.aconst_null(); code.areturn(); }
             _ => code.ret_void(),
         }
     }
@@ -761,6 +762,30 @@ impl<'a> MethodEmitter<'a> {
             Expr::DoubleLit(v) => code.push_double(v, cw),
             Expr::BoolLit(b) => code.push_int(if b { 1 } else { 0 }, cw),
             Expr::StringLit(s) => code.push_string(&s, cw),
+            Expr::NullLit => code.aconst_null(),
+            Expr::NotNull { operand } => {
+                self.emit_expr(operand, code, cw);
+                code.dup();
+                let ok = code.new_label();
+                code.ifnonnull(ok);
+                let npe = cw.class_ref("java/lang/NullPointerException");
+                code.new_obj(npe);
+                code.dup();
+                let init = cw.methodref("java/lang/NullPointerException", "<init>", "()V");
+                code.invokespecial(init, 0, 0);
+                code.athrow();
+                code.bind(ok);
+            }
+            Expr::Elvis { lhs, rhs } => {
+                let result = self.info.ty(e);
+                self.emit_expr(lhs, code, cw);
+                code.dup();
+                let end = code.new_label();
+                code.ifnonnull(end);
+                code.pop(); // discard the null
+                self.emit_expr_as(rhs, result, code, cw);
+                code.bind(end);
+            }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
                     match ty {
@@ -1004,6 +1029,17 @@ impl<'a> MethodEmitter<'a> {
     fn emit_compare_jump(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, target: Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let lt = self.info.ty(lhs);
         let rt = self.info.ty(rhs);
+        // `x == null` / `x != null` → ifnull / ifnonnull on the non-null-literal operand.
+        if lt == Ty::Null || rt == Ty::Null {
+            let val = if lt == Ty::Null { rhs } else { lhs };
+            self.emit_expr(val, code, cw);
+            match op {
+                BinOp::Eq => code.ifnull(target),
+                BinOp::Ne => code.ifnonnull(target),
+                _ => {}
+            }
+            return;
+        }
         let common = Ty::promote(lt, rt).unwrap_or(lt);
         self.emit_expr_as(lhs, common, code, cw);
         self.emit_expr_as(rhs, common, code, cw);

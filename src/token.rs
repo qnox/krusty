@@ -24,6 +24,7 @@ pub enum TokenKind {
     KwIn,
     KwTrue,
     KwFalse,
+    KwNull,
     KwPackage,
     KwImport,
     // punctuation / operators
@@ -56,6 +57,7 @@ pub enum TokenKind {
     StarEq,   // *=
     SlashEq,  // /=
     PercentEq,// %=
+    Question, // ?   (nullable types, ?. , ?:)
     // trivia / control
     Newline,
     Eof,
@@ -91,6 +93,7 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "in" => TokenKind::KwIn,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,
+        "null" => TokenKind::KwNull,
         "package" => TokenKind::KwPackage,
         "import" => TokenKind::KwImport,
         _ => return None,
