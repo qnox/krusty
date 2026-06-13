@@ -246,6 +246,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            type_params: Vec::new(),
             props: Vec::new(),
             methods: Vec::new(),
             body_props: Vec::new(),
@@ -284,6 +285,7 @@ impl<'a> Parser<'a> {
     fn parse_fun(&mut self) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
+        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
             self.bump();
@@ -331,7 +333,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, params, ret, body, span: Span::new(start.lo, end.hi) }
+        FunDecl { name, params, ret, body, type_params, span: Span::new(start.lo, end.hi) }
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -347,6 +349,7 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected class name");
             "<error>".to_string()
         };
+        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
         let mut props = Vec::new();
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
@@ -409,7 +412,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -454,6 +457,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
+        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
         let (supertypes, _base, _base_args) = self.parse_supertypes();
         let mut methods = Vec::new();
         self.skip_newlines();
@@ -478,7 +482,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
-            name, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(),
+            name, type_params, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false,
             supertypes, base_class: None, base_args: Vec::new(),
@@ -513,7 +517,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
@@ -521,12 +525,55 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Ident) {
             let name = self.text().to_string();
             self.bump();
+            self.skip_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
             let nullable = self.eat(TokenKind::Question); // `T?`
             TypeRef { name, nullable, span }
         } else {
             self.diags.error(span, "expected a type");
             TypeRef { name: "<error>".to_string(), nullable: false, span }
         }
+    }
+
+    /// Skip a balanced `<...>` generic type-argument list (types are erased).
+    fn skip_type_args(&mut self) {
+        if !self.at(TokenKind::Lt) {
+            return;
+        }
+        let mut depth = 0;
+        loop {
+            match self.kind() {
+                TokenKind::Lt => { depth += 1; self.bump(); }
+                TokenKind::Gt => { depth -= 1; self.bump(); if depth == 0 { break; } }
+                TokenKind::Eof => break,
+                _ => { self.bump(); }
+            }
+        }
+    }
+
+    /// Parse and discard a `<T, reified U : Bound, out V>` type-parameter list, returning the names.
+    fn parse_type_params(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        if !self.eat(TokenKind::Lt) {
+            return names;
+        }
+        loop {
+            self.skip_newlines();
+            while self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out" | "in") {
+                self.bump();
+            }
+            if self.at(TokenKind::Ident) {
+                names.push(self.text().to_string());
+                self.bump();
+            }
+            if self.eat(TokenKind::Colon) {
+                let _ = self.parse_type(); // upper bound (erased)
+            }
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::Gt, "'>'");
+        names
     }
 
     // ---- statements ----
