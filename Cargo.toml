@@ -4,6 +4,10 @@ version = "0.0.1"
 edition = "2021"
 description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
 
+[dependencies]
+# Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [lib]
 name = "krust"
 path = "src/lib.rs"

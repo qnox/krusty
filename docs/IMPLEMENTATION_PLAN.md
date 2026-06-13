@@ -102,14 +102,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `ClassInfo`/`MethodSig` (name, descriptor, public/static). Round-trips krust output; **validated
   against real javac output** (`tests/classreader_e2e.rs`: static/instance/private, primitive &
   reference descriptors, `<init>`). 2 unit + 1 e2e test.
-### 6b — resolve Java/JDK static calls via the reader ✅
-- ✅ `jvm/classpath.rs` (dir-based, cached); `SymbolTable.classpath`; `import` capture in
-  parser/AST; `resolve_java_static` (exact param-descriptor overload match) wired into both
-  typecheck and emit; driver `-cp <dirs>`.
-- ✅ **e2e** (`tests/java_interop_e2e.rs`): krust compiles Kotlin calling a real javac class
-  (`import util.Calc; Calc.triple(n); Calc.tag(s)`, nested) → resolves via classpath `.class` →
-  runs correctly (`15`, `[hi]`, `[12]`). 51 tests green.
-- Remaining: instance-method calls, JDK classes (jimage/jar reading), overload widening.
+### 6b — resolve Java static calls via the reader (dirs + jars) ✅
+- ✅ `jvm/classpath.rs`: dir **and `.jar`** entries (zip/DEFLATE via `zip` crate), cached;
+  `SymbolTable.classpath`; `import` capture; `resolve_java_static` (exact param-descriptor overload
+  match) in typecheck + emit; driver `-cp a/classes:lib.jar`.
+- ✅ **e2e**: krust calls a javac class from a **loose dir** (`util.Calc`) *and from a real `.jar`*
+  (`libx.Lib.sq` packaged with `jar cf`) → runs correctly (`15/[hi]/[12]`, `36`). 57 tests green.
+- Remaining: instance-method calls, JDK classes (jimage), overload widening, multi-jar resolution.
 ### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
 ### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 
