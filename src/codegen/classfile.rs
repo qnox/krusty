@@ -22,6 +22,7 @@ const MAJOR_JAVA6: u16 = 50;
 enum Const {
     Utf8(String),
     Integer(i32),
+    Float(u32),  // bit pattern (f32 isn't Hash/Eq)
     Long(i64),
     Double(u64), // bit pattern (f64 isn't Hash/Eq)
     Class(u16),
@@ -78,6 +79,9 @@ impl ConstPool {
     fn long(&mut self, v: i64) -> u16 {
         self.intern(Const::Long(v))
     }
+    fn float(&mut self, v: f32) -> u16 {
+        self.intern(Const::Float(v.to_bits()))
+    }
     fn double(&mut self, v: f64) -> u16 {
         self.intern(Const::Double(v.to_bits()))
     }
@@ -115,6 +119,10 @@ impl ConstPool {
                 Const::Integer(v) => {
                     out.push(3);
                     u4(out, *v as u32);
+                }
+                Const::Float(bits) => {
+                    out.push(4);
+                    u4(out, *bits);
                 }
                 Const::Long(v) => {
                     out.push(5);
@@ -303,6 +311,9 @@ impl ClassWriter {
     }
     pub fn const_long(&mut self, v: i64) -> u16 {
         self.cp.long(v)
+    }
+    pub fn const_float(&mut self, v: f32) -> u16 {
+        self.cp.float(v)
     }
     pub fn const_double(&mut self, v: f64) -> u16 {
         self.cp.double(v)
@@ -532,6 +543,9 @@ impl CodeBuilder {
     pub fn lload(&mut self, idx: u16) {
         self.load(0x16, idx, 2);
     }
+    pub fn fload(&mut self, idx: u16) {
+        self.load(0x17, idx, 1);
+    }
     pub fn dload(&mut self, idx: u16) {
         self.load(0x18, idx, 2);
     }
@@ -548,6 +562,9 @@ impl CodeBuilder {
     }
     pub fn lstore(&mut self, idx: u16) {
         self.store(0x37, idx, 2);
+    }
+    pub fn fstore(&mut self, idx: u16) {
+        self.store(0x38, idx, 1);
     }
     pub fn dstore(&mut self, idx: u16) {
         self.store(0x39, idx, 2);
@@ -581,6 +598,10 @@ impl CodeBuilder {
             let i = cw.const_long(v);
             self.op_u2(0x14, i, 2); // ldc2_w
         }
+    }
+    pub fn push_float(&mut self, v: f32, cw: &mut ClassWriter) {
+        let i = cw.const_float(v);
+        self.ldc(i); // float is one slot
     }
     pub fn push_double(&mut self, v: f64, cw: &mut ClassWriter) {
         let i = cw.const_double(v);
@@ -617,15 +638,33 @@ impl CodeBuilder {
     pub fn ddiv(&mut self) { self.op(0x6f, -2); }
     pub fn drem(&mut self) { self.op(0x73, -2); }
     pub fn dneg(&mut self) { self.op(0x77, 0); }
+    pub fn fadd(&mut self) { self.op(0x62, -1); }
+    pub fn fsub(&mut self) { self.op(0x66, -1); }
+    pub fn fmul(&mut self) { self.op(0x6a, -1); }
+    pub fn fdiv(&mut self) { self.op(0x6e, -1); }
+    pub fn frem(&mut self) { self.op(0x72, -1); }
+    pub fn fneg(&mut self) { self.op(0x76, 0); }
+    /// `fcmpg`: pops two floats, pushes an int (-1/0/1).
+    pub fn fcmpg(&mut self) { self.op(0x96, -1); }
 
     // conversions
     pub fn i2l(&mut self) { self.op(0x85, 1); }
     pub fn i2d(&mut self) { self.op(0x87, 1); }
     pub fn l2d(&mut self) { self.op(0x8a, 0); }
+    pub fn i2f(&mut self) { self.op(0x86, 0); }
+    pub fn l2f(&mut self) { self.op(0x89, -1); }
+    pub fn f2d(&mut self) { self.op(0x8d, 1); }
+    pub fn l2i(&mut self) { self.op(0x88, -1); }
+    pub fn f2i(&mut self) { self.op(0x8b, 0); }
+    pub fn f2l(&mut self) { self.op(0x8c, 1); }
+    pub fn d2i(&mut self) { self.op(0x8e, -1); }
+    pub fn d2l(&mut self) { self.op(0x8f, 0); }
+    pub fn d2f(&mut self) { self.op(0x90, -1); }
 
     // returns
     pub fn ireturn(&mut self) { self.op(0xac, -1); }
     pub fn lreturn(&mut self) { self.op(0xad, -2); }
+    pub fn freturn(&mut self) { self.op(0xae, -1); }
     pub fn dreturn(&mut self) { self.op(0xaf, -2); }
     pub fn areturn(&mut self) { self.op(0xb0, -1); }
     pub fn ret_void(&mut self) { self.op(0xb1, 0); }
@@ -703,6 +742,9 @@ impl CodeBuilder {
             (Int, Long) => self.i2l(),
             (Int, Double) => self.i2d(),
             (Long, Double) => self.l2d(),
+            (Int, Float) => self.i2f(),
+            (Long, Float) => self.l2f(),
+            (Float, Double) => self.f2d(),
             _ => {}
         }
     }

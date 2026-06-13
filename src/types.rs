@@ -36,6 +36,7 @@ pub fn intern_ty(t: Ty) -> &'static Ty {
 pub enum Ty {
     Int,
     Long,
+    Float,
     Double,
     Boolean,
     Char,
@@ -78,6 +79,7 @@ impl Ty {
         Some(match name {
             "Int" => Ty::Int,
             "Long" => Ty::Long,
+            "Float" => Ty::Float,
             "Double" => Ty::Double,
             "Boolean" => Ty::Boolean,
             "Char" => Ty::Char,
@@ -105,6 +107,7 @@ impl Ty {
         match self {
             Ty::Int => "Int",
             Ty::Long => "Long",
+            Ty::Float => "Float",
             Ty::Double => "Double",
             Ty::Boolean => "Boolean",
             Ty::Char => "Char",
@@ -132,7 +135,7 @@ impl Ty {
     }
 
     pub fn is_numeric(self) -> bool {
-        matches!(self, Ty::Int | Ty::Long | Ty::Double)
+        matches!(self, Ty::Int | Ty::Long | Ty::Float | Ty::Double)
     }
 
     /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `Ljava/lang/String;`, `V`, `Lpkg/Name;`).
@@ -140,6 +143,7 @@ impl Ty {
         match self {
             Ty::Int => "I".into(),
             Ty::Long => "J".into(),
+            Ty::Float => "F".into(),
             Ty::Double => "D".into(),
             Ty::Boolean => "Z".into(),
             Ty::Char => "C".into(),
@@ -158,7 +162,8 @@ impl Ty {
         match self {
             Ty::Int => 1,
             Ty::Long => 2,
-            Ty::Double => 3,
+            Ty::Float => 3,
+            Ty::Double => 4,
             _ => 0,
         }
     }

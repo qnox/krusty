@@ -976,6 +976,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::DoubleLit(v), span)
             }
+            TokenKind::FloatLit => {
+                // strip the trailing `f`/`F` suffix
+                let t = self.text();
+                let v = t[..t.len() - 1].parse::<f32>().unwrap_or(0.0);
+                self.bump();
+                self.file.add_expr(Expr::FloatLit(v), span)
+            }
             TokenKind::StringLit => {
                 let raw = self.text();
                 let v = unquote(raw);

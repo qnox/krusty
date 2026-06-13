@@ -144,6 +144,17 @@ pub fn builtin_exception(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
+pub fn conversion_target(name: &str) -> Option<Ty> {
+    Some(match name {
+        "toInt" => Ty::Int,
+        "toLong" => Ty::Long,
+        "toFloat" => Ty::Float,
+        "toDouble" => Ty::Double,
+        _ => return None,
+    })
+}
+
 /// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -831,6 +842,7 @@ impl<'a> Checker<'a> {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
             Expr::DoubleLit(_) => Ty::Double,
+            Expr::FloatLit(_) => Ty::Float,
             Expr::BoolLit(_) => Ty::Boolean,
             Expr::StringLit(_) => Ty::String,
             Expr::CharLit(_) => Ty::Char,
@@ -1291,6 +1303,12 @@ impl<'a> Checker<'a> {
                 if rt == Ty::String {
                     if let Some((_, ret)) = resolve_string_instance(&name, &arg_tys) {
                         return ret;
+                    }
+                }
+                // Numeric conversion intrinsics: `n.toInt()`/`toLong()`/`toFloat()`/`toDouble()`.
+                if rt.is_numeric() && arg_tys.is_empty() {
+                    if let Some(target) = conversion_target(&name) {
+                        return target;
                     }
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
