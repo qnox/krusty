@@ -496,6 +496,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/try_catch_e2e.rs` (try-as-expression + multi-catch hierarchy on the JVM; stack-nonempty
   and `finally` rejection). Box conformance **91 OK / 0 FAIL** (up from 86).
 
+## Phase 34 — Explicit `this` + member assignment  ✅
+- ✅ `this` resolves to the enclosing class type (the checker tracks `this_ty`); codegen loads it as
+  `aload 0` in instance context. Usable as a value (`return this`), a receiver (`this.foo()`), and a
+  member read (`this.v`).
+- ✅ Member assignment `receiver.prop = value` (and compound `receiver.prop += value`) writes via the
+  property's public setter — backing fields are private, so a cross-instance `putfield` would fail,
+  and the setter also dispatches correctly for open classes. Assigning a `val` member is rejected.
+- ✅ `tests/this_member_e2e.rs` (this read/receiver + cross-instance and compound member assignment on
+  the JVM; `val`-member rejection). Box conformance **99 OK / 0 FAIL** (up from 91; 100 compiled).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

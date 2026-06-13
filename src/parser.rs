@@ -648,30 +648,46 @@ impl<'a> Parser<'a> {
             TokenKind::KwFor => self.parse_for(start),
             _ => {
                 let e = self.parse_expr();
-                // assignment: `name = value` (v0: simple-name target only)
+                // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
-                    if let Expr::Name(n) = self.file.expr(e) {
-                        let name = n.clone();
-                        self.bump(); // '='
-                        self.skip_newlines();
-                        let value = self.parse_expr();
-                        return self.finish_stmt(Stmt::Assign { name, value }, start);
+                    match self.file.expr(e).clone() {
+                        Expr::Name(n) => {
+                            self.bump(); // '='
+                            self.skip_newlines();
+                            let value = self.parse_expr();
+                            return self.finish_stmt(Stmt::Assign { name: n, value }, start);
+                        }
+                        Expr::Member { receiver, name } => {
+                            self.bump(); // '='
+                            self.skip_newlines();
+                            let value = self.parse_expr();
+                            return self.finish_stmt(Stmt::AssignMember { receiver, name, value }, start);
+                        }
+                        _ => self.diags.error(self.tok().span, "invalid assignment target"),
                     }
-                    self.diags.error(self.tok().span, "invalid assignment target");
                 }
-                // compound assignment: `name op= value` → `name = name op value`.
+                // compound assignment: `target op= value` → `target = target op value`.
                 if let Some(op) = compound_op(self.kind()) {
-                    if let Expr::Name(n) = self.file.expr(e).clone() {
-                        let name = n.clone();
-                        let op_span = self.tok().span;
-                        self.bump();
-                        self.skip_newlines();
-                        let rhs = self.parse_expr();
-                        let lhs = self.file.add_expr(Expr::Name(name.clone()), op_span);
-                        let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
-                        return self.finish_stmt(Stmt::Assign { name, value }, start);
+                    let op_span = self.tok().span;
+                    match self.file.expr(e).clone() {
+                        Expr::Name(n) => {
+                            self.bump();
+                            self.skip_newlines();
+                            let rhs = self.parse_expr();
+                            let lhs = self.file.add_expr(Expr::Name(n.clone()), op_span);
+                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
+                            return self.finish_stmt(Stmt::Assign { name: n, value }, start);
+                        }
+                        Expr::Member { receiver, name } => {
+                            self.bump();
+                            self.skip_newlines();
+                            let rhs = self.parse_expr();
+                            let lhs = self.file.add_expr(Expr::Member { receiver, name: name.clone() }, op_span);
+                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
+                            return self.finish_stmt(Stmt::AssignMember { receiver, name, value }, start);
+                        }
+                        _ => self.diags.error(self.tok().span, "invalid assignment target"),
                     }
-                    self.diags.error(self.tok().span, "invalid assignment target");
                 }
                 self.finish_stmt(Stmt::Expr(e), start)
             }
