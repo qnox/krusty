@@ -72,13 +72,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
 ### 4e — v52 + StackMapTable ⬜ (hardening, for exact version match with kotlinc)
 
-## Phase 5 — Differential harness vs kotlinc  ⬜
-- `harness/`: (a) locate reference kotlinc (wrap the `kotlin-compiler` 2.4.0 jar in `~/.m2` via a
-  tiny launcher, or system `kotlinc`); (b) for each case: compile with both, run a generated
-  `Main` calling the functions with fixed inputs, compare stdout/exit; (c) `javap -c -p` normalized
-  structural diff; (d) verifier gate.
-- Wire as `cargo test --test diff` (integration test shelling out).
-- **Exit:** edge-case suite green (execution-equivalent to kotlinc).
+## Phase 4b — `@kotlin.Metadata` emitter (protobuf)  🚧 (load-bearing for Kotlin-library ABI)
+- ✅ `metadata/protobuf.rs`: protobuf wire writer (varint/len-delimited/nested/repeated), checked
+  against canonical vectors (`08 96 01`, etc.). 5 tests.
+- ⬜ `bytesToStrings`/`BitEncoding` for `d1` + modified-UTF-8 constant pool.
+- ⬜ `ProtoBuf.Package/Function/Type/ValueParameter` (file-facade kind=2) + JVM signature ext +
+  string table; `@kotlin.Metadata` annotation attribute; `mv` version. Validated in Phase 5b.
+
+## Phase 5 — Differential harness vs kotlinc  🚧
+### 5a — ABI signatures + execution ✅
+- ✅ Reference kotlinc: official 1.9.24 dist (run under JDK 21). `harness/run-diff.sh`.
+- ✅ `tests/diff_kotlinc.rs` (env-gated `KRUST_KOTLINC`): compile same source with krust + kotlinc;
+  **public ABI signatures (javap) match exactly** and **execution output is identical** across an
+  8-function subset (arith/promotion/mixed/if/&&/concat).
+### 5b — @Metadata round-trip ⬜
+- Compile a library with krust, then compile a *Kotlin consumer* of it with kotlinc; kotlinc must
+  accept krust's `@Metadata` and resolve the API. (Drives Phase 4b correctness.)
 
 ## Phase 6 — Real interop + scale  ⬜
 - `.class` signature reader (replace the hardcoded JDK table) so arbitrary JDK calls resolve.
