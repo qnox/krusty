@@ -115,7 +115,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   match) in typecheck + emit; driver `-cp a/classes:lib.jar`.
 - ✅ **e2e**: krusty calls a javac class from a **loose dir** (`util.Calc`) *and from a real `.jar`*
   (`libx.Lib.sq` packaged with `jar cf`) → runs correctly (`15/[hi]/[12]`, `36`). 57 tests green.
-- Remaining: instance-method calls, JDK classes (jimage), overload widening, multi-jar resolution.
+- Remaining: JDK classes via jimage (classpath reader reads dirs/jars only), overload widening,
+  multi-jar resolution, instance methods on arbitrary classpath types (needs `Ty::Obj`).
+### 6e — `java.lang.String` instance methods ✅
+- ✅ `resolve_string_instance` (curated `java.lang.String` subset: `length`/`isEmpty`/`substring`×2/
+  `indexOf`/`concat`) drives typecheck + `invokevirtual` codegen. Interim until jimage gives the
+  full JDK; each entry matches what kotlinc emits.
+- ✅ **Differential pass**: `tests/diff_kotlinc.rs` now includes `s.substring(1)`, `s.substring(1,3)`,
+  `s.indexOf("b")` — krusty's bytecode + execution match kotlinc exactly. Unit tests in `resolve.rs`.
 ### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
 ### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 

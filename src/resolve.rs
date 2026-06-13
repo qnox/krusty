@@ -53,6 +53,22 @@ pub fn desc_to_ty(d: &str) -> Ty {
     }
 }
 
+/// Resolve a `java.lang.String` *instance* method by name + argument types. Returns
+/// `(jvm descriptor, return type)` for `invokevirtual java/lang/String`. This is a curated subset
+/// of real `java.lang.String` methods (the JDK lives in jimage, which the classpath reader doesn't
+/// read yet); each entry matches what kotlinc emits for the same call.
+pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<(&'static str, Ty)> {
+    Some(match (method, arg_tys) {
+        ("length", []) => ("()I", Ty::Int),
+        ("isEmpty", []) => ("()Z", Ty::Boolean),
+        ("substring", [Ty::Int]) => ("(I)Ljava/lang/String;", Ty::String),
+        ("substring", [Ty::Int, Ty::Int]) => ("(II)Ljava/lang/String;", Ty::String),
+        ("indexOf", [Ty::String]) => ("(Ljava/lang/String;)I", Ty::Int),
+        ("concat", [Ty::String]) => ("(Ljava/lang/String;)Ljava/lang/String;", Ty::String),
+        _ => return None,
+    })
+}
+
 /// Resolve a static call `Class.method(args)` against the classpath by exact param-descriptor
 /// match. Returns `(owner internal name, method descriptor, return type)`.
 pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
@@ -391,13 +407,16 @@ impl<'a> Checker<'a> {
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
-                match (name.as_str(), arg_tys.as_slice()) {
-                    ("toString", []) => Ty::String, // intrinsic on any type
-                    _ => {
-                        self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
-                        Ty::Error
+                if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
+                    return Ty::String; // intrinsic on any type
+                }
+                if rt == Ty::String {
+                    if let Some((_, ret)) = resolve_string_instance(&name, &arg_tys) {
+                        return ret;
                     }
                 }
+                self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
+                Ty::Error
             }
             // free function call: name(args)
             Expr::Name(fname) => {
@@ -587,5 +606,22 @@ mod tests {
     #[test]
     fn bool_operator_misuse() {
         err_contains("fun f(a: Int): Boolean = a && a", "cannot be applied");
+    }
+
+    #[test]
+    fn string_instance_methods() {
+        ok("fun f(s: String): String = s.substring(1)");
+        ok("fun f(s: String): String = s.substring(1, 3)");
+        ok("fun f(s: String): Int = s.indexOf(\"x\")");
+        ok("fun f(s: String): String = s.concat(\"y\")");
+        err_contains("fun f(s: String): String = s.substring(\"x\")", "unresolved method");
+        err_contains("fun f(a: Int): Int = a.substring(1)", "unresolved method");
+    }
+
+    #[test]
+    fn string_method_table() {
+        assert_eq!(resolve_string_instance("substring", &[Ty::Int]), Some(("(I)Ljava/lang/String;", Ty::String)));
+        assert_eq!(resolve_string_instance("indexOf", &[Ty::String]), Some(("(Ljava/lang/String;)I", Ty::Int)));
+        assert_eq!(resolve_string_instance("substring", &[Ty::String]), None);
     }
 }

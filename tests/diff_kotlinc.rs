@@ -61,6 +61,9 @@ fun mixed(a: Double, b: Int): Double = a * b + 1
 fun max(a: Int, b: Int): Int = if (a > b) a else b
 fun both(a: Int, b: Int): Boolean = a > 0 && b > 0
 fun greet(name: String): String = "hi " + name
+fun tail(s: String): String = s.substring(1)
+fun mid(s: String): String = s.substring(1, 3)
+fun find(s: String): Int = s.indexOf("b")
 "#;
 
     let root = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
@@ -104,6 +107,9 @@ public class Main {
         System.out.println(DiffKt.max(9,2));
         System.out.println(DiffKt.both(1,1));
         System.out.println(DiffKt.greet("bob"));
+        System.out.println(DiffKt.tail("abcd"));
+        System.out.println(DiffKt.mid("abcd"));
+        System.out.println(DiffKt.find("abc"));
     }
 }"#;
     fs::write(root.join("Main.java"), main).unwrap();

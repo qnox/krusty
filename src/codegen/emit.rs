@@ -723,6 +723,21 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref("java/lang/String", "valueOf", desc);
                 code.invokestatic(m, words, 1);
             }
+            // java.lang.String instance method: recv.method(args) -> invokevirtual
+            Expr::Member { receiver, name }
+                if self.info.ty(receiver) == Ty::String
+                    && crate::resolve::resolve_string_instance(&name, &args.iter().map(|a| self.info.ty(*a)).collect::<Vec<_>>()).is_some() =>
+            {
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                let (desc, ret) = crate::resolve::resolve_string_instance(&name, &arg_tys).unwrap();
+                self.emit_expr(receiver, code, cw);
+                for a in args {
+                    self.emit_expr(*a, code, cw);
+                }
+                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = cw.methodref("java/lang/String", &name, desc);
+                code.invokevirtual(m, arg_words, slot_words(ret) as i32);
+            }
             Expr::Name(fname) if fname == "println" => {
                 let out = cw.fieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
                 code.getstatic(out, 1);
