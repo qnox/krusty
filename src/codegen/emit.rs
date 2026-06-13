@@ -1396,6 +1396,16 @@ impl<'a> MethodEmitter<'a> {
         // Falls here when nothing matched: the `else` body (if any) produces the value.
         if let Some(arm) = arms.iter().find(|a| a.conditions.is_empty()) {
             emit_body(self, arm.body, code, cw);
+        } else if result != Ty::Unit {
+            // An exhaustive `when` used as an expression (the checker proved sealed-exhaustiveness, so
+            // there is no `else`): the no-match path is unreachable, but every path must produce a
+            // value or diverge — throw, mirroring Kotlin's `NoWhenBranchMatchedException`.
+            let exc = cw.class_ref("java/lang/IllegalStateException");
+            code.new_obj(exc);
+            code.dup();
+            let init = cw.methodref("java/lang/IllegalStateException", "<init>", "()V");
+            code.invokespecial(init, 0, 0);
+            code.athrow();
         }
         code.bind(end);
     }

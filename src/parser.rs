@@ -110,6 +110,7 @@ impl<'a> Parser<'a> {
                     let mut d = self.parse_class();
                     d.is_open = is_open;
                     d.is_abstract = is_abstract;
+                    d.is_sealed = is_sealed;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -260,6 +261,7 @@ impl<'a> Parser<'a> {
             is_interface: false,
             is_open: false,
             is_abstract: false,
+            is_sealed: false,
             supertypes: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
@@ -414,7 +416,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -486,7 +488,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name, type_params, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false,
+            enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
@@ -519,7 +521,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

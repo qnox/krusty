@@ -31,6 +31,9 @@ pub struct ClassSig {
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
+    /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
+    /// `when` without an `else`.
+    pub is_sealed: bool,
     /// Internal names of interfaces this type implements (for subtyping).
     pub interfaces: Vec<String>,
     /// Internal name of the base class (`: Base(..)`), if any.
@@ -97,6 +100,15 @@ impl SymbolTable {
             }
             self.collect_super_methods(&p, out);
         }
+    }
+
+    /// Internal names of declared classes whose direct base class is `internal`.
+    pub fn subclasses_of(&self, internal: &str) -> Vec<String> {
+        self.classes
+            .values()
+            .filter(|c| c.super_internal.as_deref() == Some(internal))
+            .map(|c| c.internal.clone())
+            .collect()
     }
 
     /// A property (own or inherited) on a class internal name. Returns `(type, is_var)`.
@@ -273,7 +285,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     let super_internal = c.base_class.as_ref().map(|b| class_names.get(b).cloned().unwrap_or_else(|| b.clone()));
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, interfaces, super_internal },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, interfaces, super_internal },
                     );
                 }
                 Decl::Property(p) => {
@@ -548,6 +560,32 @@ impl<'a> Checker<'a> {
                 seen.insert(key, f.span);
             }
         }
+    }
+
+    /// True if a subject `when` is exhaustive because its subject is a `sealed` class and every
+    /// declared subclass is matched by a positive `is` arm. Conservative: anything it can't prove
+    /// (non-sealed subject, an uncovered subclass, a nested sealed subclass) returns false.
+    fn when_sealed_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
+        let Some(Ty::Obj(internal)) = subj_ty else { return false };
+        let Some(cs) = self.syms.class_by_internal(internal) else { return false };
+        if !cs.is_sealed {
+            return false;
+        }
+        let subs = self.syms.subclasses_of(internal);
+        if subs.is_empty() {
+            return false;
+        }
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for arm in arms {
+            for &c in &arm.conditions {
+                if let Expr::Is { ty, negated: false, .. } = self.file.expr(c) {
+                    if let Ty::Obj(n) = self.resolve_ty_no_diag(ty) {
+                        covered.insert(n.to_string());
+                    }
+                }
+            }
+        }
+        subs.iter().all(|d| covered.contains(d))
     }
 
     /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
@@ -922,8 +960,14 @@ impl<'a> Checker<'a> {
                         None => bt,
                     });
                 }
-                // A `when` is only an expression (carries a value) when it is exhaustive (has `else`).
-                if has_else { result.unwrap_or(Ty::Unit) } else { Ty::Unit }
+                // A `when` carries a value only when it is exhaustive: it has an `else`, or its
+                // subject is a `sealed` type whose every subclass is matched by an `is` arm.
+                let exhaustive = has_else || self.when_sealed_exhaustive(subj_ty, &arms);
+                if exhaustive {
+                    result.unwrap_or(Ty::Unit)
+                } else {
+                    Ty::Unit
+                }
             }
         };
         self.set(e, t)
