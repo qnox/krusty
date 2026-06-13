@@ -119,6 +119,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 ### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
 ### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 
+## Phase 8 — Classes (language surface)  🚧
+### 8a — primary-constructor properties ✅ (Java-consumer ABI matches kotlinc)
+- ✅ `class C(val a: T, var b: U)` → JVM class with **private backing fields** (`final` for `val`),
+  a **primary constructor** (`super()` + field stores), and `getX`/`setX` accessors
+  (`public final`). Property types restricted to the primitive/String `Ty` set in v0
+  (class-typed members need `Ty::Obj` — a follow-up).
+- ✅ Lexer `class` kw; parser primary-ctor params (require `val`/`var`) + optional empty body;
+  AST `Decl::Class`/`ClassDecl`/`PropParam`; resolver registers `classes` (simple→internal name);
+  `classfile.rs` field table + `getfield`/`putfield`; `emit::emit_class`; driver emits one `.class`
+  per class and the `FileKt` facade only when the file has top-level functions.
+- ✅ **Differential ABI passes** (`tests/diff_class_kotlinc.rs`): krust + kotlinc produce **identical
+  public member signatures** for `class Point(val x: Int, var y: String)` (ctor + getX/getY/setY),
+  and both construct + run identically. Plus `tests/class_e2e.rs` (shape + `-Xverify:all` run).
+- ⬜ **Next:** Class `@Metadata` (kind=1: `ProtoBuf.Class` with constructor + properties) so a
+  *Kotlin* consumer sees it as a Kotlin class (Java consumers already match). Then: secondary
+  constructors, methods in class bodies, `data class` (equals/hashCode/toString/componentN/copy),
+  class-typed properties (`Ty::Obj`), inheritance/interfaces.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

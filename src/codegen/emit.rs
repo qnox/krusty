@@ -48,16 +48,17 @@ pub fn emit_file(
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
     let imports = import_map(file);
     for &d in &file.decls {
-        let Decl::Fun(f) = file.decl(d);
-        let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
-        e.emit_fun(f, &mut cw);
+        if let Decl::Fun(f) = file.decl(d) {
+            let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            e.emit_fun(f, &mut cw);
+        }
     }
     // @kotlin.Metadata: describe the file facade so Kotlin consumers see the Kotlin API.
     let funcs: Vec<crate::metadata::builder::FnMeta> = file
         .decls
         .iter()
         .filter_map(|&d| {
-            let Decl::Fun(f) = file.decl(d);
+            let Decl::Fun(f) = file.decl(d) else { return None };
             let sig = syms.funs.get(&f.name)?;
             Some(crate::metadata::builder::FnMeta {
                 name: f.name.clone(),
@@ -70,6 +71,98 @@ pub fn emit_file(
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(2, &[1, 9, 0], 48, &d1, &d2);
     cw.finish()
+}
+
+/// Capitalize the first character (`x` -> `X`) for Kotlin's `getX`/`setX` accessor naming.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Lower a `class C(val a: T, var b: U)` to a JVM class with private backing fields, a primary
+/// constructor that calls `super()` and stores each field, and `getX`/`setX` accessors — matching
+/// kotlinc's public ABI for a simple property-holding class.
+pub fn emit_class(class: &ClassDecl, internal_name: &str, _syms: &SymbolTable) -> Vec<u8> {
+    let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
+
+    // Resolve property types (v0: restricted to the primitive/String set).
+    let props: Vec<(&PropParam, Ty)> = class
+        .props
+        .iter()
+        .map(|p| (p, Ty::from_name(&p.ty.name).unwrap_or(Ty::Error)))
+        .collect();
+
+    // Backing fields: `private final` for `val`, `private` for `var`.
+    for (p, ty) in &props {
+        let access = if p.is_var { ACC_PRIVATE } else { ACC_PRIVATE | ACC_FINAL };
+        cw.add_field(access, &p.name, ty.descriptor());
+    }
+
+    // Primary constructor: super() then store each parameter into its backing field.
+    let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
+    let total_locals: u16 = 1 + props.iter().map(|(_, t)| slot_words(*t)).sum::<u16>();
+    let mut code = CodeBuilder::new(total_locals);
+    code.aload(0);
+    let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
+    code.invokespecial(obj_init, 0, 0);
+    let mut slot = 1u16;
+    for (p, ty) in &props {
+        code.aload(0);
+        load_local(*ty, slot, &mut code);
+        let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+        code.putfield(f, slot_words(*ty) as i32);
+        slot += slot_words(*ty);
+    }
+    code.ret_void();
+    code.link();
+    cw.add_method(ACC_PUBLIC, "<init>", &ctor_desc, &code);
+
+    // Accessors: `public final getX()` for every property; `setX(..)` for `var`.
+    for (p, ty) in &props {
+        let cap = capitalize(&p.name);
+        // getter
+        let mut g = CodeBuilder::new(1);
+        g.aload(0);
+        let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+        g.getfield(f, slot_words(*ty) as i32);
+        emit_typed_return(*ty, &mut g);
+        g.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+        // setter (var only)
+        if p.is_var {
+            let mut s = CodeBuilder::new(1 + slot_words(*ty));
+            s.aload(0);
+            load_local(*ty, 1, &mut s);
+            let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+            s.putfield(f, slot_words(*ty) as i32);
+            s.ret_void();
+            s.link();
+            cw.add_method(ACC_PUBLIC | ACC_FINAL, &format!("set{cap}"), &method_descriptor(&[*ty], Ty::Unit), &s);
+        }
+    }
+
+    cw.finish()
+}
+
+fn load_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
+    match ty {
+        Ty::Int | Ty::Boolean => code.iload(slot),
+        Ty::Long => code.lload(slot),
+        Ty::Double => code.dload(slot),
+        _ => code.aload(slot),
+    }
+}
+
+fn emit_typed_return(ty: Ty, code: &mut CodeBuilder) {
+    match ty {
+        Ty::Int | Ty::Boolean => code.ireturn(),
+        Ty::Long => code.lreturn(),
+        Ty::Double => code.dreturn(),
+        _ => code.areturn(),
+    }
 }
 
 struct MethodEmitter<'a> {

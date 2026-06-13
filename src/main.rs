@@ -57,20 +57,44 @@ fn main() {
         if diags.has_errors() {
             continue; // collect all diagnostics before bailing
         }
-        let internal = file_class_name(&stems[i], file.package.as_deref());
-        let bytes = emit_file(file, &info, &syms, &internal, &mut diags);
-        if !diags.has_errors() {
+        let write_class = |internal: &str, bytes: &[u8]| -> std::io::Result<()> {
             let path = out_dir.join(format!("{internal}.class"));
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
-            if let Err(e) = std::fs::write(&path, &bytes) {
-                eprintln!("krust: cannot write {}: {e}", path.display());
-                std::process::exit(1);
+            std::fs::write(&path, bytes)
+        };
+
+        // Each top-level `class` becomes its own `.class` file.
+        for &d in &file.decls {
+            if let krust::ast::Decl::Class(c) = file.decl(d) {
+                let internal = match file.package.as_deref() {
+                    Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
+                    _ => c.name.clone(),
+                };
+                let bytes = krust::codegen::emit::emit_class(c, &internal, &syms);
+                if let Err(e) = write_class(&internal, &bytes) {
+                    eprintln!("krust: cannot write {internal}.class: {e}");
+                    std::process::exit(1);
+                }
+                emitted += 1;
             }
-            let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
-            module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
-            emitted += 1;
+        }
+
+        // The file facade (`<File>Kt`) is emitted only if the file has top-level functions.
+        let has_funs = file.decls.iter().any(|&d| matches!(file.decl(d), krust::ast::Decl::Fun(_)));
+        if has_funs {
+            let internal = file_class_name(&stems[i], file.package.as_deref());
+            let bytes = emit_file(file, &info, &syms, &internal, &mut diags);
+            if !diags.has_errors() {
+                if let Err(e) = write_class(&internal, &bytes) {
+                    eprintln!("krust: cannot write {internal}.class: {e}");
+                    std::process::exit(1);
+                }
+                let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
+                module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
+                emitted += 1;
+            }
         }
         // `info` (per-file typecheck state) drops here, before the next file.
     }

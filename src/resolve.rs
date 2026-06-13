@@ -23,6 +23,8 @@ pub struct Signature {
 #[derive(Default)]
 pub struct SymbolTable {
     pub funs: HashMap<String, Signature>,
+    /// Declared class simple-name -> internal name (e.g. `Point -> demo/Point`).
+    pub classes: HashMap<String, String>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
 }
@@ -67,14 +69,30 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     let mut table = SymbolTable::default();
     for file in files {
         for &d in &file.decls {
-            let Decl::Fun(f) = file.decl(d);
-            let params = f.params.iter().map(|p| ty_of_ref(&p.ty, diags)).collect();
-            let ret = match &f.ret {
-                Some(r) => ty_of_ref(r, diags),
-                None => Ty::Unit, // v0: missing return type defaults to Unit
-            };
-            if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
-                diags.error(f.span, format!("conflicting declaration of '{}'", f.name));
+            match file.decl(d) {
+                Decl::Fun(f) => {
+                    let params = f.params.iter().map(|p| ty_of_ref(&p.ty, diags)).collect();
+                    let ret = match &f.ret {
+                        Some(r) => ty_of_ref(r, diags),
+                        None => Ty::Unit, // v0: missing return type defaults to Unit
+                    };
+                    if table.funs.insert(f.name.clone(), Signature { params, ret }).is_some() {
+                        diags.error(f.span, format!("conflicting declaration of '{}'", f.name));
+                    }
+                }
+                Decl::Class(c) => {
+                    // Validate property types now (so unknown types are reported once, globally).
+                    for p in &c.props {
+                        ty_of_ref(&p.ty, diags);
+                    }
+                    let internal = match &file.package {
+                        Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), c.name),
+                        _ => c.name.clone(),
+                    };
+                    if table.classes.insert(c.name.clone(), internal).is_some() {
+                        diags.error(c.span, format!("conflicting declaration of '{}'", c.name));
+                    }
+                }
             }
         }
     }
@@ -119,8 +137,10 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         imports,
     };
     for &d in &file.decls {
-        let Decl::Fun(f) = file.decl(d);
-        c.check_fun(f);
+        if let Decl::Fun(f) = file.decl(d) {
+            c.check_fun(f);
+        }
+        // Decl::Class has no bodies to check in v0 (properties are ctor params with known types).
     }
     TypeInfo { expr_types: c.expr_types }
 }
