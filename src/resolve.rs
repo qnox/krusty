@@ -344,11 +344,16 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .filter(|p| p.is_property)
                         .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, &ctp, diags), p.is_var))
                         .collect();
-                    // Body properties (`class C { val x = … }`) are also fields/accessors.
+                    // Body properties (`class C { val x = … }`) are also fields/accessors. A computed
+                    // property (custom getter, no annotation) infers its type from the getter body.
                     for bp in &c.body_props {
-                        let ty = match &bp.ty {
-                            Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                            None => bp.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
+                        let ty = match (&bp.ty, &bp.getter) {
+                            (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
+                            (None, Some(FunBody::Expr(g))) => {
+                                let locals: HashMap<&str, Ty> = props.iter().map(|(n, t, _)| (n.as_str(), *t)).collect();
+                                infer_getter_ty(file, *g, &locals)
+                            }
+                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                         };
                         props.push((bp.name.clone(), ty, bp.is_var));
                     }
@@ -431,6 +436,45 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
         }
     }
     table
+}
+
+/// Light type inference for an unannotated computed-property getter body (`val x get() = expr`),
+/// against the class's already-collected properties (`locals`). Handles literals, property/`this.x`
+/// references, `.size`/`.length`, unary, and binary ops; anything else is `Error` (the file skips).
+fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
+    match file.expr(e) {
+        Expr::IntLit(_) => Ty::Int,
+        Expr::LongLit(_) => Ty::Long,
+        Expr::DoubleLit(_) => Ty::Double,
+        Expr::FloatLit(_) => Ty::Float,
+        Expr::BoolLit(_) => Ty::Boolean,
+        Expr::CharLit(_) => Ty::Char,
+        Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        Expr::Name(n) => locals.get(n.as_str()).copied().unwrap_or(Ty::Error),
+        Expr::Member { receiver, name } => {
+            if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
+                locals.get(name.as_str()).copied().unwrap_or(Ty::Error)
+            } else if name == "size" || name == "length" {
+                Ty::Int
+            } else {
+                Ty::Error
+            }
+        }
+        Expr::Unary { op, operand } => match op {
+            UnOp::Not => Ty::Boolean,
+            UnOp::Neg => infer_getter_ty(file, *operand, locals),
+        },
+        Expr::Binary { op, lhs, rhs } => {
+            let lt = infer_getter_ty(file, *lhs, locals);
+            let rt = infer_getter_ty(file, *rhs, locals);
+            match op {
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => Ty::Boolean,
+                BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
+                _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
+            }
+        }
+        _ => Ty::Error,
+    }
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).

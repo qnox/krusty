@@ -766,6 +766,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/for_indices_e2e.rs` (index iteration over int and reference arrays, on the JVM). Box
   conformance holds at **168 OK / 0 FAIL** (those files have further blockers; compounds).
 
+## Phase 59 — Unannotated computed-getter inference  ✅
+- ✅ A computed property without a type annotation (`val x get() = expr`) now infers its type from the
+  getter body (`infer_getter_ty`: literals, property/`this.x` references against the class's collected
+  props, `.size`/`.length`, unary/binary ops) during signature collection. Emit uses the inferred
+  type from the symbol table so `getX`'s descriptor matches callers (a getter whose body needs more
+  than the light inferer covers stays `Error` → cleanly skipped).
+- ✅ `tests/computed_getter_infer_e2e.rs` (inferred Int/Boolean/String getters, on the JVM). Box
+  conformance holds at **168 OK / 0 FAIL** (clears 124 first-errors; those files have further
+  blockers, so it compounds).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
