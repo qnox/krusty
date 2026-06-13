@@ -1055,7 +1055,17 @@ impl<'a> Checker<'a> {
                     self.declare(&c.name, cty, false);
                     let ht = self.expr(c.body);
                     self.pop_scope();
-                    result = self.join(result, ht, self.span(c.body));
+                    // A `try` used as a statement needn't have body/catch agree; merge leniently
+                    // (mismatch → `Unit`) so only an expression use that needs a value is constrained.
+                    result = if result == ht {
+                        result
+                    } else if result == Ty::Nothing {
+                        ht
+                    } else if ht == Ty::Nothing {
+                        result
+                    } else {
+                        Ty::Unit
+                    };
                 }
                 result
             }
@@ -1404,6 +1414,29 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Recognize stdlib precondition intrinsics: `require`/`check`/`assert(cond)` (→ `Unit`),
+    /// `error(msg)` (→ `Nothing`), and `TODO()`/`TODO(msg)` (→ `Nothing`). Returns the result type,
+    /// or `None` if `fname` isn't one of these.
+    fn check_precondition_intrinsic(&mut self, fname: &str, args: &[ExprId], arg_tys: &[Ty], span: Span) -> Option<Ty> {
+        if self.syms.funs.contains_key(fname) {
+            return None; // a user-defined function of the same name takes precedence
+        }
+        match (fname, arg_tys) {
+            ("require" | "check" | "assert", [cond]) => {
+                self.expect_assignable(Ty::Boolean, *cond, self.span(args[0]), "condition");
+                Some(Ty::Unit)
+            }
+            ("error", [_]) => Some(Ty::Nothing),
+            ("TODO", []) => Some(Ty::Nothing),
+            ("TODO", [_]) => Some(Ty::Nothing),
+            ("require" | "check" | "assert" | "error" | "TODO", _) => {
+                self.diags.error(span, format!("krusty: unsupported form of '{fname}'"));
+                Some(Ty::Error)
+            }
+            _ => None,
+        }
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -1545,6 +1578,9 @@ impl<'a> Checker<'a> {
                 }
                 if self.lookup(&fname).is_none() {
                     if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
+                        return t;
+                    }
+                    if let Some(t) = self.check_precondition_intrinsic(&fname, args, &arg_tys, span) {
                         return t;
                     }
                     // Unqualified companion (static) method call inside a companion member.
