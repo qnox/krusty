@@ -740,12 +740,31 @@ impl<'a> Parser<'a> {
                     self.bump();
                     lhs = self.file.add_expr(Expr::NotNull { operand: lhs }, Span::new(lspan.lo, end.hi));
                 }
-                // `?.` safe calls are not yet supported — reject so the file is skipped, not miscompiled.
+                // `?.` safe call: `recv?.name` or `recv?.name(args)`.
                 TokenKind::Question if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Dot) => {
-                    self.diags.error(self.tok().span, "safe calls (?.) are not supported");
-                    self.bump();
-                    self.bump();
-                    let _ = self.ident_or_error("member name");
+                    self.bump(); // '?'
+                    self.bump(); // '.'
+                    let name = self.ident_or_error("member name");
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let args = if self.at(TokenKind::LParen) {
+                        self.bump();
+                        self.skip_newlines();
+                        let mut args = Vec::new();
+                        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                            args.push(self.parse_expr());
+                            self.skip_newlines();
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                            self.skip_newlines();
+                        }
+                        self.expect(TokenKind::RParen, "')'");
+                        Some(args)
+                    } else {
+                        None
+                    };
+                    let end = self.t[self.i.saturating_sub(1)].span;
+                    lhs = self.file.add_expr(Expr::SafeCall { receiver: lhs, name, args }, Span::new(lspan.lo, end.hi));
                 }
                 TokenKind::Dot => {
                     self.bump();

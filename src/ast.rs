@@ -39,6 +39,9 @@ pub enum Expr {
     Elvis { lhs: ExprId, rhs: ExprId },
     /// A string template `"a${e}b$c"` — alternating literal and interpolated-expression parts.
     Template(Vec<TemplatePart>),
+    /// `receiver?.name` (args `None`) or `receiver?.name(args)` — a safe call: evaluates to `null`
+    /// when the receiver is null, else the member access / call result.
+    SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -334,6 +337,18 @@ impl File {
                 self.write_expr(*lhs, out);
                 out.push(' ');
                 self.write_expr(*rhs, out);
+                out.push(')');
+            }
+            Expr::SafeCall { receiver, name, args } => {
+                out.push_str("(?. ");
+                self.write_expr(*receiver, out);
+                out.push_str(&format!(" {name}"));
+                if let Some(args) = args {
+                    for a in args {
+                        out.push(' ');
+                        self.write_expr(*a, out);
+                    }
+                }
                 out.push(')');
             }
             Expr::Template(parts) => {

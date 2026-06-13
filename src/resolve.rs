@@ -546,6 +546,35 @@ impl<'a> Checker<'a> {
                 }
                 Ty::String
             }
+            Expr::SafeCall { receiver, name, args } => {
+                let rt = self.expr(receiver);
+                if rt == Ty::Error {
+                    return Ty::Error;
+                }
+                let result = match &args {
+                    None => self.check_member(rt, &name, self.span(e)),
+                    Some(a) => {
+                        let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
+                        if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
+                            Ty::String
+                        } else if rt == Ty::String {
+                            resolve_string_instance(&name, &arg_tys).map(|(_, r)| r).unwrap_or(Ty::Error)
+                        } else if let Ty::Obj(internal) = rt {
+                            self.lookup_method(internal, &name).map(|s| s.ret)
+                                .or_else(|| resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys).map(|(_, r)| r))
+                                .unwrap_or(Ty::Error)
+                        } else {
+                            Ty::Error
+                        }
+                    }
+                };
+                // The safe-call result is nullable; krusty needs it to be a reference type (no boxing).
+                if !result.is_reference() && result != Ty::Error {
+                    self.diags.error(self.span(e), "krusty: safe call (?.) with a non-reference result is not supported".to_string());
+                    return Ty::Error;
+                }
+                result
+            }
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
                 None => match self.syms.props.get(&n) {

@@ -376,6 +376,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/class_body_e2e.rs` (body props + `init` + plain param; open-property dispatch).
   Box conformance: **67 / 67 OK / 0 FAIL** (up from 62); full suite 112 green.
 
+## Phase 25 — Safe calls (`?.`)  ✅
+- ✅ `recv?.prop` and `recv?.method(args)` lower to a null-guard: evaluate the receiver, `ifnull` →
+  push `null`, else do the member access / call. Works on krusty classes (incl. interfaces →
+  `invokeinterface`), `java.lang.String`, and classpath Java objects; composes with `?:`.
+- ✅ Result is reference-typed (krusty doesn't box) — a non-reference safe-call result is rejected
+  (skipped, not miscompiled).
+- ✅ `tests/safe_call_e2e.rs` (safe method + property, with Elvis). Full suite 114 green; box
+  conformance 67 / 67 OK / 0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

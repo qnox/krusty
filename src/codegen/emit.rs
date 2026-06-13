@@ -1098,6 +1098,67 @@ impl<'a> MethodEmitter<'a> {
                 let tos = cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
                 code.invokevirtual(tos, 0, 1);
             }
+            Expr::SafeCall { receiver, name, args } => {
+                let rt = self.info.ty(receiver);
+                let result = self.info.ty(e);
+                self.emit_expr(receiver, code, cw);
+                code.dup();
+                let lnull = code.new_label();
+                let end = code.new_label();
+                code.ifnull(lnull);
+                // non-null path: receiver value is on the stack.
+                match &args {
+                    None => {
+                        // property getter
+                        let internal = rt.obj_internal().unwrap_or("java/lang/Object");
+                        let getter = format!("get{}", capitalize(&name));
+                        let m = cw.methodref(internal, &getter, &method_descriptor(&[], result));
+                        code.invokevirtual(m, 0, slot_words(result) as i32);
+                    }
+                    Some(call_args) => {
+                        let arg_tys: Vec<Ty> = call_args.iter().map(|a| self.info.ty(*a)).collect();
+                        if rt == Ty::String {
+                            if let Some((desc, ret)) = crate::resolve::resolve_string_instance(&name, &arg_tys) {
+                                for a in call_args {
+                                    self.emit_expr(*a, code, cw);
+                                }
+                                let aw: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                                let m = cw.methodref("java/lang/String", &name, desc);
+                                code.invokevirtual(m, aw, slot_words(ret) as i32);
+                            }
+                        } else if let Ty::Obj(internal) = rt {
+                            let sig = self.syms.method_of(internal, &name);
+                            let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
+                            if let Some(sig) = sig {
+                                for (a, pty) in call_args.iter().zip(&sig.params) {
+                                    self.emit_expr_as(*a, *pty, code, cw);
+                                }
+                                let aw: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                                let desc = method_descriptor(&sig.params, sig.ret);
+                                if is_iface {
+                                    let m = cw.interface_methodref(internal, &name, &desc);
+                                    code.invokeinterface(m, aw, slot_words(sig.ret) as i32);
+                                } else {
+                                    let m = cw.methodref(internal, &name, &desc);
+                                    code.invokevirtual(m, aw, slot_words(sig.ret) as i32);
+                                }
+                            } else if let Some((desc, ret)) = crate::resolve::resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys) {
+                                for a in call_args {
+                                    self.emit_expr(*a, code, cw);
+                                }
+                                let aw: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                                let m = cw.methodref(internal, &name, &desc);
+                                code.invokevirtual(m, aw, slot_words(ret) as i32);
+                            }
+                        }
+                    }
+                }
+                code.goto(end);
+                code.bind(lnull);
+                code.pop(); // discard the null receiver copy
+                code.aconst_null();
+                code.bind(end);
+            }
             Expr::Name(n) => {
                 if let Some(&(slot, ty)) = self.slots.get(&n) {
                     load_local(ty, slot, code);
