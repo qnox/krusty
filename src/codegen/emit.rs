@@ -1825,6 +1825,27 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // `super.method(args)` → aload 0; args; invokespecial Super.method (non-virtual dispatch).
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
+                let sup = self
+                    .syms
+                    .class_by_internal(&self.class.clone())
+                    .and_then(|c| c.super_internal.clone())
+                    .unwrap_or_else(|| "java/lang/Object".to_string());
+                let sig = self.syms.method_of(&sup, &name);
+                code.aload(0);
+                if let Some(sig) = sig {
+                    for (a, pty) in args.iter().zip(&sig.params) {
+                        self.emit_expr_as(*a, *pty, code, cw);
+                    }
+                    let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                    let m = cw.methodref(&sup, &name, &method_descriptor(&sig.params, sig.ret));
+                    code.invokespecial(m, arg_words, slot_words(sig.ret) as i32);
+                }
+                return;
+            }
+        }
         // Object member call: `Object.method(args)` → getstatic INSTANCE; args; invokevirtual.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if let Expr::Name(cls) = self.file.expr(receiver).clone() {
