@@ -104,6 +104,12 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // top-level property: `val`/`var name (: Type)? = init`
+                TokenKind::KwVal | TokenKind::KwVar => {
+                    let d = self.parse_top_property();
+                    let id = self.file.add_decl(Decl::Property(d));
+                    self.file.decls.push(id);
+                }
                 // `data class` — `data` is a soft keyword (a plain identifier elsewhere).
                 TokenKind::Ident
                     if self.text() == "data" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
@@ -159,6 +165,19 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_top_property(&mut self) -> PropDecl {
+        let start = self.tok().span;
+        let is_var = self.at(TokenKind::KwVar);
+        self.bump(); // val/var
+        let name = self.ident_or_error("property name");
+        let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
+        self.expect(TokenKind::Eq, "'='"); // v0: top-level properties require an initializer
+        self.skip_newlines();
+        let init = self.parse_expr();
+        let end = self.t[self.i.saturating_sub(1)].span;
+        PropDecl { name, ty, is_var, init, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_qualified_name(&mut self) -> String {

@@ -53,6 +53,63 @@ pub fn emit_file(
             e.emit_fun(f, &mut cw);
         }
     }
+
+    // Top-level properties: a private static backing field + accessors, initialized in `<clinit>`.
+    let mut tl_props: Vec<(&PropDecl, Ty)> = file
+        .decls
+        .iter()
+        .filter_map(|&d| match file.decl(d) {
+            Decl::Property(p) => Some((p, syms.props.get(&p.name).map(|(t, _)| *t).unwrap_or(Ty::Error))),
+            _ => None,
+        })
+        .collect();
+    // A property with no determinable value type (e.g. `val x = unitReturningCall()`) can't be a
+    // JVM field — reject (the file is skipped) rather than emit invalid bytecode.
+    tl_props.retain(|(p, ty)| {
+        if matches!(ty, Ty::Unit | Ty::Error) {
+            diags.error(p.span, format!("krusty: top-level property '{}' has unsupported type '{}'", p.name, ty.name()));
+            false
+        } else {
+            true
+        }
+    });
+    for (p, ty) in &tl_props {
+        let access = if p.is_var { ACC_PRIVATE | ACC_STATIC } else { ACC_PRIVATE | ACC_STATIC | ACC_FINAL };
+        cw.add_field(access, &p.name, &ty.descriptor());
+        let cap = capitalize(&p.name);
+        // getter
+        let mut g = CodeBuilder::new(0);
+        let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+        g.getstatic(f, slot_words(*ty) as i32);
+        emit_typed_return(*ty, &mut g);
+        g.link();
+        cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+        if p.is_var {
+            let mut s = CodeBuilder::new(slot_words(*ty));
+            load_local(*ty, 0, &mut s);
+            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+            s.putstatic(f, slot_words(*ty) as i32);
+            s.ret_void();
+            s.link();
+            cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &format!("set{cap}"), &method_descriptor(&[*ty], Ty::Unit), &s);
+        }
+    }
+    // `<clinit>` runs every property initializer into its static field.
+    if !tl_props.is_empty() {
+        let mut clinit = CodeBuilder::new(0);
+        {
+            let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            for (p, ty) in &tl_props {
+                e.emit_expr_as(p.init, *ty, &mut clinit, &mut cw);
+                let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+                clinit.putstatic(f, slot_words(*ty) as i32);
+            }
+        }
+        clinit.ret_void();
+        clinit.link();
+        cw.add_method(ACC_STATIC, "<clinit>", "()V", &clinit);
+    }
+
     // @kotlin.Metadata: describe the file facade so Kotlin consumers see the Kotlin API.
     let funcs: Vec<crate::metadata::builder::FnMeta> = file
         .decls
@@ -67,7 +124,20 @@ pub fn emit_file(
             })
         })
         .collect();
-    let (d1_bytes, d2) = crate::metadata::builder::build_package(&funcs);
+    let prop_metas: Vec<crate::metadata::builder::PropMeta> = tl_props
+        .iter()
+        .map(|(p, ty)| {
+            let cap = capitalize(&p.name);
+            crate::metadata::builder::PropMeta {
+                name: p.name.clone(),
+                ty: *ty,
+                is_var: p.is_var,
+                getter: (format!("get{cap}"), method_descriptor(&[], *ty)),
+                setter: if p.is_var { Some((format!("set{cap}"), method_descriptor(&[*ty], Ty::Unit))) } else { None },
+            }
+        })
+        .collect();
+    let (d1_bytes, d2) = crate::metadata::builder::build_package(&funcs, &prop_metas);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(2, &[1, 9, 0], 48, &d1, &d2);
     cw.finish()
@@ -660,6 +730,11 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr_as(value, ty, code, cw);
                     let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
                     code.putfield(f, slot_words(ty) as i32);
+                } else if let Some(&(ty, _)) = self.syms.props.get(&name).filter(|_| !self.is_instance) {
+                    // top-level `var` property write → putstatic on the file facade.
+                    self.emit_expr_as(value, ty, code, cw);
+                    let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
+                    code.putstatic(f, slot_words(ty) as i32);
                 }
             }
             Stmt::Return(e) => match e {
@@ -804,6 +879,14 @@ impl<'a> MethodEmitter<'a> {
                     code.aload(0);
                     let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                     code.getfield(f, slot_words(ty) as i32);
+                } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
+                    // top-level property → static field on the file facade.
+                    if self.is_instance {
+                        self.diags.error(self.file.expr_spans[e.0 as usize], "krusty: top-level property access from a member method is not supported");
+                    } else {
+                        let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
+                        code.getstatic(f, slot_words(ty) as i32);
+                    }
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty: unbound local '{n}' in codegen"));
                 }

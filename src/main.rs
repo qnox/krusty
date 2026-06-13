@@ -72,8 +72,11 @@ fn main() {
         }
 
         // The file facade (`<File>Kt`) is emitted only if the file has top-level functions.
-        let has_funs = file.decls.iter().any(|&d| matches!(file.decl(d), krusty::ast::Decl::Fun(_)));
-        if has_funs {
+        let has_facade_members = file
+            .decls
+            .iter()
+            .any(|&d| matches!(file.decl(d), krusty::ast::Decl::Fun(_) | krusty::ast::Decl::Property(_)));
+        if has_facade_members {
             let internal = file_class_name(&stems[i], file.package.as_deref());
             let bytes = emit_file(file, &info, &syms, &internal, &mut diags);
             if !diags.has_errors() {
