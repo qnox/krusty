@@ -576,6 +576,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/byte_short_e2e.rs` (literals, arithmetic→Int, truncating conversions, fields, comparison,
   data-class equals incl. a Char field, on the JVM). Box conformance **116 OK / 0 FAIL** (up from 113).
 
+## Phase 41 — `try`/`finally`  ✅
+- ✅ `finally` is inlined on the normal path (after the body) and after each normally-completing
+  catch, plus a synthetic catch-all (exception-table entry, `catch_type` 0) over the body and the
+  catch bodies that runs the finally then re-throws the in-flight exception.
+- ✅ Soundness: a `return`/`break`/`continue` that escapes the guarded region bypasses the inlined
+  finally, so such trys are rejected (a deep `exit_walk` treats `return` as always-escaping and
+  `break`/`continue` as escaping only when not inside a loop nested in the region, recursing into
+  nested `try`). `finally` requires a Unit/Nothing body (no value to thread across it); otherwise
+  rejected.
+- ✅ Empty/degenerate exception-table ranges (`start >= end`, e.g. an empty `try {}` body) are
+  dropped in `resolved_exceptions` — they protect nothing and are an illegal `Code` entry.
+- ✅ `tests/try_finally_e2e.rs` (finally on normal, caught, and re-thrown paths on the JVM). Box
+  conformance **128 OK / 0 FAIL** (up from 116).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

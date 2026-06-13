@@ -435,12 +435,15 @@ impl CodeBuilder {
     }
 
     /// Resolve the exception table to byte offsets (call after all labels are bound, e.g. in `link`).
+    /// Drops degenerate ranges where `start >= end` (an empty protected region — e.g. an empty `try`
+    /// body — protects nothing, and an empty range is an illegal `Code` exception-table entry).
     pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
         self.exceptions
             .iter()
             .map(|&(s, e, h, t)| {
                 (self.labels[s.0 as usize] as u16, self.labels[e.0 as usize] as u16, self.labels[h.0 as usize] as u16, t)
             })
+            .filter(|&(start, end, _, _)| start < end)
             .collect()
     }
 

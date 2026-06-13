@@ -945,8 +945,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Try { body, catches } => {
+            Expr::Try { body, catches, finally } => {
                 let bt = self.expr(body);
+                if let Some(f) = finally {
+                    self.expr(f); // finally runs for effect; its value is discarded
+                }
                 let mut result = bt;
                 for c in &catches {
                     let cty = match self.catch_internal(&c.ty.name) {

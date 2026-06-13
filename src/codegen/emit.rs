@@ -994,7 +994,7 @@ impl<'a> MethodEmitter<'a> {
     /// `try { body } catch (e: T) { … } …`: the body is guarded by an exception-table range; each
     /// handler stores the caught exception, binds the catch variable, and produces the result value
     /// (or discards it, when the `try` is a statement). The body and handlers all converge at `after`.
-    fn emit_try(&mut self, e: ExprId, body: ExprId, catches: &[CatchClause], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    fn emit_try(&mut self, e: ExprId, body: ExprId, catches: &[CatchClause], finally: Option<ExprId>, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let result = self.info.ty(e);
         // A `try` is only sound where the operand stack is empty at entry: when the body throws, the
         // JVM clears the whole stack to just the exception, so any partially-computed values that the
@@ -1006,6 +1006,20 @@ impl<'a> MethodEmitter<'a> {
                 "krusty: try/catch is only supported in statement, initializer, return, or argument position (empty operand stack)".to_string(),
             );
             return;
+        }
+        // `finally` runs on every exit. krusty inlines it on the normal path and in a catch-all that
+        // re-throws — but a `return`/`break`/`continue` inside the guarded code bypasses that and would
+        // skip the finally. Support only the common "pure cleanup" case (no non-local exit) + require a
+        // Unit result (no value to thread across the finally); otherwise reject (skip).
+        if finally.is_some() {
+            let exits = self.has_nonlocal_exit(body) || catches.iter().any(|c| self.has_nonlocal_exit(c.body));
+            if exits || !matches!(result, Ty::Unit | Ty::Nothing) {
+                self.diags.error(
+                    self.file.expr_spans[e.0 as usize],
+                    "krusty: try/finally is only supported for a Unit/Nothing body with no return/break/continue inside".to_string(),
+                );
+                return;
+            }
         }
         let try_start = code.new_label();
         let try_end = code.new_label();
@@ -1023,10 +1037,18 @@ impl<'a> MethodEmitter<'a> {
         code.bind(try_start);
         emit_value(self, body, code, cw);
         code.bind(try_end);
+        // On normal completion, run the finally inline then jump past everything. If the body diverges
+        // (e.g. ends in `throw`), this is unreachable — skip it (the catch-all below runs the finally).
         if !self.expr_diverges(body) {
+            if let Some(f) = finally {
+                self.emit_block_discard(f, code, cw);
+            }
             code.goto(after);
         }
 
+        // Range of the catch handler bodies, so the finally catch-all also covers a throw in a catch.
+        let catches_start = code.new_label();
+        code.bind(catches_start);
         for c in catches {
             let internal = self.catch_internal(&c.ty.name);
             let cty = Ty::obj(&internal);
@@ -1047,12 +1069,77 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             if !self.expr_diverges(c.body) {
+                if let Some(f) = finally {
+                    self.emit_block_discard(f, code, cw); // finally after a normally-completing catch
+                }
                 code.goto(after);
             }
             let cti = cw.class_ref(&internal);
             code.add_exception(try_start, try_end, handler, cti);
         }
+        // catch-all `finally` handler: run the finally, then re-throw the in-flight exception.
+        if let Some(f) = finally {
+            let catches_end = code.new_label();
+            code.bind(catches_end);
+            let fin = code.new_label();
+            code.bind(fin);
+            code.set_stack(1);
+            let ex_slot = self.fresh_slot(Ty::obj("java/lang/Throwable"));
+            code.ensure_locals(ex_slot + 1);
+            code.astore(ex_slot);
+            self.emit_block_discard(f, code, cw);
+            code.aload(ex_slot);
+            code.athrow();
+            code.add_exception(try_start, try_end, fin, 0); // body throw not matched by a catch
+            // A throw from within a catch body (only a non-empty range is a legal exception entry).
+            if !catches.is_empty() {
+                code.add_exception(catches_start, catches_end, fin, 0);
+            }
+        }
         code.bind(after);
+    }
+
+    /// True if `e` contains a control transfer that would leave an enclosing `try`, bypassing a
+    /// `finally`. `return` always escapes; `break`/`continue` escape only when *not* inside a loop
+    /// nested within the guarded region (those are local to that loop). `throw` is fine — the finally
+    /// catch-all handles it. Recurses into nested `try` so an inner break/return is still seen.
+    fn has_nonlocal_exit(&self, e: ExprId) -> bool {
+        self.exit_walk(e, false)
+    }
+
+    fn exit_walk(&self, e: ExprId, in_loop: bool) -> bool {
+        match self.file.expr(e) {
+            Expr::Block { stmts, trailing } => {
+                stmts.iter().any(|s| self.stmt_exit_walk(*s, in_loop)) || trailing.map_or(false, |t| self.exit_walk(t, in_loop))
+            }
+            Expr::If { cond, then_branch, else_branch } => {
+                self.exit_walk(*cond, in_loop)
+                    || self.exit_walk(*then_branch, in_loop)
+                    || else_branch.map_or(false, |b| self.exit_walk(b, in_loop))
+            }
+            Expr::When { subject, arms } => {
+                subject.map_or(false, |s| self.exit_walk(s, in_loop))
+                    || arms.iter().any(|a| a.conditions.iter().any(|c| self.exit_walk(*c, in_loop)) || self.exit_walk(a.body, in_loop))
+            }
+            Expr::Try { body, catches, finally } => {
+                self.exit_walk(*body, in_loop)
+                    || catches.iter().any(|c| self.exit_walk(c.body, in_loop))
+                    || finally.map_or(false, |f| self.exit_walk(f, in_loop))
+            }
+            _ => false,
+        }
+    }
+
+    fn stmt_exit_walk(&self, s: StmtId, in_loop: bool) -> bool {
+        match self.file.stmt(s) {
+            Stmt::Return(_) => true,
+            Stmt::Break | Stmt::Continue => !in_loop, // local to a loop nested inside the guarded region
+            Stmt::Expr(e) => self.exit_walk(*e, in_loop),
+            Stmt::Local { init, .. } => self.exit_walk(*init, in_loop),
+            Stmt::While { body, .. } => self.exit_walk(*body, true),
+            Stmt::For { body, .. } => self.exit_walk(*body, true),
+            _ => false,
+        }
     }
 
     fn emit_fun(&mut self, f: &FunDecl, cw: &mut ClassWriter) {
@@ -1355,7 +1442,7 @@ impl<'a> MethodEmitter<'a> {
                 let (op, words) = array_load_op(elem);
                 code.array_load(op, words);
             }
-            Expr::Try { body, catches } => self.emit_try(e, body, &catches, code, cw),
+            Expr::Try { body, catches, finally } => self.emit_try(e, body, &catches, finally, code, cw),
             Expr::Is { operand, ty, negated } => {
                 self.emit_expr(operand, code, cw);
                 let tt = resolve_ty(&ty, self.syms);
