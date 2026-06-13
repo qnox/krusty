@@ -108,6 +108,27 @@ impl SymbolTable {
         }
     }
 
+    /// All declared supertypes (base-class chain + interfaces, transitively) of `internal`.
+    pub fn supertype_internals(&self, internal: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_super_internals(internal, &mut out);
+        out
+    }
+    fn collect_super_internals(&self, internal: &str, out: &mut Vec<String>) {
+        let Some(c) = self.class_by_internal(internal) else { return };
+        let mut parents: Vec<String> = Vec::new();
+        if let Some(s) = &c.super_internal {
+            parents.push(s.clone());
+        }
+        parents.extend(c.interfaces.iter().cloned());
+        for p in parents {
+            if !out.contains(&p) {
+                out.push(p.clone());
+                self.collect_super_internals(&p, out);
+            }
+        }
+    }
+
     /// Internal names of declared classes whose direct base class is `internal`.
     pub fn subclasses_of(&self, internal: &str) -> Vec<String> {
         self.classes
@@ -697,6 +718,23 @@ impl<'a> Checker<'a> {
                     format!("krusty: method '{name}' needs a bridge method (covariant/generic return override is not supported)"),
                 );
                 return;
+            }
+        }
+        // Property getters need the same check: a supertype property whose (erased) type differs from
+        // the class's own property type (e.g. a generic interface `val x: T` → `Object`, overridden
+        // with a concrete type) would need a bridge `getX`, which krusty does not synthesize.
+        for sup in self.syms.supertype_internals(internal) {
+            let Some(sc) = self.syms.class_by_internal(&sup) else { continue };
+            for (pname, sty, _) in sc.props.clone() {
+                if let Some((own_ty, _)) = self.syms.prop_of(internal, &pname) {
+                    if sty.descriptor() != own_ty.descriptor() {
+                        self.diags.error(
+                            span,
+                            format!("krusty: property '{pname}' needs a bridge getter (covariant/generic override is not supported)"),
+                        );
+                        return;
+                    }
+                }
             }
         }
     }

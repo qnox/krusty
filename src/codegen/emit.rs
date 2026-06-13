@@ -212,8 +212,25 @@ fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<
             ret,
         ));
     }
+    // Abstract properties → abstract `getX` (and `setX` for `var`); implementing classes provide them.
+    let mut prop_metas = Vec::new();
+    for p in &class.body_props {
+        let ty = p.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Error);
+        let cap = capitalize(&p.name);
+        cw.add_abstract_method(ACC_PUBLIC, &format!("get{cap}"), &method_descriptor(&[], ty));
+        if p.is_var {
+            cw.add_abstract_method(ACC_PUBLIC, &format!("set{cap}"), &method_descriptor(&[ty], Ty::Unit));
+        }
+        prop_metas.push(crate::metadata::class_builder::PropMeta {
+            name: p.name.clone(),
+            ty,
+            is_var: p.is_var,
+            getter: (format!("get{cap}"), method_descriptor(&[], ty)),
+            setter: if p.is_var { Some((format!("set{cap}"), method_descriptor(&[ty], Ty::Unit))) } else { None },
+        });
+    }
     // @kotlin.Metadata (kind=1, interface flags) — declares the abstract members for consumers.
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &[], &method_metas, &[], 102);
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &prop_metas, &method_metas, &[], 102);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
     cw.finish()
@@ -1303,13 +1320,20 @@ impl<'a> MethodEmitter<'a> {
             Stmt::AssignMember { receiver, name, value } => {
                 if let Ty::Obj(internal) = self.info.ty(receiver) {
                     let prop_ty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
+                    let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
                     self.emit_expr(receiver, code, cw);
                     self.emit_expr_as(value, prop_ty, code, cw);
                     // Write via the public setter (backing fields are private, so a cross-instance
                     // putfield would fail; the setter also dispatches correctly for open classes).
                     let setter = format!("set{}", capitalize(&name));
-                    let m = cw.methodref(internal, &setter, &method_descriptor(&[prop_ty], Ty::Unit));
-                    code.invokevirtual(m, slot_words(prop_ty) as i32, 0);
+                    let desc = method_descriptor(&[prop_ty], Ty::Unit);
+                    if is_iface {
+                        let m = cw.interface_methodref(internal, &setter, &desc);
+                        code.invokeinterface(m, slot_words(prop_ty) as i32, 0);
+                    } else {
+                        let m = cw.methodref(internal, &setter, &desc);
+                        code.invokevirtual(m, slot_words(prop_ty) as i32, 0);
+                    }
                 }
             }
             Stmt::AssignIndex { array, index, value } => {
@@ -1729,10 +1753,17 @@ impl<'a> MethodEmitter<'a> {
                     // inherited; invokevirtual resolves up the class hierarchy).
                     let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
                     let lateinit = self.is_lateinit(internal, &name);
+                    let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
                     self.emit_expr(receiver, code, cw);
                     let getter = format!("get{}", capitalize(&name));
-                    let m = cw.methodref(internal, &getter, &method_descriptor(&[], pty));
-                    code.invokevirtual(m, 0, slot_words(pty) as i32);
+                    let desc = method_descriptor(&[], pty);
+                    if is_iface {
+                        let m = cw.interface_methodref(internal, &getter, &desc);
+                        code.invokeinterface(m, 0, slot_words(pty) as i32);
+                    } else {
+                        let m = cw.methodref(internal, &getter, &desc);
+                        code.invokevirtual(m, 0, slot_words(pty) as i32);
+                    }
                     if lateinit {
                         self.emit_lateinit_guard(&name, code, cw);
                     }
