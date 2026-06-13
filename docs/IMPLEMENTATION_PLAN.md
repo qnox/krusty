@@ -455,6 +455,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/raw_string_e2e.rs` (multi-line + embedded quotes run on the JVM; verbatim value;
   interpolation rejection). Box conformance **81 OK / 0 FAIL** (up from 80).
 
+## Phase 31 — Exhaustive `when` over sealed types  ✅
+- ✅ `sealed` is now tracked through `ClassDecl` → `ClassSig` (`is_sealed`). A subject `when` with no
+  `else` is treated as an expression (value = join of arm bodies) when the subject is a sealed class
+  and every declared subclass is matched by a positive `is` arm (`SymbolTable::subclasses_of`).
+- ✅ Conservative: a non-sealed subject, any uncovered subclass, or a nested sealed subclass not
+  directly matched ⇒ not exhaustive ⇒ the `when` stays `Unit` and using it as an expression is
+  rejected (skipped), never assumed exhaustive.
+- ✅ Codegen emits the unreachable no-match path as a `throw new IllegalStateException()` (mirroring
+  Kotlin's `NoWhenBranchMatchedException`; a plain JDK exception avoids a stdlib dependency) so the
+  verifier sees every path produce a value or diverge.
+- ✅ `tests/when_exhaustive_e2e.rs` (exhaustive sealed dispatch on the JVM; non-exhaustive rejection).
+  Box conformance holds at **81 OK / 0 FAIL** (removes a class of false rejections; sealed-`when`
+  box files typically need further features to fully compile).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

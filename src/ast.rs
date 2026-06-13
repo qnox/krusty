@@ -175,6 +175,9 @@ pub struct ClassDecl {
     /// `ACC_ABSTRACT`.
     pub is_open: bool,
     pub is_abstract: bool,
+    /// `sealed` — abstract + open, and its subclasses are all known in this module (enabling
+    /// exhaustive `when` without `else`).
+    pub is_sealed: bool,
     /// Implemented interface names from a supertype list (`class C : I1, I2`).
     pub supertypes: Vec<String>,
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
