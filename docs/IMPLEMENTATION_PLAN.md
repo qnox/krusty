@@ -142,7 +142,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   only works if kotlinc reads the class `@Metadata` — and runs (`7:bye`).
 - Note: d1 is semantically equivalent, not byte-identical, to kotlinc's (per-string string-table
   records vs kotlinc's range-compressed) — accepted by kotlinc, which is the ABI goal.
-- ⬜ **Next:** methods in class bodies, secondary constructors, `data class`
+### 8c — member functions (instance methods) ✅
+- ✅ Class bodies accept `fun` declarations → emitted as `public final` instance methods (`this` in
+  slot 0, params from slot 1). Bare property names in a method body resolve to backing-field
+  access (`getfield`/`putfield` for `var`). Typechecked with the class properties in an implicit
+  `this` scope, parameters shadowing.
+- ✅ Class `@Metadata` gains `Class.function` (f9) entries (name + return type + value params; JVM
+  signature derivable, no ext — matching kotlinc).
+- ✅ `tests/class_e2e.rs::member_function_shape_and_run` (instance method, `-Xverify:all`, → `15`)
+  and the class round-trip now exercises a member call from a Kotlin consumer (`p.shifted(3)` →
+  `7:bye:10`).
+- ⬜ **Next:** secondary constructors, `data class`
   (equals/hashCode/toString/componentN/copy), class-typed properties (`Ty::Obj`),
   inheritance/interfaces, nullability.
 

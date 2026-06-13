@@ -137,10 +137,20 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         imports,
     };
     for &d in &file.decls {
-        if let Decl::Fun(f) = file.decl(d) {
-            c.check_fun(f);
+        match file.decl(d) {
+            Decl::Fun(f) => c.check_fun(f),
+            Decl::Class(cl) => {
+                // Member functions are checked with the class's properties in an implicit scope.
+                let props: Vec<(String, Ty, bool)> = cl
+                    .props
+                    .iter()
+                    .map(|p| (p.name.clone(), Ty::from_name(&p.ty.name).unwrap_or(Ty::Error), p.is_var))
+                    .collect();
+                for m in &cl.methods {
+                    c.check_method(m, &props);
+                }
+            }
         }
-        // Decl::Class has no bodies to check in v0 (properties are ctor params with known types).
     }
     TypeInfo { expr_types: c.expr_types }
 }
@@ -185,6 +195,29 @@ impl<'a> Checker<'a> {
             let ty = Ty::from_name(&p.ty.name).unwrap_or(Ty::Error);
             self.declare(&p.name, ty, false);
         }
+        self.check_fun_body(f);
+        self.pop_scope();
+    }
+
+    /// Check an instance method: the class properties are visible (implicit `this`), then the
+    /// method's own parameters shadow them.
+    fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
+        self.ret_ty = f.ret.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(Ty::Unit);
+        self.push_scope(); // implicit-this scope (properties)
+        for (n, t, is_var) in props {
+            self.declare(n, *t, *is_var);
+        }
+        self.push_scope(); // parameter scope
+        for p in &f.params {
+            let ty = Ty::from_name(&p.ty.name).unwrap_or(Ty::Error);
+            self.declare(&p.name, ty, false);
+        }
+        self.check_fun_body(f);
+        self.pop_scope();
+        self.pop_scope();
+    }
+
+    fn check_fun_body(&mut self, f: &FunDecl) {
         match &f.body {
             FunBody::Expr(e) => {
                 let t = self.expr(*e);
@@ -195,7 +228,6 @@ impl<'a> Checker<'a> {
             }
             FunBody::None => {}
         }
-        self.pop_scope();
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {

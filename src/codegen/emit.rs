@@ -85,7 +85,14 @@ fn capitalize(s: &str) -> String {
 /// Lower a `class C(val a: T, var b: U)` to a JVM class with private backing fields, a primary
 /// constructor that calls `super()` and stores each field, and `getX`/`setX` accessors — matching
 /// kotlinc's public ABI for a simple property-holding class.
-pub fn emit_class(class: &ClassDecl, internal_name: &str, _syms: &SymbolTable) -> Vec<u8> {
+pub fn emit_class(
+    class: &ClassDecl,
+    file: &File,
+    info: &TypeInfo,
+    internal_name: &str,
+    syms: &SymbolTable,
+    diags: &mut DiagSink,
+) -> Vec<u8> {
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
 
     // Resolve property types (v0: restricted to the primitive/String set).
@@ -144,6 +151,25 @@ pub fn emit_class(class: &ClassDecl, internal_name: &str, _syms: &SymbolTable) -
         }
     }
 
+    // Member functions → instance methods. Property names resolve to backing-field access.
+    let class_props: HashMap<String, Ty> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
+    let imports = import_map(file);
+    let method_metas: Vec<crate::metadata::class_builder::FnMeta> = class
+        .methods
+        .iter()
+        .map(|m| {
+            let params: Vec<Ty> = m.params.iter().map(|p| Ty::from_name(&p.ty.name).unwrap_or(Ty::Error)).collect();
+            let ret = m.ret.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(Ty::Unit);
+            let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+            e.emit_method(m, &params, ret, &mut cw);
+            crate::metadata::class_builder::FnMeta {
+                name: m.name.clone(),
+                params: m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+                ret,
+            }
+        })
+        .collect();
+
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
     let ctor_params: Vec<(String, Ty)> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
     let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
@@ -160,7 +186,7 @@ pub fn emit_class(class: &ClassDecl, internal_name: &str, _syms: &SymbolTable) -
             }
         })
         .collect();
-    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas);
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal_name, &ctor_params, &ctor_desc, &prop_metas, &method_metas);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
 
@@ -195,11 +221,47 @@ struct MethodEmitter<'a> {
     next_slot: u16,
     ret_ty: Ty,
     imports: &'a HashMap<String, String>,
+    /// Class properties visible to an instance method (implicit `this`); empty for static funcs.
+    class_props: HashMap<String, Ty>,
+    /// True when emitting an instance method (slot 0 = `this`; bare property names → getfield).
+    is_instance: bool,
 }
 
 impl<'a> MethodEmitter<'a> {
     fn new(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, imports: &'a HashMap<String, String>, diags: &'a mut DiagSink) -> Self {
-        MethodEmitter { file, info, syms, class: class.to_string(), diags, slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports }
+        MethodEmitter {
+            file, info, syms, class: class.to_string(), diags,
+            slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
+            class_props: HashMap::new(), is_instance: false,
+        }
+    }
+
+    fn new_instance(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, imports: &'a HashMap<String, String>, class_props: HashMap<String, Ty>, diags: &'a mut DiagSink) -> Self {
+        let mut e = MethodEmitter::new(file, info, syms, class, imports, diags);
+        e.class_props = class_props;
+        e.is_instance = true;
+        e.next_slot = 1; // slot 0 reserved for `this`
+        e
+    }
+
+    /// Emit an instance method: `this` in slot 0, params from slot 1, `public final` (non-static).
+    fn emit_method(&mut self, f: &FunDecl, params: &[Ty], ret: Ty, cw: &mut ClassWriter) {
+        self.ret_ty = ret;
+        for (p, ty) in f.params.iter().zip(params) {
+            self.alloc_slot(&p.name, *ty);
+        }
+        let mut code = CodeBuilder::new(self.next_slot);
+        match &f.body {
+            FunBody::Expr(e) => {
+                self.emit_expr_as(*e, ret, &mut code, cw);
+                self.emit_return(ret, &mut code);
+            }
+            FunBody::Block(b) => self.emit_block_as_body(*b, &mut code, cw),
+            FunBody::None => self.emit_default_return(ret, &mut code, cw),
+        }
+        code.ensure_locals(self.next_slot);
+        code.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, &f.name, &method_descriptor(params, ret), &code);
     }
 
     fn alloc_slot(&mut self, name: &str, ty: Ty) -> u16 {
@@ -301,6 +363,12 @@ impl<'a> MethodEmitter<'a> {
                 if let Some(&(slot, ty)) = self.slots.get(&name) {
                     self.emit_expr_as(value, ty, code, cw);
                     self.store(ty, slot, code);
+                } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance) {
+                    // implicit `this.<prop> = value` — write the backing field
+                    code.aload(0);
+                    self.emit_expr_as(value, ty, code, cw);
+                    let f = cw.fieldref(&self.class.clone(), &name, ty.descriptor());
+                    code.putfield(f, slot_words(ty) as i32);
                 }
             }
             Stmt::Return(e) => match e {
@@ -377,6 +445,11 @@ impl<'a> MethodEmitter<'a> {
                         Ty::Double => code.dload(slot),
                         _ => code.aload(slot),
                     }
+                } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
+                    // implicit `this.<prop>` — read the backing field
+                    code.aload(0);
+                    let f = cw.fieldref(&self.class.clone(), &n, ty.descriptor());
+                    code.getfield(f, slot_words(ty) as i32);
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krust: unbound local '{n}' in codegen"));
                 }
