@@ -9,6 +9,8 @@ pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_SUPER: u16 = 0x0020;
+pub const ACC_INTERFACE: u16 = 0x0200;
+pub const ACC_ABSTRACT: u16 = 0x0400;
 
 // v0 targets major 50 (Java 6): its verifier falls back to the type-inference verifier when a
 // method has no StackMapTable, so branchy methods verify without us computing frames yet. Upgrading
@@ -152,7 +154,8 @@ struct MethodInfo {
     desc: u16,
     max_stack: u16,
     max_locals: u16,
-    code: Vec<u8>,
+    /// `None` for an abstract method (no `Code` attribute).
+    code: Option<Vec<u8>>,
 }
 
 struct FieldInfo {
@@ -166,6 +169,7 @@ pub struct ClassWriter {
     access: u16,
     this_class: u16,
     super_class: u16,
+    interfaces: Vec<u16>,
     fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
@@ -181,10 +185,29 @@ impl ClassWriter {
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
             this_class,
             super_class,
+            interfaces: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
         }
+    }
+
+    /// Override the class access flags (e.g. `ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`).
+    pub fn set_access(&mut self, access: u16) {
+        self.access = access;
+    }
+
+    /// Add an implemented interface / extended interface by internal name.
+    pub fn add_interface(&mut self, internal: &str) {
+        let c = self.cp.class(internal);
+        self.interfaces.push(c);
+    }
+
+    /// Declare an abstract method (no `Code` attribute) — for interfaces.
+    pub fn add_abstract_method(&mut self, access: u16, name: &str, desc: &str) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None });
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
@@ -277,7 +300,7 @@ impl ClassWriter {
             desc: d,
             max_stack: code.max_stack,
             max_locals: code.max_locals,
-            code: code.bytes.clone(),
+            code: Some(code.bytes.clone()),
         });
     }
 
@@ -291,7 +314,10 @@ impl ClassWriter {
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);
         u2(&mut out, self.super_class);
-        u2(&mut out, 0); // interfaces
+        u2(&mut out, self.interfaces.len() as u16);
+        for &i in &self.interfaces {
+            u2(&mut out, i);
+        }
         u2(&mut out, self.fields.len() as u16);
         for f in &self.fields {
             u2(&mut out, f.access);
@@ -304,18 +330,22 @@ impl ClassWriter {
             u2(&mut out, m.access);
             u2(&mut out, m.name);
             u2(&mut out, m.desc);
-            u2(&mut out, 1); // attributes: Code
-            // Code attribute
-            u2(&mut out, code_attr_name);
-            let code_len = m.code.len();
-            let attr_len = 2 + 2 + 4 + code_len + 2 + 2; // max_stack+max_locals+code_len+code+exc_table_len+attrs
-            u4(&mut out, attr_len as u32);
-            u2(&mut out, m.max_stack);
-            u2(&mut out, m.max_locals);
-            u4(&mut out, code_len as u32);
-            out.extend_from_slice(&m.code);
-            u2(&mut out, 0); // exception_table_length
-            u2(&mut out, 0); // code attributes (StackMapTable added in Phase 4)
+            match &m.code {
+                None => u2(&mut out, 0), // abstract method: no attributes
+                Some(code) => {
+                    u2(&mut out, 1); // attributes: Code
+                    u2(&mut out, code_attr_name);
+                    let code_len = code.len();
+                    let attr_len = 2 + 2 + 4 + code_len + 2 + 2;
+                    u4(&mut out, attr_len as u32);
+                    u2(&mut out, m.max_stack);
+                    u2(&mut out, m.max_locals);
+                    u4(&mut out, code_len as u32);
+                    out.extend_from_slice(code);
+                    u2(&mut out, 0); // exception_table_length
+                    u2(&mut out, 0); // code attributes
+                }
+            }
         }
         u2(&mut out, self.class_attributes.len() as u16);
         for (name, bytes) in &self.class_attributes {

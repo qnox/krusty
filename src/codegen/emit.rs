@@ -190,6 +190,33 @@ fn emit_enum(class: &ClassDecl, internal: &str) -> Vec<u8> {
     cw.finish()
 }
 
+/// Lower an `interface Name { fun sig(): T }` to a JVM interface: `public abstract` methods, no
+/// bodies. Extended interfaces (supertypes) become super-interfaces.
+fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<u8> {
+    let mut cw = ClassWriter::new(internal, "java/lang/Object");
+    cw.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    for st in &class.supertypes {
+        let si = syms.classes.get(st).map(|c| c.internal.clone()).unwrap_or_else(|| st.clone());
+        cw.add_interface(&si);
+    }
+    let mut method_metas = Vec::new();
+    for m in &class.methods {
+        let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+        let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+        cw.add_abstract_method(ACC_PUBLIC, &m.name, &method_descriptor(&params, ret));
+        method_metas.push(crate::metadata::class_builder::FnMeta::plain(
+            m.name.clone(),
+            m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+            ret,
+        ));
+    }
+    // @kotlin.Metadata (kind=1, interface flags) — declares the abstract members for consumers.
+    let (d1_bytes, d2) = crate::metadata::class_builder::build_class(internal, &[], "()V", &[], &method_metas, &[], 102);
+    let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
+    cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
+    cw.finish()
+}
+
 /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
     Ty::from_name(&r.name)
@@ -220,7 +247,20 @@ pub fn emit_class(
     if class.is_enum {
         return emit_enum(class, internal_name);
     }
+    if class.is_interface {
+        return emit_interface(class, internal_name, syms);
+    }
+    if class.has_base_class {
+        // v0 supports implementing interfaces but not extending a base class.
+        diags.error(class.span, "krusty v0: extending a base class is not supported".to_string());
+        return Vec::new();
+    }
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
+    // Implemented interfaces (supertypes without constructor args).
+    for st in &class.supertypes {
+        let iface_internal = syms.classes.get(st).map(|c| c.internal.clone()).unwrap_or_else(|| st.clone());
+        cw.add_interface(&iface_internal);
+    }
 
     // Resolve property types (primitives/String or declared class reference types).
     let props: Vec<(&PropParam, Ty)> = class

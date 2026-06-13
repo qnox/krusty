@@ -320,6 +320,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Deferred (Kotlin-consumer parity): `values()`/`valueOf()`/`$VALUES`, the `kotlin/Enum<T>`
   generic supertype in metadata (so consumers get `.ordinal`), entry constructor args + bodies.
 
+## Phase 21 — Interfaces (declarations + implementing classes)  ✅
+- ✅ `interface Name { fun sig(): T }` → a JVM `public interface` (`ACC_INTERFACE|ABSTRACT`) with
+  `public abstract` methods (no bodies); super-interfaces supported. `@Metadata` flags=102 + the
+  abstract members.
+- ✅ Supertype lists: `class C(...) : I1, I2 { … }` → the class `implements` those interfaces
+  (`ClassWriter` gained an interfaces list + abstract methods + settable access). A base-class
+  supertype (`: Base()`) is detected and cleanly **rejected** (v0 has no class inheritance →
+  skipped, never miscompiled).
+- ✅ Concrete-type dispatch (`Square(3).area()`) works via the class's own methods; ABI shows
+  `implements Shape`. `tests/interface_e2e.rs` (shape + JVM run). Full suite 106 green; box 39/39
+  OK/0 FAIL.
+- ⬜ Deferred: polymorphism via an interface-typed value (`val s: Shape = Square(..); s.area()` →
+  `invokeinterface`), class inheritance (`: Base()`), default interface methods.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
