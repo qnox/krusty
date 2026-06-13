@@ -749,6 +749,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   conformance holds at **164 OK / 0 FAIL** (clears the #1 String-method blocker, 125 first-errors;
   those files have further blockers, so it compounds rather than landing alone).
 
+## Phase 57 — `++`/`--` + null-safe reference `==`  ✅
+- ✅ `++`/`--` (new `PlusPlus`/`MinusMinus` tokens), prefix and postfix, in statement position on a
+  simple variable, desugared to `name = name ± 1`. `while` now parses a statement body (via
+  `parse_branch`), so `while (c) i++` works. Increment on a non-variable is rejected.
+- ✅ Fixed a latent miscompile this exposed: reference `==`/`!=` used `a.equals(b)` (NPE when `a` is
+  null) instead of Kotlin's null-safe structural equality — now `java.util.Objects.equals(a, b)`
+  (in both the comparison-jump and `when`-subject paths).
+- ✅ `tests/inc_dec_e2e.rs` (pre/post inc/dec incl. a `while` body, and null-safe `==`, on the JVM).
+  Box conformance **168 OK / 0 FAIL** (up from 164).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -61,6 +61,8 @@ pub enum TokenKind {
     Not,      // !
     Arrow,    // ->  (when arms, lambdas)
     DotDot,   // ..  (range)
+    PlusPlus,   // ++
+    MinusMinus, // --
     PlusEq,   // +=
     MinusEq,  // -=
     StarEq,   // *=
