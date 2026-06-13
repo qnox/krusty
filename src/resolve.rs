@@ -548,6 +548,23 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                             c.expect_assignable(declared, it, c.span(init), "property initializer");
                         }
                     }
+                    // A computed property's getter body is checked like a method returning the
+                    // property type (the implicit-`this` scope of props is already active here).
+                    if let Some(getter) = &bp.getter {
+                        let prev_ret = c.ret_ty;
+                        c.ret_ty = bp.ty.as_ref().map(|r| c.resolve_ty(r)).unwrap_or(Ty::Error);
+                        match getter {
+                            FunBody::Expr(g) => {
+                                let gt = c.expr(*g);
+                                c.expect_assignable(c.ret_ty, gt, c.span(*g), "getter body");
+                            }
+                            FunBody::Block(g) => {
+                                let _ = c.expr(*g);
+                            }
+                            FunBody::None => {}
+                        }
+                        c.ret_ty = prev_ret;
+                    }
                 }
                 for step in &cl.init_order {
                     if let ClassInit::Block(b) = step {
@@ -598,6 +615,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Property(p) => {
+                // A top-level computed property (custom getter) isn't supported — the facade emits a
+                // backing field, not the getter, so reject to avoid a miscompile.
+                if p.getter.is_some() {
+                    c.diags.error(p.span, "krusty: top-level computed properties (custom getter) are not supported".to_string());
+                }
                 if let Some(init) = p.init {
                     let it = c.expr(init);
                     if let Some((declared, _)) = syms.props.get(&p.name).copied().filter(|(t, _)| *t != Ty::Error) {

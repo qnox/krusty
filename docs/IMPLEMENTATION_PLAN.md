@@ -654,6 +654,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/string_iter_e2e.rs` (char counting, accumulation, break, on the JVM). Box conformance
   **148 OK / 0 FAIL** (up from 147).
 
+## Phase 48 — Computed properties  ✅
+- ✅ A class property with a custom getter (`val x: T get() = expr` / `get() { … }`) and no
+  initializer is a *computed property*: no backing field, no constructor init — krusty emits a
+  `getX()` method running the getter body (instance method, implicit-`this` scope), and the checker
+  type-checks the getter body against the property type. Reads (`r.x`) already route through `getX`.
+- ✅ Top-level computed properties are rejected (the facade emits a backing field, not a getter — it
+  would miscompile). A computed property requires a type annotation (no getter-return inference yet).
+- ✅ `tests/computed_prop_e2e.rs` (expression + block getters reading other props, on the JVM). Box
+  conformance **149 OK / 0 FAIL** (up from 148).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
