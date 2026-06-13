@@ -197,6 +197,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   kotlinc-style flags; the real kotlinc compiles + runs a consumer against that jar (`8`). Plus
   `cli.rs` unit tests for flag parsing.
 
+## Phase 10 — Kotlin conformance suite (ported)  ✅
+- ✅ `tests/kotlin_box_conformance.rs` ports JetBrains/Kotlin's `compiler/testData/codegen/box`
+  (10,009 `fun box(): String → "OK"` cases). Each is run through the real `krusty` binary; krusty
+  **skips** what it can't compile (unsupported feature), **runs `box()`** on a JVM for what it can,
+  and the test **fails only** if krusty *accepted* a case but produced wrong/invalid bytecode.
+  Gated on `KRUSTY_KOTLIN_BOX_DIR`. Latest full sweep: **10,009 scanned · 13 compiled · 13 box()=OK
+  · 0 FAIL** — krusty is correct on 100% of the conformance cases it accepts; coverage grows
+  automatically as the language widens.
+- ✅ `tests/box_vendored_e2e.rs` + `tests/box_data/` vendor the in-subset cases (Apache-2.0, see
+  PROVENANCE.md) so they also run in normal `cargo test`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

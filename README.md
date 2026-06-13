@@ -63,6 +63,10 @@ index-based AST — and whether such output can still be a drop-in Kotlin librar
   `max_stack`/`max_locals`, branch fixups; no external bytecode dependency.
 - **Correctness by differential testing** — the source of truth is the real `kotlinc`: ABI
   signatures (`javap`) must match, and Kotlin/Java consumers must compile and run identically.
+- **Conformance** — krusty is run against JetBrains/Kotlin's own `codegen/box` suite (10,009 cases):
+  it skips what it can't yet compile, runs `box()` for what it can, and is asserted to **never
+  miscompile a case it accepts** (latest sweep: 13 in-subset cases, all `OK`, 0 failures). Coverage
+  grows automatically as the language widens.
 
 ## Layout
 
