@@ -2895,6 +2895,23 @@ impl<'a> MethodEmitter<'a> {
                 for (a, pty) in args.iter().zip(&sig.params) {
                     self.emit_expr_as(*a, *pty, code, cw);
                 }
+                // Omitted trailing parameters are filled with their default-value expressions
+                // (the emitted method always takes the full parameter list).
+                if args.len() < sig.params.len() {
+                    let defaults: Vec<Option<ExprId>> = self
+                        .file
+                        .decls
+                        .iter()
+                        .find_map(|&d| match self.file.decl(d) {
+                            crate::ast::Decl::Fun(f) if f.name == fname => Some(f.params.iter().map(|p| p.default).collect()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    for i in args.len()..sig.params.len() {
+                        let dx = defaults.get(i).copied().flatten().expect("required guarantees a default");
+                        self.emit_expr_as(dx, sig.params[i], code, cw);
+                    }
+                }
                 let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
                 let ret_words = slot_words(sig.ret) as i32;
                 let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));

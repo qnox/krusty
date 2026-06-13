@@ -148,6 +148,9 @@ pub struct Param {
     /// `true` for a `vararg` parameter — its runtime type is `Array<ty>` and callers pack the
     /// trailing arguments into a fresh array.
     pub is_vararg: bool,
+    /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted trailing
+    /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
+    pub default: Option<ExprId>,
 }
 
 #[derive(Clone, Debug)]
