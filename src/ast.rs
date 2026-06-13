@@ -199,6 +199,9 @@ pub struct ClassDecl {
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
     pub is_enum: bool,
     pub enum_entries: Vec<String>,
+    /// Constructor arguments per enum entry (parallel to `enum_entries`; empty for `A` with no args).
+    /// The enum's primary-constructor parameters are in `props`.
+    pub enum_entry_args: Vec<Vec<ExprId>>,
     /// `interface Name { … }` — a JVM interface (abstract methods).
     pub is_interface: bool,
     /// `open`/`abstract` — the class is not `final` (may be subclassed); `abstract` also adds

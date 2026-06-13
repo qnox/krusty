@@ -616,6 +616,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/interface_property_e2e.rs` (interface val/var read+write through an interface-typed value
   on the JVM; default-method rejection). Box conformance **137 OK / 0 FAIL** (up from 132).
 
+## Phase 44 — Enum constructors + hex/binary literals  ✅
+- ✅ Enum classes with a primary constructor and per-entry arguments
+  (`enum class Color(val rgb: Int) { RED(0xFF0000), … }`): `enum_entry_args` (parallel to
+  `enum_entries`); the `<init>` takes `(String name, int ordinal, <ctor params>)`, `<clinit>`
+  constructs each entry `new C("NAME", ordinal, args…)`, and property params become fields + getters.
+  Member functions after the `;` are emitted as instance methods. Per-entry class bodies
+  (`RED { … }`, an anonymous subclass) are rejected.
+- ✅ Hex (`0xFF`), binary (`0b1010`), and `_`-separated integer literals (lexer + `parse_int_literal`,
+  via `u64` so `0xFFFFFFFF` fits, with the `L` long suffix preserved).
+- ✅ `tests/enum_args_e2e.rs` (enum ctor + per-entry args + methods + `name`/`ordinal`, and
+  hex/binary/underscore literals, on the JVM). Box conformance **139 OK / 0 FAIL** (up from 137).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
