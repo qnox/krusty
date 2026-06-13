@@ -1682,6 +1682,17 @@ impl<'a> Checker<'a> {
                         return Ty::obj("java/lang/StringBuilder");
                     }
                 }
+                // Unqualified call to a sibling instance method: `foo()` → `this.foo()`.
+                if !self.syms.funs.contains_key(&fname) {
+                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                        if let Some(sig) = self.lookup_method(internal, &fname) {
+                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                            return sig.ret;
+                        }
+                    }
+                }
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
                         let sig = sig.clone();

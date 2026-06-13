@@ -718,6 +718,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/package_directive_e2e.rs` (package after `@file:` annotation + typealias, clean
   parse/check/emit into the package's facade). Box conformance **161 OK / 0 FAIL** (up from 158).
 
+## Phase 54 — Unqualified intra-class method calls  ✅
+- ✅ An unqualified call to a sibling instance method (`foo()` inside another method) now resolves to
+  `this.foo()` and emits `aload 0; args; invokevirtual` (walking the base-class chain via
+  `method_of`). Previously only `this.foo()` worked; bare `foo()` was an "unresolved function".
+- ✅ `tests/intra_class_call_e2e.rs` (sibling + inherited method called unqualified, on the JVM). Box
+  conformance **164 OK / 0 FAIL** (up from 161). Foundational for `run`/`with`/`apply` (which rebind
+  the implicit receiver) — the next lambda step.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
