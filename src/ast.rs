@@ -42,6 +42,8 @@ pub enum Expr {
     /// `receiver?.name` (args `None`) or `receiver?.name(args)` — a safe call: evaluates to `null`
     /// when the receiver is null, else the member access / call result.
     SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
+    /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
+    Throw { operand: ExprId },
     /// `operand is T` / `operand !is T` — a type test (`instanceof`), evaluates to `Boolean`.
     Is { operand: ExprId, ty: TypeRef, negated: bool },
     /// `operand as T` / `operand as? T` — a cast (`checkcast`). `nullable` ⇒ `as?` (instanceof,
@@ -349,6 +351,11 @@ impl File {
                 self.write_expr(*lhs, out);
                 out.push(' ');
                 self.write_expr(*rhs, out);
+                out.push(')');
+            }
+            Expr::Throw { operand } => {
+                out.push_str("(throw ");
+                self.write_expr(*operand, out);
                 out.push(')');
             }
             Expr::Is { operand, ty, negated } => {

@@ -122,6 +122,28 @@ impl SymbolTable {
     }
 }
 
+/// The JVM internal name of a common JDK exception/error referenced by simple name (Kotlin's
+/// auto-imported `kotlin.*` exception aliases map onto these `java.lang` types). Used so
+/// `throw RuntimeException("…")` resolves without an explicit import.
+pub fn builtin_exception(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Throwable" => "java/lang/Throwable",
+        "Exception" => "java/lang/Exception",
+        "RuntimeException" => "java/lang/RuntimeException",
+        "Error" => "java/lang/Error",
+        "IllegalStateException" => "java/lang/IllegalStateException",
+        "IllegalArgumentException" => "java/lang/IllegalArgumentException",
+        "NullPointerException" => "java/lang/NullPointerException",
+        "IndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
+        "UnsupportedOperationException" => "java/lang/UnsupportedOperationException",
+        "ArithmeticException" => "java/lang/ArithmeticException",
+        "ClassCastException" => "java/lang/ClassCastException",
+        "NumberFormatException" => "java/lang/NumberFormatException",
+        "AssertionError" => "java/lang/AssertionError",
+        _ => return None,
+    })
+}
+
 /// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -592,6 +614,7 @@ impl<'a> Checker<'a> {
     /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
     fn expr_diverges(&self, e: ExprId) -> bool {
         match self.file.expr(e) {
+            Expr::Throw { .. } => true,
             Expr::Block { stmts, trailing } => {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
@@ -733,6 +756,10 @@ impl<'a> Checker<'a> {
         if expected == Ty::Error || actual == Ty::Error {
             return;
         }
+        // `Nothing` (a `throw`) is the bottom type: assignable to anything.
+        if actual == Ty::Nothing {
+            return;
+        }
         // `null` is assignable to any reference type (krusty is permissive about nullability).
         if actual == Ty::Null && expected.is_reference() {
             return;
@@ -763,6 +790,10 @@ impl<'a> Checker<'a> {
             Expr::CharLit(_) => Ty::Char,
             Expr::NullLit => Ty::Null,
             Expr::NotNull { operand } => self.expr(operand), // value with the same (non-null) type
+            Expr::Throw { operand } => {
+                self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
+                Ty::Nothing
+            }
             Expr::Is { operand, ty, negated: _ } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
@@ -1151,6 +1182,14 @@ impl<'a> Checker<'a> {
                             return Ty::obj(&internal);
                         }
                     }
+                    // A common JDK exception by simple name (`throw RuntimeException("msg")`): krusty
+                    // accepts the no-arg and single-`String` constructors.
+                    if let Some(internal) = builtin_exception(&fname) {
+                        let ok = matches!(arg_tys.as_slice(), [] | [Ty::String]);
+                        if ok {
+                            return Ty::obj(internal);
+                        }
+                    }
                 }
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
@@ -1185,6 +1224,14 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         if a == b {
+            return a;
+        }
+        // `Nothing` is the bottom type: a diverging branch contributes no value, so the join is the
+        // other branch (`if (c) x else throw e` has the type of `x`).
+        if a == Ty::Nothing {
+            return b;
+        }
+        if b == Ty::Nothing {
             return a;
         }
         if let Some(t) = Ty::promote(a, b) {
