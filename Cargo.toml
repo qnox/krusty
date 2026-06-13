@@ -1,5 +1,5 @@
 [package]
-name = "krust"
+name = "krusty"
 version = "0.0.1"
 edition = "2021"
 description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
@@ -9,11 +9,11 @@ description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lib]
-name = "krust"
+name = "krusty"
 path = "src/lib.rs"
 
 [[bin]]
-name = "krust"
+name = "krusty"
 path = "src/main.rs"
 
 [profile.release]

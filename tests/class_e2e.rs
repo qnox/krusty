@@ -1,4 +1,4 @@
-//! Phase: classes with primary-constructor properties. krust lowers `class C(val a, var b)` to a
+//! Phase: classes with primary-constructor properties. krusty lowers `class C(val a, var b)` to a
 //! JVM class with private backing fields, a primary constructor, and `getX`/`setX` accessors.
 //! These tests (1) verify the emitted shape via the `.class` reader, and (2) load + verify + run
 //! the class on a real JVM, calling its constructor and getters from Java.
@@ -6,13 +6,13 @@
 use std::fs;
 use std::process::Command;
 
-use krust::ast::Decl;
-use krust::codegen::emit::emit_class;
-use krust::diag::DiagSink;
-use krust::jvm::classreader::parse_class;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::ast::Decl;
+use krusty::codegen::emit::emit_class;
+use krusty::diag::DiagSink;
+use krusty::jvm::classreader::parse_class;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let mut d = DiagSink::new();
@@ -45,10 +45,10 @@ fn class_shape_matches_expected_abi() {
     // Backing fields: x is final, y is not (var).
     let x = ci.fields.iter().find(|f| f.name == "x").expect("field x");
     assert_eq!(x.descriptor, "I");
-    assert!(x.access & krust::codegen::classfile::ACC_FINAL != 0, "val backing field must be final");
+    assert!(x.access & krusty::codegen::classfile::ACC_FINAL != 0, "val backing field must be final");
     let y = ci.fields.iter().find(|f| f.name == "y").expect("field y");
     assert_eq!(y.descriptor, "Ljava/lang/String;");
-    assert!(y.access & krust::codegen::classfile::ACC_FINAL == 0, "var backing field must not be final");
+    assert!(y.access & krusty::codegen::classfile::ACC_FINAL == 0, "var backing field must not be final");
 
     // Constructor + accessors.
     assert!(ci.method("<init>", "(ILjava/lang/String;)V").is_some(), "primary constructor");
@@ -61,7 +61,7 @@ fn class_shape_matches_expected_abi() {
 
 #[test]
 fn member_function_shape_and_run() {
-    let Ok(java_home) = std::env::var("KRUST_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+    let Ok(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
         eprintln!("skipping member_function_shape_and_run: set JAVA_HOME");
         return;
     };
@@ -78,7 +78,7 @@ fn member_function_shape_and_run() {
     let m = ci.method("addTo", "(I)I").expect("addTo(I)I");
     assert!(!m.is_static(), "member function must be an instance method");
 
-    let dir = std::env::temp_dir().join(format!("krust_mfn_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_mfn_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("Calc.class"), &bytes).unwrap();
@@ -102,8 +102,8 @@ public class Main {
 /// `-Xverify:all` so the JVM verifier validates the constructor/getter bytecode.
 #[test]
 fn class_loads_verifies_and_runs() {
-    let Ok(java_home) = std::env::var("KRUST_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
-        eprintln!("skipping class_loads_verifies_and_runs: set JAVA_HOME or KRUST_REF_JAVA_HOME");
+    let Ok(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+        eprintln!("skipping class_loads_verifies_and_runs: set JAVA_HOME or KRUSTY_REF_JAVA_HOME");
         return;
     };
     let javac = format!("{java_home}/bin/javac");
@@ -113,7 +113,7 @@ fn class_loads_verifies_and_runs() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!("krust_class_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_class_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 

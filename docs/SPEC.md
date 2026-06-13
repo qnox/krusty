@@ -1,4 +1,4 @@
-# krust — a memory-lean Kotlin→JVM compiler PoC
+# krusty — a memory-lean Kotlin→JVM compiler PoC
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 **Goal:** demonstrate that a **linear, data-oriented, per-file streaming pipeline** compiles a
@@ -8,7 +8,7 @@ the whole-module FIR+IR graph that makes `kotlinc` memory scale with module size
 This project is the concrete follow-up to the memory investigation in
 `~/projects/kotlin-memory-bench` (see `COMPARISON_REPORT_2.4.0.md`): localized tuning of kotlinc
 caps at ~8% on full compilation because the pipeline is whole-module; per-file processing measured
-~80% lower peak. krust *is* the per-file pipeline, built from scratch where there's no legacy
+~80% lower peak. krusty *is* the per-file pipeline, built from scratch where there's no legacy
 whole-module architecture or plugin contract to fight.
 
 ---
@@ -45,7 +45,7 @@ compilation. Java *interop* in v0 = referencing a small fixed set of JDK class s
 **not** compiling `.java`.
 
 > Rationale: this subset covers the `kotlin-memory-bench` scenarios (`many_functions`, `multifile`,
-> `bodyheavy`) — the exact workloads where the per-file pipeline showed ~80% lower peak — so krust
+> `bodyheavy`) — the exact workloads where the per-file pipeline showed ~80% lower peak — so krusty
 > can be benchmarked head-to-head with kotlinc on identical inputs.
 
 ## 3. Pipeline (linear, per-file streaming)
@@ -105,7 +105,7 @@ Phase 6 adds a minimal Java *source* front end for mixed compilation.
 
 ## 6. Correctness & compatibility: differential testing vs kotlinc
 
-**Compatibility IS a goal — specifically ABI + `@Metadata`, NOT byte-identity.** A krust-compiled
+**Compatibility IS a goal — specifically ABI + `@Metadata`, NOT byte-identity.** A krusty-compiled
 `.class` must be usable as a drop-in library by Kotlin and Java consumers. That requires matching
 the *contract* kotlinc produces, not the exact bytes:
 
@@ -118,7 +118,7 @@ the *contract* kotlinc produces, not the exact bytes:
      args, `$annotations`/synthetic accessors. Consumers link against *this*; it must equal kotlinc.
   2. **`@kotlin.Metadata` equivalence (semantic).** A Kotlin consumer reads the protobuf-encoded
      `@Metadata`, not the raw signatures, to recover the Kotlin API (nullability, `val`/property vs
-     method, default values, named params, variance). krust must emit `@Metadata` that **decodes to
+     method, default values, named params, variance). krusty must emit `@Metadata` that **decodes to
      the same Kotlin declarations** as kotlinc, with a compatible `metadataVersion`. (Semantic
      equivalence of the decoded protobuf — byte-identity of the annotation not required.)
 
@@ -129,7 +129,7 @@ Correctness/compat layers, strongest first (1–2 are the **primary gate** for l
 2. **`@Metadata` diff (primary).** Decode `@kotlin.Metadata` from both (documented
    `kotlin-metadata-jvm` schema) and compare the recovered declarations; require semantic equality
    + compatible version.
-3. **Execution differential.** Compile with both krust and reference kotlinc (`kotlin-compiler`
+3. **Execution differential.** Compile with both krusty and reference kotlinc (`kotlin-compiler`
    2.4.0 jar in `~/.m2`, headless); run a generated driver calling the functions with fixed inputs;
    compare results. Verifies behavior independent of code-gen shape.
 4. **Structural disassembly (informational).** `javap -c -p` normalized; flags *how* code differs
@@ -155,17 +155,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 ## 8. Success criteria for the PoC
 
-1. krust compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
+1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
 2. **ABI match:** public members (names/descriptors/modifiers) are identical to kotlinc's output.
 3. **`@Metadata` match:** emitted metadata decodes to the same Kotlin declarations as kotlinc
    (compatible `metadataVersion`), so output is consumable as a Kotlin library — verified by having
-   kotlinc itself compile a consumer against krust's output.
+   kotlinc itself compile a consumer against krusty's output.
 4. **Behavior match:** execution-differential tests pass on the §7 edge cases.
 5. Measured peak RSS compiling `bodyheavy` is **bounded ~constant in file count** and well below
    kotlinc's (the per-file thesis, on a real implementation).
 6. All emitted classes pass the JVM verifier.
 
 > Note: criteria 2–3 are the load-bearing compatibility goals; byte-identity is explicitly out.
-> The ultimate compat test (criterion 3) is **round-trip**: compile a library with krust, then
-> compile a *Kotlin consumer* of it with real kotlinc — if kotlinc accepts krust's `@Metadata` and
+> The ultimate compat test (criterion 3) is **round-trip**: compile a library with krusty, then
+> compile a *Kotlin consumer* of it with real kotlinc — if kotlinc accepts krusty's `@Metadata` and
 > resolves the API, the output is a genuine Kotlin library.

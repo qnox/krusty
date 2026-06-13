@@ -1,5 +1,5 @@
 //! Build the `@kotlin.Metadata` `d1`/`d2` payload for a Kotlin *class* (kind=1), so a Kotlin
-//! consumer recognizes krust's emitted class as a genuine Kotlin class (property syntax, etc.).
+//! consumer recognizes krusty's emitted class as a genuine Kotlin class (property syntax, etc.).
 //!
 //! Schema reverse-engineered from kotlinc 1.9.24 for `class Point(val x: Int, var y: String)`
 //! (see METADATA_NOTES.md). `ProtoBuf.Class`: f3=fq_name (a class-id string-table entry),

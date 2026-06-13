@@ -99,7 +99,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "krust"
+name = "krusty"
 version = "0.0.1"
 dependencies = [
  "zip",

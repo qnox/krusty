@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::Command;
 
-use krust::jvm::classreader::parse_class;
+use krusty::jvm::classreader::parse_class;
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("-version").output().is_ok()
@@ -16,7 +16,7 @@ fn reads_real_javac_class() {
         eprintln!("skipping: javac unavailable");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("krust_cr_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_cr_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(

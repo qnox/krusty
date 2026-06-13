@@ -1,27 +1,27 @@
-//! Differential ABI test vs kotlinc for a property-holding class: krust and kotlinc compile the
+//! Differential ABI test vs kotlinc for a property-holding class: krusty and kotlinc compile the
 //! same `class Point(val x, var y)`; their public member signatures (constructor + accessors, via
 //! javap) must match exactly, and both must construct + run identically.
 //!
 //! Opt-in via env (same as diff_kotlinc.rs):
-//!   KRUST_KOTLINC, KRUST_REF_JAVA_HOME, KRUST_KOTLIN_STDLIB
+//!   KRUSTY_KOTLINC, KRUSTY_REF_JAVA_HOME, KRUSTY_KOTLIN_STDLIB
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krust::ast::Decl;
-use krust::codegen::emit::emit_class;
-use krust::diag::DiagSink;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::ast::Decl;
+use krusty::codegen::emit::emit_class;
+use krusty::diag::DiagSink;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
-fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
+fn krusty_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
@@ -37,7 +37,7 @@ fn krust_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
         })
         .expect("class decl");
     let bytes = emit_class(&cd, &files[0], &info, internal, &syms, &mut d);
-    assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
 
@@ -54,26 +54,26 @@ fn member_signatures(dir: &PathBuf, class: &str) -> BTreeSet<String> {
 
 #[test]
 fn class_abi_and_execution_match_kotlinc() {
-    let Some(kotlinc) = env("KRUST_KOTLINC") else {
-        eprintln!("skipping diff_class_kotlinc: set KRUST_KOTLINC to enable");
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping diff_class_kotlinc: set KRUSTY_KOTLINC to enable");
         return;
     };
 
     let src = "class Point(val x: Int, var y: String)\n";
 
-    let root = std::env::temp_dir().join(format!("krust_cdiff_{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("krusty_cdiff_{}", std::process::id()));
     let kr = root.join("kr");
     let refd = root.join("ref");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&kr).unwrap();
     fs::create_dir_all(&refd).unwrap();
 
-    fs::write(kr.join("Point.class"), krust_compile_class(src, "Point", "Point")).unwrap();
+    fs::write(kr.join("Point.class"), krusty_compile_class(src, "Point", "Point")).unwrap();
 
     fs::write(root.join("Point.kt"), src).unwrap();
     let mut cmd = Command::new(&kotlinc);
     cmd.arg(root.join("Point.kt")).args(["-d", refd.to_str().unwrap()]);
-    if let Some(jh) = env("KRUST_REF_JAVA_HOME") {
+    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
         cmd.env("JAVA_HOME", jh);
     }
     let kc = cmd.output().expect("run kotlinc");
@@ -81,7 +81,7 @@ fn class_abi_and_execution_match_kotlinc() {
 
     let kr_abi = member_signatures(&kr, "Point");
     let ref_abi = member_signatures(&refd, "Point");
-    assert_eq!(kr_abi, ref_abi, "\nclass ABI mismatch.\n krust: {kr_abi:#?}\n kotlinc: {ref_abi:#?}");
+    assert_eq!(kr_abi, ref_abi, "\nclass ABI mismatch.\n krusty: {kr_abi:#?}\n kotlinc: {ref_abi:#?}");
     assert!(!kr_abi.is_empty(), "no signatures extracted");
 
     // Execution: both classes drive the same Main identically.
@@ -110,9 +110,9 @@ public class Main {
     };
 
     let kr_out = run_with(&kr, "");
-    let stdlib = env("KRUST_KOTLIN_STDLIB").unwrap_or_default();
+    let stdlib = env("KRUSTY_KOTLIN_STDLIB").unwrap_or_default();
     let ref_out = run_with(&refd, &stdlib);
-    assert_eq!(kr_out, ref_out, "execution differs:\n krust:\n{kr_out}\n kotlinc:\n{ref_out}");
+    assert_eq!(kr_out, ref_out, "execution differs:\n krusty:\n{kr_out}\n kotlinc:\n{ref_out}");
 
     let _ = fs::remove_dir_all(&root);
 }

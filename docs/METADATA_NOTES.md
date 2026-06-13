@@ -1,6 +1,6 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-Goal: emit `@kotlin.Metadata` so krust output is consumable as a **Kotlin** library (Java consumers
+Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** library (Java consumers
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
@@ -38,12 +38,12 @@ to the builtin via `predefinedIndex=8` = `kotlin/Int`.
 5 Byte 6 Double 7 Float 8 Int  9 Long 10 Short 11 Boolean 12 Char
 13 CharSequence 14 String  …
 ```
-⇒ krust types: Int→8, Long→9, Double→6, Boolean→11, String→14, Unit→2.
+⇒ krusty types: Int→8, Long→9, Double→6, Boolean→11, String→14, Unit→2.
 
 ## Leading `00` — RESOLVED
 The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 payload begins with a
 `0x00` byte before the delimited `StringTableTypes`. The reader strips it before
-`parseDelimitedFrom`. krust emits it verbatim; confirmed by the round-trips below.
+`parseDelimitedFrom`. krusty emits it verbatim; confirmed by the round-trips below.
 
 ## Class metadata (kind=1) — `ProtoBuf.Class`
 Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (see
@@ -61,13 +61,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - `JvmMethodSignature`: `f1 = name`, `f2 = desc`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor
-`Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krust emits one
+`Lpkg/Name;`; builtins via `Record.f2 = predefinedIndex`; everything else verbatim. krusty emits one
 record per string (no range compression) ⇒ semantically equivalent, not byte-identical, to
 kotlinc — accepted by the reader, which is the ABI goal.
 
 ## Status — round-trips PASSING
 Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both round-trips pass**: a
-*Kotlin consumer* compiled by the real kotlinc resolves krust's top-level functions (facade
-`@Metadata` + `META-INF/*.kotlin_module`, Phase 5b) **and** uses krust's classes via property syntax
+*Kotlin consumer* compiled by the real kotlinc resolves krusty's top-level functions (facade
+`@Metadata` + `META-INF/*.kotlin_module`, Phase 5b) **and** uses krusty's classes via property syntax
 (class `@Metadata` kind=1, Phase 8b). Remaining: richer language surface (data classes, methods in
 bodies, generics, nullability) — each extends these same builders.

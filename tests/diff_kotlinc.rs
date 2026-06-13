@@ -1,27 +1,27 @@
-//! Differential test vs the real kotlinc: compile the same source with krust and with kotlinc,
+//! Differential test vs the real kotlinc: compile the same source with krusty and with kotlinc,
 //! then compare (1) the public ABI signatures (javap) and (2) runtime behavior (execution).
 //!
 //! Opt-in via env (so the suite stays green without a kotlinc install):
-//!   KRUST_KOTLINC        path to a kotlinc launcher (e.g. .../kotlinc/bin/kotlinc)
-//!   KRUST_REF_JAVA_HOME  JDK used to RUN kotlinc (older kotlinc needs <= JDK 21)
-//!   KRUST_KOTLIN_STDLIB  path to kotlin-stdlib.jar (to run kotlinc's output)
+//!   KRUSTY_KOTLINC        path to a kotlinc launcher (e.g. .../kotlinc/bin/kotlinc)
+//!   KRUSTY_REF_JAVA_HOME  JDK used to RUN kotlinc (older kotlinc needs <= JDK 21)
+//!   KRUSTY_KOTLIN_STDLIB  path to kotlin-stdlib.jar (to run kotlinc's output)
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krust::codegen::emit::emit_file;
-use krust::diag::DiagSink;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::codegen::emit::emit_file;
+use krusty::diag::DiagSink;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
-fn krust_compile(src: &str, internal: &str) -> Vec<u8> {
+fn krusty_compile(src: &str, internal: &str) -> Vec<u8> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
@@ -29,7 +29,7 @@ fn krust_compile(src: &str, internal: &str) -> Vec<u8> {
     let syms = collect_signatures(&files, &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     let bytes = emit_file(&files[0], &info, &syms, internal, &mut d);
-    assert!(!d.has_errors(), "krust errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }
 
@@ -46,12 +46,12 @@ fn abi_signatures(dir: &PathBuf, class: &str) -> BTreeSet<String> {
 
 #[test]
 fn abi_and_execution_match_kotlinc() {
-    let Some(kotlinc) = env("KRUST_KOTLINC") else {
-        eprintln!("skipping diff_kotlinc: set KRUST_KOTLINC to enable");
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping diff_kotlinc: set KRUSTY_KOTLINC to enable");
         return;
     };
 
-    // Subset that krust + kotlinc both support; same source compiled by both.
+    // Subset that krusty + kotlinc both support; same source compiled by both.
     let src = r#"
 fun add(a: Int, b: Int): Int = a + b
 fun precedence(a: Int, b: Int, c: Int): Int = a + b * c
@@ -63,21 +63,21 @@ fun both(a: Int, b: Int): Boolean = a > 0 && b > 0
 fun greet(name: String): String = "hi " + name
 "#;
 
-    let root = std::env::temp_dir().join(format!("krust_diff_{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
     let kr = root.join("kr");
     let refd = root.join("ref");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&kr).unwrap();
     fs::create_dir_all(&refd).unwrap();
 
-    // krust output
-    fs::write(kr.join("DiffKt.class"), krust_compile(src, "DiffKt")).unwrap();
+    // krusty output
+    fs::write(kr.join("DiffKt.class"), krusty_compile(src, "DiffKt")).unwrap();
 
     // kotlinc reference output (file Diff.kt -> class DiffKt)
     fs::write(root.join("Diff.kt"), src).unwrap();
     let mut cmd = Command::new(&kotlinc);
     cmd.arg(root.join("Diff.kt")).args(["-d", refd.to_str().unwrap()]);
-    if let Some(jh) = env("KRUST_REF_JAVA_HOME") {
+    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
         cmd.env("JAVA_HOME", jh);
     }
     let kc = cmd.output().expect("run kotlinc");
@@ -88,7 +88,7 @@ fun greet(name: String): String = "hi " + name
     let ref_abi = abi_signatures(&refd, "DiffKt");
     assert_eq!(
         kr_abi, ref_abi,
-        "\nABI mismatch.\n krust: {kr_abi:#?}\n kotlinc: {ref_abi:#?}"
+        "\nABI mismatch.\n krusty: {kr_abi:#?}\n kotlinc: {ref_abi:#?}"
     );
     assert!(!kr_abi.is_empty(), "no signatures extracted");
 
@@ -123,9 +123,9 @@ public class Main {
     };
 
     let kr_out = run_with(&kr, "");
-    let stdlib = env("KRUST_KOTLIN_STDLIB").unwrap_or_default();
+    let stdlib = env("KRUSTY_KOTLIN_STDLIB").unwrap_or_default();
     let ref_out = run_with(&refd, &stdlib);
-    assert_eq!(kr_out, ref_out, "execution output differs:\n krust:\n{kr_out}\n kotlinc:\n{ref_out}");
+    assert_eq!(kr_out, ref_out, "execution output differs:\n krusty:\n{kr_out}\n kotlinc:\n{ref_out}");
 
     let _ = fs::remove_dir_all(&root);
 }

@@ -1,10 +1,10 @@
-//! End-to-end: emit a real class with krust's class-file writer, then have the JVM load, VERIFY,
+//! End-to-end: emit a real class with krusty's class-file writer, then have the JVM load, VERIFY,
 //! and run it (via a Java `Main` that calls the method). This is the Phase 3 exit gate.
 
 use std::fs;
 use std::process::Command;
 
-use krust::codegen::classfile::*;
+use krusty::codegen::classfile::*;
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("-version").output().is_ok()
@@ -27,7 +27,7 @@ fn emitted_add_class_verifies_and_runs() {
     cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, "add", "(II)I", &code);
     let bytes = cw.finish();
 
-    let dir = std::env::temp_dir().join(format!("krust_e2e_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_e2e_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("FooKt.class"), &bytes).unwrap();
@@ -44,11 +44,11 @@ fn emitted_add_class_verifies_and_runs() {
         .expect("run javac");
     assert!(
         javac.status.success(),
-        "javac failed (krust class rejected by compiler):\n{}",
+        "javac failed (krusty class rejected by compiler):\n{}",
         String::from_utf8_lossy(&javac.stderr)
     );
 
-    // -Xverify:all forces full bytecode verification of the loaded krust class.
+    // -Xverify:all forces full bytecode verification of the loaded krusty class.
     let run = Command::new("java")
         .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
         .output()

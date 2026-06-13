@@ -1,4 +1,4 @@
-//! krust — a memory-lean Kotlin→JVM compiler PoC.
+//! krusty — a memory-lean Kotlin→JVM compiler PoC.
 //!
 //! The pipeline is intentionally *linear and per-file streaming*: signatures are collected
 //! globally (cheap), then each file is typechecked → lowered → emitted → dropped, so the working

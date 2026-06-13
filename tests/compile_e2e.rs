@@ -1,14 +1,14 @@
-//! End-to-end through the full krust pipeline: source → lex → parse → typecheck → emit class,
+//! End-to-end through the full krusty pipeline: source → lex → parse → typecheck → emit class,
 //! then JVM-verify + run via a Java `Main`, comparing results to the expected Kotlin semantics.
 
 use std::fs;
 use std::process::Command;
 
-use krust::codegen::emit::emit_file;
-use krust::diag::DiagSink;
-use krust::lexer::lex;
-use krust::parser::parse;
-use krust::resolve::{check_file, collect_signatures};
+use krusty::codegen::emit::emit_file;
+use krusty::diag::DiagSink;
+use krusty::lexer::lex;
+use krusty::parser::parse;
+use krusty::resolve::{check_file, collect_signatures};
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("-version").output().is_ok()
@@ -49,10 +49,10 @@ fn numeric_and_concat_pipeline() {
 
     let bytes = match compile(src, "DemoKt") {
         Ok(b) => b,
-        Err(errs) => panic!("krust compile errors: {errs:?}"),
+        Err(errs) => panic!("krusty compile errors: {errs:?}"),
     };
 
-    let dir = std::env::temp_dir().join(format!("krust_pipe_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_pipe_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("DemoKt.class"), &bytes).unwrap();
@@ -78,7 +78,7 @@ fn numeric_and_concat_pipeline() {
         .current_dir(&dir)
         .output()
         .expect("javac");
-    assert!(javac.status.success(), "javac rejected krust output:\n{}", String::from_utf8_lossy(&javac.stderr));
+    assert!(javac.status.success(), "javac rejected krusty output:\n{}", String::from_utf8_lossy(&javac.stderr));
 
     let run = Command::new("java")
         .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
@@ -123,10 +123,10 @@ fn control_flow_pipeline() {
 
     let bytes = match compile(src, "CtrlKt") {
         Ok(b) => b,
-        Err(errs) => panic!("krust compile errors: {errs:?}"),
+        Err(errs) => panic!("krusty compile errors: {errs:?}"),
     };
 
-    let dir = std::env::temp_dir().join(format!("krust_ctrl_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_ctrl_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("CtrlKt.class"), &bytes).unwrap();
@@ -154,7 +154,7 @@ fn control_flow_pipeline() {
         .current_dir(&dir)
         .output()
         .expect("javac");
-    assert!(javac.status.success(), "javac rejected krust output:\n{}", String::from_utf8_lossy(&javac.stderr));
+    assert!(javac.status.success(), "javac rejected krusty output:\n{}", String::from_utf8_lossy(&javac.stderr));
 
     let run = Command::new("java")
         .args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "Main"])
