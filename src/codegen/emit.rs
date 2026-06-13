@@ -1367,9 +1367,20 @@ impl<'a> MethodEmitter<'a> {
             let body = code.new_label();
             let next = code.new_label();
             for &cnd in &arm.conditions {
-                match subj {
-                    Some((slot, st)) => self.emit_eq_jump(slot, st, cnd, body, code, cw),
-                    None => self.emit_cond_jump(cnd, body, true, code, cw),
+                match (subj, self.file.expr(cnd).clone()) {
+                    // `is T` arm: instanceof against the subject slot (don't re-evaluate the subject).
+                    (Some((slot, st)), Expr::Is { ty, negated, .. }) => {
+                        load_local(st, slot, code);
+                        let ci = cw.class_ref(ref_internal(resolve_ty(&ty, self.syms)));
+                        code.instance_of(ci);
+                        if negated {
+                            code.ifeq(body);
+                        } else {
+                            code.ifne(body);
+                        }
+                    }
+                    (Some((slot, st)), _) => self.emit_eq_jump(slot, st, cnd, body, code, cw),
+                    (None, _) => self.emit_cond_jump(cnd, body, true, code, cw),
                 }
             }
             code.goto(next); // no condition matched → try the next arm

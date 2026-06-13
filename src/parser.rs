@@ -1029,10 +1029,10 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::KwElse) {
                 // else arm — no conditions
             } else {
-                conditions.push(self.parse_expr());
+                conditions.push(self.parse_when_condition(subject));
                 while self.eat(TokenKind::Comma) {
                     self.skip_newlines();
-                    conditions.push(self.parse_expr());
+                    conditions.push(self.parse_when_condition(subject));
                 }
             }
             self.expect(TokenKind::Arrow, "'->'");
@@ -1043,6 +1043,32 @@ impl<'a> Parser<'a> {
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         self.file.add_expr(Expr::When { subject, arms }, Span::new(start.lo, end.hi))
+    }
+
+    /// A single `when`-arm condition. In the subject form, `is T` / `!is T` becomes a type test
+    /// against the subject (`Expr::Is` whose operand is the subject expression); otherwise a value
+    /// matched by `==`.
+    fn parse_when_condition(&mut self, subject: Option<ExprId>) -> ExprId {
+        let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
+            Some(false)
+        } else if self.at(TokenKind::Not)
+            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "is")
+        {
+            Some(true)
+        } else {
+            None
+        };
+        if let (Some(negated), Some(subj)) = (negated, subject) {
+            let start = self.tok().span;
+            if negated {
+                self.bump(); // '!'
+            }
+            self.bump(); // 'is'
+            let ty = self.parse_type();
+            let end = self.t[self.i.saturating_sub(1)].span;
+            return self.file.add_expr(Expr::Is { operand: subj, ty, negated }, Span::new(start.lo, end.hi));
+        }
+        self.parse_expr()
     }
 
     /// A branch/body of `if`/`when`/`for`: a block, or a single statement. A bare expression keeps
