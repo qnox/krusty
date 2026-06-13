@@ -403,6 +403,28 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   ABI assertion; erased-overload-clash rejection). Full suite green; box conformance **70 OK / 0
   FAIL** (generic declarations + inferred usage now compile).
 
+## Phase 27 — Type tests & casts (`is` / `!is` / `as` / `as?`)  ✅
+- ✅ `e is T` / `e !is T` lower to `instanceof` (→ `Boolean`, negated via `^ 1`); `e as T` to
+  `checkcast`; `e as? T` to an `instanceof`-guarded cast (value kept on match, `null` otherwise).
+  `is` is parsed as a named-check at comparison precedence, `as`/`as?` at postfix precedence.
+- ✅ `Any` is recognized as `java/lang/Object`. A primitive→`Any` assignment is now correctly
+  *rejected* (krusty doesn't box) rather than silently storing an unboxed primitive.
+- ✅ Operand and target must be *known reference types*: an unresolved target (`Number`, a value
+  class, `Nothing`, an erased type parameter) would degrade to `instanceof Object`/`checkcast
+  Object` (a no-op / always-true) — rejected, not miscompiled. Nullable `is T?` (where `null is T?`
+  is true but `instanceof` is false) is rejected. `String` uses its real internal name.
+- ✅ No smart-casting yet (explicit `as` covers the common idiom); a follow-up.
+- ✅ **Bridge methods.** Recognizing `Any` exposed latent bridge bugs. krusty now rejects any class
+  whose *effective* implementation of a declared-supertype method (own or inherited up the base
+  chain — incl. *fake overrides* where the impl is inherited and the differing signature comes from
+  an interface) has the same erased parameters but a different return descriptor, and any data class
+  overriding a synthesized `copy`/`componentN` via an interface — these need a JVM bridge krusty
+  doesn't emit (`AbstractMethodError`).
+- ✅ **Null-safe `data class` equals.** Reference fields now compare via `java.util.Objects.equals`
+  (a nullable field could be `null` → a plain `.equals` would NPE).
+- ✅ `tests/is_as_e2e.rs` (is/!is/as/as? run on the JVM; unsafe-cast rejection). Box conformance
+  **77 OK / 0 FAIL** (up from 70).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -50,6 +50,7 @@ impl Ty {
             "Char" => Ty::Char,
             "String" => Ty::String,
             "Unit" => Ty::Unit,
+            "Any" => Ty::obj("java/lang/Object"),
             _ => return None,
         })
     }

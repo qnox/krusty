@@ -74,6 +74,31 @@ impl SymbolTable {
         self.method_of(&s, name)
     }
 
+    /// All method signatures inherited from declared supertypes (base-class chain + interfaces,
+    /// recursively) as `(name, signature)`. Used to detect overrides that would need a JVM bridge
+    /// method (covariant/generic return), which krusty does not synthesize.
+    pub fn supertype_methods(&self, internal: &str) -> Vec<(String, Signature)> {
+        let mut out = Vec::new();
+        self.collect_super_methods(internal, &mut out);
+        out
+    }
+    fn collect_super_methods(&self, internal: &str, out: &mut Vec<(String, Signature)>) {
+        let Some(c) = self.class_by_internal(internal) else { return };
+        let mut parents: Vec<String> = Vec::new();
+        if let Some(s) = &c.super_internal {
+            parents.push(s.clone());
+        }
+        parents.extend(c.interfaces.iter().cloned());
+        for p in parents {
+            if let Some(pc) = self.class_by_internal(&p) {
+                for (n, sig) in &pc.methods {
+                    out.push((n.clone(), sig.clone()));
+                }
+            }
+            self.collect_super_methods(&p, out);
+        }
+    }
+
     /// A property (own or inherited) on a class internal name. Returns `(type, is_var)`.
     pub fn prop_of(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
         let c = self.class_by_internal(internal)?;
@@ -350,6 +375,18 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods);
+                if let Some(internal) = syms.classes.get(&cl.name).map(|s| s.internal.clone()) {
+                    c.check_no_bridge_needed(&internal, cl.span);
+                    // A `data class` implementing an interface that declares `copy`/`componentN` would
+                    // need bridges for its *synthesized* members (which return the class itself, not
+                    // the supertype) — krusty doesn't emit those, so reject (cleanly skip).
+                    if cl.is_data {
+                        let supers = syms.supertype_methods(&internal);
+                        if let Some((sn, _)) = supers.iter().find(|(sn, _)| sn == "copy" || sn.starts_with("component")) {
+                            c.diags.error(cl.span, format!("krusty: data class overriding synthesized member '{sn}' needs a bridge method (unsupported)"));
+                        }
+                    }
+                }
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
@@ -451,20 +488,50 @@ impl<'a> Checker<'a> {
     /// (keeping bound-distinct overloads separate), which krusty does not model, so we reject the
     /// file rather than emit a `ClassFormatError`-inducing duplicate method.
     fn erased_sig_key(&self, f: &FunDecl) -> String {
+        let (params, _) = self.erased_param_ret(f);
+        format!("{}({})", f.name, params)
+    }
+
+    /// The erased JVM parameter descriptors (concatenated) and return descriptor of a function,
+    /// using the type parameters in scope plus the function's own (each → `Object`).
+    fn erased_param_ret(&self, f: &FunDecl) -> (String, String) {
         let extra: std::collections::HashSet<&str> = f.type_params.iter().map(|s| s.as_str()).collect();
-        let descr = |r: &TypeRef| -> String {
-            if let Some(t) = Ty::from_name(&r.name) {
+        let descr = |name: &str| -> String {
+            if let Some(t) = Ty::from_name(name) {
                 t.descriptor()
-            } else if self.tparams.contains(&r.name) || extra.contains(r.name.as_str()) {
+            } else if self.tparams.contains(name) || extra.contains(name) {
                 "Ljava/lang/Object;".to_string()
-            } else if let Some(cs) = self.syms.classes.get(&r.name) {
+            } else if let Some(cs) = self.syms.classes.get(name) {
                 Ty::obj(&cs.internal).descriptor()
             } else {
                 "Ljava/lang/Object;".to_string()
             }
         };
-        let params: String = f.params.iter().map(|p| descr(&p.ty)).collect();
-        format!("{}({})", f.name, params)
+        let params: String = f.params.iter().map(|p| descr(&p.ty.name)).collect();
+        let ret = f.ret.as_ref().map(|r| descr(&r.name)).unwrap_or_else(|| "V".to_string());
+        (params, ret)
+    }
+
+    /// Reject classes whose *effective* implementation of a supertype method has the same erased
+    /// parameters but a different return descriptor (covariant or generic return) — including
+    /// *fake overrides*, where the implementation is inherited from a base class while the differing
+    /// signature comes from an interface. The JVM resolves such a call via the supertype's descriptor
+    /// and would need a synthetic bridge method, which krusty does not emit — so the file is cleanly
+    /// skipped rather than throwing `AbstractMethodError` at runtime.
+    fn check_no_bridge_needed(&mut self, internal: &str, span: Span) {
+        let supers = self.syms.supertype_methods(internal);
+        for (name, ssig) in &supers {
+            let Some(impl_sig) = self.syms.method_of(internal, name) else { continue };
+            let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
+            let ip: String = impl_sig.params.iter().map(|t| t.descriptor()).collect();
+            if sp == ip && ssig.ret.descriptor() != impl_sig.ret.descriptor() {
+                self.diags.error(
+                    span,
+                    format!("krusty: method '{name}' needs a bridge method (covariant/generic return override is not supported)"),
+                );
+                return;
+            }
+        }
     }
 
     /// Report (and thereby skip the file for) functions whose erased signatures collide.
@@ -601,6 +668,31 @@ impl<'a> Checker<'a> {
             Expr::CharLit(_) => Ty::Char,
             Expr::NullLit => Ty::Null,
             Expr::NotNull { operand } => self.expr(operand), // value with the same (non-null) type
+            Expr::Is { operand, ty, negated: _ } => {
+                let ot = self.expr(operand);
+                let tt = self.resolve_ty(&ty);
+                // `instanceof` needs a reference operand and a *known* reference target. An unresolved
+                // target (`Number`, a value class, `Nothing`, …) must not silently become `Object`
+                // (which would make the test always true) — reject so the file is cleanly skipped.
+                // A *nullable* target (`x is T?`) is also rejected: `null is T?` is true, but plain
+                // `instanceof` yields false, so it would miscompile.
+                if !tt.is_reference() || ty.nullable || (!ot.is_reference() && ot != Ty::Error) {
+                    self.diags.error(self.span(e), "krusty: 'is' on this type is not supported".to_string());
+                    return Ty::Error;
+                }
+                Ty::Boolean
+            }
+            Expr::As { operand, ty, nullable: _ } => {
+                let ot = self.expr(operand);
+                let tt = self.resolve_ty(&ty);
+                // `checkcast` needs a reference operand and a *known* reference target (an unresolved
+                // target would erase to `Object`, a no-op cast — reject instead of miscompiling).
+                if !tt.is_reference() || (!ot.is_reference() && ot != Ty::Error) {
+                    self.diags.error(self.span(e), "krusty: 'as' with this type is not supported".to_string());
+                    return Ty::Error;
+                }
+                tt
+            }
             Expr::Elvis { lhs, rhs } => {
                 let lt = self.expr(lhs);
                 let rt = self.expr(rhs);

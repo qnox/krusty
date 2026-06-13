@@ -741,6 +741,29 @@ impl<'a> Parser<'a> {
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
         let mut lhs = self.parse_prefix();
         loop {
+            // `is` / `!is` type test — a "named check" at comparison precedence (binding power 7).
+            if min_bp <= 7 {
+                let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
+                    Some(false)
+                } else if self.at(TokenKind::Not)
+                    && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "is")
+                {
+                    Some(true)
+                } else {
+                    None
+                };
+                if let Some(negated) = negated {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    if negated {
+                        self.bump(); // '!'
+                    }
+                    self.bump(); // 'is'
+                    let ty = self.parse_type();
+                    let end = self.t[self.i.saturating_sub(1)].span;
+                    lhs = self.file.add_expr(Expr::Is { operand: lhs, ty, negated }, Span::new(lspan.lo, end.hi));
+                    continue;
+                }
+            }
             let op = match infix_op(self.kind()) {
                 Some(o) => o,
                 None => break,
@@ -780,6 +803,16 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
         loop {
+            // `as T` / `as? T` cast — binds tighter than the binary operators (postfix level).
+            if self.at(TokenKind::Ident) && self.text() == "as" {
+                let lspan = self.file.expr_spans[lhs.0 as usize];
+                self.bump(); // 'as'
+                let nullable = self.eat(TokenKind::Question);
+                let ty = self.parse_type();
+                let end = self.t[self.i.saturating_sub(1)].span;
+                lhs = self.file.add_expr(Expr::As { operand: lhs, ty, nullable }, Span::new(lspan.lo, end.hi));
+                continue;
+            }
             match self.kind() {
                 // `!!` not-null assertion in postfix position = two consecutive `Not` tokens.
                 TokenKind::Not if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Not) => {
