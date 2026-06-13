@@ -271,6 +271,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   multi-module tests (out of single-translation-unit scope).
 - ✅ Box conformance: **34 compiled / 34 OK / 0 FAIL** (up from 31); full suite 97 green.
 
+## Phase 16 — kotlinc-aligned diagnostics  ✅
+- ✅ Error messages now match kotlinc's wording (the `file:line:col: error:` format already matched):
+  `unresolved reference: x` (was `… 'x'`; also for unknown types), `type mismatch: inferred type is
+  A but B was expected`, `val cannot be reassigned`, `conflicting declarations: x`.
+- ✅ `tests/diagnostics_match_kotlinc.rs` compiles erroneous snippets with **both** krusty and the
+  real kotlinc and asserts the first `error:` text is identical.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
