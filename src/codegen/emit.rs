@@ -31,10 +31,10 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
     let mut s = String::from("(");
     for p in params {
-        s.push_str(p.descriptor());
+        s.push_str(&p.descriptor());
     }
     s.push(')');
-    s.push_str(ret.descriptor());
+    s.push_str(&ret.descriptor());
     s
 }
 
@@ -73,6 +73,13 @@ pub fn emit_file(
     cw.finish()
 }
 
+/// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
+fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
+    Ty::from_name(&r.name)
+        .or_else(|| syms.classes.get(&r.name).map(|c| Ty::obj(&c.internal)))
+        .unwrap_or(Ty::Error)
+}
+
 /// Capitalize the first character (`x` -> `X`) for Kotlin's `getX`/`setX` accessor naming.
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -95,17 +102,17 @@ pub fn emit_class(
 ) -> Vec<u8> {
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
 
-    // Resolve property types (v0: restricted to the primitive/String set).
+    // Resolve property types (primitives/String or declared class reference types).
     let props: Vec<(&PropParam, Ty)> = class
         .props
         .iter()
-        .map(|p| (p, Ty::from_name(&p.ty.name).unwrap_or(Ty::Error)))
+        .map(|p| (p, resolve_ty(&p.ty, syms)))
         .collect();
 
     // Backing fields: `private final` for `val`, `private` for `var`.
     for (p, ty) in &props {
         let access = if p.is_var { ACC_PRIVATE } else { ACC_PRIVATE | ACC_FINAL };
-        cw.add_field(access, &p.name, ty.descriptor());
+        cw.add_field(access, &p.name, &ty.descriptor());
     }
 
     // Primary constructor: super() then store each parameter into its backing field.
@@ -119,7 +126,7 @@ pub fn emit_class(
     for (p, ty) in &props {
         code.aload(0);
         load_local(*ty, slot, &mut code);
-        let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+        let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
         code.putfield(f, slot_words(*ty) as i32);
         slot += slot_words(*ty);
     }
@@ -133,7 +140,7 @@ pub fn emit_class(
         // getter
         let mut g = CodeBuilder::new(1);
         g.aload(0);
-        let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+        let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
         g.getfield(f, slot_words(*ty) as i32);
         emit_typed_return(*ty, &mut g);
         g.link();
@@ -143,7 +150,7 @@ pub fn emit_class(
             let mut s = CodeBuilder::new(1 + slot_words(*ty));
             s.aload(0);
             load_local(*ty, 1, &mut s);
-            let f = cw.fieldref(internal_name, &p.name, ty.descriptor());
+            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
             s.putfield(f, slot_words(*ty) as i32);
             s.ret_void();
             s.link();
@@ -158,8 +165,8 @@ pub fn emit_class(
         .methods
         .iter()
         .map(|m| {
-            let params: Vec<Ty> = m.params.iter().map(|p| Ty::from_name(&p.ty.name).unwrap_or(Ty::Error)).collect();
-            let ret = m.ret.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(Ty::Unit);
+            let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+            let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
             let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
             e.emit_method(m, &params, ret, &mut cw);
             crate::metadata::class_builder::FnMeta {
@@ -327,7 +334,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Int | Ty::Boolean => code.ireturn(),
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
-            Ty::String => code.areturn(),
+            Ty::String | Ty::Obj(_) => code.areturn(),
             Ty::Unit | Ty::Error => code.ret_void(),
         }
     }
@@ -367,7 +374,7 @@ impl<'a> MethodEmitter<'a> {
                     // implicit `this.<prop> = value` — write the backing field
                     code.aload(0);
                     self.emit_expr_as(value, ty, code, cw);
-                    let f = cw.fieldref(&self.class.clone(), &name, ty.descriptor());
+                    let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
                     code.putfield(f, slot_words(ty) as i32);
                 }
             }
@@ -448,7 +455,7 @@ impl<'a> MethodEmitter<'a> {
                 } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance) {
                     // implicit `this.<prop>` — read the backing field
                     code.aload(0);
-                    let f = cw.fieldref(&self.class.clone(), &n, ty.descriptor());
+                    let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                     code.getfield(f, slot_words(ty) as i32);
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty: unbound local '{n}' in codegen"));
@@ -482,6 +489,18 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(receiver, code, cw);
                     let m = cw.methodref("java/lang/String", "length", "()I");
                     code.invokevirtual(m, 0, 1);
+                } else if let Ty::Obj(internal) = self.info.ty(receiver) {
+                    // Property read on a class value: `p.prop` → invokevirtual get<Prop>().
+                    let pty = self
+                        .syms
+                        .class_by_internal(internal)
+                        .and_then(|c| c.prop(&name))
+                        .map(|(t, _)| t)
+                        .unwrap_or(Ty::Error);
+                    self.emit_expr(receiver, code, cw);
+                    let getter = format!("get{}", capitalize(&name));
+                    let m = cw.methodref(internal, &getter, &method_descriptor(&[], pty));
+                    code.invokevirtual(m, 0, slot_words(pty) as i32);
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty v0: member '{name}' not emittable"));
                 }
@@ -738,6 +757,21 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref("java/lang/String", &name, desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
+            // Instance method call on a class value: `p.method(args)` → invokevirtual.
+            Expr::Member { receiver, name }
+                if matches!(self.info.ty(receiver), Ty::Obj(_))
+                    && self.syms.class_by_internal(self.info.ty(receiver).obj_internal().unwrap()).map_or(false, |c| c.methods.contains_key(&name)) =>
+            {
+                let internal = self.info.ty(receiver).obj_internal().unwrap();
+                let sig = self.syms.class_by_internal(internal).unwrap().methods.get(&name).unwrap().clone();
+                self.emit_expr(receiver, code, cw);
+                for (a, pty) in args.iter().zip(&sig.params) {
+                    self.emit_expr_as(*a, *pty, code, cw);
+                }
+                let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = cw.methodref(internal, &name, &method_descriptor(&sig.params, sig.ret));
+                code.invokevirtual(m, arg_words, slot_words(sig.ret) as i32);
+            }
             Expr::Name(fname) if fname == "println" => {
                 let out = cw.fieldref("java/lang/System", "out", "Ljava/io/PrintStream;");
                 code.getstatic(out, 1);
@@ -754,6 +788,22 @@ impl<'a> MethodEmitter<'a> {
                 };
                 let m = cw.methodref("java/io/PrintStream", "println", desc);
                 code.invokevirtual(m, words, 0);
+            }
+            // Constructor call: `ClassName(args)` → new + dup + invokespecial <init>.
+            Expr::Name(fname) if !self.slots.contains_key(&fname) && self.syms.classes.contains_key(&fname) => {
+                let cls = self.syms.classes.get(&fname).unwrap();
+                let internal = cls.internal.clone();
+                let ctor_tys: Vec<Ty> = cls.props.iter().map(|(_, t, _)| *t).collect();
+                let class_idx = cw.class_ref(&internal);
+                code.new_obj(class_idx);
+                code.dup();
+                for (a, pty) in args.iter().zip(&ctor_tys) {
+                    self.emit_expr_as(*a, *pty, code, cw);
+                }
+                let arg_words: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let desc = method_descriptor(&ctor_tys, Ty::Unit);
+                let m = cw.methodref(&internal, "<init>", &desc);
+                code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
                 let sig = match self.syms.funs.get(&fname) {
