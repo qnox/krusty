@@ -140,6 +140,12 @@ pub struct ClassDecl {
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
     pub is_enum: bool,
     pub enum_entries: Vec<String>,
+    /// `interface Name { … }` — a JVM interface (abstract methods).
+    pub is_interface: bool,
+    /// Implemented interface names from a supertype list (`class C : I1, I2`). v0 supports only
+    /// interface supertypes; a base-class supertype (`: Base()`) sets `has_base_class`.
+    pub supertypes: Vec<String>,
+    pub has_base_class: bool,
     pub span: Span,
 }
 
@@ -225,6 +231,13 @@ impl File {
                 }
                 out.push(' ');
                 self.write_expr(p.init, out);
+                out.push(')');
+            }
+            Decl::Class(c) if c.is_interface => {
+                out.push_str(&format!("(interface {}", c.name));
+                for m in &c.methods {
+                    out.push_str(&format!(" (absfun {})", m.name));
+                }
                 out.push(')');
             }
             Decl::Class(c) if c.is_enum => {

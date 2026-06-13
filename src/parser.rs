@@ -136,6 +136,14 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // `interface Name { … }` (soft keyword `interface` + a name).
+                TokenKind::Ident
+                    if self.text() == "interface" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident) =>
+                {
+                    let d = self.parse_interface();
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
                     self.bump(); // recover
@@ -234,6 +242,9 @@ impl<'a> Parser<'a> {
             is_object: false,
             is_enum: true,
             enum_entries: entries,
+            is_interface: false,
+            supertypes: Vec::new(),
+            has_base_class: false,
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -348,6 +359,9 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::RParen, "')'");
         }
+        // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
+        // base class (v0: unsupported → flagged); the rest are implemented interfaces.
+        let (supertypes, has_base_class) = self.parse_supertypes();
         // Optional class body — v0 accepts member `fun` declarations (instance methods).
         let mut methods = Vec::new();
         self.skip_newlines();
@@ -371,7 +385,75 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props, methods, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, supertypes, has_base_class, span: Span::new(start.lo, end.hi) }
+    }
+
+    /// Parse an optional `: Type(args)?, Type, …` supertype list. Returns (interface names,
+    /// whether a base-class supertype — one with `()` — is present).
+    fn parse_supertypes(&mut self) -> (Vec<String>, bool) {
+        let mut ifaces = Vec::new();
+        let mut has_base = false;
+        if self.eat(TokenKind::Colon) {
+            loop {
+                self.skip_newlines();
+                let name = self.parse_qualified_name();
+                let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
+                if self.at(TokenKind::LParen) {
+                    // constructor call → base class (v0 unsupported)
+                    has_base = true;
+                    let mut depth = 0;
+                    loop {
+                        match self.kind() {
+                            TokenKind::LParen => { depth += 1; self.bump(); }
+                            TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
+                            TokenKind::Eof => break,
+                            _ => { self.bump(); }
+                        }
+                    }
+                } else if !simple.is_empty() {
+                    ifaces.push(simple);
+                }
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        (ifaces, has_base)
+    }
+
+    /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
+    fn parse_interface(&mut self) -> ClassDecl {
+        let start = self.tok().span;
+        self.bump(); // 'interface'
+        let name = self.ident_or_error("interface name");
+        let (supertypes, has_base_class) = self.parse_supertypes();
+        let mut methods = Vec::new();
+        self.skip_newlines();
+        if self.at(TokenKind::LBrace) {
+            self.bump();
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    self.skip_decl_prefix();
+                    self.skip_newlines();
+                }
+                match self.kind() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    _ => {
+                        self.diags.error(self.tok().span, "v0: interface bodies support only abstract 'fun' declarations");
+                        self.bump();
+                    }
+                }
+            }
+            self.expect(TokenKind::RBrace, "'}'");
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        ClassDecl {
+            name, props: Vec::new(), methods, is_data: false, is_object: false, is_enum: false,
+            enum_entries: Vec::new(), is_interface: true, supertypes, has_base_class,
+            span: Span::new(start.lo, end.hi),
+        }
     }
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
@@ -401,7 +483,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, props: Vec::new(), methods, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, supertypes: Vec::new(), has_base_class: false, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
