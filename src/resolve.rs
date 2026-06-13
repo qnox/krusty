@@ -27,6 +27,10 @@ pub struct ClassSig {
     pub internal: String,
     pub props: Vec<(String, Ty, bool)>, // (name, type, is_var)
     pub methods: HashMap<String, Signature>,
+    /// True if this is an `interface` (calls dispatch via `invokeinterface`).
+    pub is_interface: bool,
+    /// Internal names of interfaces this type implements (for subtyping).
+    pub interfaces: Vec<String>,
 }
 
 impl ClassSig {
@@ -195,7 +199,16 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     if c.is_enum {
                         table.enums.insert(c.name.clone(), c.enum_entries.clone());
                     }
-                    table.classes.insert(c.name.clone(), ClassSig { internal, props, methods });
+                    // Implemented interfaces, resolved to internal names (for subtyping/dispatch).
+                    let interfaces: Vec<String> = c
+                        .supertypes
+                        .iter()
+                        .map(|s| class_names.get(s).cloned().unwrap_or_else(|| s.clone()))
+                        .collect();
+                    table.classes.insert(
+                        c.name.clone(),
+                        ClassSig { internal, props, methods, is_interface: c.is_interface, interfaces },
+                    );
                 }
                 Decl::Property(p) => {
                     // Type from the annotation, else a light inference from a literal initializer.
@@ -387,6 +400,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Is `sub` a subtype of `sup`? Reflexive, plus a class is a subtype of any interface it
+    /// implements (v0 has no class inheritance, so the relation is one level deep).
+    fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
+        sub == sup
+            || self
+                .syms
+                .class_by_internal(sub)
+                .map_or(false, |c| c.interfaces.iter().any(|i| i == sup))
+    }
+
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
         if expected == Ty::Error || actual == Ty::Error {
             return;
@@ -394,6 +417,12 @@ impl<'a> Checker<'a> {
         // `null` is assignable to any reference type (krusty is permissive about nullability).
         if actual == Ty::Null && expected.is_reference() {
             return;
+        }
+        // A class value is assignable to an interface (supertype) it implements.
+        if let (Ty::Obj(e), Ty::Obj(a)) = (expected, actual) {
+            if self.obj_is_subtype(a, e) {
+                return;
+            }
         }
         if expected != actual {
             let _ = ctx;

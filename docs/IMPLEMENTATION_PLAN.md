@@ -331,8 +331,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Concrete-type dispatch (`Square(3).area()`) works via the class's own methods; ABI shows
   `implements Shape`. `tests/interface_e2e.rs` (shape + JVM run). Full suite 106 green; box 39/39
   OK/0 FAIL.
-- ⬜ Deferred: polymorphism via an interface-typed value (`val s: Shape = Square(..); s.area()` →
-  `invokeinterface`), class inheritance (`: Base()`), default interface methods.
+### 21b — interface-typed polymorphism ✅
+- ✅ A value typed as an interface (`val s: Shape = Square(3)`, or an interface-typed parameter)
+  dispatches via **`invokeinterface`** (new `InterfaceMethodref` constant + opcode). A class is
+  **assignable to an interface it implements** (`expect_assignable` subtyping), so `describe(Rect(..))`
+  for `fun describe(s: Shape)` type-checks and runs. `tests/interface_e2e.rs::interface_polymorphism_runs`.
+- ⬜ Deferred: class inheritance (`: Base()` — needs open/abstract + super-ctor), default interface
+  methods, generics.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.

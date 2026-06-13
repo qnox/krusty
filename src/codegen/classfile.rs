@@ -28,6 +28,7 @@ enum Const {
     String(u16),
     NameAndType(u16, u16),
     Methodref(u16, u16),
+    InterfaceMethodref(u16, u16),
     Fieldref(u16, u16),
 }
 
@@ -90,6 +91,11 @@ impl ConstPool {
         let nt = self.name_and_type(name, desc);
         self.intern(Const::Methodref(c, nt))
     }
+    fn interface_methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
+        let c = self.class(class);
+        let nt = self.name_and_type(name, desc);
+        self.intern(Const::InterfaceMethodref(c, nt))
+    }
     fn fieldref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         let c = self.class(class);
         let nt = self.name_and_type(name, desc);
@@ -135,6 +141,11 @@ impl ConstPool {
                 }
                 Const::Methodref(c, nt) => {
                     out.push(10);
+                    u2(out, *c);
+                    u2(out, *nt);
+                }
+                Const::InterfaceMethodref(c, nt) => {
+                    out.push(11);
                     u2(out, *c);
                     u2(out, *nt);
                 }
@@ -274,6 +285,9 @@ impl ClassWriter {
     /// Intern helpers exposed for the emitter (Phase 4) to reference pool entries while building code.
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         self.cp.methodref(class, name, desc)
+    }
+    pub fn interface_methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
+        self.cp.interface_methodref(class, name, desc)
     }
     pub fn fieldref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         self.cp.fieldref(class, name, desc)
@@ -580,6 +594,14 @@ impl CodeBuilder {
     pub fn invokevirtual(&mut self, methodref: u16, arg_words: i32, ret_words: i32) {
         // pops receiver + args, pushes return
         self.op_u2(0xb6, methodref, ret_words - arg_words - 1);
+    }
+    /// `invokeinterface <iface-methodref> <count> 0` — `count` = receiver + arg words.
+    pub fn invokeinterface(&mut self, iref: u16, arg_words: i32, ret_words: i32) {
+        self.bytes.push(0xb9);
+        self.bytes.extend_from_slice(&iref.to_be_bytes());
+        self.bytes.push((arg_words + 1) as u8); // count includes the receiver
+        self.bytes.push(0);
+        self.adjust(ret_words - arg_words - 1);
     }
     pub fn getstatic(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb2, fieldref, words);
