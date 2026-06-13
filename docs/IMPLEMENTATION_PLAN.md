@@ -469,6 +469,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Box conformance holds at **81 OK / 0 FAIL** (removes a class of false rejections; sealed-`when`
   box files typically need further features to fully compile).
 
+## Phase 32 — `throw` + JDK exceptions  ✅
+- ✅ `throw e` is a prefix expression of bottom type `Ty::Nothing` (added to the type model): the
+  bottom type is assignable to every type, joins to the *other* branch (`if (c) x else throw e` is
+  typed `x`), and never yields a value (codegen emits `athrow`). `Nothing` and `throw` are folded
+  into the divergence analysis so dead jumps after a throwing branch are skipped.
+- ✅ Common JDK exceptions construct by simple name (`RuntimeException("msg")`,
+  `IllegalStateException()`, `IllegalArgumentException`, `AssertionError`, … — `builtin_exception`),
+  with the no-arg and single-`String` constructors, so `throw RuntimeException(...)` needs no import.
+- ✅ Fixed a latent miscompile this exposed: `inline`/`value class` (unboxed semantics) was being
+  compiled as a normal class (wrong `==`) — now rejected (skipped).
+- ✅ `tests/throw_e2e.rs` (throw as guard/body, exception thrown with message preserved, on the JVM;
+  inline-class rejection). Box conformance **86 OK / 0 FAIL** (up from 81).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

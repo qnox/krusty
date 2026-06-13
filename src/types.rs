@@ -31,6 +31,9 @@ pub enum Ty {
     Obj(&'static str),
     /// The type of the `null` literal — assignable to any reference type.
     Null,
+    /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
+    /// type; an expression of this type never yields a value (it always diverges).
+    Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
 }
@@ -66,6 +69,7 @@ impl Ty {
             Ty::Unit => "Unit",
             Ty::Obj(n) => n,
             Ty::Null => "Null",
+            Ty::Nothing => "Nothing",
             Ty::Error => "<error>",
         }
     }
@@ -99,6 +103,7 @@ impl Ty {
             Ty::Unit => "V".into(),
             Ty::Obj(n) => format!("L{n};"),
             Ty::Null => "Ljava/lang/Object;".into(),
+            Ty::Nothing => "Ljava/lang/Object;".into(),
             Ty::Error => "Ljava/lang/Object;".into(),
         }
     }

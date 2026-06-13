@@ -907,7 +907,9 @@ impl<'a> MethodEmitter<'a> {
             Ty::Long => code.lreturn(),
             Ty::Double => code.dreturn(),
             Ty::String | Ty::Obj(_) | Ty::Null => code.areturn(),
-            Ty::Unit | Ty::Error => code.ret_void(),
+            // `Nothing` only reaches here if a diverging expression somehow fell through; it never
+            // produces a value, so a void return is a safe (unreachable) default.
+            Ty::Unit | Ty::Nothing | Ty::Error => code.ret_void(),
         }
     }
 
@@ -1082,6 +1084,10 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(init, 0, 0);
                 code.athrow();
                 code.bind(ok);
+            }
+            Expr::Throw { operand } => {
+                self.emit_expr(operand, code, cw);
+                code.athrow();
             }
             Expr::Is { operand, ty, negated } => {
                 self.emit_expr(operand, code, cw);
@@ -1414,6 +1420,7 @@ impl<'a> MethodEmitter<'a> {
     /// True for a `return`, or a block whose last statement diverges.
     fn expr_diverges(&self, e: ExprId) -> bool {
         match self.file.expr(e) {
+            Expr::Throw { .. } => true,
             Expr::Block { stmts, trailing } => {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
@@ -1816,6 +1823,25 @@ impl<'a> MethodEmitter<'a> {
                 }
                 let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = cw.methodref(&internal, "<init>", &desc);
+                code.invokespecial(m, arg_words, 0);
+            }
+            // A common JDK exception by simple name (`RuntimeException("msg")`): new + dup + (msg) +
+            // invokespecial <init>()V or <init>(String)V.
+            Expr::Name(fname)
+                if !self.slots.contains_key(&fname)
+                    && !self.syms.funs.contains_key(&fname)
+                    && crate::resolve::builtin_exception(&fname).is_some() =>
+            {
+                let internal = crate::resolve::builtin_exception(&fname).unwrap();
+                let class_idx = cw.class_ref(internal);
+                code.new_obj(class_idx);
+                code.dup();
+                let desc = if args.is_empty() { "()V" } else { "(Ljava/lang/String;)V" };
+                for a in args {
+                    self.emit_expr_as(*a, Ty::String, code, cw);
+                }
+                let arg_words: i32 = if args.is_empty() { 0 } else { 1 };
+                let m = cw.methodref(internal, "<init>", desc);
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {

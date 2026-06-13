@@ -107,6 +107,11 @@ impl<'a> Parser<'a> {
                     self.file.decls.push(id);
                 }
                 TokenKind::KwClass => {
+                    // `inline`/`value class` is an unboxed value type with special equals/representation
+                    // semantics — compiling it as a normal class would miscompile, so reject (skip).
+                    if mods.iter().any(|m| m == "inline" || m == "value") {
+                        self.diags.error(self.tok().span, "value/inline classes are not supported");
+                    }
                     let mut d = self.parse_class();
                     d.is_open = is_open;
                     d.is_abstract = is_abstract;
@@ -788,6 +793,13 @@ impl<'a> Parser<'a> {
 
     fn parse_prefix(&mut self) -> ExprId {
         let start = self.tok().span;
+        // `throw <expr>` — a soft keyword; raises an exception (bottom type `Nothing`).
+        if self.at(TokenKind::Ident) && self.text() == "throw" {
+            self.bump(); // 'throw'
+            let operand = self.parse_bp(0);
+            let end = self.file.expr_spans[operand.0 as usize];
+            return self.file.add_expr(Expr::Throw { operand }, Span::new(start.lo, end.hi));
+        }
         let unop = match self.kind() {
             TokenKind::Minus => Some(UnOp::Neg),
             TokenKind::Not => Some(UnOp::Not),
