@@ -709,6 +709,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   the JVM; lambda-misuse rejection). Box conformance holds at **158 OK / 0 FAIL** (`run`/`with`/
   `apply` — which rebind `this` — and higher-order functions are the next lambda steps).
 
+## Phase 53 — `package` after annotations + `typealias` skip  ✅
+- ✅ A `package` directive is now accepted in the top-level loop (not just as the very first token),
+  so it parses after file-level annotations (`@file:JvmName(...)` etc.) — previously it cascaded into
+  "expected a top-level declaration".
+- ✅ `typealias Name = Type` is skipped (not modeled) instead of cascading; a file that actually
+  *uses* the alias still fails to resolve it and is cleanly skipped.
+- ✅ `tests/package_directive_e2e.rs` (package after `@file:` annotation + typealias, clean
+  parse/check/emit into the package's facade). Box conformance **161 OK / 0 FAIL** (up from 158).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
