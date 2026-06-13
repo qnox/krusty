@@ -58,6 +58,16 @@ impl StringTable {
         i
     }
 
+    /// A class id from a type descriptor `Lpkg/Name;` via operation `DESC_TO_CLASS_ID` (Record.f3=2).
+    fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
+        let i = self.strings.len() as u32;
+        self.strings.push(descriptor.to_string());
+        let mut r = Pb::new();
+        r.field_varint(3, 2); // operation = DESC_TO_CLASS_ID
+        self.records.push(r);
+        i
+    }
+
     /// Serialize the `StringTableTypes` message (record = field 1, repeated).
     fn serialize_types(&self) -> Pb {
         let mut p = Pb::new();
@@ -70,8 +80,10 @@ impl StringTable {
 
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     let mut p = Pb::new();
-    let idx = builtin_index(t).unwrap_or(0); // 0 = kotlin/Any fallback (only on already-erroring code)
-    let class_name = st.builtin(idx);
+    let class_name = match t {
+        Ty::Obj(internal) => st.class_id_from_desc(&format!("L{internal};")),
+        _ => st.builtin(builtin_index(t).unwrap_or(0)), // 0 = kotlin/Any fallback on erroring code
+    };
     p.field_varint(6, class_name as u64); // Type.class_name = 6
     p
 }

@@ -79,3 +79,44 @@ fn kotlinc_consumes_class_typed_members() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Top-level functions that take/return a class type: the facade `@Metadata` must encode the class
+/// as a class-id so a Kotlin consumer can call `mk(7): Point` / `originX(p): Int`. Uses the real
+/// `krusty` driver (classes + `FileKt` facade + `META-INF/*.kotlin_module`).
+#[test]
+fn kotlinc_consumes_class_typed_top_level_functions() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping reftype_roundtrip facade: set KRUSTY_KOTLINC to enable");
+        return;
+    };
+
+    let root = std::env::temp_dir().join(format!("krusty_facrt_{}", std::process::id()));
+    let lib = root.join("lib");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    fs::write(root.join("Lib.kt"), "package demo\nclass Point(val x: Int, val y: Int)\nfun mk(a: Int): Point = Point(a, a)\nfun originX(p: Point): Int = p.x\n").unwrap();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let kr = Command::new(krusty).args(["-d", lib.to_str().unwrap()]).arg(root.join("Lib.kt")).output().expect("run krusty");
+    assert!(kr.status.success(), "krusty failed: {}", String::from_utf8_lossy(&kr.stderr));
+
+    let consumer = "import demo.mk\nimport demo.originX\nfun main() {\n  val p = mk(7)\n  println(originX(p))\n}\n";
+    fs::write(root.join("Consumer.kt"), consumer).unwrap();
+    let mut cmd = Command::new(&kotlinc);
+    cmd.arg(root.join("Consumer.kt")).args(["-cp", lib.to_str().unwrap(), "-d", root.join("cout").to_str().unwrap()]);
+    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let kc = cmd.output().expect("run kotlinc");
+    assert!(kc.status.success(), "kotlinc FAILED on class-typed facade fns:\n{}", String::from_utf8_lossy(&kc.stderr));
+
+    if let Some(stdlib) = env("KRUSTY_KOTLIN_STDLIB") {
+        let cp = format!("{}:{}:{}", root.join("cout").to_str().unwrap(), lib.to_str().unwrap(), stdlib);
+        let run = Command::new("java").args(["-cp", &cp, "ConsumerKt"]).output().expect("java");
+        if run.status.success() {
+            assert_eq!(String::from_utf8_lossy(&run.stdout), "7\n", "stderr={}", String::from_utf8_lossy(&run.stderr));
+        }
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
