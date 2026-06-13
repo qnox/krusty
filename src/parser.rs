@@ -693,6 +693,14 @@ impl<'a> Parser<'a> {
                 };
                 self.finish_stmt(Stmt::Return(e), start)
             }
+            TokenKind::Ident if self.text() == "break" => {
+                self.bump();
+                self.finish_stmt(Stmt::Break, start)
+            }
+            TokenKind::Ident if self.text() == "continue" => {
+                self.bump();
+                self.finish_stmt(Stmt::Continue, start)
+            }
             TokenKind::KwWhile => {
                 self.bump();
                 self.expect(TokenKind::LParen, "'('");

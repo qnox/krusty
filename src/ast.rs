@@ -101,6 +101,9 @@ pub enum Stmt {
     /// `array[index] = value` — array element store.
     AssignIndex { array: ExprId, index: ExprId, value: ExprId },
     Return(Option<ExprId>),
+    /// `break` / `continue` — loop control (unlabeled).
+    Break,
+    Continue,
     While { cond: ExprId, body: ExprId }, // body is a Block expr
     /// `for (name in start <op> end (step s)?) body` over an integer range.
     For { name: String, range: ForRange, body: ExprId },
@@ -536,6 +539,8 @@ impl File {
                 self.write_expr(*value, out);
                 out.push(')');
             }
+            Stmt::Break => out.push_str("(break)"),
+            Stmt::Continue => out.push_str("(continue)"),
             Stmt::Return(e) => {
                 out.push_str("(return");
                 if let Some(e) = e {

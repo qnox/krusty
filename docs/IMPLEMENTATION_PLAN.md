@@ -555,6 +555,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/companion_e2e.rs` (qualified + unqualified static members on the JVM; collision rejection).
   Box conformance **110 OK / 0 FAIL** (up from 109).
 
+## Phase 39 — `break` / `continue`  ✅
+- ✅ Unlabeled `break`/`continue` (soft keywords) in `for`/`while`. Codegen tracks a stack of
+  `(continue_target, break_target)` labels per loop: `break` → past the loop, `continue` → the loop's
+  step (in a `for`, the counter still advances — `continue` targets a label bound before the
+  increment). `break`/`continue` outside a loop is rejected.
+- ✅ `tests/break_continue_e2e.rs` (break + continue in for and while on the JVM; outside-loop
+  rejection). Box conformance **113 OK / 0 FAIL** (up from 110).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
