@@ -891,8 +891,12 @@ impl<'a> Checker<'a> {
                         has_else = true;
                     }
                     for &cnd in &arm.conditions {
+                        let is_type_test = matches!(self.file.expr(cnd), Expr::Is { .. });
                         let ct = self.expr(cnd);
                         match subj_ty {
+                            // A type-test arm (`is T`) compares by `instanceof`, not `==` — no
+                            // comparability constraint (it already validated its own operand/target).
+                            _ if is_type_test => {}
                             // subject form: condition must be comparable to the subject
                             Some(st) if st != Ty::Error && ct != Ty::Error && st != ct && Ty::promote(st, ct).is_none() => {
                                 self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
@@ -902,7 +906,17 @@ impl<'a> Checker<'a> {
                             _ => {}
                         }
                     }
+                    // Smart-cast the body of a single positive `is T` arm (subject is a stable name).
+                    let arm_cast = match arm.conditions.as_slice() {
+                        [cnd] => self.smartcast_binding(*cnd, false),
+                        _ => None,
+                    };
+                    self.push_scope();
+                    if let Some((n, t)) = &arm_cast {
+                        self.declare(n, *t, false);
+                    }
                     let bt = self.expr(arm.body);
+                    self.pop_scope();
                     result = Some(match result {
                         Some(r) => self.join(r, bt, self.span(arm.body)),
                         None => bt,

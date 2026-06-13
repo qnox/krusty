@@ -436,6 +436,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/smartcast_e2e.rs` (if-then + early-return guard on the JVM; `var` non-narrowing). Box
   conformance **80 OK / 0 FAIL** (up from 77).
 
+## Phase 29 — `when` type-test arms  ✅
+- ✅ Subject-form `when (x) { is T -> … }` parses `is T` / `!is T` arms into a type test against the
+  subject; codegen dispatches via `instanceof` on the subject slot (evaluated once, not re-emitted),
+  branching with `ifne`/`ifeq`.
+- ✅ The checker skips the `==`-comparability constraint for type-test arms, and smart-casts the
+  subject to `T` inside a single positive `is T` arm's body (reusing the Phase 28 machinery).
+- ✅ `tests/when_is_e2e.rs` (sealed-style dispatch + per-arm smart-cast on the JVM). Box conformance
+  holds at **80 OK / 0 FAIL** (exhaustive `when` without `else` over sealed types — needed for many
+  such files to fully compile — is a separate follow-up).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
