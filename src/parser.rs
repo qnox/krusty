@@ -90,6 +90,11 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
+                TokenKind::KwClass => {
+                    let d = self.parse_class();
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 _ => {
                     self.diags.error(self.tok().span, "expected a top-level declaration");
                     self.bump(); // recover
@@ -163,6 +168,60 @@ impl<'a> Parser<'a> {
         };
         let end = self.t[self.i.saturating_sub(1)].span;
         FunDecl { name, params, ret, body, span: Span::new(start.lo, end.hi) }
+    }
+
+    /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
+    /// Every primary-constructor parameter must be a `val`/`var` property (no plain params yet).
+    fn parse_class(&mut self) -> ClassDecl {
+        let start = self.tok().span;
+        self.bump(); // 'class'
+        let name = if self.at(TokenKind::Ident) {
+            let n = self.text().to_string();
+            self.bump();
+            n
+        } else {
+            self.diags.error(self.tok().span, "expected class name");
+            "<error>".to_string()
+        };
+        let mut props = Vec::new();
+        if self.eat(TokenKind::LParen) {
+            self.skip_newlines();
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                let is_var = match self.kind() {
+                    TokenKind::KwVal => { self.bump(); false }
+                    TokenKind::KwVar => { self.bump(); true }
+                    _ => {
+                        self.diags.error(self.tok().span, "v0: primary-constructor parameters must be 'val' or 'var' properties");
+                        false
+                    }
+                };
+                let pname = self.ident_or_error("property name");
+                self.expect(TokenKind::Colon, "':'");
+                let ty = self.parse_type();
+                props.push(PropParam { name: pname, ty, is_var });
+                self.skip_newlines();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RParen, "')'");
+        }
+        // Optional class body — v0 accepts only an empty `{ }`.
+        self.skip_newlines();
+        if self.at(TokenKind::LBrace) {
+            self.bump();
+            self.skip_newlines();
+            if !self.eat(TokenKind::RBrace) {
+                self.diags.error(self.tok().span, "v0: class bodies must be empty");
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.bump();
+                }
+                self.eat(TokenKind::RBrace);
+            }
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        ClassDecl { name, props, span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
@@ -565,6 +624,17 @@ mod tests {
         assert!(t.contains("(while (< i n)"), "{t}");
         assert!(t.contains("(set a b)"), "{t}");
         assert!(t.contains("(return a)"), "{t}");
+    }
+
+    #[test]
+    fn class_with_properties() {
+        assert_eq!(tree("class Point(val x: Int, var y: String)"),
+            "(class Point (val x Int) (var y String))\n");
+    }
+
+    #[test]
+    fn class_with_empty_body() {
+        assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
     }
 
     #[test]

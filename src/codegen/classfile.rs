@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
+pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_SUPER: u16 = 0x0020;
@@ -154,11 +155,18 @@ struct MethodInfo {
     code: Vec<u8>,
 }
 
+struct FieldInfo {
+    access: u16,
+    name: u16,
+    desc: u16,
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     access: u16,
     this_class: u16,
     super_class: u16,
+    fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
 }
@@ -173,9 +181,17 @@ impl ClassWriter {
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
             this_class,
             super_class,
+            fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
         }
+    }
+
+    /// Declare a field (e.g. a backing field for a Kotlin property).
+    pub fn add_field(&mut self, access: u16, name: &str, desc: &str) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.fields.push(FieldInfo { access, name: n, desc: d });
     }
 
     /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
@@ -276,7 +292,13 @@ impl ClassWriter {
         u2(&mut out, self.this_class);
         u2(&mut out, self.super_class);
         u2(&mut out, 0); // interfaces
-        u2(&mut out, 0); // fields
+        u2(&mut out, self.fields.len() as u16);
+        for f in &self.fields {
+            u2(&mut out, f.access);
+            u2(&mut out, f.name);
+            u2(&mut out, f.desc);
+            u2(&mut out, 0); // field attributes
+        }
         u2(&mut out, self.methods.len() as u16);
         for m in &self.methods {
             u2(&mut out, m.access);
@@ -529,6 +551,14 @@ impl CodeBuilder {
     }
     pub fn getstatic(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb2, fieldref, words);
+    }
+    /// `getfield`: pops objectref, pushes the field value (`words` wide).
+    pub fn getfield(&mut self, fieldref: u16, words: i32) {
+        self.op_u2(0xb4, fieldref, words - 1);
+    }
+    /// `putfield`: pops objectref + value (`words` wide).
+    pub fn putfield(&mut self, fieldref: u16, words: i32) {
+        self.op_u2(0xb5, fieldref, -(1 + words));
     }
     pub fn pop(&mut self) { self.op(0x57, -1); }
     pub fn pop2(&mut self) { self.op(0x58, -2); }

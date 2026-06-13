@@ -12,6 +12,7 @@ pub enum TokenKind {
     StringLit, // "..."
     // keywords
     KwFun,
+    KwClass,
     KwVal,
     KwVar,
     KwReturn,
@@ -68,6 +69,7 @@ impl Token {
 pub fn keyword(text: &str) -> Option<TokenKind> {
     Some(match text {
         "fun" => TokenKind::KwFun,
+        "class" => TokenKind::KwClass,
         "val" => TokenKind::KwVal,
         "var" => TokenKind::KwVar,
         "return" => TokenKind::KwReturn,

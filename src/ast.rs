@@ -82,9 +82,26 @@ pub struct FunDecl {
     pub span: Span,
 }
 
+/// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
+/// v0: property types are restricted to the primitive/String `Ty` set (no class-typed members yet).
+#[derive(Clone, Debug)]
+pub struct PropParam {
+    pub name: String,
+    pub ty: TypeRef,
+    pub is_var: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClassDecl {
+    pub name: String,
+    pub props: Vec<PropParam>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub enum Decl {
     Fun(FunDecl),
+    Class(ClassDecl),
 }
 
 /// One parsed source file: its package, and arenas for every node kind.
@@ -145,6 +162,13 @@ impl File {
 
     fn write_decl(&self, id: DeclId, out: &mut String) {
         match self.decl(id) {
+            Decl::Class(c) => {
+                out.push_str(&format!("(class {}", c.name));
+                for p in &c.props {
+                    out.push_str(&format!(" ({} {} {})", if p.is_var { "var" } else { "val" }, p.name, p.ty.name));
+                }
+                out.push(')');
+            }
             Decl::Fun(f) => {
                 out.push_str(&format!("(fun {}", f.name));
                 for p in &f.params {
