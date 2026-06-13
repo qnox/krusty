@@ -81,10 +81,10 @@ fn scope_fn_run() {
 }
 
 #[test]
-fn lambda_outside_let_also_is_rejected() {
-    // A trailing lambda on a non-`let`/`also` call (here `run`) isn't an inlined scope function.
+fn lambda_outside_inlined_scope_fn_is_rejected() {
+    // A trailing lambda on a non-inlined function (here `filter`, not let/also/run/with/apply).
     let mut d = DiagSink::new();
-    let src = "fun box(): String { \"x\".run { it }\n return \"OK\" }";
+    let src = "fun box(): String { \"x\".filter { it }\n return \"OK\" }";
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
     let files = vec![file];

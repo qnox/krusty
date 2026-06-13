@@ -1473,6 +1473,30 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Type-check a `run`/`with`/`apply` lambda body with `recv` as its implicit receiver: `this` is
+    /// `recv`, and the receiver's properties resolve unqualified. Returns the body's type.
+    fn check_with_receiver(&mut self, recv: Ty, body: ExprId, span: Span) -> Ty {
+        let Ty::Obj(internal) = recv else {
+            if recv != Ty::Error {
+                self.diags.error(span, "krusty: run/with/apply receiver must be a class instance".to_string());
+            }
+            return Ty::Error;
+        };
+        let prev_this = self.this_ty;
+        self.this_ty = Some(recv);
+        self.push_scope();
+        // The receiver's properties are visible unqualified inside the body.
+        if let Some(cs) = self.syms.class_by_internal(internal) {
+            for (n, t, is_var) in cs.props.clone() {
+                self.declare(&n, t, is_var);
+            }
+        }
+        let bt = self.expr(body);
+        self.pop_scope();
+        self.this_ty = prev_this;
+        bt
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -1519,6 +1543,15 @@ impl<'a> Checker<'a> {
                         let bt = self.expr(body);
                         self.pop_scope();
                         return if name == "let" { bt } else { rt };
+                    }
+                }
+                // `recv.run { … }` / `recv.apply { … }`: the lambda body has `recv` as its implicit
+                // receiver (`this`); `run` yields the body, `apply` the receiver.
+                if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
+                    if let Expr::Lambda { param: None, body } = self.file.expr(args[0]).clone() {
+                        let rt = self.expr(receiver);
+                        let bt = self.check_with_receiver(rt, body, self.span(args[0]));
+                        return if name == "run" { bt } else { rt };
                     }
                 }
                 // `super.method(args)` — dispatch to the base class's method (non-virtual).
@@ -1629,6 +1662,14 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
+                // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
+                // args are evaluated, since the trailing lambda isn't a normal value).
+                if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
+                    if let Expr::Lambda { param: None, body } = self.file.expr(args[1]).clone() {
+                        let rt = self.expr(args[0]);
+                        return self.check_with_receiver(rt, body, self.span(args[1]));
+                    }
+                }
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
