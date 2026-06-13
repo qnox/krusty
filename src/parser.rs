@@ -222,6 +222,39 @@ impl<'a> Parser<'a> {
         PropDecl { name, ty, is_var, init, span: Span::new(start.lo, end.hi) }
     }
 
+    /// `companion object [Name] [: Super] { fun…; val… }` — collect its functions/properties to be
+    /// emitted as `static`/`static final` members of the enclosing class.
+    fn parse_companion(&mut self, methods: &mut Vec<FunDecl>, props: &mut Vec<PropDecl>) {
+        self.bump(); // 'companion'
+        self.bump(); // 'object'
+        if self.at(TokenKind::Ident) {
+            self.bump(); // optional companion name
+        }
+        // tolerate (and ignore) a supertype list on the companion
+        let _ = self.parse_supertypes();
+        self.skip_newlines();
+        if !self.eat(TokenKind::LBrace) {
+            return;
+        }
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                self.skip_decl_prefix();
+                self.skip_newlines();
+            }
+            match self.kind() {
+                TokenKind::RBrace | TokenKind::Eof => break,
+                TokenKind::KwFun => methods.push(self.parse_fun()),
+                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property()),
+                _ => {
+                    self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
+                    self.bump();
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace, "'}'");
+    }
+
     /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
     fn parse_enum(&mut self) -> ClassDecl {
         let start = self.tok().span;
@@ -257,6 +290,8 @@ impl<'a> Parser<'a> {
             type_params: Vec::new(),
             props: Vec::new(),
             methods: Vec::new(),
+            companion_methods: Vec::new(),
+            companion_props: Vec::new(),
             body_props: Vec::new(),
             init_order: Vec::new(),
             is_data: false,
@@ -390,6 +425,8 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
+        let mut companion_methods: Vec<FunDecl> = Vec::new();
+        let mut companion_props: Vec<PropDecl> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -412,6 +449,13 @@ impl<'a> Parser<'a> {
                         let block = self.parse_block_expr();
                         init_order.push(ClassInit::Block(block));
                     }
+                    // `companion object [Name] { fun…; val… }` — members become static on this class.
+                    TokenKind::Ident
+                        if self.text() == "companion"
+                            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "object") =>
+                    {
+                        self.parse_companion(&mut companion_methods, &mut companion_props);
+                    }
                     _ => {
                         self.diags.error(self.tok().span, "v0: class bodies support member 'fun', 'val'/'var', and 'init' blocks");
                         self.bump();
@@ -421,7 +465,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -491,7 +535,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
-            name, type_params, props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(),
+            name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(),
@@ -526,7 +570,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props: Vec::new(), init_order: Vec::new(), is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

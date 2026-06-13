@@ -543,6 +543,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/float_e2e.rs` (Float arithmetic/comparison/fields, conversions, primitive elvis/`!!` on
   the JVM). Box conformance **109 OK / 0 FAIL** (up from 105).
 
+## Phase 38 — `companion object`  ✅
+- ✅ `companion object { fun…; const val/val… }` members are emitted as `static`/`static final`
+  members of the enclosing class: `ClassName.fn(...)` → `invokestatic`, `ClassName.PROP` →
+  `getstatic` (+ a `<clinit>` for property initializers). Members are also reachable *unqualified*
+  inside other companion members (tracked via `companion_of` in the checker and emitter).
+- ✅ Scope/soundness (krusty puts statics on the *same* class, not a nested `Companion`): a companion
+  member whose name collides with an instance member is rejected (would duplicate a field/method),
+  and a companion member that reads/writes a top-level property is rejected (it would target the
+  wrong class). The ABI differs from kotlinc's nested-`Companion` shape but executes correctly.
+- ✅ `tests/companion_e2e.rs` (qualified + unqualified static members on the JVM; collision rejection).
+  Box conformance **110 OK / 0 FAIL** (up from 109).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

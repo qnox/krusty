@@ -177,6 +177,12 @@ pub struct ClassDecl {
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,
+    /// `companion object { … }` member functions — emitted as `static` methods on this class and
+    /// called as `ClassName.fn(...)`.
+    pub companion_methods: Vec<FunDecl>,
+    /// `companion object { … }` properties (`const val`/`val`) — emitted as `static final` fields and
+    /// read as `ClassName.PROP`.
+    pub companion_props: Vec<PropDecl>,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,

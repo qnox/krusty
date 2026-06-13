@@ -502,6 +502,31 @@ pub fn emit_class(
         })
         .collect();
 
+    // `companion object` members → `static`/`static final` members on this class.
+    for m in &class.companion_methods {
+        let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+        let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+        let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+        e.companion_of = Some(class.name.clone());
+        e.emit_method(m, &params, ret, ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &mut cw);
+    }
+    if !class.companion_props.is_empty() {
+        // static final fields, initialized in <clinit>.
+        let mut clinit = CodeBuilder::new(0);
+        for p in &class.companion_props {
+            let ty = p.ty.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or_else(|| info.ty(p.init));
+            cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &p.name, &ty.descriptor());
+            let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            e.companion_of = Some(class.name.clone());
+            e.emit_expr_as(p.init, ty, &mut clinit, &mut cw);
+            let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
+            clinit.putstatic(f, slot_words(ty) as i32);
+        }
+        clinit.ret_void();
+        clinit.link();
+        cw.add_method(ACC_STATIC, "<clinit>", "()V", &clinit);
+    }
+
     // `data class`: synthesize equals/hashCode/toString/componentN/copy(+copy$default) and expose
     // componentN/copy in the metadata so Kotlin consumers can call them.
     let mut method_metas = method_metas;
@@ -844,6 +869,9 @@ struct MethodEmitter<'a> {
     /// In an `open`/`abstract` class, `this.<prop>` must dispatch through the (virtual) accessor so
     /// overrides are honored, instead of reading the backing field directly.
     props_via_getter: bool,
+    /// When emitting a `companion object` member, the enclosing class — its static members are then
+    /// reachable unqualified (`MAX` → `getstatic`, `create(…)` → `invokestatic`).
+    companion_of: Option<String>,
 }
 
 impl<'a> MethodEmitter<'a> {
@@ -851,7 +879,7 @@ impl<'a> MethodEmitter<'a> {
         MethodEmitter {
             file, info, syms, class: class.to_string(), diags,
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
-            class_props: HashMap::new(), is_instance: false, props_via_getter: false,
+            class_props: HashMap::new(), is_instance: false, props_via_getter: false, companion_of: None,
         }
     }
 
@@ -1442,6 +1470,15 @@ impl<'a> MethodEmitter<'a> {
                         let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                         code.getfield(f, slot_words(ty) as i32);
                     }
+                } else if let Some((cls, ty)) = self
+                    .companion_of
+                    .as_ref()
+                    .and_then(|c| self.syms.classes.get(c))
+                    .and_then(|c| c.static_props.get(&n).map(|&t| (c.internal.clone(), t)))
+                {
+                    // Unqualified companion property inside a companion member → getstatic.
+                    let f = cw.fieldref(&cls, &n, &ty.descriptor());
+                    code.getstatic(f, slot_words(ty) as i32);
                 } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
                     // top-level property → static field on the file facade.
                     if self.is_instance {
@@ -1487,6 +1524,15 @@ impl<'a> MethodEmitter<'a> {
                                 let internal = self.syms.classes.get(&en).map(|c| c.internal.clone()).unwrap_or(en.clone());
                                 let f = cw.fieldref(&internal, &name, &Ty::obj(&internal).descriptor());
                                 code.getstatic(f, 1);
+                                return;
+                            }
+                        }
+                        // `ClassName.PROP` — a companion (static) field read.
+                        if let Some(cs) = self.syms.classes.get(&en) {
+                            if let Some(&ty) = cs.static_props.get(&name) {
+                                let internal = cs.internal.clone();
+                                let f = cw.fieldref(&internal, &name, &ty.descriptor());
+                                code.getstatic(f, slot_words(ty) as i32);
                                 return;
                             }
                         }
@@ -1907,6 +1953,23 @@ impl<'a> MethodEmitter<'a> {
                 return;
             }
         }
+        // Companion (static) method call: `ClassName.fn(args)` → args; invokestatic.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if let Expr::Name(cls) = self.file.expr(receiver).clone() {
+                if !self.slots.contains_key(&cls) {
+                    if let Some(sig) = self.syms.classes.get(&cls).and_then(|c| c.static_methods.get(&name)).cloned() {
+                        let internal = self.syms.classes[&cls].internal.clone();
+                        for (a, pty) in args.iter().zip(&sig.params) {
+                            self.emit_expr_as(*a, *pty, code, cw);
+                        }
+                        let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                        let m = cw.methodref(&internal, &name, &method_descriptor(&sig.params, sig.ret));
+                        code.invokestatic(m, arg_words, slot_words(sig.ret) as i32);
+                        return;
+                    }
+                }
+            }
+        }
         // Object member call: `Object.method(args)` → getstatic INSTANCE; args; invokevirtual.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if let Expr::Name(cls) = self.file.expr(receiver).clone() {
@@ -2132,6 +2195,24 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
+                // Unqualified companion (static) method call inside a companion member → invokestatic
+                // on the enclosing class.
+                if !self.syms.funs.contains_key(&fname) {
+                    if let Some((internal, sig)) = self
+                        .companion_of
+                        .as_ref()
+                        .and_then(|c| self.syms.classes.get(c))
+                        .and_then(|c| c.static_methods.get(&fname).map(|s| (c.internal.clone(), s.clone())))
+                    {
+                        for (a, pty) in args.iter().zip(&sig.params) {
+                            self.emit_expr_as(*a, *pty, code, cw);
+                        }
+                        let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                        let m = cw.methodref(&internal, &fname, &method_descriptor(&sig.params, sig.ret));
+                        code.invokestatic(m, arg_words, slot_words(sig.ret) as i32);
+                        return;
+                    }
+                }
                 let sig = match self.syms.funs.get(&fname) {
                     Some(s) => s.clone(),
                     None => return,
