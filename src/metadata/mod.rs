@@ -2,3 +2,4 @@
 
 pub mod protobuf;
 pub mod encoding;
+pub mod builder;
