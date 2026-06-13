@@ -20,6 +20,8 @@ pub enum TokenKind {
     KwElse,
     KwWhen,
     KwWhile,
+    KwFor,
+    KwIn,
     KwTrue,
     KwFalse,
     KwPackage,
@@ -48,6 +50,12 @@ pub enum TokenKind {
     OrOr,     // ||
     Not,      // !
     Arrow,    // ->  (when arms, lambdas)
+    DotDot,   // ..  (range)
+    PlusEq,   // +=
+    MinusEq,  // -=
+    StarEq,   // *=
+    SlashEq,  // /=
+    PercentEq,// %=
     // trivia / control
     Newline,
     Eof,
@@ -79,6 +87,8 @@ pub fn keyword(text: &str) -> Option<TokenKind> {
         "else" => TokenKind::KwElse,
         "when" => TokenKind::KwWhen,
         "while" => TokenKind::KwWhile,
+        "for" => TokenKind::KwFor,
+        "in" => TokenKind::KwIn,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,
         "package" => TokenKind::KwPackage,

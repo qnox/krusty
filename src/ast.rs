@@ -61,7 +61,24 @@ pub enum Stmt {
     Assign { name: String, value: ExprId },
     Return(Option<ExprId>),
     While { cond: ExprId, body: ExprId }, // body is a Block expr
+    /// `for (name in start <op> end (step s)?) body` over an integer range.
+    For { name: String, range: ForRange, body: ExprId },
     Expr(ExprId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RangeKind {
+    Through, // a..b   (inclusive)
+    Until,   // a until b (exclusive)
+    DownTo,  // a downTo b (descending, inclusive)
+}
+
+#[derive(Clone, Debug)]
+pub struct ForRange {
+    pub start: ExprId,
+    pub end: ExprId,
+    pub kind: RangeKind,
+    pub step: Option<ExprId>,
 }
 
 /// A syntactic type reference. v0: just a simple name (`Int`, `String`, ...).
@@ -320,6 +337,24 @@ impl File {
                 out.push_str("(while ");
                 self.write_expr(*cond, out);
                 out.push(' ');
+                self.write_expr(*body, out);
+                out.push(')');
+            }
+            Stmt::For { name, range, body } => {
+                let op = match range.kind {
+                    crate::ast::RangeKind::Through => "..",
+                    crate::ast::RangeKind::Until => "until",
+                    crate::ast::RangeKind::DownTo => "downTo",
+                };
+                out.push_str(&format!("(for {name} ("));
+                self.write_expr(range.start, out);
+                out.push_str(&format!(" {op} "));
+                self.write_expr(range.end, out);
+                if let Some(s) = range.step {
+                    out.push_str(" step ");
+                    self.write_expr(s, out);
+                }
+                out.push_str(") ");
                 self.write_expr(*body, out);
                 out.push(')');
             }

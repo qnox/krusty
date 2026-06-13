@@ -311,6 +311,7 @@ impl<'a> Parser<'a> {
                 };
                 self.finish_stmt(Stmt::While { cond, body }, start)
             }
+            TokenKind::KwFor => self.parse_for(start),
             _ => {
                 let e = self.parse_expr();
                 // assignment: `name = value` (v0: simple-name target only)
@@ -324,9 +325,54 @@ impl<'a> Parser<'a> {
                     }
                     self.diags.error(self.tok().span, "invalid assignment target");
                 }
+                // compound assignment: `name op= value` → `name = name op value`.
+                if let Some(op) = compound_op(self.kind()) {
+                    if let Expr::Name(n) = self.file.expr(e).clone() {
+                        let name = n.clone();
+                        let op_span = self.tok().span;
+                        self.bump();
+                        self.skip_newlines();
+                        let rhs = self.parse_expr();
+                        let lhs = self.file.add_expr(Expr::Name(name.clone()), op_span);
+                        let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
+                        return self.finish_stmt(Stmt::Assign { name, value }, start);
+                    }
+                    self.diags.error(self.tok().span, "invalid assignment target");
+                }
                 self.finish_stmt(Stmt::Expr(e), start)
             }
         }
+    }
+
+    fn parse_for(&mut self, start: Span) -> StmtId {
+        self.bump(); // 'for'
+        self.expect(TokenKind::LParen, "'('");
+        let name = self.ident_or_error("loop variable");
+        self.expect(TokenKind::KwIn, "'in'");
+        let rstart = self.parse_expr();
+        let kind = if self.eat(TokenKind::DotDot) {
+            RangeKind::Through
+        } else if self.at(TokenKind::Ident) && self.text() == "until" {
+            self.bump();
+            RangeKind::Until
+        } else if self.at(TokenKind::Ident) && self.text() == "downTo" {
+            self.bump();
+            RangeKind::DownTo
+        } else {
+            self.diags.error(self.tok().span, "v0 `for` supports only `a..b`, `a until b`, `a downTo b`");
+            RangeKind::Through
+        };
+        let rend = self.parse_expr();
+        let step = if self.at(TokenKind::Ident) && self.text() == "step" {
+            self.bump();
+            Some(self.parse_expr())
+        } else {
+            None
+        };
+        self.expect(TokenKind::RParen, "')'");
+        self.skip_newlines();
+        let body = self.parse_branch();
+        self.finish_stmt(Stmt::For { name, range: ForRange { start: rstart, end: rend, kind, step }, body }, start)
     }
 
     fn finish_stmt(&mut self, s: Stmt, start: Span) -> StmtId {
@@ -540,23 +586,38 @@ impl<'a> Parser<'a> {
         self.file.add_expr(Expr::When { subject, arms }, Span::new(start.lo, end.hi))
     }
 
+    /// A branch/body of `if`/`when`/`for`: a block, or a single statement. A bare expression keeps
+    /// its value (exposed as the wrapping block's trailing value); a real statement (`return`,
+    /// assignment, `s += i`, …) yields a Unit-valued block.
     fn parse_branch(&mut self) -> ExprId {
         if self.at(TokenKind::LBrace) {
-            self.parse_block_expr()
-        } else if matches!(self.kind(), TokenKind::KwReturn | TokenKind::KwVal | TokenKind::KwVar | TokenKind::KwWhile) {
-            // A statement (e.g. `if (c) return x`) — wrap the single statement as a block branch.
-            let start = self.tok().span;
-            let s = self.parse_stmt();
-            let end = self.t[self.i.saturating_sub(1)].span;
-            self.file.add_expr(Expr::Block { stmts: vec![s], trailing: None }, Span::new(start.lo, end.hi))
-        } else {
-            self.parse_expr()
+            return self.parse_block_expr();
         }
+        let start = self.tok().span;
+        let s = self.parse_stmt();
+        // A bare expression branch stays a bare expression (its value is the branch value);
+        // a real statement (`return`, assignment, `s += i`, …) becomes a Unit-valued block.
+        if let Stmt::Expr(e) = self.file.stmt(s) {
+            return *e;
+        }
+        let end = self.t[self.i.saturating_sub(1)].span;
+        self.file.add_expr(Expr::Block { stmts: vec![s], trailing: None }, Span::new(start.lo, end.hi))
     }
 }
 
 // ---- precedence ----
 const BP_PREFIX: u8 = 13;
+
+fn compound_op(k: TokenKind) -> Option<BinOp> {
+    Some(match k {
+        TokenKind::PlusEq => BinOp::Add,
+        TokenKind::MinusEq => BinOp::Sub,
+        TokenKind::StarEq => BinOp::Mul,
+        TokenKind::SlashEq => BinOp::Div,
+        TokenKind::PercentEq => BinOp::Rem,
+        _ => return None,
+    })
+}
 
 fn infix_op(k: TokenKind) -> Option<BinOp> {
     Some(match k {
@@ -695,6 +756,15 @@ mod tests {
     #[test]
     fn class_with_empty_body() {
         assert_eq!(tree("class Box(val v: Int) {\n}"), "(class Box (val v Int))\n");
+    }
+
+    #[test]
+    fn for_loop_and_compound_assign() {
+        let t = tree("fun f(n: Int): Int {\n var s = 0\n for (i in 1..n) s += i\n return s\n}");
+        assert!(t.contains("(for i (1 .. n)"), "{t}");
+        assert!(t.contains("(set s (+ s i))"), "{t}");
+        assert!(tree("fun g(n: Int) {\n for (i in n downTo 0 step 2) {}\n}").contains("(for i (n downTo 0 step 2)"));
+        assert!(tree("fun h(n: Int) {\n for (i in 0 until n) {}\n}").contains("(for i (0 until n)"));
     }
 
     #[test]
