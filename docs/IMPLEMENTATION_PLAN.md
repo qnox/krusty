@@ -802,6 +802,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/annotations_e2e.rs` (annotation-class decl + `@Tag`/`@Suppress` uses on a function, a
   local, and a loop, run on the JVM). Box conformance **170 → 173 OK / 0 FAIL**.
 
+## Phase 62 — Named arguments  ✅
+- ✅ Top-level function calls accept named arguments (`f(b = 2, a = 5)`). The parser records a
+  per-call `name =` label table on `File` (side-table keyed by the call's `ExprId`, no `Expr::Call`
+  churn); `Signature` gains `param_names`. A shared `map_call_args` reorders source-order arguments
+  onto positional parameter slots, validating unknown/duplicate names, positional-after-named, arity,
+  and missing required parameters. Named args combine with omitted defaults.
+- ✅ Evaluation order preserved: supplied arguments are spilled to fresh locals in *source* order,
+  then loaded (or a default emitted) in *parameter* order — so a reordered call like
+  `f(b = sideEffect(), a = sideEffect())` still evaluates `b` before `a` (verified on the JVM).
+- ✅ Correctness guard: named arguments on anything other than a top-level function (methods,
+  constructors, builtins) are rejected, since krusty doesn't reorder those — the labels would
+  otherwise be silently ignored and miscompile.
+- ✅ TDD: `tests/named_args_e2e.rs` (in-order / reordered / named+default / source-order eval, on the
+  JVM) + a `named_arguments` checker unit test (accept + the two rejections). Gated by the full
+  10,009-case original Kotlin `codegen/box` suite: **173 → 174 OK / 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

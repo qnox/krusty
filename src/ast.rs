@@ -274,6 +274,9 @@ pub struct File {
     pub stmt_arena: Vec<Stmt>,
     pub expr_spans: Vec<Span>,
     pub stmt_spans: Vec<Span>,
+    /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
+    /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
+    pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
 }
 
 impl File {

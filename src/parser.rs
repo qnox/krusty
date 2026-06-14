@@ -1209,7 +1209,21 @@ impl<'a> Parser<'a> {
                     self.bump();
                     self.skip_newlines();
                     let mut args = Vec::new();
+                    let mut names: Vec<Option<String>> = Vec::new();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        // Named argument `name = expr` — `name` is an identifier followed by a single
+                        // `=` (not `==`, which begins an equality expression).
+                        if self.at(TokenKind::Ident)
+                            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Eq)
+                        {
+                            let n = self.text().to_string();
+                            self.bump(); // name
+                            self.bump(); // '='
+                            self.skip_newlines();
+                            names.push(Some(n));
+                        } else {
+                            names.push(None);
+                        }
                         args.push(self.parse_expr());
                         self.skip_newlines();
                         if !self.eat(TokenKind::Comma) {
@@ -1220,7 +1234,11 @@ impl<'a> Parser<'a> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
-                    lhs = self.file.add_expr(Expr::Call { callee: lhs, args }, Span::new(lspan.lo, end.hi));
+                    let call = self.file.add_expr(Expr::Call { callee: lhs, args }, Span::new(lspan.lo, end.hi));
+                    if names.iter().any(|n| n.is_some()) {
+                        self.file.call_arg_names.insert(call.0, names);
+                    }
+                    lhs = call;
                 }
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
                 // last call argument (same line only, to avoid swallowing an unrelated block).
@@ -1228,6 +1246,7 @@ impl<'a> Parser<'a> {
                     let lambda = self.parse_lambda();
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
+                    let old = lhs;
                     lhs = match self.file.expr(lhs).clone() {
                         Expr::Call { callee, mut args } => {
                             args.push(lambda);
@@ -1235,6 +1254,12 @@ impl<'a> Parser<'a> {
                         }
                         _ => self.file.add_expr(Expr::Call { callee: lhs, args: vec![lambda] }, Span::new(lspan.lo, end.hi)),
                     };
+                    // Carry any named-argument metadata to the rebuilt call (the trailing lambda is
+                    // an extra positional argument).
+                    if let Some(mut names) = self.file.call_arg_names.remove(&old.0) {
+                        names.push(None);
+                        self.file.call_arg_names.insert(lhs.0, names);
+                    }
                 }
                 // `array[index]` element access.
                 TokenKind::LBracket => {
