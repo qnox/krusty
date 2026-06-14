@@ -23,6 +23,9 @@ pub struct Signature {
     /// Minimum number of arguments a caller must supply — params beyond this have default values
     /// that the caller fills in. Equals `params.len()` when there are no defaults.
     pub required: usize,
+    /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
+    /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
+    pub param_names: Vec<String>,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -348,7 +351,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             }
                         }
                     }
-                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required }).is_some() {
+                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect() }).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
@@ -385,18 +388,18 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             mtp.extend(m.type_params.iter().cloned());
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required } })
+                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
                         })
                         .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0 });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new() });
                         }
                         methods.insert(
                             "copy".into(),
-                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len() },
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len(), param_names: Vec::new() },
                         );
                     }
                     if c.is_object {
@@ -421,7 +424,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             mtp.extend(m.type_params.iter().cloned());
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
-                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required } })
+                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
                         })
                         .collect();
                     let static_props: HashMap<String, Ty> = c
@@ -464,6 +467,50 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
 /// Light type inference for an unannotated computed-property getter body (`val x get() = expr`),
 /// against the class's already-collected properties (`locals`). Handles literals, property/`this.x`
 /// references, `.size`/`.length`, unary, and binary ops; anything else is `Error` (the file skips).
+/// Map a call's source-order arguments (with optional `name =` labels) onto positional parameter
+/// slots. Returns a vector of length `param_names.len()`: each slot holds the supplied argument or
+/// `None` (the parameter falls back to its default). Errors describe the first problem found
+/// (unknown/duplicate name, positional-after-named, arity, or a missing required argument).
+pub fn map_call_args(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    param_names: &[String],
+    required: usize,
+) -> Result<Vec<Option<ExprId>>, String> {
+    let n = param_names.len();
+    let mut slots: Vec<Option<ExprId>> = vec![None; n];
+    let mut pos = 0usize;
+    let mut seen_named = false;
+    for (i, &a) in args.iter().enumerate() {
+        match names.and_then(|ns| ns.get(i)).and_then(|o| o.as_ref()) {
+            Some(nm) => {
+                seen_named = true;
+                let idx = param_names.iter().position(|p| p == nm).ok_or_else(|| format!("no parameter named '{nm}'"))?;
+                if slots[idx].is_some() {
+                    return Err(format!("an argument is already passed for '{nm}'"));
+                }
+                slots[idx] = Some(a);
+            }
+            None => {
+                if seen_named {
+                    return Err("a positional argument cannot follow a named argument".to_string());
+                }
+                if pos >= n {
+                    return Err(format!("too many arguments: expected at most {n}"));
+                }
+                slots[pos] = Some(a);
+                pos += 1;
+            }
+        }
+    }
+    for (i, slot) in slots.iter().enumerate().take(required) {
+        if slot.is_none() {
+            return Err(format!("no value passed for required parameter '{}'", param_names.get(i).map(|s| s.as_str()).unwrap_or("?")));
+        }
+    }
+    Ok(slots)
+}
+
 /// Does the default-argument expression `e` read any of `names` (the function's own parameters)?
 /// Statement-bearing expressions (blocks, lambdas, try, when) are conservatively treated as a
 /// reference so we never silently mis-substitute a default we can't fully analyse.
@@ -1339,7 +1386,7 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(receiver);
                 self.check_member(rt, &name, self.span(e))
             }
-            Expr::Call { callee, args } => self.check_call(callee, &args, self.span(e)),
+            Expr::Call { callee, args } => self.check_call(e, callee, &args, self.span(e)),
             Expr::If { cond, then_branch, else_branch } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
@@ -1629,7 +1676,20 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    fn check_call(&mut self, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
+    fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
+        // Named arguments (`f(x = 1)`) are only reordered for top-level function calls. Anywhere else
+        // (methods, constructors, builtins) the labels would be silently ignored — reject instead.
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        if arg_names.is_some() {
+            let to_free_fn = matches!(self.file.expr(callee), Expr::Name(n) if self.syms.funs.contains_key(n));
+            if !to_free_fn {
+                for &a in args {
+                    self.expr(a);
+                }
+                self.diags.error(span, "krusty: named arguments are only supported for top-level function calls".to_string());
+                return Ty::Error;
+            }
+        }
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
@@ -1862,6 +1922,19 @@ impl<'a> Checker<'a> {
                                     self.expect_assignable(elem, arg_tys[i], self.span(args[i]), "vararg argument");
                                 }
                             }
+                        } else if let Some(names) = &arg_names {
+                            // Named arguments: map onto positional slots, then type-check each slot.
+                            match map_call_args(args, Some(names), &sig.param_names, sig.required) {
+                                Ok(slots) => {
+                                    for (i, slot) in slots.iter().enumerate() {
+                                        if let Some(a) = slot {
+                                            let aty = self.expr_types[a.0 as usize];
+                                            self.expect_assignable(sig.params[i], aty, self.span(*a), "argument");
+                                        }
+                                    }
+                                }
+                                Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
+                            }
                         } else if arg_tys.len() < sig.required || arg_tys.len() > sig.params.len() {
                             let want = if sig.required == sig.params.len() {
                                 format!("{}", sig.params.len())
@@ -2079,6 +2152,19 @@ mod tests {
     fn err_contains(src: &str, needle: &str) {
         let (errs, _) = check(src);
         assert!(errs.iter().any(|e| e.contains(needle)), "expected error containing {needle:?}, got {errs:?}");
+    }
+
+    #[test]
+    fn named_arguments() {
+        // Accepted: named (any order), and named combined with an omitted default.
+        ok("fun f(a: Int, b: Int): Int = a - b\nfun g(): Int = f(b = 2, a = 5)");
+        ok("fun f(a: Int, b: Int = 10): Int = a + b\nfun g(): Int = f(a = 1)");
+        // Rejected: unknown parameter name, and named args on a non-free-function call.
+        err_contains("fun f(a: Int): Int = a\nfun g(): Int = f(z = 1)", "no parameter named 'z'");
+        err_contains(
+            "class C { fun m(a: Int): Int = a }\nfun g(): Int = C().m(a = 3)",
+            "named arguments are only supported",
+        );
     }
 
     #[test]

@@ -2892,24 +2892,49 @@ impl<'a> MethodEmitter<'a> {
                     code.invokestatic(m, arg_words, slot_words(sig.ret) as i32);
                     return;
                 }
-                for (a, pty) in args.iter().zip(&sig.params) {
-                    self.emit_expr_as(*a, *pty, code, cw);
-                }
-                // Omitted trailing parameters are filled with their default-value expressions
-                // (the emitted method always takes the full parameter list).
-                if args.len() < sig.params.len() {
-                    let defaults: Vec<Option<ExprId>> = self
-                        .file
-                        .decls
-                        .iter()
-                        .find_map(|&d| match self.file.decl(d) {
-                            crate::ast::Decl::Fun(f) if f.name == fname => Some(f.params.iter().map(|p| p.default).collect()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    for i in args.len()..sig.params.len() {
-                        let dx = defaults.get(i).copied().flatten().expect("required guarantees a default");
-                        self.emit_expr_as(dx, sig.params[i], code, cw);
+                // The default-value expressions for any omitted parameters (the emitted method always
+                // takes the full parameter list).
+                let defaults: Vec<Option<ExprId>> = self
+                    .file
+                    .decls
+                    .iter()
+                    .find_map(|&d| match self.file.decl(d) {
+                        crate::ast::Decl::Fun(f) if f.name == fname => Some(f.params.iter().map(|p| p.default).collect()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let names = self.file.call_arg_names.get(&e.0).cloned();
+                if let Some(names) = names {
+                    // Named arguments may be reordered relative to the parameters. Evaluate the
+                    // supplied arguments in SOURCE order into fresh locals (preserving Kotlin's
+                    // left-to-right evaluation), then load them — or emit a default — in parameter
+                    // order so the stack matches the method descriptor.
+                    let slots = crate::resolve::map_call_args(args, Some(&names), &sig.param_names, sig.required).unwrap_or_default();
+                    let mut locals: Vec<Option<(u16, Ty)>> = vec![None; sig.params.len()];
+                    for &a in args {
+                        let pi = slots.iter().position(|s| *s == Some(a)).expect("checker mapped every arg");
+                        let pty = sig.params[pi];
+                        self.emit_expr_as(a, pty, code, cw);
+                        let slot = self.fresh_slot(pty);
+                        code.ensure_locals(slot + slot_words(pty));
+                        self.store(pty, slot, code);
+                        locals[pi] = Some((slot, pty));
+                    }
+                    for (i, &pty) in sig.params.iter().enumerate() {
+                        match locals[i] {
+                            Some((slot, t)) => load_local(t, slot, code),
+                            None => {
+                                let dx = defaults.get(i).copied().flatten().expect("checker guarantees a default");
+                                self.emit_expr_as(dx, pty, code, cw);
+                            }
+                        }
+                    }
+                } else {
+                    // Positional: supplied args are already in parameter order; omitted trailing
+                    // parameters fall back to their defaults.
+                    for (i, &pty) in sig.params.iter().enumerate() {
+                        let arg = args.get(i).copied().or_else(|| defaults.get(i).copied().flatten()).expect("checker guarantees a value or default");
+                        self.emit_expr_as(arg, pty, code, cw);
                     }
                 }
                 let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
