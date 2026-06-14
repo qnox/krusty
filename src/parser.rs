@@ -152,6 +152,16 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
+                // `annotation class Name(...)` — annotations carry no runtime representation krusty
+                // emits; parse the declaration to consume it, then drop it. Uses (`@Name(...)`) are
+                // skipped as annotations; referring to the type as a value then fails to resolve and
+                // the file is cleanly skipped (no miscompile).
+                TokenKind::Ident
+                    if self.text() == "annotation" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                {
+                    self.bump(); // 'annotation'
+                    let _ = self.parse_class();
+                }
                 // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
                 TokenKind::Ident
                     if self.text() == "enum" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
@@ -864,6 +874,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> StmtId {
+        // Leading annotations on a statement (`@Suppress("…") val x = …`) carry no codegen
+        // meaning here — skip them and parse the statement they decorate.
+        if self.at(TokenKind::At) {
+            while self.at(TokenKind::At) {
+                self.skip_annotation();
+                self.skip_newlines();
+            }
+            return self.parse_stmt();
+        }
         let start = self.tok().span;
         match self.kind() {
             TokenKind::KwVal | TokenKind::KwVar => {

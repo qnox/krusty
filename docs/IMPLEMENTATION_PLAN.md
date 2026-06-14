@@ -791,6 +791,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ `tests/default_args_e2e.rs` (literal/bool/top-level-val defaults, run on the JVM). Box
   conformance **168 → 170 OK / 0 FAIL**.
 
+## Phase 61 — Annotations (parse + ignore)  ✅
+- ✅ Annotation *uses* now parse anywhere they appear and carry no codegen meaning: the existing
+  declaration-prefix path already skipped `@Anno(...)` on declarations/params; this phase adds
+  skipping leading annotations on *statements* (`@Suppress("…") val x = …`, `@Suppress(...) for ...`)
+  in `parse_stmt`.
+- ✅ `annotation class Name(...)` declarations parse (via `parse_class`) and are then dropped — krusty
+  emits no runtime representation for them. Using the annotation as a *value/type* then fails to
+  resolve, so such a file is cleanly skipped (never miscompiled).
+- ✅ `tests/annotations_e2e.rs` (annotation-class decl + `@Tag`/`@Suppress` uses on a function, a
+  local, and a loop, run on the JVM). Box conformance **170 → 173 OK / 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
