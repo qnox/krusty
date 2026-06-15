@@ -72,7 +72,7 @@ fn try_finally_run() {
     let dir = std::env::temp_dir().join(format!("krusty_tf_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("TfKt.class"), emit_file(&files[0], &info, &syms, "TfKt", &mut d)).unwrap();
+    fs::write(dir.join("TfKt.class"), emit_file(&files[0], &info, &syms, "TfKt", &mut d).0).unwrap();
     let log = files[0]
         .decls
         .iter()
@@ -81,7 +81,7 @@ fn try_finally_run() {
             _ => None,
         })
         .expect("Log decl");
-    fs::write(dir.join("Log.class"), emit_class(&log, &files[0], &info, "Log", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Log.class"), emit_class(&log, &files[0], &info, "Log", "Log", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

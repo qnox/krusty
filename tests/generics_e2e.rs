@@ -49,7 +49,7 @@ fn generics_via_erasure_run() {
     let info = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
-    let facade = emit_file(&files[0], &info, &syms, "GKt", &mut d);
+    let (facade, _) = emit_file(&files[0], &info, &syms, "GKt", &mut d);
     let holder = files[0]
         .decls
         .iter()
@@ -58,7 +58,7 @@ fn generics_via_erasure_run() {
             _ => None,
         })
         .expect("Holder decl");
-    let holder_bytes = emit_class(&holder, &files[0], &info, "Holder", &syms, &mut d);
+    let (holder_bytes, _) = emit_class(&holder, &files[0], &info, "Holder", "Holder", &syms, &mut d);
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     let dir = std::env::temp_dir().join(format!("krusty_gen_{}", std::process::id()));

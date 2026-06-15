@@ -5,6 +5,7 @@
 //! `toString()`, string concat (`StringBuilder`), `println`, `.length`. Branchy methods rely on the
 //! v50 type-inference verifier (no StackMapTable yet — see classfile.rs).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -12,6 +13,49 @@ use crate::codegen::classfile::*;
 use crate::diag::DiagSink;
 use crate::resolve::{import_map, resolve_java_static, SymbolTable, TypeInfo};
 use crate::types::Ty;
+
+thread_local! {
+    /// Lambda-generated anonymous class bytes accumulated during a single emit_file / emit_class
+    /// call. Drained by the caller after emission. (Thread-local avoids threading through the entire
+    /// emit API.)
+    static LAMBDA_CLASSES: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    /// Tracks which FunctionN stub arities have already been pushed in this compilation unit,
+    /// so we don't emit duplicate stub classes.
+    static FUNCTION_STUBS: RefCell<std::collections::HashSet<u8>> = RefCell::new(std::collections::HashSet::new());
+}
+
+fn push_lambda_class(name: String, bytes: Vec<u8>) {
+    LAMBDA_CLASSES.with(|lc| lc.borrow_mut().push((name, bytes)));
+}
+
+fn drain_lambda_classes() -> Vec<(String, Vec<u8>)> {
+    FUNCTION_STUBS.with(|s| s.borrow_mut().clear());
+    LAMBDA_CLASSES.with(|lc| std::mem::take(&mut *lc.borrow_mut()))
+}
+
+/// Emit a stub `kotlin/jvm/functions/FunctionN` interface class (just the declaration, no body)
+/// and register it for output. The stub makes lambda-using programs self-contained without
+/// requiring kotlin-stdlib on the runtime classpath.
+fn ensure_function_stub(arity: u8) {
+    FUNCTION_STUBS.with(|s| {
+        if s.borrow().contains(&arity) {
+            return;
+        }
+        s.borrow_mut().insert(arity);
+        let iface_name = Ty::fun_interface(arity);
+        let mut cw = ClassWriter::new(&iface_name, "java/lang/Object");
+        cw.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+        // invoke([Object...])Object — the single abstract method all FunctionN interfaces expose.
+        let mut desc = String::from("(");
+        for _ in 0..arity {
+            desc.push_str("Ljava/lang/Object;");
+        }
+        desc.push_str(")Ljava/lang/Object;");
+        cw.add_abstract_method(ACC_PUBLIC | ACC_ABSTRACT, "invoke", &desc);
+        let bytes = cw.finish();
+        push_lambda_class(iface_name, bytes);
+    });
+}
 
 /// Class name kotlinc derives for top-level decls: `<File>Kt` (capitalized).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
@@ -62,13 +106,16 @@ pub fn emit_file(
     syms: &SymbolTable,
     internal_name: &str,
     diags: &mut DiagSink,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
     let mut cw = ClassWriter::new(internal_name, "java/lang/Object");
     let imports = import_map(file);
+    let mut lambda_ctr: u32 = 0;
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
             let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            e.lambda_counter = lambda_ctr;
             e.emit_fun(f, &mut cw);
+            lambda_ctr = e.lambda_counter;
         }
     }
 
@@ -117,6 +164,7 @@ pub fn emit_file(
         let mut clinit = CodeBuilder::new(0);
         {
             let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            e.lambda_counter = lambda_ctr;
             for (p, ty) in &tl_props {
                 if let Some(init) = p.init {
                     e.emit_expr_as(init, *ty, &mut clinit, &mut cw);
@@ -124,6 +172,7 @@ pub fn emit_file(
                     clinit.putstatic(f, slot_words(*ty) as i32);
                 }
             }
+            lambda_ctr = e.lambda_counter;
         }
         clinit.ret_void();
         clinit.link();
@@ -160,7 +209,8 @@ pub fn emit_file(
     let (d1_bytes, d2) = crate::metadata::builder::build_package(&funcs, &prop_metas);
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(2, &[1, 9, 0], 48, &d1, &d2);
-    cw.finish()
+    let extra = drain_lambda_classes();
+    (cw.finish(), extra)
 }
 
 /// Lower a (v0) `enum class Name { A, B }` to a class extending `java/lang/Enum`: one
@@ -408,6 +458,7 @@ fn ref_internal(ty: Ty) -> &'static str {
         Ty::Obj(n) => n,
         // An array's `instanceof`/`checkcast` operand is its descriptor (`[LData;`, `[I`), not a name.
         Ty::Array(_) => crate::types::intern(&ty.descriptor()),
+        Ty::Fun(n) => crate::types::intern(&Ty::fun_interface(n)),
         _ => "java/lang/Object",
     }
 }
@@ -416,6 +467,10 @@ fn ref_internal(ty: Ty) -> &'static str {
 /// is an erased generic type parameter → `java/lang/Object` (valid code reaching codegen has already
 /// passed the resolver, so the only unknowns here are type parameters).
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
+    // Function type `(A) -> B` — parsed with fun_params non-empty.
+    if !r.fun_params.is_empty() || r.name == "<fun>" {
+        return Ty::Fun(r.fun_params.len() as u8);
+    }
     if let Some(elem) = Ty::primitive_array_element(&r.name) {
         return Ty::array(elem);
     }
@@ -446,20 +501,31 @@ pub fn emit_class(
     file: &File,
     info: &TypeInfo,
     internal_name: &str,
+    file_facade: &str,
     syms: &SymbolTable,
     diags: &mut DiagSink,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
     if class.is_enum {
-        return emit_enum(class, file, info, internal_name, syms, diags);
+        let bytes = emit_enum(class, file, info, internal_name, syms, diags);
+        let extra = drain_lambda_classes();
+        return (bytes, extra);
     }
     if class.is_interface {
-        return emit_interface(class, internal_name, syms);
+        let bytes = emit_interface(class, internal_name, syms);
+        let extra = drain_lambda_classes();
+        return (bytes, extra);
     }
     // Base class (`: Base(args)`) → JVM super; otherwise `java/lang/Object`.
     let base_internal = class
         .base_class
         .as_ref()
-        .map(|b| syms.classes.get(b).map(|c| c.internal.clone()).unwrap_or_else(|| b.clone()));
+        .map(|b| {
+            if b == "Any" {
+                "java/lang/Object".to_string()
+            } else {
+                syms.classes.get(b).map(|c| c.internal.clone()).unwrap_or_else(|| b.clone())
+            }
+        });
     let super_internal = base_internal.clone().unwrap_or_else(|| "java/lang/Object".to_string());
     let mut cw = ClassWriter::new(internal_name, &super_internal);
     // `open`/`abstract` classes are not `final`; `abstract` adds ACC_ABSTRACT.
@@ -472,6 +538,7 @@ pub fn emit_class(
     }
     // Implemented interfaces (supertypes without constructor args).
     for st in &class.supertypes {
+        if st == "Any" { continue; }
         let iface_internal = syms.classes.get(st).map(|c| c.internal.clone()).unwrap_or_else(|| st.clone());
         cw.add_interface(&iface_internal);
     }
@@ -510,11 +577,14 @@ pub fn emit_class(
     let total_locals: u16 = 1 + props.iter().map(|(_, t)| slot_words(*t)).sum::<u16>();
     let class_props_map: HashMap<String, Ty> = all_props.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
     let ctor_imports = import_map(file);
+    let mut lambda_ctr: u32 = 0;
     let mut code = CodeBuilder::new(total_locals);
     {
         // A MethodEmitter gives `this` (slot 0) + the ctor params (= the properties) so base-class
         // constructor arguments (which reference those params) can be lowered.
         let mut ce = MethodEmitter::new_instance(file, info, syms, internal_name, &ctor_imports, class_props_map.clone(), diags);
+        ce.lambda_counter = lambda_ctr;
+        ce.file_facade = file_facade.to_string();
         let mut slot = 1u16;
         for (p, ty) in &props {
             ce.slots.insert(p.name.clone(), (slot, *ty));
@@ -538,6 +608,7 @@ pub fn emit_class(
                 code.invokespecial(obj_init, 0, 0);
             }
         }
+        lambda_ctr = ce.lambda_counter;
     }
     let mut slot = 1u16;
     for (p, ty) in &props {
@@ -552,6 +623,8 @@ pub fn emit_class(
     // Body-property initializers and `init { }` blocks, in source order (after ctor-param stores).
     if !class.init_order.is_empty() {
         let mut ie = MethodEmitter::new_instance(file, info, syms, internal_name, &ctor_imports, class_props_map.clone(), diags);
+        ie.lambda_counter = lambda_ctr;
+        ie.file_facade = file_facade.to_string();
         let mut s = 1u16;
         for (p, ty) in &props {
             ie.slots.insert(p.name.clone(), (s, *ty));
@@ -573,6 +646,7 @@ pub fn emit_class(
                 ClassInit::Block(b) => ie.emit_block_discard(*b, &mut code, &mut cw),
             }
         }
+        lambda_ctr = ie.lambda_counter;
     }
     code.ret_void();
     code.link();
@@ -604,7 +678,7 @@ pub fn emit_class(
         for (name, _, _) in &all_props {
             if !seen.insert(capitalize(name)) {
                 diags.error(class.span, format!("krusty: property accessor name clash on '{name}'"));
-                return Vec::new();
+                return (Vec::new(), drain_lambda_classes());
             }
         }
     }
@@ -623,10 +697,41 @@ pub fn emit_class(
         let setter_name = format!("set{cap}");
         // getter
         if !explicit_methods.contains(&getter_name) {
+            let is_lateinit = syms.class_by_internal(internal_name)
+                .map_or(false, |c| c.lateinit_props.contains(name.as_str()));
             let mut g = CodeBuilder::new(1);
             g.aload(0);
             let f = cw.fieldref(internal_name, name, &ty.descriptor());
             g.getfield(f, slot_words(*ty) as i32);
+            if is_lateinit {
+                // Stack: {value (maybe null)}. dup then test — at `ok` the stack is {value}.
+                g.dup();
+                let ok = g.new_label();
+                use crate::codegen::classfile::VerifType;
+                let class_cidx = cw.class_ref(internal_name);
+                let vt = match ty {
+                    Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
+                    Ty::Obj(internal) => VerifType::Object(cw.class_ref(internal)),
+                    Ty::Array(elem) => {
+                        let desc = crate::types::intern(&format!("[{}", elem.descriptor()));
+                        VerifType::Object(cw.class_ref(desc))
+                    }
+                    _ => VerifType::Object(cw.class_ref("java/lang/Object")),
+                };
+                g.add_frame_if_new(ok, vec![VerifType::Object(class_cidx)], vec![vt.clone()]);
+                g.ifnonnull(ok);
+                // null path — stack: {null}; throw RuntimeException
+                let exc = cw.class_ref("java/lang/RuntimeException");
+                g.new_obj(exc);
+                g.dup();
+                g.push_string(&format!("lateinit property {name} has not been initialized"), &mut cw);
+                let init = cw.methodref("java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V");
+                g.invokespecial(init, 1, 0);
+                g.athrow();
+                g.add_frame_if_new(ok, vec![VerifType::Object(class_cidx)], vec![vt]);
+                g.bind(ok);
+                // stack: {value (non-null)} — fall through to typed return
+            }
             emit_typed_return(*ty, &mut g);
             g.link();
             cw.add_method(member_access, &getter_name, &method_descriptor(&[], *ty), &g);
@@ -648,26 +753,26 @@ pub fn emit_class(
     // access; inherited members are reached via accessors on a typed receiver.
     let class_props: HashMap<String, Ty> = class_props_map.clone();
     let imports = import_map(file);
-    let method_metas: Vec<crate::metadata::class_builder::FnMeta> = class
-        .methods
-        .iter()
-        .map(|m| {
-            let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
-            // Prefer the symbol-table return type (infer_lit_ty applied) over re-deriving from AST.
-            let ret = syms.class_by_internal(internal_name)
-                .and_then(|c| c.methods.get(&m.name))
-                .map(|s| s.ret)
-                .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
-            let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
-            e.props_via_getter = class.is_open || class.is_abstract;
-            e.emit_method(m, &params, ret, member_access, &mut cw);
-            crate::metadata::class_builder::FnMeta::plain(
-                m.name.clone(),
-                m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
-                ret,
-            )
-        })
-        .collect();
+    let mut method_metas: Vec<crate::metadata::class_builder::FnMeta> = Vec::new();
+    for m in &class.methods {
+        let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
+        // Prefer the symbol-table return type (infer_lit_ty applied) over re-deriving from AST.
+        let ret = syms.class_by_internal(internal_name)
+            .and_then(|c| c.methods.get(&m.name))
+            .map(|s| s.ret)
+            .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
+        let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+        e.lambda_counter = lambda_ctr;
+        e.file_facade = file_facade.to_string();
+        e.props_via_getter = class.is_open || class.is_abstract;
+        e.emit_method(m, &params, ret, member_access, &mut cw);
+        lambda_ctr = e.lambda_counter;
+        method_metas.push(crate::metadata::class_builder::FnMeta::plain(
+            m.name.clone(),
+            m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
+            ret,
+        ));
+    }
 
     // Computed properties (`val x: T get() = …`) → a `getX()` method running the getter body.
     for bp in &class.body_props {
@@ -687,10 +792,14 @@ pub fn emit_class(
             body: getter.clone(),
             type_params: Vec::new(),
             span: bp.span,
+            is_inline: false,
         };
         let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+        e.lambda_counter = lambda_ctr;
+        e.file_facade = file_facade.to_string();
         e.props_via_getter = class.is_open || class.is_abstract;
         e.emit_method(&getter_fn, &[], ty, member_access, &mut cw);
+        lambda_ctr = e.lambda_counter;
     }
 
     // `companion object` members → `static`/`static final` members on this class.
@@ -704,8 +813,11 @@ pub fn emit_class(
             .map(|s| s.ret)
             .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
         let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+        e.lambda_counter = lambda_ctr;
+        e.file_facade = file_facade.to_string();
         e.companion_of = Some(class.name.clone());
         e.emit_method(m, &params, ret, ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &mut cw);
+        lambda_ctr = e.lambda_counter;
     }
     if !class.companion_props.is_empty() {
         // static final fields, initialized in <clinit>.
@@ -715,8 +827,11 @@ pub fn emit_class(
             cw.add_field(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &p.name, &ty.descriptor());
             if let Some(init) = p.init {
                 let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+                e.lambda_counter = lambda_ctr;
+                e.file_facade = file_facade.to_string();
                 e.companion_of = Some(class.name.clone());
                 e.emit_expr_as(init, ty, &mut clinit, &mut cw);
+                lambda_ctr = e.lambda_counter;
                 let f = cw.fieldref(internal_name, &p.name, &ty.descriptor());
                 clinit.putstatic(f, slot_words(ty) as i32);
             }
@@ -755,7 +870,8 @@ pub fn emit_class(
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     cw.set_kotlin_metadata(1, &[1, 9, 0], 48, &d1, &d2);
 
-    cw.finish()
+    let extra = drain_lambda_classes();
+    (cw.finish(), extra)
 }
 
 /// StringBuilder.append descriptor + stack words for a value of type `t`.
@@ -837,15 +953,36 @@ fn emit_data_members(
 
     // copy$default(self, props..., mask:int, marker:Object) -> Self — synthetic default-applier.
     if !user_methods.contains("copy") {
+        use crate::codegen::classfile::VerifType as VT;
         let mask_slot = 1 + total_words;
         let total_locals = mask_slot + 2; // mask + marker
         let mut c = CodeBuilder::new(total_locals);
+        // Build the constant StackMapTable locals for all `skip` branch targets:
+        // [this, props..., mask(Int), marker(Obj)].
+        let mut skip_locals: Vec<VT> = vec![VT::Object(cw.class_ref(internal))];
+        for (_, ty) in props.iter() {
+            let vt = match ty {
+                Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VT::Integer,
+                Ty::Long => VT::Long,
+                Ty::Float => VT::Float,
+                Ty::Double => VT::Double,
+                Ty::String => VT::Object(cw.class_ref("java/lang/String")),
+                Ty::Obj(s) => VT::Object(cw.class_ref(s)),
+                Ty::Array(e) => { let d = format!("[{}", e.descriptor()); VT::Object(cw.class_ref(&d)) }
+                _ => VT::Top,
+            };
+            skip_locals.push(vt);
+            if matches!(ty, Ty::Long | Ty::Double) { skip_locals.push(VT::Top); }
+        }
+        skip_locals.push(VT::Integer);                                   // mask
+        skip_locals.push(VT::Object(cw.class_ref("java/lang/Object"))); // marker
         let mut slot = 1u16;
         for (i, (p, ty)) in props.iter().enumerate() {
             c.iload(mask_slot);
             c.push_int(1 << i, cw);
             c.iand();
             let skip = c.new_label();
+            c.add_frame_if_new(skip, skip_locals.clone(), vec![]); // frame at branch target
             c.ifeq(skip);
             c.aload(0);
             let f = cw.fieldref(internal, &p.name, &ty.descriptor());
@@ -927,11 +1064,17 @@ fn emit_data_members(
 
     // equals(Object): identity, instanceof, then per-property comparison.
     if !user_methods.contains("equals") {
-        let mut c = CodeBuilder::new(2); // this=0, other=1; cast -> 2
+        use crate::codegen::classfile::VerifType as VT;
+        let mut c = CodeBuilder::new(3); // this=0, other=1; cast_other=2
         let cidx = cw.class_ref(internal);
+        // Frame used at `ne` and `is_inst` targets: [this, other_as_Object].
+        let frm2 = vec![VT::Object(cidx), VT::Object(cw.class_ref("java/lang/Object"))];
+        // Frame used at each `eq` target: [this, other_as_Object, cast_other_as_self].
+        let frm3 = vec![VT::Object(cidx), VT::Object(cw.class_ref("java/lang/Object")), VT::Object(cidx)];
         c.aload(0);
         c.aload(1);
         let ne = c.new_label();
+        c.add_frame_if_new(ne, frm2.clone(), vec![]);
         c.if_acmpne(ne);
         c.push_int(1, cw);
         c.ireturn();
@@ -939,6 +1082,7 @@ fn emit_data_members(
         c.aload(1);
         c.instance_of(cidx);
         let is_inst = c.new_label();
+        c.add_frame_if_new(is_inst, frm2.clone(), vec![]);
         c.ifne(is_inst);
         c.push_int(0, cw);
         c.ireturn();
@@ -953,6 +1097,7 @@ fn emit_data_members(
             c.aload(2);
             c.getfield(f, slot_words(*ty) as i32);
             let eq = c.new_label();
+            c.add_frame_if_new(eq, frm3.clone(), vec![]);
             match ty {
                 Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => c.if_icmpeq(eq),
                 Ty::Long => {
@@ -1077,6 +1222,15 @@ struct MethodEmitter<'a> {
     /// Implicit receiver for an inlined `run`/`with`/`apply` body: `(slot, class internal)`. When set,
     /// `this` and unqualified member access target this slot/class instead of `this` (slot 0).
     recv: Option<(u16, String)>,
+    /// Counter for generating unique anonymous class names for lambda literals.
+    lambda_counter: u32,
+    /// Maps mangled local-function name → the class it was emitted on (for correct invokestatic).
+    local_fun_emitted_class: HashMap<String, String>,
+    /// True when this emitter is inside a lambda body.
+    inside_lambda: bool,
+    /// Internal name of the file-facade class (e.g. `FooKt`) that owns top-level functions.
+    /// Equals `class` for top-level emitters; differs when emitting inside a class declaration.
+    file_facade: String,
 }
 
 impl<'a> MethodEmitter<'a> {
@@ -1086,6 +1240,10 @@ impl<'a> MethodEmitter<'a> {
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
             class_props: HashMap::new(), is_instance: false, props_via_getter: false, companion_of: None,
             loop_labels: Vec::new(), recv: None,
+            lambda_counter: 0,
+            local_fun_emitted_class: HashMap::new(),
+            inside_lambda: false,
+            file_facade: class.to_string(),
         }
     }
 
@@ -1110,6 +1268,125 @@ impl<'a> MethodEmitter<'a> {
         e.is_instance = true;
         e.next_slot = 1; // slot 0 reserved for `this`
         e
+    }
+
+    /// Allocate an anonymous local slot of `ty` and register it in `self.slots` under a synthetic
+    /// name so `make_verif_locals` picks it up in StackMapTable frames.
+    fn alloc_temp(&mut self, ty: Ty) -> u16 {
+        let slot = self.next_slot;
+        let name = format!("$$tmp_{slot}");
+        self.next_slot += slot_words(ty);
+        self.slots.insert(name, (slot, ty));
+        slot
+    }
+
+    /// Store a default (zero/null) value to `slot` so the verifier sees it as initialized.
+    /// Must be called right after `alloc_temp` for slots that precede any `rec(...)` call.
+    fn init_temp(&mut self, ty: Ty, slot: u16, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        match ty {
+            Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => {
+                code.push_int(0, cw);
+                code.istore(slot);
+            }
+            Ty::Long => {
+                code.push_long(0, cw);
+                code.lstore(slot);
+            }
+            Ty::Float => {
+                code.push_float(0.0, cw);
+                code.fstore(slot);
+            }
+            Ty::Double => {
+                code.push_double(0.0, cw);
+                code.dstore(slot);
+            }
+            _ => {
+                code.aconst_null();
+                code.astore(slot);
+            }
+        }
+    }
+
+    /// Build the verification-type locals list for the current `self.slots` state.
+    /// Used to record StackMapTable frames. Slot 0 for instance methods = `this`.
+    fn make_verif_locals(&self, cw: &mut ClassWriter) -> Vec<crate::codegen::classfile::VerifType> {
+        use crate::codegen::classfile::VerifType;
+        let max = self.next_slot as usize;
+        if max == 0 { return Vec::new(); }
+
+        let mut raw: Vec<VerifType> = vec![VerifType::Top; max];
+
+        if self.is_instance {
+            raw[0] = VerifType::Object(cw.class_ref(&self.class));
+        }
+
+        for &(slot, ty) in self.slots.values() {
+            let vt = match ty {
+                Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
+                Ty::Long => VerifType::Long,
+                Ty::Float => VerifType::Float,
+                Ty::Double => VerifType::Double,
+                Ty::Null => VerifType::Null,
+                Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
+                Ty::Obj(ref internal) => VerifType::Object(cw.class_ref(internal)),
+                Ty::Array(ref elem) => {
+                    let desc = format!("[{}", elem.descriptor());
+                    VerifType::Object(cw.class_ref(&desc))
+                }
+                Ty::Fun(n) => {
+                    let iname = format!("kotlin/jvm/functions/Function{}", n);
+                    VerifType::Object(cw.class_ref(&iname))
+                }
+                Ty::Unit | Ty::Nothing | Ty::Error => VerifType::Top,
+            };
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = vt;
+            }
+        }
+
+        // Build result: Long/Double take 2 slots but appear once; skip the second slot.
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            let is_wide = matches!(raw[i], VerifType::Long | VerifType::Double);
+            result.push(raw[i].clone());
+            i += if is_wide { 2 } else { 1 };
+        }
+        while result.last() == Some(&VerifType::Top) { result.pop(); }
+        result
+    }
+
+    /// Record a StackMapTable frame for `label` with empty operand stack (first call wins).
+    /// Always registers; StackMapTable is emitted for any method that has branch targets.
+    fn rec(&self, label: crate::codegen::classfile::Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let locals = self.make_verif_locals(cw);
+        code.add_frame_if_new(label, locals, vec![]);
+    }
+
+    /// Record a StackMapTable frame for `label` with a single item on the operand stack.
+    /// Used for exception-handler entry points (JVM places the caught exception on the stack).
+    fn rec_s(&self, label: crate::codegen::classfile::Label, stack_ty: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        use crate::codegen::classfile::VerifType;
+        let locals = self.make_verif_locals(cw);
+        let stack_item = match stack_ty {
+            Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
+            Ty::Long => VerifType::Long,
+            Ty::Float => VerifType::Float,
+            Ty::Double => VerifType::Double,
+            Ty::Null => VerifType::Null,
+            Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
+            Ty::Obj(internal) => VerifType::Object(cw.class_ref(internal)),
+            Ty::Array(ref elem) => {
+                let desc = crate::types::intern(&format!("[{}", elem.descriptor()));
+                VerifType::Object(cw.class_ref(desc))
+            }
+            Ty::Fun(n) => {
+                let iname = crate::types::intern(&Ty::fun_interface(n));
+                VerifType::Object(cw.class_ref(iname))
+            }
+            _ => VerifType::Top,
+        };
+        code.add_frame_if_new(label, locals, vec![stack_item]);
     }
 
     /// Emit an instance method: `this` in slot 0, params from slot 1, `public final` (non-static).
@@ -1221,12 +1498,15 @@ impl<'a> MethodEmitter<'a> {
         self.syms.class_by_internal(internal).map_or(false, |c| c.lateinit_props.contains(name))
     }
 
-    /// After a `lateinit` property's (reference) value is on the stack, throw if it is still null —
-    /// matching Kotlin's uninitialized-property access (a `RuntimeException`; krusty avoids the
-    /// stdlib `UninitializedPropertyAccessException`, but it is caught the same way).
-    fn emit_lateinit_guard(&mut self, prop: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    /// After a `lateinit` companion-static property value is on the stack, throw if null.
+    /// NOTE: this is only called for companion `getstatic` paths where the stack has exactly
+    /// 1 item (the property value). Instance/this property paths use the getter, which has the
+    /// null check built in (so the stack is always clean at the branch target).
+    fn emit_lateinit_guard(&mut self, prop: &str, prop_ty: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         code.dup();
         let ok = code.new_label();
+        // At ok: the dup'd value is on the stack (ifnonnull pops its operand).
+        self.rec_s(ok, prop_ty, code, cw);
         code.ifnonnull(ok);
         let exc = cw.class_ref("java/lang/RuntimeException");
         code.new_obj(exc);
@@ -1235,6 +1515,7 @@ impl<'a> MethodEmitter<'a> {
         let init = cw.methodref("java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V");
         code.invokespecial(init, 1, 0);
         code.athrow();
+        self.rec_s(ok, prop_ty, code, cw);
         code.bind(ok);
     }
 
@@ -1278,21 +1559,61 @@ impl<'a> MethodEmitter<'a> {
                 return;
             }
         }
+        // For value-producing try/catch, allocate a temp slot for the result BEFORE the try body so
+        // every branch-target frame sees the slot as a known type (needed for StackMapTable).
+        let result_tmp = if result != Ty::Unit && result != Ty::Nothing && result != Ty::Error {
+            let tmp = self.alloc_temp(result);
+            self.init_temp(result, tmp, code, cw); // must precede any rec()
+            Some(tmp)
+        } else {
+            None
+        };
+
         let try_start = code.new_label();
         let try_end = code.new_label();
         let after = code.new_label();
 
-        let emit_value = |this: &mut Self, ex: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter| {
-            if result == Ty::Unit {
+        // Emit a try/catch sub-expression: if value-producing, store result to `result_tmp`;
+        // otherwise discard. Stack is always empty after this (safe for StackMapTable frames).
+        let emit_value = |this: &mut Self, ex: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter, result_tmp: Option<u16>| {
+            if let Some(tmp) = result_tmp {
+                this.emit_expr_as(ex, result, code, cw);
+                store_local(result, tmp, code);
+            } else {
                 this.emit_expr(ex, code, cw);
                 this.discard(this.info.ty(ex), code);
-            } else {
-                this.emit_expr_as(ex, result, code, cw);
             }
         };
 
+        // Snapshot locals BEFORE the try body. All try/catch merge-point frames must use this snapshot:
+        // locals declared inside the try body (via alloc_slot) go out of scope after the try, so the
+        // handler frames and the `after` convergence point must not include them. Pre-registering here
+        // (first-wins) prevents any inner alloc_slot from polluting these frames.
+        let handler_locals = self.make_verif_locals(cw);
+        // Pre-register `after`: try-body locals are out of scope at the convergence point.
+        code.add_frame_if_new(after, handler_locals.clone(), vec![]);
+        let catch_handler_labels: Vec<(crate::codegen::classfile::Label, String)> = catches.iter().map(|c| {
+            use crate::codegen::classfile::VerifType;
+            let internal = self.catch_internal(&c.ty.name);
+            let handler = code.new_label();
+            let vt = VerifType::Object(cw.class_ref(&internal));
+            code.add_frame_if_new(handler, handler_locals.clone(), vec![vt]);
+            (handler, internal)
+        }).collect();
+        let fin_label: Option<crate::codegen::classfile::Label> = if finally.is_some() {
+            use crate::codegen::classfile::VerifType;
+            let l = code.new_label();
+            let vt = VerifType::Object(cw.class_ref("java/lang/Throwable"));
+            code.add_frame_if_new(l, handler_locals.clone(), vec![vt]);
+            Some(l)
+        } else {
+            None
+        };
+
+        self.rec(try_start, code, cw);
         code.bind(try_start);
-        emit_value(self, body, code, cw);
+        emit_value(self, body, code, cw, result_tmp);
+        self.rec(try_end, code, cw);
         code.bind(try_end);
         // On normal completion, run the finally inline then jump past everything. If the body diverges
         // (e.g. ends in `throw`), this is unreachable — skip it (the catch-all below runs the finally).
@@ -1300,23 +1621,24 @@ impl<'a> MethodEmitter<'a> {
             if let Some(f) = finally {
                 self.emit_block_discard(f, code, cw);
             }
+            self.rec(after, code, cw); // stack: empty
             code.goto(after);
         }
 
-        // Range of the catch handler bodies, so the finally catch-all also covers a throw in a catch.
+        // Range of the catch handler bodies so the finally catch-all also covers throws in catches.
+        // No frame needed here: catches_start is just an exception-table boundary, not a branch target.
         let catches_start = code.new_label();
         code.bind(catches_start);
-        for c in catches {
-            let internal = self.catch_internal(&c.ty.name);
-            let cty = Ty::obj(&internal);
-            let handler = code.new_label();
-            code.bind(handler);
+        for (c, (handler, internal)) in catches.iter().zip(catch_handler_labels.iter()) {
+            let cty = Ty::obj(internal);
+            // Frame was pre-registered above (first-wins); bind now at the handler bytecode position.
+            code.bind(*handler);
             code.set_stack(1); // the JVM places the caught exception on the stack
             let slot = self.fresh_slot(cty);
             code.ensure_locals(slot + slot_words(cty));
             self.store(cty, slot, code);
             let prev = self.slots.insert(c.name.clone(), (slot, cty));
-            emit_value(self, c.body, code, cw);
+            emit_value(self, c.body, code, cw, result_tmp);
             match prev {
                 Some(p) => {
                     self.slots.insert(c.name.clone(), p);
@@ -1329,16 +1651,19 @@ impl<'a> MethodEmitter<'a> {
                 if let Some(f) = finally {
                     self.emit_block_discard(f, code, cw); // finally after a normally-completing catch
                 }
+                self.rec(after, code, cw); // stack: empty
                 code.goto(after);
             }
-            let cti = cw.class_ref(&internal);
-            code.add_exception(try_start, try_end, handler, cti);
+            let cti = cw.class_ref(internal);
+            code.add_exception(try_start, try_end, *handler, cti);
         }
         // catch-all `finally` handler: run the finally, then re-throw the in-flight exception.
         if let Some(f) = finally {
+            let fin = fin_label.unwrap();
+            // catches_end is just an exception-table boundary, not a branch target; no frame needed.
             let catches_end = code.new_label();
             code.bind(catches_end);
-            let fin = code.new_label();
+            // Frame was pre-registered above (first-wins); bind now at the handler bytecode position.
             code.bind(fin);
             code.set_stack(1);
             let ex_slot = self.fresh_slot(Ty::obj("java/lang/Throwable"));
@@ -1353,7 +1678,11 @@ impl<'a> MethodEmitter<'a> {
                 code.add_exception(catches_start, catches_end, fin, 0);
             }
         }
+        self.rec(after, code, cw); // stack: empty
         code.bind(after);
+        if let Some(tmp) = result_tmp {
+            load_local(result, tmp, code); // push result
+        }
     }
 
     /// True if `e` contains a control transfer that would leave an enclosing `try`, bypassing a
@@ -1467,7 +1796,7 @@ impl<'a> MethodEmitter<'a> {
             Ty::Long => code.lreturn(),
             Ty::Float => code.freturn(),
             Ty::Double => code.dreturn(),
-            Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) => code.areturn(),
+            Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) | Ty::Fun(_) => code.areturn(),
             // `Nothing` only reaches here if a diverging expression somehow fell through; it never
             // produces a value, so a void return is a safe (unreachable) default.
             Ty::Unit | Ty::Nothing | Ty::Error => code.ret_void(),
@@ -1480,12 +1809,13 @@ impl<'a> MethodEmitter<'a> {
             Ty::Long => { code.push_long(0, cw); code.lreturn(); }
             Ty::Double => { code.push_double(0.0, cw); code.dreturn(); }
             Ty::String => { code.push_string("", cw); code.areturn(); }
-            Ty::Obj(_) | Ty::Null => { code.aconst_null(); code.areturn(); }
+            Ty::Obj(_) | Ty::Null | Ty::Fun(_) => { code.aconst_null(); code.areturn(); }
             _ => code.ret_void(),
         }
     }
 
     fn discard(&self, t: Ty, code: &mut CodeBuilder) {
+        if t == Ty::Nothing { return; } // Never returns; athrow already consumed the value
         match slot_words(t) {
             1 => code.pop(),
             2 => code.pop2(),
@@ -1573,6 +1903,7 @@ impl<'a> MethodEmitter<'a> {
             },
             Stmt::Break => {
                 if let Some(&(_, brk)) = self.loop_labels.last() {
+                    self.rec(brk, code, cw);
                     code.goto(brk);
                 } else {
                     self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: 'break' outside a loop".to_string());
@@ -1580,6 +1911,7 @@ impl<'a> MethodEmitter<'a> {
             }
             Stmt::Continue => {
                 if let Some(&(cont, _)) = self.loop_labels.last() {
+                    self.rec(cont, code, cw);
                     code.goto(cont);
                 } else {
                     self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: 'continue' outside a loop".to_string());
@@ -1588,12 +1920,15 @@ impl<'a> MethodEmitter<'a> {
             Stmt::While { cond, body } => {
                 let start = code.new_label();
                 let end = code.new_label();
+                self.rec(start, code, cw);
                 code.bind(start);
                 self.emit_cond_jump(cond, end, false, code, cw); // if !cond goto end
                 self.loop_labels.push((start, end)); // continue → re-test, break → end
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
+                self.rec(start, code, cw);
                 code.goto(start);
+                self.rec(end, code, cw);
                 code.bind(end);
             }
             Stmt::For { name, range, body } => {
@@ -1602,20 +1937,23 @@ impl<'a> MethodEmitter<'a> {
                 let i = self.alloc_slot(&name, Ty::Int);
                 code.istore(i);
                 self.emit_expr_as(range.end, Ty::Int, code, cw);
-                let end_slot = self.fresh_slot(Ty::Int);
+                // alloc_temp so the end/step slots appear in StackMapTable frames at loop back-edge.
+                let end_slot = self.alloc_temp(Ty::Int);
                 code.istore(end_slot);
                 let step_slot = range.step.map(|s| {
                     self.emit_expr_as(s, Ty::Int, code, cw);
-                    let ss = self.fresh_slot(Ty::Int);
+                    let ss = self.alloc_temp(Ty::Int);
                     code.istore(ss);
                     ss
                 });
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
+                self.rec(start, code, cw);
                 code.bind(start);
                 code.iload(i);
                 code.iload(end_slot);
+                self.rec(end, code, cw);
                 match range.kind {
                     RangeKind::Through => code.if_icmpgt(end), // exit when i > end
                     RangeKind::Until => code.if_icmpge(end),   // exit when i >= end
@@ -1624,6 +1962,7 @@ impl<'a> MethodEmitter<'a> {
                 self.loop_labels.push((cont, end)); // continue → the increment step, break → end
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
+                self.rec(cont, code, cw);
                 code.bind(cont);
                 code.iload(i);
                 match step_slot {
@@ -1636,7 +1975,9 @@ impl<'a> MethodEmitter<'a> {
                     code.iadd();
                 }
                 code.istore(i);
+                self.rec(start, code, cw);
                 code.goto(start);
+                self.rec(end, code, cw);
                 code.bind(end);
             }
             Stmt::ForEach { name, iterable, body } => {
@@ -1645,17 +1986,18 @@ impl<'a> MethodEmitter<'a> {
                 let is_string = iter_ty == Ty::String;
                 let elem = if is_string { Ty::Char } else { iter_ty.array_elem().unwrap_or(Ty::Error) };
                 self.emit_expr(iterable, code, cw);
-                let recv_slot = self.fresh_slot(Ty::obj("java/lang/Object"));
-                code.ensure_locals(recv_slot + 1);
+                // alloc_temp so recv/i slots appear in StackMapTable frames at loop back-edge.
+                let recv_slot = self.alloc_temp(iter_ty);
                 code.astore(recv_slot);
-                let i_slot = self.fresh_slot(Ty::Int);
-                code.ensure_locals(i_slot + 1);
+                let i_slot = self.alloc_temp(Ty::Int);
                 code.push_int(0, cw);
                 code.istore(i_slot);
                 let x_slot = self.alloc_slot(&name, elem);
+                self.init_temp(elem, x_slot, code, cw); // slot must be initialized before rec()
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
+                self.rec(start, code, cw);
                 code.bind(start);
                 code.iload(i_slot);
                 code.aload(recv_slot);
@@ -1665,6 +2007,7 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     code.arraylength();
                 }
+                self.rec(end, code, cw);
                 code.if_icmpge(end); // i >= size → done
                 code.aload(recv_slot);
                 code.iload(i_slot);
@@ -1679,9 +2022,12 @@ impl<'a> MethodEmitter<'a> {
                 self.loop_labels.push((cont, end));
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
+                self.rec(cont, code, cw);
                 code.bind(cont);
                 code.iinc(i_slot, 1);
+                self.rec(start, code, cw);
                 code.goto(start);
+                self.rec(end, code, cw);
                 code.bind(end);
             }
             Stmt::Expr(e) => {
@@ -1716,7 +2062,8 @@ impl<'a> MethodEmitter<'a> {
                 }
                 lcode.ensure_locals(self.next_slot);
                 lcode.link();
-                cw.add_method(ACC_PRIVATE | ACC_STATIC, &mangled, &method_descriptor(&sig.params, sig.ret), &lcode);
+                cw.add_method(ACC_STATIC, &mangled, &method_descriptor(&sig.params, sig.ret), &lcode);
+                self.local_fun_emitted_class.insert(mangled.clone(), cw.internal_name.clone());
 
                 self.slots = saved_slots;
                 self.next_slot = saved_next;
@@ -1756,6 +2103,10 @@ impl<'a> MethodEmitter<'a> {
         if from.is_numeric() && target.is_numeric() {
             // Handles both widening (i2l, i2d, …) and narrowing to Byte/Short (i2b/i2s).
             self.emit_numeric_conversion(from, target, code);
+        } else if from == Ty::obj("java/lang/Object") && target.is_reference() && target != Ty::obj("java/lang/Object") {
+            // Erased Object (e.g. from FunctionN.invoke()) narrowed to a concrete reference type.
+            let ci = cw.class_ref(ref_internal(target));
+            code.checkcast(ci);
         }
     }
 
@@ -1769,19 +2120,20 @@ impl<'a> MethodEmitter<'a> {
             Expr::StringLit(s) => code.push_string(&s, cw),
             Expr::CharLit(c) => code.push_int(c as i32, cw),
             Expr::NullLit => code.aconst_null(),
-            // A lambda only reaches codegen as an intercepted `let`/`also` argument (handled in
-            // `emit_call`); a bare one is unsupported (the checker already rejected it).
-            Expr::Lambda { .. } => {
-                self.diags.error(self.file.expr_spans[e.0 as usize], "krusty: unsupported lambda".to_string());
+            Expr::Lambda { param, body } => {
+                self.emit_lambda(e, param.as_deref(), body, code, cw);
             }
             Expr::NotNull { operand } if !self.info.ty(operand).is_reference() => {
                 // `!!` on a non-null primitive (`42!!`) is the operand itself — no null check.
                 self.emit_expr(operand, code, cw);
             }
             Expr::NotNull { operand } => {
+                let result = self.info.ty(e);
                 self.emit_expr(operand, code, cw);
                 code.dup();
                 let ok = code.new_label();
+                // At `ok` the dup'd value is on the stack (ifnonnull pops from the top).
+                self.rec_s(ok, result, code, cw);
                 code.ifnonnull(ok);
                 let npe = cw.class_ref("java/lang/NullPointerException");
                 code.new_obj(npe);
@@ -1789,6 +2141,7 @@ impl<'a> MethodEmitter<'a> {
                 let init = cw.methodref("java/lang/NullPointerException", "<init>", "()V");
                 code.invokespecial(init, 0, 0);
                 code.athrow();
+                self.rec_s(ok, result, code, cw);
                 code.bind(ok);
             }
             Expr::Throw { operand } => {
@@ -1816,30 +2169,40 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::As { operand, ty, nullable } => {
+                let op_ty = self.info.ty(operand);
                 self.emit_expr(operand, code, cw);
                 let tt = resolve_ty(&ty, self.syms);
                 let internal = ref_internal(tt);
                 let ci = cw.class_ref(internal);
+                let cast_ty = Ty::obj(crate::types::intern(internal));
                 if nullable {
                     // `as?`: keep the value if `instanceof T`, else replace with null.
+                    // dup; instanceof pops the dup'd copy → at is_inst, stack = {operand}.
+                    // At end, either {null} or {T}.
                     code.dup();
                     code.instance_of(ci);
                     let is_inst = code.new_label();
                     let end = code.new_label();
+                    self.rec_s(is_inst, op_ty, code, cw);
                     code.ifne(is_inst);
                     code.pop();
                     code.aconst_null();
+                    self.rec_s(end, cast_ty, code, cw);
                     code.goto(end);
+                    self.rec_s(is_inst, op_ty, code, cw);
                     code.bind(is_inst);
                     code.checkcast(ci);
+                    self.rec_s(end, cast_ty, code, cw);
                     code.bind(end);
                 } else {
                     code.checkcast(ci);
                     // `x as T` to a *non-nullable* `T`: a null value throws (Kotlin's null check —
                     // `checkcast` alone lets null through). `x as T?` (nullable) keeps null.
                     if !ty.nullable {
+                        // dup; ifnonnull(ok): at ok, stack = {dup'd cast result}.
                         code.dup();
                         let ok = code.new_label();
+                        self.rec_s(ok, cast_ty, code, cw);
                         code.ifnonnull(ok);
                         let npe = cw.class_ref("java/lang/NullPointerException");
                         code.new_obj(npe);
@@ -1847,6 +2210,7 @@ impl<'a> MethodEmitter<'a> {
                         let init = cw.methodref("java/lang/NullPointerException", "<init>", "()V");
                         code.invokespecial(init, 0, 0);
                         code.athrow();
+                        self.rec_s(ok, cast_ty, code, cw);
                         code.bind(ok);
                     }
                 }
@@ -1860,9 +2224,12 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(lhs, code, cw);
                     code.dup();
                     let end = code.new_label();
+                    // At `end` the stack has 1 item (the non-null lhs or the rhs).
+                    self.rec_s(end, result, code, cw);
                     code.ifnonnull(end);
                     code.pop(); // discard the null
                     self.emit_expr_as(rhs, result, code, cw);
+                    self.rec_s(end, result, code, cw);
                     code.bind(end);
                 }
             }
@@ -1888,12 +2255,22 @@ impl<'a> MethodEmitter<'a> {
             Expr::SafeCall { receiver, name, args } => {
                 let rt = self.info.ty(receiver);
                 let result = self.info.ty(e);
+                // Use temp slots so all branch targets (lnull, end) have empty operand stacks.
+                // Use the precise types so the verifier knows the actual type when loading these slots.
+                let recv_slot = self.alloc_temp(rt);
+                let result_slot = self.alloc_temp(result);
+                code.ensure_locals(self.next_slot);
                 self.emit_expr(receiver, code, cw);
-                code.dup();
+                code.astore(recv_slot);       // recv_slot initialized; must precede any rec()
+                code.aconst_null();
+                code.astore(result_slot);     // result_slot initialized to null; must precede any rec()
                 let lnull = code.new_label();
                 let end = code.new_label();
+                code.aload(recv_slot);
+                self.rec(lnull, code, cw);    // frame: stack empty (ifnull pops its operand)
                 code.ifnull(lnull);
-                // non-null path: receiver value is on the stack.
+                // non-null path: load receiver for the call.
+                code.aload(recv_slot);
                 match &args {
                     None => {
                         // property getter
@@ -1940,11 +2317,17 @@ impl<'a> MethodEmitter<'a> {
                         }
                     }
                 }
+                code.astore(result_slot);     // store result; stack empty
+                self.rec(end, code, cw);      // frame: stack empty
                 code.goto(end);
+                self.rec(lnull, code, cw);    // frame: stack empty (first-wins already set above)
                 code.bind(lnull);
-                code.pop(); // discard the null receiver copy
                 code.aconst_null();
+                code.astore(result_slot);     // store null result
+                self.rec(end, code, cw);
                 code.bind(end);
+                code.aload(result_slot);      // push result (reference or null)
+                let _ = result;
             }
             Expr::Name(n) if n == "this" && (self.is_instance || self.recv.is_some()) => {
                 self.emit_implicit_this(code);
@@ -1962,18 +2345,17 @@ impl<'a> MethodEmitter<'a> {
                 } else if let Some(&ty) = self.class_props.get(&n).filter(|_| self.is_instance || self.recv.is_some()) {
                     // implicit `this.<prop>`: read via the getter in an open class / `run`-`with`-`apply`
                     // receiver (whose backing field is private to its own class); else the field.
+                    // `lateinit` always uses the getter — the null check lives there so it runs with a
+                    // clean stack (exactly one item), regardless of what the caller has accumulated.
                     let owner = self.implicit_class();
                     self.emit_implicit_this(code);
-                    if self.recv.is_some() || self.props_via_getter {
+                    if self.recv.is_some() || self.props_via_getter || self.is_lateinit(&owner, &n) {
                         let getter = format!("get{}", capitalize(&n));
                         let m = cw.methodref(&owner, &getter, &method_descriptor(&[], ty));
                         code.invokevirtual(m, 0, slot_words(ty) as i32);
                     } else {
                         let f = cw.fieldref(&owner, &n, &ty.descriptor());
                         code.getfield(f, slot_words(ty) as i32);
-                    }
-                    if self.is_lateinit(&owner, &n) {
-                        self.emit_lateinit_guard(&n, code, cw);
                     }
                 } else if let Some((cls, ty)) = self
                     .companion_of
@@ -1985,7 +2367,7 @@ impl<'a> MethodEmitter<'a> {
                     let f = cw.fieldref(&cls, &n, &ty.descriptor());
                     code.getstatic(f, slot_words(ty) as i32);
                     if self.is_lateinit(&cls, &n) {
-                        self.emit_lateinit_guard(&n, code, cw);
+                        self.emit_lateinit_guard(&n, ty, code, cw);
                     }
                 } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
                     // top-level property → static field on the file facade.
@@ -2043,7 +2425,7 @@ impl<'a> MethodEmitter<'a> {
                                 let f = cw.fieldref(&internal, &name, &ty.descriptor());
                                 code.getstatic(f, slot_words(ty) as i32);
                                 if lateinit {
-                                    self.emit_lateinit_guard(&name, code, cw);
+                                    self.emit_lateinit_guard(&name, ty, code, cw);
                                 }
                                 return;
                             }
@@ -2090,10 +2472,9 @@ impl<'a> MethodEmitter<'a> {
                         code.invokevirtual(m, 0, rw);
                         return;
                     }
-                    // Property read on a class value: `p.prop` → invokevirtual get<Prop>() (own or
-                    // inherited; invokevirtual resolves up the class hierarchy).
+                    // Property read on a class value: `p.prop` → invokevirtual get<Prop>().
+                    // For `lateinit` properties the null check is inside the getter itself.
                     let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
-                    let lateinit = self.is_lateinit(internal, &name);
                     let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
                     self.emit_expr(receiver, code, cw);
                     let getter = format!("get{}", capitalize(&name));
@@ -2105,9 +2486,6 @@ impl<'a> MethodEmitter<'a> {
                         let m = cw.methodref(internal, &getter, &desc);
                         code.invokevirtual(m, 0, slot_words(pty) as i32);
                     }
-                    if lateinit {
-                        self.emit_lateinit_guard(&name, code, cw);
-                    }
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty v0: member '{name}' not emittable"));
                 }
@@ -2118,18 +2496,50 @@ impl<'a> MethodEmitter<'a> {
                     Some(eb) => {
                         let l_else = code.new_label();
                         let l_end = code.new_label();
-                        self.emit_cond_jump(cond, l_else, false, code, cw); // if !cond goto else
-                        self.emit_expr_as(then_branch, result, code, cw);
-                        code.goto(l_end);
-                        code.bind(l_else);
-                        self.emit_expr_as(eb, result, code, cw);
-                        code.bind(l_end);
+                        if result == Ty::Unit {
+                            // Statement-if with else: discard both branches; stack empty at l_end.
+                            self.emit_cond_jump(cond, l_else, false, code, cw);
+                            self.emit_expr_as(then_branch, result, code, cw);
+                            // Skip goto if then-branch already transferred control (return/throw).
+                            // Emitting dead code after areturn/athrow would require an extra frame.
+                            if !self.expr_diverges(then_branch) {
+                                self.rec(l_end, code, cw);
+                                code.goto(l_end);
+                            }
+                            self.rec(l_else, code, cw); // first-wins; may already be set
+                            code.bind(l_else);
+                            self.emit_expr_as(eb, result, code, cw);
+                            // Always register l_end: needed for dead-code frame when both diverge.
+                            self.rec(l_end, code, cw);
+                            code.bind(l_end);
+                        } else {
+                            // Value-producing if: use a temp slot so the stack is empty at l_end.
+                            let tmp = self.alloc_temp(result);
+                            self.init_temp(result, tmp, code, cw); // must precede any rec()
+                            self.emit_cond_jump(cond, l_else, false, code, cw);
+                            self.emit_expr_as(then_branch, result, code, cw);
+                            if !self.expr_diverges(then_branch) {
+                                store_local(result, tmp, code);
+                                self.rec(l_end, code, cw); // stack: empty
+                                code.goto(l_end);
+                            }
+                            self.rec(l_else, code, cw); // first-wins; may already be set
+                            code.bind(l_else);
+                            self.emit_expr_as(eb, result, code, cw);
+                            if !self.expr_diverges(eb) {
+                                store_local(result, tmp, code);
+                            }
+                            self.rec(l_end, code, cw); // always: dead-code frame when both diverge
+                            code.bind(l_end);
+                            load_local(result, tmp, code); // push result onto stack
+                        }
                     }
                     None => {
                         // statement-if (Unit value)
                         let l_end = code.new_label();
                         self.emit_cond_jump(cond, l_end, false, code, cw);
                         self.emit_block_discard(then_branch, code, cw);
+                        self.rec(l_end, code, cw);
                         code.bind(l_end);
                     }
                 }
@@ -2151,20 +2561,35 @@ impl<'a> MethodEmitter<'a> {
     fn emit_when(&mut self, e: ExprId, subject: Option<ExprId>, arms: &[WhenArm], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let result = self.info.ty(e);
         let end = code.new_label();
+
+        // For value-producing `when`, allocate a temp slot BEFORE processing arms so that every
+        // StackMapTable frame (including those inside condition branches) sees the slot's type.
+        let result_tmp = if result != Ty::Unit && result != Ty::Nothing && result != Ty::Error {
+            let tmp = self.alloc_temp(result);
+            self.init_temp(result, tmp, code, cw); // must precede any rec()
+            Some(tmp)
+        } else {
+            None
+        };
+
         let subj = subject.map(|s| {
             let st = self.info.ty(s);
             self.emit_expr(s, code, cw);
-            let slot = self.fresh_slot(st);
-            self.store(st, slot, code);
+            // alloc_temp (not fresh_slot) so the subject slot appears in all arm frames.
+            let slot = self.alloc_temp(st);
+            self.store(st, slot, code); // initializes the slot before any rec() is called
             (slot, st)
         });
 
-        let emit_body = |this: &mut Self, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter| {
-            if result == Ty::Unit {
+        // Emit the body of one `when` arm. If value-producing, stores to `result_tmp` (stack empty
+        // after); otherwise discards. Stack is always empty after this closure.
+        let emit_body = |this: &mut Self, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter, result_tmp: Option<u16>| {
+            if let Some(tmp) = result_tmp {
+                this.emit_expr_as(body, result, code, cw);
+                store_local(result, tmp, code);
+            } else {
                 this.emit_expr(body, code, cw);
                 this.discard(this.info.ty(body), code);
-            } else {
-                this.emit_expr_as(body, result, code, cw);
             }
         };
 
@@ -2179,8 +2604,10 @@ impl<'a> MethodEmitter<'a> {
                         let ci = cw.class_ref(ref_internal(resolve_ty(&ty, self.syms)));
                         code.instance_of(ci);
                         if negated {
+                            self.rec(body, code, cw);
                             code.ifeq(body);
                         } else {
+                            self.rec(body, code, cw);
                             code.ifne(body);
                         }
                     }
@@ -2188,19 +2615,23 @@ impl<'a> MethodEmitter<'a> {
                     (None, _) => self.emit_cond_jump(cnd, body, true, code, cw),
                 }
             }
+            self.rec(next, code, cw);
             code.goto(next); // no condition matched → try the next arm
+            self.rec(body, code, cw);
             code.bind(body);
-            emit_body(self, arm.body, code, cw);
+            emit_body(self, arm.body, code, cw, result_tmp);
             // Skip the (dead) jump to `end` if the body already diverges (e.g. all arms `return`),
             // which would otherwise leave a branch targeting the method end.
             if !self.expr_diverges(arm.body) {
+                self.rec(end, code, cw); // stack: empty (result stored to tmp)
                 code.goto(end);
             }
+            self.rec(next, code, cw);
             code.bind(next);
         }
         // Falls here when nothing matched: the `else` body (if any) produces the value.
         if let Some(arm) = arms.iter().find(|a| a.conditions.is_empty()) {
-            emit_body(self, arm.body, code, cw);
+            emit_body(self, arm.body, code, cw, result_tmp);
         } else if result != Ty::Unit {
             // An exhaustive `when` used as an expression (the checker proved sealed-exhaustiveness, so
             // there is no `else`): the no-match path is unreachable, but every path must produce a
@@ -2212,7 +2643,11 @@ impl<'a> MethodEmitter<'a> {
             code.invokespecial(init, 0, 0);
             code.athrow();
         }
+        self.rec(end, code, cw); // stack: empty
         code.bind(end);
+        if let Some(tmp) = result_tmp {
+            load_local(result, tmp, code); // push result onto stack
+        }
     }
 
     /// Conservatively: does evaluating `e` always transfer control away (never fall through)?
@@ -2239,24 +2674,28 @@ impl<'a> MethodEmitter<'a> {
             Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => {
                 code.iload(slot);
                 self.emit_expr_as(cond, st, code, cw);
+                self.rec(target, code, cw);
                 code.if_icmpeq(target);
             }
             Ty::Long => {
                 code.lload(slot);
                 self.emit_expr_as(cond, st, code, cw);
                 code.lcmp();
+                self.rec(target, code, cw);
                 code.ifeq(target);
             }
             Ty::Double => {
                 code.dload(slot);
                 self.emit_expr_as(cond, st, code, cw);
                 code.dcmpg();
+                self.rec(target, code, cw);
                 code.ifeq(target);
             }
             Ty::Float => {
                 code.fload(slot);
                 self.emit_expr_as(cond, st, code, cw);
                 code.fcmpg();
+                self.rec(target, code, cw);
                 code.ifeq(target);
             }
             _ => {
@@ -2265,6 +2704,7 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(cond, code, cw);
                 let eqm = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
                 code.invokestatic(eqm, 2, 1);
+                self.rec(target, code, cw);
                 code.ifne(target);
             }
         }
@@ -2276,13 +2716,21 @@ impl<'a> MethodEmitter<'a> {
             Expr::Binary { op, lhs, rhs } if is_cmp(op) || op == BinOp::And || op == BinOp::Or => {
                 let l_true = code.new_label();
                 let l_end = code.new_label();
-                // jump to l_true when the condition holds, else fall through to push 0
+                // Use a temp slot so the stack is empty at l_end (required for StackMapTable).
+                let tmp = self.alloc_temp(Ty::Int);
+                self.init_temp(Ty::Int, tmp, code, cw); // must precede any rec(); verifier needs slot initialized
                 self.emit_cond_jump(e, l_true, true, code, cw);
                 code.push_int(0, cw);
+                code.istore(tmp);
+                self.rec(l_end, code, cw); // stack: empty
                 code.goto(l_end);
+                self.rec(l_true, code, cw);
                 code.bind(l_true);
                 code.push_int(1, cw);
+                code.istore(tmp);
+                self.rec(l_end, code, cw);
                 code.bind(l_end);
+                code.iload(tmp); // push result
                 let _ = (op, lhs, rhs);
             }
             Expr::Unary { op: UnOp::Not, operand } => {
@@ -2303,6 +2751,7 @@ impl<'a> MethodEmitter<'a> {
                     let skip = code.new_label();
                     self.emit_cond_jump(lhs, skip, false, code, cw);
                     self.emit_cond_jump(rhs, target, true, code, cw);
+                    self.rec(skip, code, cw);
                     code.bind(skip);
                 } else {
                     // jump if !(lhs && rhs) = !lhs || !rhs
@@ -2318,6 +2767,7 @@ impl<'a> MethodEmitter<'a> {
                     let skip = code.new_label();
                     self.emit_cond_jump(lhs, skip, true, code, cw);
                     self.emit_cond_jump(rhs, target, false, code, cw);
+                    self.rec(skip, code, cw);
                     code.bind(skip);
                 }
             }
@@ -2332,8 +2782,10 @@ impl<'a> MethodEmitter<'a> {
                 // arbitrary boolean value: compare against 0
                 self.emit_expr(cond, code, cw);
                 if want {
+                    self.rec(target, code, cw);
                     code.ifne(target);
                 } else {
+                    self.rec(target, code, cw);
                     code.ifeq(target);
                 }
             }
@@ -2347,6 +2799,7 @@ impl<'a> MethodEmitter<'a> {
         if lt == Ty::Null || rt == Ty::Null {
             let val = if lt == Ty::Null { rhs } else { lhs };
             self.emit_expr(val, code, cw);
+            self.rec(target, code, cw);
             match op {
                 BinOp::Eq => code.ifnull(target),
                 BinOp::Ne => code.ifnonnull(target),
@@ -2357,6 +2810,7 @@ impl<'a> MethodEmitter<'a> {
         let common = Ty::promote(lt, rt).unwrap_or(lt);
         self.emit_expr_as(lhs, common, code, cw);
         self.emit_expr_as(rhs, common, code, cw);
+        self.rec(target, code, cw);
         match common {
             Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => match op {
                 BinOp::Lt => code.if_icmplt(target),
@@ -2397,6 +2851,8 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn cmp0(&mut self, op: BinOp, target: Label, code: &mut CodeBuilder) {
+        // NOTE: rec() cannot be called here (no cw), but cmp0 is only reached from
+        // emit_compare_jump which calls self.rec(target, code, cw) before the dispatch.
         match op {
             BinOp::Lt => code.iflt(target),
             BinOp::Le => code.ifle(target),
@@ -2457,9 +2913,35 @@ impl<'a> MethodEmitter<'a> {
         code.invokevirtual(to_s, 0, 1);
     }
 
+    /// Returns true when `emit_bool(e)` emits branch instructions that register StackMapTable
+    /// frames requiring an empty operand stack.
+    fn bool_uses_branching(&self, e: ExprId) -> bool {
+        match self.file.expr(e) {
+            Expr::Binary { op, .. } => is_cmp(*op) || *op == BinOp::And || *op == BinOp::Or,
+            Expr::Unary { op: UnOp::Not, operand } => self.bool_uses_branching(*operand),
+            _ => false,
+        }
+    }
+
     fn emit_append(&mut self, e: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let t = self.info.ty(e);
-        self.emit_expr(e, code, cw);
+        if t == Ty::Boolean && self.bool_uses_branching(e) {
+            // Branching boolean evaluation registers StackMapTable frames that require an empty
+            // operand stack. Save the StringBuilder so those inner frames see an empty stack,
+            // then rebuild {SB, bool} for the append call.
+            // alloc_temp (not fresh_slot) so that frames inside emit_bool correctly type sb_tmp.
+            let sb_tmp = self.alloc_temp(Ty::obj("java/lang/StringBuilder"));
+            code.astore(sb_tmp); // astore initializes sb_tmp; no init_temp needed before rec()
+            self.emit_expr(e, code, cw); // bool on stack; inner frames see empty stack ✓
+            // After emit_bool, the bool is on the stack. Save it and rebuild {SB, bool}.
+            // fresh_slot: no rec() calls follow, so the slot needn't appear in self.slots.
+            let bool_raw = self.fresh_slot(Ty::Int);
+            code.istore(bool_raw);
+            code.aload(sb_tmp);
+            code.iload(bool_raw);
+        } else {
+            self.emit_expr(e, code, cw);
+        }
         let (desc, words) = match t {
             Ty::Int | Ty::Byte | Ty::Short => ("(I)Ljava/lang/StringBuilder;", 1),
             Ty::Boolean => ("(Z)Ljava/lang/StringBuilder;", 1),
@@ -2513,7 +2995,127 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
+    /// Emit a lambda literal `{ [param ->] body }` as an anonymous class implementing
+    /// `kotlin/jvm/functions/FunctionN`. The anonymous class is registered via the thread-local
+    /// `LAMBDA_CLASSES` and the call site pushes a fresh instance: `new Anon; dup; invokespecial`.
+    fn emit_lambda(&mut self, e: ExprId, param: Option<&str>, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        // Infer arity: explicit param → 1; no param but body uses `it` → 1 (implicit param); else 0.
+        let (arity, bind_name): (u8, Option<&str>) = if let Some(p) = param {
+            (1, Some(p))
+        } else if crate::resolve::expr_uses_name_pub(self.file, body, "it") {
+            (1, Some("it"))
+        } else {
+            (0, None)
+        };
+        let iface = Ty::fun_interface(arity);
+        let anon_name = format!("{}$lambda${n}", self.class);
+
+        // Build the anonymous class implementing FunctionN.
+        let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
+        acw.add_interface(&iface);
+
+        // <init>()V
+        {
+            let mut init_code = CodeBuilder::new(1);
+            init_code.aload(0);
+            let obj_init = acw.methodref("java/lang/Object", "<init>", "()V");
+            init_code.invokespecial(obj_init, 0, 0);
+            init_code.ret_void();
+            init_code.link();
+            acw.add_method(ACC_PUBLIC, "<init>", "()V", &init_code);
+        }
+
+        // invoke([Object...])Object — emit the lambda body.
+        {
+            // Build invoke descriptor: (Object*)Object
+            let invoke_desc_str: String = {
+                let mut d = String::from("(");
+                for _ in 0..arity {
+                    d.push_str("Ljava/lang/Object;");
+                }
+                d.push_str(")Ljava/lang/Object;");
+                d
+            };
+            let body_locals = 1 + arity as u16; // slot 0 = this, slots 1..arity = params
+            let mut invoke_code = CodeBuilder::new(body_locals + 16); // extra headroom
+
+            // Build a scratch MethodEmitter to emit the lambda body.
+            // We need to bind the lambda parameter (if any) to the Object-typed slot.
+            let mut le = MethodEmitter::new(self.file, self.info, self.syms, &self.class.clone(), self.imports, self.diags);
+            le.lambda_counter = self.lambda_counter;
+            le.ret_ty = Ty::obj("java/lang/Object");
+            le.is_instance = true; // slot 0 = this (the anonymous object)
+            le.local_fun_emitted_class = self.local_fun_emitted_class.clone();
+            le.inside_lambda = true;
+            le.file_facade = self.file_facade.clone();
+            le.next_slot = 1; // skip `this`
+            if let Some(p) = bind_name {
+                le.slots.insert(p.to_string(), (1, Ty::obj("java/lang/Object")));
+                le.next_slot = 1 + arity as u16;
+            }
+
+            // Emit the body expression; box the result if it's a primitive.
+            let body_ty = self.info.ty(body);
+            le.emit_expr(body, &mut invoke_code, &mut acw);
+            emit_box(body_ty, &mut invoke_code, &mut acw);
+            if body_ty == Ty::Unit {
+                // Unit body: push null as the Object result.
+                invoke_code.aconst_null();
+            }
+            invoke_code.areturn();
+            invoke_code.ensure_locals(le.next_slot.max(body_locals));
+            invoke_code.link();
+            acw.add_method(ACC_PUBLIC, "invoke", &invoke_desc_str, &invoke_code);
+
+            // Propagate sub-lambda counter and local fun class tracking.
+            self.lambda_counter = le.lambda_counter;
+            self.local_fun_emitted_class.extend(le.local_fun_emitted_class);
+        }
+
+        let anon_bytes = acw.finish();
+        // Ensure the FunctionN interface stub class is in the output so the program is
+        // self-contained without kotlin-stdlib on the runtime classpath.
+        ensure_function_stub(arity);
+        push_lambda_class(anon_name.clone(), anon_bytes);
+
+        // At the call site: `new AnonClass; dup; invokespecial <init>()V`.
+        // Mark the enclosing method as needing a StackMapTable (lambda `new` + branches triggers
+        // the Java 25 type-checking verifier to require explicit frame entries).
+        let ci = cw.class_ref(&anon_name);
+        code.set_needs_stackmap();
+        code.new_obj(ci);
+        code.dup();
+        let init = cw.methodref(&anon_name, "<init>", "()V");
+        code.invokespecial(init, 0, 0);
+
+        // The type of this expression is Fun(arity) — set it so that callers can use the value.
+        let _ = e;
+    }
+
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // IIFE: `{ [p ->] body }([arg])` — inline the lambda body so it can read/write outer locals.
+        if let Expr::Lambda { param, body } = self.file.expr(callee).clone() {
+            if let Some(pname) = param {
+                if let Some(&arg) = args.first() {
+                    let arg_ty = self.info.ty(arg);
+                    self.emit_expr(arg, code, cw);
+                    let slot = self.fresh_slot(arg_ty);
+                    code.ensure_locals(slot + slot_words(arg_ty));
+                    self.store(arg_ty, slot, code);
+                    let prev = self.slots.insert(pname.clone(), (slot, arg_ty));
+                    self.emit_expr(body, code, cw);
+                    match prev {
+                        Some(p) => { self.slots.insert(pname, p); }
+                        None => { self.slots.remove(&pname); }
+                    }
+                }
+            } else {
+                self.emit_expr(body, code, cw);
+            }
+            return;
+        }
         // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
@@ -2572,6 +3174,11 @@ impl<'a> MethodEmitter<'a> {
         // `super.method(args)` → aload 0; args; invokespecial Super.method (non-virtual dispatch).
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
+                if self.inside_lambda {
+                    self.diags.error(self.file.expr_spans[e.0 as usize],
+                        "krusty: super call inside lambda not supported".to_string());
+                    return;
+                }
                 let sup = self
                     .syms
                     .class_by_internal(&self.class.clone())
@@ -2691,7 +3298,8 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr(*a, code, cw);
                 }
                 let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = cw.methodref("java/lang/String", &name, desc);
+                let jvm_name = crate::resolve::string_kotlin_to_jvm(&name);
+                let m = cw.methodref("java/lang/String", jvm_name, desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
             // `"literal".trimIndent()` / `.trimMargin()` — folded at compile time (the receiver must
@@ -2762,6 +3370,25 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref(internal, &name, &desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
+            // Extension / static method from classpath (e.g. Kotlin stdlib StringsKt.uppercase).
+            // Receiver is pushed first, then the rest of the args → invokestatic.
+            Expr::Member { receiver, .. }
+                if self.info.ext_calls.contains_key(&e) =>
+            {
+                let (owner, jvm_name, desc) = self.info.ext_calls[&e].clone();
+                let recv_ty = self.info.ty(receiver);
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+                let ret_desc = desc[desc.find(')').unwrap() + 1..].to_string();
+                let ret = crate::resolve::desc_to_ty(&ret_desc);
+                self.emit_expr(receiver, code, cw);
+                for &a in args {
+                    self.emit_expr(a, code, cw);
+                }
+                let recv_words = slot_words(recv_ty) as i32;
+                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = cw.methodref(&owner, &jvm_name, &desc);
+                code.invokestatic(m, recv_words + arg_words, slot_words(ret) as i32);
+            }
             // Precondition intrinsics (`require`/`check`/`assert(cond)`, `error(msg)`, `TODO()`).
             Expr::Name(fname)
                 if !self.syms.funs.contains_key(&fname)
@@ -2786,8 +3413,10 @@ impl<'a> MethodEmitter<'a> {
                         let exc = if fname == "require" { "java/lang/IllegalArgumentException" } else if fname == "check" { "java/lang/IllegalStateException" } else { "java/lang/AssertionError" };
                         self.emit_expr_as(args[0], Ty::Boolean, code, cw);
                         let ok = code.new_label();
+                        self.rec(ok, code, cw);
                         code.ifne(ok); // condition true → continue
                         throw(code, cw, exc, None, self);
+                        self.rec(ok, code, cw);
                         code.bind(ok);
                     }
                     "error" => throw(code, cw, "java/lang/IllegalStateException", Some(&args[0]), self),
@@ -2798,6 +3427,7 @@ impl<'a> MethodEmitter<'a> {
                         let ok = code.new_label();
                         self.emit_compare_jump(BinOp::Eq, args[0], args[1], ok, code, cw);
                         throw(code, cw, "java/lang/AssertionError", args.get(2), self);
+                        self.rec(ok, code, cw);
                         code.bind(ok);
                     }
                     // assertTrue(cond[, msg]) / assertFalse(cond[, msg]).
@@ -2805,11 +3435,14 @@ impl<'a> MethodEmitter<'a> {
                         self.emit_expr_as(args[0], Ty::Boolean, code, cw);
                         let ok = code.new_label();
                         if fname == "assertTrue" {
+                            self.rec(ok, code, cw);
                             code.ifne(ok); // true → pass
                         } else {
+                            self.rec(ok, code, cw);
                             code.ifeq(ok); // false → pass
                         }
                         throw(code, cw, "java/lang/AssertionError", args.get(1), self);
+                        self.rec(ok, code, cw);
                         code.bind(ok);
                     }
                     _ => unreachable!(),
@@ -2935,6 +3568,27 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
+                // Calling a local variable of function type: `f()` where `f: () -> String`.
+                if let Some(&(slot, Ty::Fun(arity))) = self.slots.get(&fname) {
+                    load_local(Ty::Fun(arity), slot, code);
+                    self.emit_fun_invoke(arity, args, code, cw);
+                    return;
+                }
+                // Calling a class property of function type: `fnc()` where `val fnc: () -> String`.
+                if let Some(&Ty::Fun(arity)) = self.class_props.get(&fname).filter(|_| self.is_instance || self.recv.is_some()) {
+                    let owner = self.implicit_class();
+                    self.emit_implicit_this(code);
+                    if self.recv.is_some() || self.props_via_getter {
+                        let getter = format!("get{}", capitalize(&fname));
+                        let m = cw.methodref(&owner, &getter, &method_descriptor(&[], Ty::Fun(arity)));
+                        code.invokevirtual(m, 0, 1);
+                    } else {
+                        let f = cw.fieldref(&owner, &fname, &Ty::Fun(arity).descriptor());
+                        code.getfield(f, 1);
+                    }
+                    self.emit_fun_invoke(arity, args, code, cw);
+                    return;
+                }
                 // Local function call → invokestatic with mangled name on the same class.
                 if let Some((mangled, sig)) = self.info.local_fun_for_call(e).map(|(n, s)| (n.to_string(), s.clone())) {
                     for (a, &pty) in args.iter().zip(&sig.params) {
@@ -2942,7 +3596,8 @@ impl<'a> MethodEmitter<'a> {
                     }
                     let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
                     let ret_words = slot_words(sig.ret) as i32;
-                    let m = cw.methodref(&self.class.clone(), &mangled, &method_descriptor(&sig.params, sig.ret));
+                    let host = self.local_fun_emitted_class.get(&mangled).cloned().unwrap_or_else(|| self.class.clone());
+                    let m = cw.methodref(&host, &mangled, &method_descriptor(&sig.params, sig.ret));
                     code.invokestatic(m, arg_words, ret_words);
                     return;
                 }
@@ -3005,7 +3660,8 @@ impl<'a> MethodEmitter<'a> {
                         code.array_store(sop, swords);
                     }
                     let arg_words: i32 = sig.params[..fixed].iter().map(|t| slot_words(*t) as i32).sum::<i32>() + 1;
-                    let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));
+                    let owner = self.file_facade.clone();
+                    let m = cw.methodref(&owner, &fname, &method_descriptor(&sig.params, sig.ret));
                     code.invokestatic(m, arg_words, slot_words(sig.ret) as i32);
                     return;
                 }
@@ -3056,13 +3712,45 @@ impl<'a> MethodEmitter<'a> {
                 }
                 let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
                 let ret_words = slot_words(sig.ret) as i32;
-                let m = cw.methodref(&self.class.clone(), &fname, &method_descriptor(&sig.params, sig.ret));
+                let owner = self.file_facade.clone();
+                let m = cw.methodref(&owner, &fname, &method_descriptor(&sig.params, sig.ret));
                 code.invokestatic(m, arg_words, ret_words);
             }
             _ => {
-                self.diags.error(self.file.expr_spans[e.0 as usize], "krusty v0: unsupported call form");
+                // Generic callee expression of function type.
+                let callee_ty = self.info.ty(callee);
+                if let Ty::Fun(arity) = callee_ty {
+                    self.emit_expr(callee, code, cw);
+                    self.emit_fun_invoke(arity, args, code, cw);
+                } else {
+                    self.diags.error(self.file.expr_spans[e.0 as usize], "krusty v0: unsupported call form");
+                }
             }
         }
+    }
+
+    /// Emit the `invokeinterface FunctionN.invoke(...)Object` sequence, with the function value
+    /// already on the stack. Boxes primitive arguments.
+    fn emit_fun_invoke(&mut self, arity: u8, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let iface = Ty::fun_interface(arity);
+        // Push each argument, boxing primitives to Object.
+        for &a in args {
+            let aty = self.info.ty(a);
+            self.emit_expr(a, code, cw);
+            emit_box(aty, code, cw);
+        }
+        // Descriptor: invoke(Object*)Object
+        let invoke_desc: String = {
+            let mut d = String::from("(");
+            for _ in 0..arity {
+                d.push_str("Ljava/lang/Object;");
+            }
+            d.push_str(")Ljava/lang/Object;");
+            d
+        };
+        let m = cw.interface_methodref(&iface, "invoke", &invoke_desc);
+        // invokeinterface: consumes 1 (receiver) + arity (args), pushes 1 (result).
+        code.invokeinterface(m, arity as i32, 1);
     }
 }
 
@@ -3090,6 +3778,21 @@ fn slot_words(t: Ty) -> u16 {
         Ty::Unit => 0,
         _ => 1,
     }
+}
+
+/// Box a primitive type to its wrapper — leaves reference types unchanged.
+fn emit_box(ty: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    let (wrapper, desc) = match ty {
+        Ty::Int | Ty::Byte | Ty::Short => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
+        Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;"),
+        Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;"),
+        Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;"),
+        Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
+        Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;"),
+        _ => return, // already a reference, no boxing needed
+    };
+    let m = cw.methodref(wrapper, "valueOf", desc);
+    code.invokestatic(m, slot_words(ty) as i32, 1);
 }
 
 #[cfg(test)]

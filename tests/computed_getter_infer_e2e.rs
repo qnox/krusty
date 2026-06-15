@@ -50,7 +50,7 @@ fn computed_getter_infer_run() {
     let dir = std::env::temp_dir().join(format!("krusty_cgi_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("CgiKt.class"), emit_file(&files[0], &info, &syms, "CgiKt", &mut d)).unwrap();
+    fs::write(dir.join("CgiKt.class"), emit_file(&files[0], &info, &syms, "CgiKt", &mut d).0).unwrap();
     let rect = files[0]
         .decls
         .iter()
@@ -59,7 +59,7 @@ fn computed_getter_infer_run() {
             _ => None,
         })
         .expect("Rect decl");
-    fs::write(dir.join("Rect.class"), emit_class(&rect, &files[0], &info, "Rect", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Rect.class"), emit_class(&rect, &files[0], &info, "Rect", "Rect", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

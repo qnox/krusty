@@ -57,7 +57,7 @@ fn lateinit_run() {
     let dir = std::env::temp_dir().join(format!("krusty_li_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("LiKt.class"), emit_file(&files[0], &info, &syms, "LiKt", &mut d)).unwrap();
+    fs::write(dir.join("LiKt.class"), emit_file(&files[0], &info, &syms, "LiKt", &mut d).0).unwrap();
     let svc = files[0]
         .decls
         .iter()
@@ -66,7 +66,7 @@ fn lateinit_run() {
             _ => None,
         })
         .expect("Service decl");
-    fs::write(dir.join("Service.class"), emit_class(&svc, &files[0], &info, "Service", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Service.class"), emit_class(&svc, &files[0], &info, "Service", "Service", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

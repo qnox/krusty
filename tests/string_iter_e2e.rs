@@ -48,7 +48,7 @@ fn string_iter_run() {
     let syms = collect_signatures(&files, &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
-    let bytes = emit_file(&files[0], &info, &syms, "SiKt", &mut d);
+    let (bytes, _) = emit_file(&files[0], &info, &syms, "SiKt", &mut d);
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     let dir = std::env::temp_dir().join(format!("krusty_si_{}", std::process::id()));

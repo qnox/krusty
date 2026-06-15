@@ -61,7 +61,7 @@ fn float_run() {
     let dir = std::env::temp_dir().join(format!("krusty_float_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("FloatKt.class"), emit_file(&files[0], &info, &syms, "FloatKt", &mut d)).unwrap();
+    fs::write(dir.join("FloatKt.class"), emit_file(&files[0], &info, &syms, "FloatKt", &mut d).0).unwrap();
     let v = files[0]
         .decls
         .iter()
@@ -70,7 +70,7 @@ fn float_run() {
             _ => None,
         })
         .expect("V decl");
-    fs::write(dir.join("V.class"), emit_class(&v, &files[0], &info, "V", &syms, &mut d)).unwrap();
+    fs::write(dir.join("V.class"), emit_class(&v, &files[0], &info, "V", "V", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

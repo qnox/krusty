@@ -31,7 +31,7 @@ fn compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> {
             _ => None,
         })
         .expect("class decl");
-    emit_class(&cd, &files[0], &info, internal, &syms, &mut d)
+    emit_class(&cd, &files[0], &info, internal, internal, &syms, &mut d).0
 }
 
 #[test]

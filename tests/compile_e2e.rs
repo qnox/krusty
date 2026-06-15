@@ -22,7 +22,7 @@ fn compile(src: &str, internal_name: &str) -> Result<Vec<u8>, Vec<String>> {
     let files = vec![file];
     let syms = collect_signatures(&files, &mut diags);
     let info = check_file(&files[0], &syms, &mut diags);
-    let bytes = emit_file(&files[0], &info, &syms, internal_name, &mut diags);
+    let (bytes, _) = emit_file(&files[0], &info, &syms, internal_name, &mut diags);
     if diags.has_errors() {
         return Err(diags.diags.iter().map(|d| d.msg.clone()).collect());
     }

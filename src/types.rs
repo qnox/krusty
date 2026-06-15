@@ -56,6 +56,9 @@ pub enum Ty {
     Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
+    /// A Kotlin function type `(A, B) -> R`, erased to `kotlin/jvm/functions/FunctionN` at the JVM
+    /// level (where N is the arity). Parameter and return types are erased.
+    Fun(u8),
 }
 
 impl Ty {
@@ -124,6 +127,7 @@ impl Ty {
             Ty::Nothing => "Nothing",
             Ty::Array(_) => "Array",
             Ty::Error => "<error>",
+            Ty::Fun(_) => "Function",
         }
     }
 
@@ -137,7 +141,7 @@ impl Ty {
 
     /// True for JVM reference types (where `null` is a valid value).
     pub fn is_reference(self) -> bool {
-        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_))
+        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) | Ty::Fun(_))
     }
 
     pub fn is_numeric(self) -> bool {
@@ -162,7 +166,13 @@ impl Ty {
             Ty::Nothing => "Ljava/lang/Object;".into(),
             Ty::Array(elem) => format!("[{}", elem.descriptor()),
             Ty::Error => "Ljava/lang/Object;".into(),
+            Ty::Fun(n) => format!("Lkotlin/jvm/functions/Function{n};"),
         }
+    }
+
+    /// The `kotlin/jvm/functions/FunctionN` interface internal name for a `Fun(n)` type.
+    pub fn fun_interface(n: u8) -> String {
+        format!("kotlin/jvm/functions/Function{n}")
     }
 
     /// Numeric promotion rank for binary arithmetic (Int < Long < Double).

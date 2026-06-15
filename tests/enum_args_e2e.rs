@@ -55,7 +55,7 @@ fn enum_args_run() {
     let dir = std::env::temp_dir().join(format!("krusty_en_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("EnKt.class"), emit_file(&files[0], &info, &syms, "EnKt", &mut d)).unwrap();
+    fs::write(dir.join("EnKt.class"), emit_file(&files[0], &info, &syms, "EnKt", &mut d).0).unwrap();
     let pl = files[0]
         .decls
         .iter()
@@ -64,7 +64,7 @@ fn enum_args_run() {
             _ => None,
         })
         .expect("Planet decl");
-    fs::write(dir.join("Planet.class"), emit_class(&pl, &files[0], &info, "Planet", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Planet.class"), emit_class(&pl, &files[0], &info, "Planet", "Planet", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

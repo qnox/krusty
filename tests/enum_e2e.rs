@@ -30,7 +30,7 @@ fn enum_shape() {
         Decl::Class(c) => Some(c.clone()),
         _ => None,
     }).unwrap();
-    let ci = parse_class(&emit_class(&cd, &files[0], &info, "Color", &syms, &mut d)).unwrap();
+    let ci = parse_class(&emit_class(&cd, &files[0], &info, "Color", "Color", &syms, &mut d).0).unwrap();
     assert_eq!(ci.super_class.as_deref(), Some("java/lang/Enum"));
     for e in ["RED", "GREEN", "BLUE"] {
         assert!(ci.fields.iter().any(|f| f.name == e && f.descriptor == "LColor;"), "entry field {e}");

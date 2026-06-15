@@ -1,6 +1,6 @@
 //! A hand-written JVM class-file writer (the format is well-specified; no external crate).
-//! Targets major version 52 (Java 8) to match kotlinc's default JVM target. Straight-line methods
-//! need no `StackMapTable`; branch frames are added in Phase 4 (see `emit.rs`).
+//! Targets major version 50 (Java 6). Methods that create lambda objects (new $lambda$N) emit a
+//! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
 use std::collections::HashMap;
 
@@ -12,11 +12,32 @@ pub const ACC_SUPER: u16 = 0x0020;
 pub const ACC_INTERFACE: u16 = 0x0200;
 pub const ACC_ABSTRACT: u16 = 0x0400;
 
-// v0 targets major 50 (Java 6): its verifier falls back to the type-inference verifier when a
-// method has no StackMapTable, so branchy methods verify without us computing frames yet. Upgrading
-// to 52 (kotlinc's default) + StackMapTable is a hardening item (plan Phase 4e). Java 8+ JVMs load
-// v50 classes fine, so output stays consumable.
-const MAJOR_JAVA6: u16 = 50;
+// Major 52 = Java 8, matching kotlinc's default JVM target.
+const MAJOR_JAVA8: u16 = 52;
+
+/// JVM verification type for StackMapTable entries (JVMS §4.7.4).
+#[derive(Clone, PartialEq)]
+pub enum VerifType {
+    Top,
+    Integer,
+    Float,
+    Long,
+    Double,
+    Null,
+    Object(u16), // constant-pool index of a Class entry
+}
+
+fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
+    match vt {
+        VerifType::Top => out.push(0),
+        VerifType::Integer => out.push(1),
+        VerifType::Float => out.push(2),
+        VerifType::Double => out.push(3),
+        VerifType::Long => out.push(4),
+        VerifType::Null => out.push(5),
+        VerifType::Object(idx) => { out.push(7); u2(out, *idx); }
+    }
+}
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
@@ -178,6 +199,8 @@ struct MethodInfo {
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
     /// constant-pool class index, or 0 for a catch-all.
     exceptions: Vec<(u16, u16, u16, u16)>,
+    /// Pre-built StackMapTable attribute body (after name+length fields). `None` if no frames.
+    stackmap: Option<Vec<u8>>,
 }
 
 struct FieldInfo {
@@ -195,6 +218,7 @@ pub struct ClassWriter {
     fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
+    pub internal_name: String,
 }
 
 impl ClassWriter {
@@ -211,6 +235,7 @@ impl ClassWriter {
             fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
+            internal_name: internal_name.to_string(),
         }
     }
 
@@ -229,7 +254,7 @@ impl ClassWriter {
     pub fn add_abstract_method(&mut self, access: u16, name: &str, desc: &str) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
-        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None, exceptions: Vec::new() });
+        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None, exceptions: Vec::new(), stackmap: None });
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
@@ -322,6 +347,7 @@ impl ClassWriter {
     pub fn add_method(&mut self, access: u16, name: &str, desc: &str, code: &CodeBuilder) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
+        let stackmap = code.build_stackmap();
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -330,15 +356,17 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             exceptions: code.resolved_exceptions(),
+            stackmap,
         });
     }
 
     pub fn finish(mut self) -> Vec<u8> {
         let code_attr_name = self.cp.utf8("Code");
+        let stackmap_attr_name = self.cp.utf8("StackMapTable");
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
-        u2(&mut out, MAJOR_JAVA6);
+        u2(&mut out, MAJOR_JAVA8);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);
@@ -365,7 +393,13 @@ impl ClassWriter {
                     u2(&mut out, 1); // attributes: Code
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
-                    let attr_len = 2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2;
+                    let sm_overhead = match &m.stackmap {
+                        None => 0,
+                        Some(sm) => 2 + 4 + sm.len(), // name_idx + length + body
+                    };
+                    let num_code_attrs: u16 = if m.stackmap.is_some() { 1 } else { 0 };
+                    // Code attr body: max_stack(2) + max_locals(2) + code_len(4) + code + exception_count(2) + exceptions + code_attrs_count(2) + [stackmap]
+                    let attr_len = 2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2 + sm_overhead;
                     u4(&mut out, attr_len as u32);
                     u2(&mut out, m.max_stack);
                     u2(&mut out, m.max_locals);
@@ -378,7 +412,12 @@ impl ClassWriter {
                         u2(&mut out, handler);
                         u2(&mut out, catch_type);
                     }
-                    u2(&mut out, 0); // code attributes
+                    u2(&mut out, num_code_attrs);
+                    if let Some(sm) = &m.stackmap {
+                        u2(&mut out, stackmap_attr_name);
+                        u4(&mut out, sm.len() as u32);
+                        out.extend_from_slice(sm);
+                    }
                 }
             }
         }
@@ -413,6 +452,12 @@ pub struct CodeBuilder {
     fixups: Vec<(usize, u32)>, // (operand position, label id) to patch in link()
     /// Exception-table entries by label: `(start, end, handler, catch_type)`, resolved in `link()`.
     exceptions: Vec<(Label, Label, Label, u16)>,
+    /// Whether this method creates a lambda object (new $ClassName$lambda$N). When true, we must
+    /// emit a StackMapTable so the Java 25 type-checking verifier accepts the class.
+    pub needs_stackmap: bool,
+    /// Frames to include in the StackMapTable: (label_id, locals, stack).
+    /// Added via `add_frame_if_new`; first registration for a given label wins.
+    frames: Vec<(u32, Vec<VerifType>, Vec<VerifType>)>,
 }
 
 impl CodeBuilder {
@@ -425,7 +470,66 @@ impl CodeBuilder {
             labels: Vec::new(),
             fixups: Vec::new(),
             exceptions: Vec::new(),
+            needs_stackmap: false,
+            frames: Vec::new(),
         }
+    }
+
+    /// Mark that this method creates a lambda object. Causes a StackMapTable to be emitted.
+    pub fn set_needs_stackmap(&mut self) {
+        self.needs_stackmap = true;
+    }
+
+    /// Record the frame at `label` (given locals + stack) if not already recorded.
+    /// First registration wins — early callers capture the "outer" scope before inner vars appear.
+    /// `stack` is the operand-stack verification types at this label (empty in most cases).
+    pub fn add_frame_if_new(&mut self, label: Label, locals: Vec<VerifType>, stack: Vec<VerifType>) {
+        let lid = label.0;
+        if !self.frames.iter().any(|(id, _, _)| *id == lid) {
+            self.frames.push((lid, locals, stack));
+        }
+    }
+
+    /// Build the StackMapTable attribute body. Returns `None` when no frames are needed.
+    /// Emits a `full_frame` entry for every registered label, sorted by bytecode offset.
+    pub fn build_stackmap(&self) -> Option<Vec<u8>> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        // Resolve label ids to bytecode offsets and sort by offset.
+        let code_len = self.bytes.len();
+        let mut entries: Vec<(u32, &Vec<VerifType>, &Vec<VerifType>)> = self.frames.iter()
+            .map(|(lid, locals, stack)| (self.labels[*lid as usize] as u32, locals, stack))
+            // Drop frames whose offset is outside the bytecode (e.g. an `end` label bound one past
+            // the last `ireturn`/`athrow` when every branch of a `when` diverges). The JVM verifier
+            // rejects StackMapTable entries with out-of-range offsets.
+            .filter(|(off, _, _)| (*off as usize) < code_len)
+            .collect();
+        entries.sort_by_key(|&(off, _, _)| off);
+        // Multiple labels may be bound at the same offset (e.g. `next` and `end` in an all-diverging
+        // `when`). Keep only the first frame at each offset; duplicates would underflow the delta.
+        entries.dedup_by_key(|(off, _, _)| *off);
+
+        let mut body = Vec::new();
+        u2(&mut body, entries.len() as u16);
+
+        // Offset deltas: the first entry's delta = offset; subsequent = offset - prev_offset - 1.
+        let mut prev: i64 = -1;
+        for (offset, locals, stack) in entries {
+            let delta = if prev < 0 { offset } else { offset - prev as u32 - 1 };
+            prev = offset as i64;
+            body.push(255u8); // full_frame
+            u2(&mut body, delta as u16);
+            u2(&mut body, locals.len() as u16);
+            for vt in locals {
+                write_verif_type(vt, &mut body);
+            }
+            u2(&mut body, stack.len() as u16);
+            for vt in stack {
+                write_verif_type(vt, &mut body);
+            }
+        }
+        Some(body)
     }
 
     /// Register a `try` range `[start, end)` guarded by a handler at `handler`, catching `catch_type`
@@ -778,7 +882,7 @@ mod tests {
         let cw = ClassWriter::new("FooKt", "java/lang/Object");
         let bytes = cw.finish();
         assert_eq!(&bytes[0..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
-        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), MAJOR_JAVA6);
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), MAJOR_JAVA8);
     }
 
     #[test]

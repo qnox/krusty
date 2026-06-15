@@ -30,7 +30,7 @@ fn object_shape_is_singleton() {
         Decl::Class(c) => Some(c.clone()),
         _ => None,
     }).unwrap();
-    let ci = parse_class(&emit_class(&cd, &files[0], &info, "Counter", &syms, &mut d)).unwrap();
+    let ci = parse_class(&emit_class(&cd, &files[0], &info, "Counter", "Counter", &syms, &mut d).0).unwrap();
     let inst = ci.fields.iter().find(|f| f.name == "INSTANCE").expect("INSTANCE field");
     assert_eq!(inst.descriptor, "LCounter;");
     assert!(ci.method("inc", "(I)I").is_some());

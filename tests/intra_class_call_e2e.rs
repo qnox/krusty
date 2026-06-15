@@ -49,7 +49,7 @@ fn intra_class_call_run() {
     let dir = std::env::temp_dir().join(format!("krusty_ic_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("IcKt.class"), emit_file(&files[0], &info, &syms, "IcKt", &mut d)).unwrap();
+    fs::write(dir.join("IcKt.class"), emit_file(&files[0], &info, &syms, "IcKt", &mut d).0).unwrap();
     for name in ["Base", "C"] {
         let cd = files[0]
             .decls
@@ -59,7 +59,7 @@ fn intra_class_call_run() {
                 _ => None,
             })
             .expect("decl");
-        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, &syms, &mut d)).unwrap();
+        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, name, &syms, &mut d).0).unwrap();
     }
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

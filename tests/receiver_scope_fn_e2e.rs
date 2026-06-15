@@ -52,7 +52,7 @@ fn receiver_scope_fn_run() {
     let dir = std::env::temp_dir().join(format!("krusty_rwa_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("RwaKt.class"), emit_file(&files[0], &info, &syms, "RwaKt", &mut d)).unwrap();
+    fs::write(dir.join("RwaKt.class"), emit_file(&files[0], &info, &syms, "RwaKt", &mut d).0).unwrap();
     let c = files[0]
         .decls
         .iter()
@@ -61,7 +61,7 @@ fn receiver_scope_fn_run() {
             _ => None,
         })
         .expect("Counter decl");
-    fs::write(dir.join("Counter.class"), emit_class(&c, &files[0], &info, "Counter", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Counter.class"), emit_class(&c, &files[0], &info, "Counter", "Counter", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

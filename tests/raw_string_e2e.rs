@@ -37,7 +37,7 @@ fn raw_string_run() {
     let dir = std::env::temp_dir().join(format!("krusty_raw_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("RawKt.class"), emit_file(&files[0], &info, &syms, "RawKt", &mut d)).unwrap();
+    fs::write(dir.join("RawKt.class"), emit_file(&files[0], &info, &syms, "RawKt", &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     fs::write(
         dir.join("M.java"),

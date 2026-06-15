@@ -57,7 +57,7 @@ fn companion_run() {
     let dir = std::env::temp_dir().join(format!("krusty_comp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("CompKt.class"), emit_file(&files[0], &info, &syms, "CompKt", &mut d)).unwrap();
+    fs::write(dir.join("CompKt.class"), emit_file(&files[0], &info, &syms, "CompKt", &mut d).0).unwrap();
     let reg = files[0]
         .decls
         .iter()
@@ -66,7 +66,7 @@ fn companion_run() {
             _ => None,
         })
         .expect("Registry decl");
-    fs::write(dir.join("Registry.class"), emit_class(&reg, &files[0], &info, "Registry", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Registry.class"), emit_class(&reg, &files[0], &info, "Registry", "Registry", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

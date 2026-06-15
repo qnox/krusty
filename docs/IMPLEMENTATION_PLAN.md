@@ -70,7 +70,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 ### 4d — streaming driver ✅
 - ✅ `krusty [-d out] f.kt ...`: lex+parse all → global signatures → per file typecheck→emit→write
   `.class`→drop. Emits `ControlKt`/`ArithKt`; classes load + verify.
-### 4e — v52 + StackMapTable ⬜ (hardening, for exact version match with kotlinc)
+### 4e — v52 + StackMapTable ✅ (exact version match with kotlinc)
+- ✅ All emitted methods now carry a valid `StackMapTable` attribute, required by Java 8
+  (class-file v52). Branch targets tracked via `rec()` / `rec_s()` in `FunctionEmitter`;
+  synthetic methods (`copy$default`, `equals`) register frames via `CodeBuilder.add_frame_if_new`.
+- ✅ `init_temp` pattern: any slot added to `self.slots` via `alloc_temp` or `alloc_slot` before a
+  `rec()` call gets a zero/null default store so the JVM's computed type matches the declared frame.
+- ✅ Divergence-aware codegen: `goto`/store after a `return`/`throw` branch is elided; frames for
+  dead code are filtered to avoid "bad offset" errors; duplicate-offset frames deduped.
+- ✅ All `cargo test` green; `-Xverify:all` passes on all emitted class files.
 
 ## Phase 4b — `@kotlin.Metadata` emitter (protobuf)  🚧 (load-bearing for Kotlin-library ABI)
 - ✅ `metadata/protobuf.rs`: protobuf wire writer, checked vs canonical vectors. 5 tests.
@@ -608,8 +616,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   accessors. Access through an interface-typed value dispatches via `invokeinterface` (read and
   write). Registered in the interface's `ClassSig.props`/metadata for resolution.
 - ✅ Interface default methods (a `fun` with a body) are rejected — they need a Java-8 interface
-  (classfile v52 + StackMapTable), which krusty doesn't emit (it targets v50). A property with an
-  initializer/custom getter is likewise rejected.
+  (`default` keyword; krusty emits v52 but doesn't yet model JVM default interface methods). A
+  property with an initializer/custom getter is likewise rejected.
 - ✅ Extended bridge detection to *property getters*: a supertype property whose erased type differs
   from the class's own (a generic interface `val x: T` → `Object` overridden with a concrete type)
   needs a bridge `getX` krusty doesn't synthesize → rejected (`supertype_internals` helper).

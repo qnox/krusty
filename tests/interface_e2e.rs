@@ -31,7 +31,7 @@ fn interface_and_impl_shapes() {
             Decl::Class(c) if c.name == name => Some(c.clone()),
             _ => None,
         }).unwrap();
-        parse_class(&emit_class(&cd, &files[0], &info, internal, &syms, &mut DiagSink::new())).unwrap()
+        parse_class(&emit_class(&cd, &files[0], &info, internal, internal, &syms, &mut DiagSink::new()).0).unwrap()
     };
     let iface = get("Shape", "Shape");
     assert!(iface.major != 0);
