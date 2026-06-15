@@ -28,6 +28,24 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
     }
 }
 
+/// Does expression `e` reference a bare name (`Expr::Name`)? Used to keep enum entry arguments
+/// to name-free constant expressions, which emit correctly regardless of the current class.
+fn expr_contains_name(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::Name(_) => true,
+        Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Throw { operand } => expr_contains_name(file, *operand),
+        Expr::Is { operand, .. } | Expr::As { operand, .. } => expr_contains_name(file, *operand),
+        Expr::Binary { lhs, rhs, .. } | Expr::Elvis { lhs, rhs } => expr_contains_name(file, *lhs) || expr_contains_name(file, *rhs),
+        Expr::Member { receiver, .. } => expr_contains_name(file, *receiver),
+        Expr::Index { array, index } => expr_contains_name(file, *array) || expr_contains_name(file, *index),
+        Expr::Call { callee, args } => expr_contains_name(file, *callee) || args.iter().any(|&a| expr_contains_name(file, a)),
+        Expr::SafeCall { receiver, args, .. } => expr_contains_name(file, *receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| expr_contains_name(file, x))),
+        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if expr_contains_name(file, *x))),
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit => false,
+        _ => true,
+    }
+}
+
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
     let mut s = String::from("(");
     for p in params {
@@ -218,6 +236,12 @@ fn emit_enum(class: &ClassDecl, file: &File, info: &TypeInfo, internal: &str, sy
         cl.push_string(entry, &mut cw);
         cl.push_int(i as i32, &mut cw);
         let args = class.enum_entry_args.get(i).cloned().unwrap_or_default();
+        // Entry arguments are emitted with the enum as the current class, so an unqualified name
+        // (e.g. a top-level `val`) would resolve to the wrong owner. Restrict to name-free
+        // expressions (literals/arithmetic); reject anything referencing a name.
+        if args.iter().any(|a| expr_contains_name(file, *a)) {
+            diags.error(file.expr_spans[args[0].0 as usize], "krusty: enum entry arguments referencing a name are not supported".to_string());
+        }
         let mut ie = MethodEmitter::new(file, info, syms, internal, &imports, diags);
         for (a, ty) in args.iter().zip(&ctor_param_tys) {
             ie.emit_expr_as(*a, *ty, &mut cl, &mut cw);
@@ -2682,7 +2706,7 @@ impl<'a> MethodEmitter<'a> {
             // Precondition intrinsics (`require`/`check`/`assert(cond)`, `error(msg)`, `TODO()`).
             Expr::Name(fname)
                 if !self.syms.funs.contains_key(&fname)
-                    && matches!(fname.as_str(), "require" | "check" | "assert" | "error" | "TODO") =>
+                    && matches!(fname.as_str(), "require" | "check" | "assert" | "error" | "TODO" | "assertEquals" | "assertTrue" | "assertFalse") =>
             {
                 let throw = |code: &mut CodeBuilder, cw: &mut ClassWriter, exc: &str, msg: Option<&ExprId>, this: &mut Self| {
                     let c = cw.class_ref(exc);
@@ -2709,6 +2733,26 @@ impl<'a> MethodEmitter<'a> {
                     }
                     "error" => throw(code, cw, "java/lang/IllegalStateException", Some(&args[0]), self),
                     "TODO" => throw(code, cw, "java/lang/RuntimeException", args.first(), self),
+                    // assertEquals(expected, actual[, msg]) — pass when `expected == actual` (Kotlin
+                    // structural equality, reused from the `==` comparison emission).
+                    "assertEquals" => {
+                        let ok = code.new_label();
+                        self.emit_compare_jump(BinOp::Eq, args[0], args[1], ok, code, cw);
+                        throw(code, cw, "java/lang/AssertionError", args.get(2), self);
+                        code.bind(ok);
+                    }
+                    // assertTrue(cond[, msg]) / assertFalse(cond[, msg]).
+                    "assertTrue" | "assertFalse" => {
+                        self.emit_expr_as(args[0], Ty::Boolean, code, cw);
+                        let ok = code.new_label();
+                        if fname == "assertTrue" {
+                            code.ifne(ok); // true → pass
+                        } else {
+                            code.ifeq(ok); // false → pass
+                        }
+                        throw(code, cw, "java/lang/AssertionError", args.get(1), self);
+                        code.bind(ok);
+                    }
                     _ => unreachable!(),
                 }
                 return;
