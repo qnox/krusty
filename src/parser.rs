@@ -642,6 +642,10 @@ impl<'a> Parser<'a> {
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
                 // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
                 let effective = if name.contains('.') { name.replace('.', "/") } else { simple.clone() };
+                // Skip optional type arguments (e.g. `A<Int, Number>`); they are erased on JVM.
+                if self.at(TokenKind::Lt) {
+                    self.skip_type_args();
+                }
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class
                     self.skip_newlines();
@@ -1732,7 +1736,7 @@ fn is_modifier(text: &str) -> bool {
         "public" | "private" | "internal" | "protected" | "open" | "final" | "abstract"
             | "inline" | "noinline" | "crossinline" | "operator" | "override" | "suspend"
             | "lateinit" | "infix" | "reified" | "vararg" | "const" | "sealed" | "actual"
-            | "expect"
+            | "expect" | "value"
     )
 }
 
