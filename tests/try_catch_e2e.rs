@@ -89,11 +89,12 @@ fn try_catch_run() {
 }
 
 #[test]
-fn try_in_stack_nonempty_position_is_rejected() {
-    // `"" + try { … }` keeps a value on the operand stack across the try — unsound, so rejected.
+fn try_in_string_concat_position_compiles_correctly() {
+    // `"" + try { "O" }` is now supported: krusty evaluates the try first (empty stack),
+    // saves the result to a local, then does the concat — the try entry always sees an empty stack.
     let src = "fun box(): String = \"\" + try { \"O\" } catch (e: Exception) { \"1\" }";
-    let (_b, errs) = compile(src, "BadKt");
-    assert!(errs.iter().any(|m| m.contains("try/catch is only supported")), "expected rejection, got {errs:?}");
+    let (_b, errs) = compile(src, "TryConcat");
+    assert!(errs.is_empty(), "unexpected compile errors: {errs:?}");
 }
 
 #[test]

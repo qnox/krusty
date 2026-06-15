@@ -72,6 +72,9 @@ pub enum Expr {
     /// the `else`. With a subject, each condition is a value matched by `==`; without, each is a
     /// boolean expression.
     When { subject: Option<ExprId>, arms: Vec<WhenArm> },
+    /// `receiver::name` or `::name` (top-level) — a callable reference or class literal.
+    /// krusty parses these to avoid cascade errors but does not implement them at runtime.
+    CallableRef { receiver: Option<ExprId>, name: String },
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +178,8 @@ pub struct FunDecl {
     pub body: FunBody,
     /// Generic type-parameter names (`fun <T, U> …`), erased to `Any`/`Object`.
     pub type_params: Vec<String>,
+    /// Subset of `type_params` that carry an `Any` upper bound (`T: Any`) — non-nullable on JVM.
+    pub non_null_type_params: std::collections::HashSet<String>,
     pub span: Span,
     pub is_inline: bool,
 }
@@ -189,6 +194,9 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    /// Default value (`class C(val x: Int = 5)`). Used to synthesize a no-arg constructor when
+    /// all primary-constructor parameters have defaults.
+    pub default: Option<ExprId>,
 }
 
 #[derive(Clone, Debug)]
@@ -555,6 +563,12 @@ impl File {
                     self.write_expr(*e, out);
                 }
                 out.push(')');
+            }
+            Expr::CallableRef { receiver, name } => {
+                if let Some(r) = receiver {
+                    self.write_expr(*r, out);
+                }
+                out.push_str(&format!("::{name}"));
             }
         }
     }

@@ -148,6 +148,10 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double)
     }
 
+    pub fn is_primitive(self) -> bool {
+        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char)
+    }
+
     /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `Ljava/lang/String;`, `V`, `Lpkg/Name;`).
     pub fn descriptor(self) -> String {
         match self {

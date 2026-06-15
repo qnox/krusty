@@ -75,6 +75,7 @@ impl<'a> Lexer<'a> {
             b']' => self.one(TokenKind::RBracket),
             b',' => self.one(TokenKind::Comma),
             b';' => self.one(TokenKind::Newline), // `;` is a statement/arm separator like a newline
+            b':' if self.peek2() == b':' => self.two(TokenKind::ColonColon),
             b':' => self.one(TokenKind::Colon),
             b'.' if self.peek2() == b'.' => self.two(TokenKind::DotDot),
             b'.' if !self.peek2().is_ascii_digit() => self.one(TokenKind::Dot),
@@ -186,9 +187,28 @@ impl<'a> Lexer<'a> {
                 self.i += 1;
             }
         }
+        // Scientific notation: `1e5`, `1.5E-3`, `9.2E18f`.
+        if self.peek() == b'e' || self.peek() == b'E' {
+            is_double = true;
+            self.i += 1;
+            if self.peek() == b'+' || self.peek() == b'-' {
+                self.i += 1;
+            }
+            while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
+                self.i += 1;
+            }
+        }
         let kind = if self.peek() == b'f' || self.peek() == b'F' {
             self.i += 1; // `1.5f` / `1f` — a Float literal
             TokenKind::FloatLit
+        } else if self.peek() == b'u' || self.peek() == b'U' {
+            self.i += 1; // `1u`, `42U` — unsigned int literal (treat as plain int)
+            if self.peek() == b'L' || self.peek() == b'l' {
+                self.i += 1; // `1uL` — unsigned long (treat as plain long)
+                TokenKind::LongLit
+            } else {
+                TokenKind::IntLit
+            }
         } else if self.peek() == b'L' && !is_double {
             self.i += 1;
             TokenKind::LongLit
