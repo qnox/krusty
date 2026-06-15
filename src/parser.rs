@@ -923,6 +923,11 @@ impl<'a> Parser<'a> {
                 self.finish_stmt(Stmt::While { cond, body }, start)
             }
             TokenKind::KwFor => self.parse_for(start),
+            // Local function declaration: `fun name(params): Ret { body }` inside a function body.
+            TokenKind::KwFun => {
+                let f = self.parse_fun();
+                self.finish_stmt(Stmt::LocalFun(f), start)
+            }
             // Prefix increment/decrement statement: `++name` / `--name` → `name = name ± 1`.
             TokenKind::PlusPlus | TokenKind::MinusMinus => {
                 let dec = self.at(TokenKind::MinusMinus);

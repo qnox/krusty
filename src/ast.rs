@@ -113,6 +113,9 @@ pub enum Stmt {
     /// `for (name in iterable) body` over an array (element iteration).
     ForEach { name: String, iterable: ExprId, body: ExprId },
     Expr(ExprId),
+    /// A local function declaration: `fun name(params): Ret { body }` inside a function body.
+    /// Emitted as a private static method on the file/class with a mangled name.
+    LocalFun(FunDecl),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -619,6 +622,9 @@ impl File {
                 out.push(')');
             }
             Stmt::Expr(e) => self.write_expr(*e, out),
+            Stmt::LocalFun(f) => {
+                out.push_str(&format!("(local-fun {})", f.name));
+            }
         }
     }
 }

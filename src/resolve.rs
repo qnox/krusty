@@ -331,7 +331,18 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .collect();
                     let ret = match &f.ret {
                         Some(r) => ty_of_ref(r, &class_names, &tp, diags),
-                        None => Ty::Unit, // v0: missing return type defaults to Unit
+                        None => {
+                            // For expression-body functions, try to infer the return type from
+                            // the body literal (handles `fun f() = "literal"` etc.).  Falls back
+                            // to Unit; check_fun will do a deeper inference pass and record any
+                            // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
+                            if let FunBody::Expr(e) = &f.body {
+                                let t = infer_lit_ty(file, *e);
+                                if t != Ty::Error { t } else { Ty::Unit }
+                            } else {
+                                Ty::Unit
+                            }
+                        }
                     };
                     let vararg = f.params.last().map_or(false, |p| p.is_vararg);
                     // Trailing params with defaults may be omitted by callers (positional only).
@@ -408,7 +419,12 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             let mut mtp = ctp.clone();
                             mtp.extend(m.type_params.iter().cloned());
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
-                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
+                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
+                                if let FunBody::Expr(e) = &m.body {
+                                    let t = infer_lit_ty(file, *e);
+                                    if t != Ty::Error { t } else { Ty::Unit }
+                                } else { Ty::Unit }
+                            });
                             (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
                         })
                         .collect();
@@ -444,7 +460,12 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             let mut mtp = ctp.clone();
                             mtp.extend(m.type_params.iter().cloned());
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
-                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or(Ty::Unit);
+                            let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
+                                if let FunBody::Expr(e) = &m.body {
+                                    let t = infer_lit_ty(file, *e);
+                                    if t != Ty::Error { t } else { Ty::Unit }
+                                } else { Ty::Unit }
+                            });
                             (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
                         })
                         .collect();
@@ -560,6 +581,50 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
     }
 }
 
+/// Returns true if the expression subtree (or any statement within it) references a name from
+/// `outer`. Used to detect captures in local function bodies before allowing lift-to-static.
+fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> bool {
+    fn check_e(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> bool {
+        let r = |x: ExprId| check_e(file, x, outer);
+        let rs = |x: StmtId| check_s(file, x, outer);
+        match file.expr(e) {
+            Expr::Name(n) => outer.contains(n),
+            Expr::IntLit(_)|Expr::LongLit(_)|Expr::DoubleLit(_)|Expr::FloatLit(_)
+            |Expr::BoolLit(_)|Expr::StringLit(_)|Expr::CharLit(_)|Expr::NullLit => false,
+            Expr::NotNull{operand}|Expr::Throw{operand}|Expr::Unary{operand,..} => r(*operand),
+            Expr::Is{operand,..}|Expr::As{operand,..} => r(*operand),
+            Expr::Elvis{lhs,rhs}|Expr::Binary{lhs,rhs,..} => r(*lhs)||r(*rhs),
+            Expr::Member{receiver,..} => r(*receiver),
+            Expr::Index{array,index} => r(*array)||r(*index),
+            Expr::Call{callee,args} => r(*callee)||args.iter().any(|&a|r(a)),
+            Expr::SafeCall{receiver,args,..} => r(*receiver)||args.as_ref().map_or(false,|a|a.iter().any(|&x|r(x))),
+            Expr::Template(parts) => parts.iter().any(|p|matches!(p,TemplatePart::Expr(x) if r(*x))),
+            Expr::If{cond,then_branch,else_branch} => r(*cond)||r(*then_branch)||else_branch.map_or(false,|x|r(x)),
+            Expr::Lambda{body,..} => r(*body),
+            Expr::Try{body,catches,finally} => r(*body)||catches.iter().any(|c|r(c.body))||finally.map_or(false,|f|r(f)),
+            Expr::When{subject,arms} => subject.map_or(false,|s|r(s))||arms.iter().any(|a|a.conditions.iter().any(|&c|r(c))||r(a.body)),
+            Expr::Block{stmts,trailing} => stmts.iter().any(|&s|rs(s))||trailing.map_or(false,|t|r(t)),
+        }
+    }
+    fn check_s(file: &File, s: StmtId, outer: &std::collections::HashSet<String>) -> bool {
+        let r = |x: ExprId| check_e(file, x, outer);
+        match file.stmt(s) {
+            Stmt::Local{init,..} => r(*init),
+            Stmt::Assign{value,..} => r(*value),
+            Stmt::AssignMember{receiver,value,..} => r(*receiver)||r(*value),
+            Stmt::AssignIndex{array,index,value} => r(*array)||r(*index)||r(*value),
+            Stmt::Return(Some(e)) => r(*e),
+            Stmt::Return(None)|Stmt::Break|Stmt::Continue => false,
+            Stmt::While{cond,body} => r(*cond)||r(*body),
+            Stmt::For{range,body,..} => r(range.start)||r(range.end)||range.step.map_or(false,|s|r(s))||r(*body),
+            Stmt::ForEach{iterable,body,..} => r(*iterable)||r(*body),
+            Stmt::Expr(e) => r(*e),
+            Stmt::LocalFun(_) => false, // nested local funs have their own capture check
+        }
+    }
+    check_e(file, e, outer)
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -665,11 +730,24 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
 /// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
+    /// Maps the `StmtId` of each `Stmt::LocalFun` to its (mangled JVM method name, signature).
+    pub local_fun_sigs: HashMap<StmtId, (String, Signature)>,
+    /// Maps a call `ExprId` to the `StmtId` of the local function it dispatches to.
+    pub local_call_map: HashMap<ExprId, StmtId>,
+    /// Inferred return types for expression-body functions that lacked an explicit return annotation.
+    /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
+    pub fun_ret_overrides: HashMap<String, Ty>,
 }
 
 impl TypeInfo {
     pub fn ty(&self, e: ExprId) -> Ty {
         self.expr_types[e.0 as usize]
+    }
+    /// If call `e` was resolved to a local function, return its mangled name and signature.
+    pub fn local_fun_for_call(&self, e: ExprId) -> Option<(&str, &Signature)> {
+        let stmt_id = self.local_call_map.get(&e)?;
+        let (name, sig) = self.local_fun_sigs.get(stmt_id)?;
+        Some((name.as_str(), sig))
     }
 }
 
@@ -691,6 +769,10 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         tparams: Default::default(),
         this_ty: None,
         companion_of: None,
+        local_funs: Vec::new(),
+        local_fun_sigs: HashMap::new(),
+        local_call_map: HashMap::new(),
+        fun_ret_overrides: HashMap::new(),
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -740,6 +822,10 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 for p in &cl.props {
                     let ty = c.resolve_ty(&p.ty);
                     c.declare(&p.name, ty, p.is_var);
+                }
+                // Base class constructor args are evaluated before the body and may reference ctor params.
+                for arg in &cl.base_args {
+                    c.expr(*arg);
                 }
                 for bp in &cl.body_props {
                     if let Some(init) = bp.init {
@@ -832,7 +918,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
-    TypeInfo { expr_types: c.expr_types }
+    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides }
 }
 
 struct Checker<'a> {
@@ -850,6 +936,14 @@ struct Checker<'a> {
     /// When checking a `companion object` member, the enclosing class name — its companion
     /// methods/properties are then in scope unqualified.
     companion_of: Option<String>,
+    /// Stack of frames for local-function scopes; each frame maps name → (StmtId, Signature).
+    /// Pushed when entering a function, popped on exit; each `Stmt::LocalFun` registers into the
+    /// innermost frame so that sibling local-function calls resolve correctly.
+    local_funs: Vec<HashMap<String, (StmtId, Signature)>>,
+    /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
+    local_fun_sigs: HashMap<StmtId, (String, Signature)>,
+    local_call_map: HashMap<ExprId, StmtId>,
+    fun_ret_overrides: HashMap<String, Ty>,
 }
 
 impl<'a> Checker<'a> {
@@ -872,6 +966,17 @@ impl<'a> Checker<'a> {
     }
     fn lookup(&self, name: &str) -> Option<&Local> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    fn push_local_funs(&mut self) { self.local_funs.push(HashMap::new()); }
+    fn pop_local_funs(&mut self) { self.local_funs.pop(); }
+    fn lookup_local_fun(&self, name: &str) -> Option<(StmtId, Signature)> {
+        self.local_funs.iter().rev().find_map(|f| f.get(name).cloned())
+    }
+    fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
+        if let Some(frame) = self.local_funs.last_mut() {
+            frame.insert(name.to_string(), (stmt_id, sig));
+        }
     }
 
     /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
@@ -1093,6 +1198,9 @@ impl<'a> Checker<'a> {
             Some(r) => r,
             None => f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit),
         };
+        // For expression-body functions with no explicit return type, infer the return type from the
+        // body expression and record it as an override (so codegen uses the right JVM descriptor).
+        let infer_ret = f.ret.is_none() && self.ret_ty == Ty::Unit && matches!(&f.body, FunBody::Expr(_));
         // Default arguments are evaluated in the caller's context (they may not read other params —
         // enforced in collect_signatures), so check each in a fresh scope and populate its types.
         self.push_scope();
@@ -1104,14 +1212,26 @@ impl<'a> Checker<'a> {
             }
         }
         self.pop_scope();
+        self.push_local_funs();
         self.push_scope();
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
             let ty = if p.is_vararg { Ty::array(ty) } else { ty };
             self.declare(&p.name, ty, false);
         }
-        self.check_fun_body(f);
+        if infer_ret {
+            if let FunBody::Expr(e) = &f.body {
+                let inferred = self.expr(*e);
+                if inferred != Ty::Unit && inferred != Ty::Error {
+                    self.ret_ty = inferred;
+                    self.fun_ret_overrides.insert(f.name.clone(), inferred);
+                }
+            }
+        } else {
+            self.check_fun_body(f);
+        }
         self.pop_scope();
+        self.pop_local_funs();
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
@@ -1119,6 +1239,7 @@ impl<'a> Checker<'a> {
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
         let added: Vec<String> = f.type_params.iter().filter(|t| self.tparams.insert((*t).clone())).cloned().collect();
         self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit);
+        self.push_local_funs();
         self.push_scope(); // implicit-this scope (properties)
         for (n, t, is_var) in props {
             self.declare(n, *t, *is_var);
@@ -1132,6 +1253,7 @@ impl<'a> Checker<'a> {
         self.check_fun_body(f);
         self.pop_scope();
         self.pop_scope();
+        self.pop_local_funs();
         for t in added {
             self.tparams.remove(&t);
         }
@@ -1893,6 +2015,20 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
+                // Local function call — resolved before top-level funs and constructors.
+                if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    if arg_tys.len() != sig.params.len() {
+                        self.diags.error(span, format!("local function '{fname}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                    } else {
+                        for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                            self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                        }
+                    }
+                    let ret = sig.ret;
+                    self.local_call_map.insert(call, stmt_id);
+                    return ret;
+                }
                 // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
                 // args are evaluated, since the trailing lambda isn't a normal value).
                 if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
@@ -1967,7 +2103,12 @@ impl<'a> Checker<'a> {
                 }
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
-                        let sig = sig.clone();
+                        let mut sig = sig.clone();
+                        // Use the inferred return type from the checker's inference pass if the
+                        // signature defaulted to Unit (no explicit return type annotation).
+                        if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
+                            sig.ret = inferred;
+                        }
                         if sig.vararg {
                             // Fixed params (all but the last) match by position; remaining args must
                             // match the vararg element type (krusty doesn't support `*spread`).
@@ -2190,6 +2331,113 @@ impl<'a> Checker<'a> {
             Stmt::Expr(e) => {
                 self.expr(e);
             }
+            Stmt::LocalFun(f) => {
+                self.check_local_fun(&f.clone(), s);
+            }
+        }
+    }
+
+    /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
+    /// functions are lifted to private static methods; captures are rejected.
+    fn check_local_fun(&mut self, f: &FunDecl, stmt_id: StmtId) {
+        let span = f.span;
+        if !f.type_params.is_empty() {
+            self.diags.error(span, "krusty: generic local functions are not supported".to_string());
+            return;
+        }
+        // Collect outer local names (everything currently in scope that isn't one of f's params).
+        let own_params: std::collections::HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        let outer_names: std::collections::HashSet<String> = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.keys())
+            .filter(|n| !own_params.contains(*n))
+            .cloned()
+            .collect();
+
+        // Detect captures by walking the body.
+        if !outer_names.is_empty() {
+            let captures = match &f.body {
+                FunBody::Expr(e) | FunBody::Block(e) => local_fun_body_uses_any(self.file, *e, &outer_names),
+                FunBody::None => false,
+            };
+            if captures {
+                self.diags.error(span, "krusty: local functions that capture outer variables are not supported".to_string());
+                return;
+            }
+        }
+
+        // Add the local function's own type parameters (erased to Object, same as top-level funs).
+        let added_tparams: Vec<String> = f.type_params.iter()
+            .filter(|t| self.tparams.insert((*t).clone()))
+            .cloned()
+            .collect();
+
+        // Resolve parameter types.
+        let params: Vec<Ty> = f.params.iter().map(|p| {
+            let t = self.resolve_ty(&p.ty);
+            if p.is_vararg { Ty::array(t) } else { t }
+        }).collect();
+
+        // Resolve return type: explicit annotation, else infer from expression body.
+        let ret_ty = if let Some(r) = &f.ret {
+            self.resolve_ty(r)
+        } else {
+            match &f.body {
+                FunBody::Expr(e) => {
+                    // Check expression in isolation to infer return type (before registering sig).
+                    self.push_local_funs();
+                    self.push_scope();
+                    for (p, &ty) in f.params.iter().zip(&params) {
+                        self.declare(&p.name, ty, false);
+                    }
+                    let inferred = self.expr(*e);
+                    self.pop_scope();
+                    self.pop_local_funs();
+                    inferred
+                }
+                _ => Ty::Unit,
+            }
+        };
+
+        // Unique mangled JVM method name (StmtId is file-unique).
+        let mangled = format!("$local${}", stmt_id.0);
+        let sig = Signature {
+            params: params.clone(),
+            ret: ret_ty,
+            vararg: f.params.last().map_or(false, |p| p.is_vararg),
+            required: params.len(),
+            param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+        };
+
+        // Register in current local-funs frame and in the TypeInfo maps.
+        self.register_local_fun(&f.name, stmt_id, sig.clone());
+        self.local_fun_sigs.insert(stmt_id, (mangled, sig.clone()));
+
+        // Check the body (for a block body or when return type was already inferred above for expr).
+        let prev_ret = self.ret_ty;
+        self.ret_ty = ret_ty;
+        self.push_local_funs();
+        self.push_scope();
+        for (p, &ty) in f.params.iter().zip(&params) {
+            self.declare(&p.name, ty, false);
+        }
+        match &f.body.clone() {
+            FunBody::Expr(e) => {
+                // Already checked above for inference; re-check to fill in expr_types.
+                let t = self.expr(*e);
+                self.expect_assignable(ret_ty, t, self.span(*e), "local function body");
+            }
+            FunBody::Block(b) => {
+                let _ = self.expr(*b);
+            }
+            FunBody::None => {}
+        }
+        self.pop_scope();
+        self.pop_local_funs();
+        self.ret_ty = prev_ret;
+        for t in added_tparams {
+            self.tparams.remove(&t);
         }
     }
 }
