@@ -840,6 +840,8 @@ impl CodeBuilder {
     pub fn instance_of(&mut self, class_index: u16) { self.op_u2(0xc1, class_index, 0); }
     /// `checkcast <class>` (ref -> ref).
     pub fn checkcast(&mut self, class_index: u16) { self.op_u2(0xc0, class_index, 0); }
+    /// `if_acmpeq` — branch if two refs ARE the same object.
+    pub fn if_acmpeq(&mut self, l: Label) { self.branch(0xa5, l, -2); }
     /// `if_acmpne` — branch if two refs are not the same object.
     pub fn if_acmpne(&mut self, l: Label) { self.branch(0xa6, l, -2); }
 

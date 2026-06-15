@@ -47,6 +47,13 @@ impl<'a> Lexer<'a> {
     fn peek2(&self) -> u8 {
         if self.i + 1 < self.b.len() { self.b[self.i + 1] } else { 0 }
     }
+    fn peek3(&self) -> u8 {
+        if self.i + 2 < self.b.len() { self.b[self.i + 2] } else { 0 }
+    }
+    fn three(&mut self, kind: TokenKind) -> TokenKind {
+        self.i += 3;
+        kind
+    }
 
     fn lex_one(&mut self) -> Token {
         self.skip_trivia();
@@ -84,8 +91,10 @@ impl<'a> Lexer<'a> {
             b'/' => self.one(TokenKind::Slash),
             b'%' if self.peek2() == b'=' => self.two(TokenKind::PercentEq),
             b'%' => self.one(TokenKind::Percent),
+            b'=' if self.peek2() == b'=' && self.peek3() == b'=' => self.three(TokenKind::RefEq),
             b'=' if self.peek2() == b'=' => self.two(TokenKind::EqEq),
             b'=' => self.one(TokenKind::Eq),
+            b'!' if self.peek2() == b'=' && self.peek3() == b'=' => self.three(TokenKind::RefNe),
             b'!' if self.peek2() == b'=' => self.two(TokenKind::NotEq),
             b'!' => self.one(TokenKind::Not), // `!!` (not-null) is two `Not`s in postfix position
             b'?' => self.one(TokenKind::Question),

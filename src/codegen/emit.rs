@@ -1432,7 +1432,8 @@ impl<'a> MethodEmitter<'a> {
         self.emit_expr(e, code, cw);
         let (desc, words) = match t {
             Ty::String => return,
-            Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
+            Ty::Int | Ty::Byte | Ty::Short => ("(I)Ljava/lang/String;", 1),
+            Ty::Boolean => ("(Z)Ljava/lang/String;", 1),
             Ty::Char => ("(C)Ljava/lang/String;", 1),
             Ty::Long => ("(J)Ljava/lang/String;", 2),
             Ty::Float => ("(F)Ljava/lang/String;", 1),
@@ -2619,7 +2620,13 @@ impl<'a> MethodEmitter<'a> {
             code.goto(next); // no condition matched → try the next arm
             self.rec(body, code, cw);
             code.bind(body);
+            // Locals declared inside a when arm are scoped to that arm. Save and restore
+            // self.slots so they don't leak into StackMapTable frames for subsequent arms.
+            let saved_slots = self.slots.clone();
+            let saved_next_slot = self.next_slot;
             emit_body(self, arm.body, code, cw, result_tmp);
+            self.slots = saved_slots;
+            self.next_slot = saved_next_slot;
             // Skip the (dead) jump to `end` if the body already diverges (e.g. all arms `return`),
             // which would otherwise leave a branch targeting the method end.
             if !self.expr_diverges(arm.body) {
@@ -2713,7 +2720,7 @@ impl<'a> MethodEmitter<'a> {
     /// Emit `e` as a boolean value (0/1 int on the stack).
     fn emit_bool(&mut self, e: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match self.file.expr(e).clone() {
-            Expr::Binary { op, lhs, rhs } if is_cmp(op) || op == BinOp::And || op == BinOp::Or => {
+            Expr::Binary { op, lhs, rhs } if is_cmp(op) || op == BinOp::And || op == BinOp::Or || op == BinOp::RefEq || op == BinOp::RefNe => {
                 let l_true = code.new_label();
                 let l_end = code.new_label();
                 // Use a temp slot so the stack is empty at l_end (required for StackMapTable).
@@ -2777,6 +2784,24 @@ impl<'a> MethodEmitter<'a> {
             Expr::Binary { op, lhs, rhs } if is_cmp(op) => {
                 let cmp = if want { op } else { negate_cmp(op) };
                 self.emit_compare_jump(cmp, lhs, rhs, target, code, cw);
+            }
+            Expr::Binary { op: op @ (BinOp::RefEq | BinOp::RefNe), lhs, rhs } => {
+                // Referential equality: `===` → if_acmpeq, `!==` → if_acmpne.
+                // Null literal on either side → ifnull / ifnonnull.
+                let lt = self.info.ty(lhs);
+                let rt = self.info.ty(rhs);
+                let jump_if_eq = (op == BinOp::RefEq) == want;
+                if lt == Ty::Null || rt == Ty::Null {
+                    let val = if lt == Ty::Null { rhs } else { lhs };
+                    self.emit_expr(val, code, cw);
+                    self.rec(target, code, cw);
+                    if jump_if_eq { code.ifnull(target); } else { code.ifnonnull(target); }
+                } else {
+                    self.emit_expr(lhs, code, cw);
+                    self.emit_expr(rhs, code, cw);
+                    self.rec(target, code, cw);
+                    if jump_if_eq { code.if_acmpeq(target); } else { code.if_acmpne(target); }
+                }
             }
             _ => {
                 // arbitrary boolean value: compare against 0
@@ -2917,7 +2942,7 @@ impl<'a> MethodEmitter<'a> {
     /// frames requiring an empty operand stack.
     fn bool_uses_branching(&self, e: ExprId) -> bool {
         match self.file.expr(e) {
-            Expr::Binary { op, .. } => is_cmp(*op) || *op == BinOp::And || *op == BinOp::Or,
+            Expr::Binary { op, .. } => is_cmp(*op) || *op == BinOp::And || *op == BinOp::Or || *op == BinOp::RefEq || *op == BinOp::RefNe,
             Expr::Unary { op: UnOp::Not, operand } => self.bool_uses_branching(*operand),
             _ => false,
         }
@@ -3259,7 +3284,8 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_expr(receiver, code, cw);
                 let (desc, words) = match rt {
                     Ty::String => return, // identity
-                    Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean => ("(I)Ljava/lang/String;", 1),
+                    Ty::Int | Ty::Byte | Ty::Short => ("(I)Ljava/lang/String;", 1),
+                    Ty::Boolean => ("(Z)Ljava/lang/String;", 1),
                     Ty::Char => ("(C)Ljava/lang/String;", 1),
                     Ty::Long => ("(J)Ljava/lang/String;", 2),
                     Ty::Float => ("(F)Ljava/lang/String;", 1),
