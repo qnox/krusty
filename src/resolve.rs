@@ -358,6 +358,24 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 Decl::Class(c) => {
                     let internal = class_names.get(&c.name).cloned().unwrap_or_else(|| class_internal(file, &c.name));
                     let ctp: std::collections::HashSet<String> = c.type_params.iter().cloned().collect();
+                    // An `init` block that calls an own member method *before* a later property
+                    // initializer runs has subtle init-order semantics (cf. KT-73355) krusty doesn't
+                    // model — the helper may observe/overwrite a not-yet-initialized field. Reject it.
+                    let own_methods: std::collections::HashSet<&str> = c.methods.iter().map(|m| m.name.as_str()).collect();
+                    let is_own_call = |ce: ExprId| matches!(file.expr(ce), Expr::Call { callee, .. } if matches!(file.expr(*callee), Expr::Name(n) if own_methods.contains(n.as_str())));
+                    if let Some(last_prop) = c.init_order.iter().rposition(|i| matches!(i, ClassInit::PropInit(_))) {
+                        for (pos, init) in c.init_order.iter().enumerate() {
+                            if let (true, ClassInit::Block(b)) = (pos < last_prop, init) {
+                                if let Expr::Block { stmts, trailing } = file.expr(*b) {
+                                    let calls_own = trailing.map_or(false, |t| is_own_call(t))
+                                        || stmts.iter().any(|&st| matches!(file.stmt(st), Stmt::Expr(ce) if is_own_call(*ce)));
+                                    if calls_own {
+                                        diags.error(c.span, "krusty: an init block that calls a member method before a later property initializer is not supported (init order)".to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // All primary-ctor params (in order) define the constructor signature.
                     let ctor_params: Vec<Ty> = c.props.iter().map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags)).collect();
                     // Only `val`/`var` params (+ body props) are backing-field properties.
@@ -378,6 +396,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             }
                             (None, _) => bp.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                         };
+                        if ty == Ty::Error && bp.init.is_some() && bp.ty.is_none() {
+                            diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
+                        }
                         props.push((bp.name.clone(), ty, bp.is_var));
                     }
                     let mut methods: HashMap<String, Signature> = c
@@ -435,6 +456,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                                 None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                             };
+                            if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                                diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
+                            }
                             (p.name.clone(), ty)
                         })
                         .collect();
@@ -456,6 +480,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
                         None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
                     };
+                    if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                        diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
+                    }
                     table.props.insert(p.name.clone(), (ty, p.is_var));
                 }
             }
@@ -575,8 +602,22 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
         Expr::DoubleLit(_) => Ty::Double,
+        Expr::FloatLit(_) => Ty::Float,
         Expr::BoolLit(_) => Ty::Boolean,
-        Expr::StringLit(_) => Ty::String,
+        Expr::CharLit(_) => Ty::Char,
+        Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        Expr::Unary { op, operand } => match op {
+            UnOp::Not => Ty::Boolean,
+            UnOp::Neg => infer_lit_ty(file, *operand),
+        },
+        Expr::Binary { op, lhs, rhs } => {
+            let (lt, rt) = (infer_lit_ty(file, *lhs), infer_lit_ty(file, *rhs));
+            match op {
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => Ty::Boolean,
+                BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
+                _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
+            }
+        }
         _ => Ty::Error,
     }
 }
@@ -1612,7 +1653,27 @@ impl<'a> Checker<'a> {
             ("error", [_]) => Some(Ty::Nothing),
             ("TODO", []) => Some(Ty::Nothing),
             ("TODO", [_]) => Some(Ty::Nothing),
-            ("require" | "check" | "assert" | "error" | "TODO", _) => {
+            // kotlin.test assertions. assertEquals(expected, actual[, msg]); assertTrue/assertFalse
+            // (cond[, msg]). All evaluate to Unit; an optional trailing message must be a String.
+            ("assertEquals", [a, b] | [a, b, _]) => {
+                // The two compared values must be a valid `==` pair (same numeric tower or both refs).
+                let comparable = Ty::promote(*a, *b).is_some() || (a.is_reference() && b.is_reference());
+                if !comparable {
+                    self.diags.error(span, format!("krusty: assertEquals on incomparable types {a:?} and {b:?}"));
+                }
+                if let [_, _, msg] = arg_tys {
+                    self.expect_assignable(Ty::String, *msg, self.span(args[2]), "message");
+                }
+                Some(Ty::Unit)
+            }
+            ("assertTrue" | "assertFalse", [cond] | [cond, _]) => {
+                self.expect_assignable(Ty::Boolean, *cond, self.span(args[0]), "condition");
+                if let [_, msg] = arg_tys {
+                    self.expect_assignable(Ty::String, *msg, self.span(args[1]), "message");
+                }
+                Some(Ty::Unit)
+            }
+            ("require" | "check" | "assert" | "error" | "TODO" | "assertEquals" | "assertTrue" | "assertFalse", _) => {
                 self.diags.error(span, format!("krusty: unsupported form of '{fname}'"));
                 Some(Ty::Error)
             }
@@ -1998,6 +2059,11 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, s: StmtId) {
         match self.file.stmt(s).clone() {
             Stmt::Local { is_var, name, ty, init } => {
+                // A local that shadows an in-scope name would alias the outer variable's slot in the
+                // emitter (block exit doesn't restore shadowed slot mappings), so reject shadowing.
+                if self.lookup(&name).is_some() {
+                    self.diags.error(self.file.stmt_spans[s.0 as usize], format!("krusty: local '{name}' shadows an existing variable (not supported)"));
+                }
                 let it = self.expr(init);
                 let declared = ty.as_ref().map(|r| self.resolve_ty(r));
                 let bind = match declared {
@@ -2152,6 +2218,26 @@ mod tests {
     fn err_contains(src: &str, needle: &str) {
         let (errs, _) = check(src);
         assert!(errs.iter().any(|e| e.contains(needle)), "expected error containing {needle:?}, got {errs:?}");
+    }
+
+    #[test]
+    fn kotlin_test_assertions() {
+        ok("import kotlin.test.*\nfun box(): String { assertEquals(4, 2+2); assertTrue(1<2); assertFalse(2<1); return \"OK\" }");
+        ok("import kotlin.test.assertEquals\nfun box(): String { assertEquals(\"a\", \"a\", \"msg\"); return \"OK\" }");
+        err_contains("import kotlin.test.*\nfun box(): String { assertTrue(5); return \"OK\" }", "Boolean was expected");
+    }
+
+    #[test]
+    fn rejects_latent_miscompiles() {
+        // Local shadowing (slot aliasing in the emitter).
+        err_contains("fun box(): String { var x = 1; if (1>0) { var x = 2 }; return \"OK\" }", "shadows");
+        // Property whose type can't be inferred (would emit an erased Object accessor).
+        err_contains("class F(val x: Int)\nclass A { var f = F(0) }\nfun box(): String = \"OK\"", "cannot infer the type");
+        // Init block that calls a member method before a later property initializer (init order).
+        err_contains(
+            "class Foo(v: Int) { init { set(v) }\n fun set(x: Int) { field = x }\n var field: Int = 0 }\nfun box(): String = \"OK\"",
+            "init order",
+        );
     }
 
     #[test]

@@ -818,6 +818,26 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   JVM) + a `named_arguments` checker unit test (accept + the two rejections). Gated by the full
   10,009-case original Kotlin `codegen/box` suite: **173 → 174 OK / 0 FAIL**.
 
+## Phase 63 — kotlin.test assertions + latent-miscompile guards  ✅
+- ✅ `kotlin.test` assertion intrinsics: `assertEquals(expected, actual[, msg])`, `assertTrue(cond[, msg])`,
+  `assertFalse(cond[, msg])`. Each is `Unit`; a passing assertion is a no-op, a failing one throws
+  `AssertionError`. `assertEquals` reuses the structural `==` emission (`emit_compare_jump`: primitive
+  compares / null-safe `Objects.equals`). This was the single most common unresolved-function blocker.
+- ✅ Unlocking ~50 new files surfaced **4 pre-existing latent miscompiles** (unrelated to assertions);
+  all fixed by rejection to hold the never-miscompile invariant:
+  1. **Local shadowing** — the emitter doesn't restore a shadowed slot mapping on block exit, so a
+     nested `var x` aliased the outer slot (VerifyError). Reject a local that shadows an in-scope name.
+  2. **Uninferrable property type** — an unannotated `var f = F(0)` inferred `Error` and emitted an
+     erased `Object` getter while callers expected the concrete type (VerifyError). `infer_lit_ty` now
+     also covers char/float/templates/unary/binary; a still-uninferrable initialized property is rejected.
+  3. **Enum entry argument referencing a name** — emitted with the enum as the current class, so a
+     top-level `val` ref resolved to the wrong owner (`NoSuchFieldError`). Reject name-bearing entry args.
+  4. **Init-order edge (KT-73355)** — an `init` block calling a member method before a later property
+     initializer. Reject.
+- ✅ TDD: `tests/assertions_e2e.rs` (passing assertions are no-ops; a failing `assertEquals` throws,
+  on the JVM) + `kotlin_test_assertions` and `rejects_latent_miscompiles` checker unit tests. Gated by
+  the full 10,009-case original Kotlin `codegen/box` suite: **174 → 218 OK / 0 FAIL** (+44).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
