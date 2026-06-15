@@ -1495,7 +1495,16 @@ impl<'a> Checker<'a> {
             return;
         }
         let added: Vec<String> = f.type_params.iter().filter(|t| self.tparams.insert((*t).clone())).cloned().collect();
-        self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit);
+        self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or_else(|| {
+            // For a method without an explicit return type (e.g. `override fun foo() = "Z"`),
+            // use the return type that collect_signatures already inferred from the method body.
+            if let Some(Ty::Obj(internal)) = self.this_ty {
+                if let Some(sig) = self.syms.class_by_internal(internal).and_then(|c| c.methods.get(&f.name)) {
+                    return sig.ret;
+                }
+            }
+            Ty::Unit
+        });
         self.push_local_funs();
         self.push_scope(); // implicit-this scope (properties)
         for (n, t, is_var) in props {
