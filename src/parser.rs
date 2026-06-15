@@ -111,7 +111,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::KwFun => {
-                    let d = self.parse_fun();
+                    let d = self.parse_fun(mods.iter().any(|m| m == "inline"));
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -178,11 +178,27 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
-                // `typealias Name = Type` — not modeled; skip the declaration (uses of the alias name
-                // then fail to resolve and that file is cleanly skipped).
+                // `typealias Name[<T,...>] = Type`
                 TokenKind::Ident if self.text() == "typealias" => {
-                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                        self.bump();
+                    self.bump(); // `typealias`
+                    let alias = if self.at(TokenKind::Ident) { self.bump().text(self.src).to_string() } else { String::new() };
+                    self.skip_type_args(); // skip `<T, R>` if present
+                    self.eat(TokenKind::Eq);
+                    // Parse just the target type name (skip complex types gracefully).
+                    let target = if self.at(TokenKind::LParen) {
+                        // function type — skip entire line
+                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                        String::new()
+                    } else if self.at(TokenKind::Ident) {
+                        let name = self.text().to_string();
+                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                        name
+                    } else {
+                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                        String::new()
+                    };
+                    if !alias.is_empty() && !target.is_empty() {
+                        self.file.type_aliases.push((alias, target));
                     }
                 }
                 _ => {
@@ -302,7 +318,7 @@ impl<'a> Parser<'a> {
             let lateinit = mods.iter().any(|m| m == "lateinit");
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
-                TokenKind::KwFun => methods.push(self.parse_fun()),
+                TokenKind::KwFun => methods.push(self.parse_fun(mods.iter().any(|m| m == "inline"))),
                 TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit, false)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
@@ -379,12 +395,13 @@ impl<'a> Parser<'a> {
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
             loop {
                 self.skip_newlines();
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                    self.skip_decl_prefix();
+                let emods = if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    let m = self.skip_decl_prefix();
                     self.skip_newlines();
-                }
+                    m
+                } else { Vec::new() };
                 match self.kind() {
-                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwFun => methods.push(self.parse_fun(emods.iter().any(|m| m == "inline"))),
                     _ => break,
                 }
             }
@@ -440,7 +457,7 @@ impl<'a> Parser<'a> {
         s
     }
 
-    fn parse_fun(&mut self) -> FunDecl {
+    fn parse_fun(&mut self, is_inline: bool) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
         let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
@@ -499,7 +516,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, params, ret, body, type_params, span: Span::new(start.lo, end.hi) }
+        FunDecl { name, params, ret, body, type_params, span: Span::new(start.lo, end.hi), is_inline }
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -560,9 +577,10 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                 }
                 let lateinit = mods.iter().any(|m| m == "lateinit");
+                let fun_inline = mods.iter().any(|m| m == "inline");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline)),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property(lateinit, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
@@ -643,14 +661,15 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                    self.skip_decl_prefix();
+                let imods = if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    let m = self.skip_decl_prefix();
                     self.skip_newlines();
-                }
+                    m
+                } else { Vec::new() };
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let f = self.parse_fun();
+                        let f = self.parse_fun(imods.iter().any(|m| m == "inline"));
                         // A default method (a `fun` with a body) needs a Java-8 interface (classfile
                         // v52 + StackMapTable), which krusty doesn't emit — only abstract methods.
                         if !matches!(f.body, FunBody::None) {
@@ -704,9 +723,10 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                 }
                 let lateinit = mods.iter().any(|m| m == "lateinit");
+                let fun_inline = mods.iter().any(|m| m == "inline");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun()),
+                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline)),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property(lateinit, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
@@ -731,7 +751,33 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> TypeRef {
         let span = self.tok().span;
-        if self.at(TokenKind::Ident) {
+        // Function type: `(A, B) -> R` — starts with `(`.
+        if self.at(TokenKind::LParen) {
+            self.bump(); // '('
+            let mut fun_params = Vec::new();
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                // Skip optional parameter name prefix `name: Type` — consume up to a colon if present.
+                // Peek ahead: if next two tokens are Ident + Colon, skip them.
+                if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Colon) {
+                    self.bump(); // name
+                    self.bump(); // ':'
+                }
+                fun_params.push(self.parse_type());
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "')'");
+            if self.eat(TokenKind::Arrow) {
+                let ret = self.parse_type();
+                let nullable = self.eat(TokenKind::Question);
+                TypeRef { name: "<fun>".to_string(), nullable, arg: Some(Box::new(ret)), span, fun_params }
+            } else {
+                // Parenthesized type (rare) — just return error; krusty doesn't support tuple types.
+                self.diags.error(span, "expected '->' for function type");
+                TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span, fun_params: Vec::new() }
+            }
+        } else if self.at(TokenKind::Ident) {
             let name = self.text().to_string();
             self.bump();
             // For `Array<T>`, capture the element type; other generic type arguments are erased.
@@ -746,10 +792,10 @@ impl<'a> Parser<'a> {
                 None
             };
             let nullable = self.eat(TokenKind::Question); // `T?`
-            TypeRef { name, nullable, arg, span }
+            TypeRef { name, nullable, arg, span, fun_params: Vec::new() }
         } else {
             self.diags.error(span, "expected a type");
-            TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span }
+            TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span, fun_params: Vec::new() }
         }
     }
 
@@ -874,6 +920,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> StmtId {
+        // Labeled loop: `l1@while(…)` or `l1@for(…)` — labels are not supported yet.
+        if self.at(TokenKind::Ident) {
+            let next1 = self.t.get(self.i + 1);
+            let next2 = self.t.get(self.i + 2);
+            let is_label = next1.map_or(false, |t| t.kind == TokenKind::At)
+                && next2.map_or(false, |t| matches!(t.kind, TokenKind::KwWhile | TokenKind::KwFor));
+            if is_label {
+                self.diags.error(self.tok().span, "krusty: labeled loops not supported".to_string());
+                self.bump(); // label name
+                self.bump(); // '@'
+            }
+        }
         // Leading annotations on a statement (`@Suppress("…") val x = …`) carry no codegen
         // meaning here — skip them and parse the statement they decorate.
         if self.at(TokenKind::At) {
@@ -906,10 +964,18 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident if self.text() == "break" => {
                 self.bump();
+                if self.at(TokenKind::At) {
+                    self.diags.error(self.tok().span, "krusty: labeled break not supported".to_string());
+                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                }
                 self.finish_stmt(Stmt::Break, start)
             }
             TokenKind::Ident if self.text() == "continue" => {
                 self.bump();
+                if self.at(TokenKind::At) {
+                    self.diags.error(self.tok().span, "krusty: labeled continue not supported".to_string());
+                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                }
                 self.finish_stmt(Stmt::Continue, start)
             }
             TokenKind::KwWhile => {
@@ -925,7 +991,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwFor => self.parse_for(start),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
             TokenKind::KwFun => {
-                let f = self.parse_fun();
+                let f = self.parse_fun(false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             // Prefix increment/decrement statement: `++name` / `--name` → `name = name ± 1`.
@@ -1356,7 +1422,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhen => self.parse_when(),
-            TokenKind::LBrace => self.parse_block_expr(),
+            TokenKind::LBrace => self.parse_lambda(),
             _ => {
                 self.diags.error(span, "expected an expression");
                 self.bump();

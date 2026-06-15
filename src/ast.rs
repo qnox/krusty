@@ -142,6 +142,9 @@ pub struct TypeRef {
     /// The first generic type argument, captured for `Array<T>` (other type args are erased/skipped).
     pub arg: Option<Box<TypeRef>>,
     pub span: Span,
+    /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
+    /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
+    pub fun_params: Vec<TypeRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +175,7 @@ pub struct FunDecl {
     /// Generic type-parameter names (`fun <T, U> …`), erased to `Any`/`Object`.
     pub type_params: Vec<String>,
     pub span: Span,
+    pub is_inline: bool,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
@@ -280,6 +284,9 @@ pub struct File {
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
     pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// `typealias Name = Target` — maps alias simple name → target simple name.
+    /// Generic type aliases are stored with the raw target name (type args erased).
+    pub type_aliases: Vec<(String, String)>,
 }
 
 impl File {

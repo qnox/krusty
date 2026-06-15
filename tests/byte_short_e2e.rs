@@ -58,7 +58,7 @@ fn byte_short_run() {
     let dir = std::env::temp_dir().join(format!("krusty_bs_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("BsKt.class"), emit_file(&files[0], &info, &syms, "BsKt", &mut d)).unwrap();
+    fs::write(dir.join("BsKt.class"), emit_file(&files[0], &info, &syms, "BsKt", &mut d).0).unwrap();
     for name in ["Holder", "DC"] {
         let cd = files[0]
             .decls
@@ -68,7 +68,7 @@ fn byte_short_run() {
                 _ => None,
             })
             .expect("class decl");
-        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, &syms, &mut d)).unwrap();
+        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, name, &syms, &mut d).0).unwrap();
     }
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

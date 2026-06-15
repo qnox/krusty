@@ -28,7 +28,7 @@ fn krusty_compile(src: &str, internal: &str) -> Vec<u8> {
     let mut syms = collect_signatures(&files, &mut d);
     syms.classpath = Classpath::empty();
     let info = check_file(&files[0], &syms, &mut d);
-    let bytes = emit_file(&files[0], &info, &syms, internal, &mut d);
+    let (bytes, _) = emit_file(&files[0], &info, &syms, internal, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }

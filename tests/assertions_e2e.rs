@@ -46,7 +46,7 @@ fn compile(src: &str, cls: &str, dir: &std::path::Path) -> bool {
     if d.has_errors() {
         return false;
     }
-    let bytes = emit_file(&files[0], &info, &syms, cls, &mut d);
+    let (bytes, _) = emit_file(&files[0], &info, &syms, cls, &mut d);
     if d.has_errors() {
         return false;
     }

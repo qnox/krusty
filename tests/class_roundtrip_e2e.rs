@@ -34,7 +34,7 @@ fn krusty_compile_class(src: &str, class_name: &str, internal: &str) -> Vec<u8> 
             _ => None,
         })
         .expect("class decl");
-    let bytes = emit_class(&cd, &files[0], &info, internal, &syms, &mut d);
+    let (bytes, _) = emit_class(&cd, &files[0], &info, internal, internal, &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
     bytes
 }

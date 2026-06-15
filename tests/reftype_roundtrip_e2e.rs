@@ -32,7 +32,7 @@ fn compile_classes(dir: &PathBuf, src: &str) {
     for &id in &files[0].decls {
         if let Decl::Class(c) = files[0].decl(id) {
             let internal = if pkg.is_empty() { c.name.clone() } else { format!("{}/{}", pkg.replace('.', "/"), c.name) };
-            let bytes = emit_class(c, &files[0], &info, &internal, &syms, &mut d);
+            let (bytes, _) = emit_class(c, &files[0], &info, &internal, &internal, &syms, &mut d);
             let path = dir.join(format!("{internal}.class"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();

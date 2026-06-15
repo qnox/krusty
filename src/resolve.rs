@@ -26,6 +26,10 @@ pub struct Signature {
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
+    /// For each parameter: if the parameter is a function type `(A, B) -> R`, the inner parameter
+    /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
+    /// `it` / parameter types. Parallel to `params`.
+    pub lambda_param_types: Vec<Vec<Ty>>,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -206,12 +210,21 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
-        "I" => Ty::Int,
+        "I" | "B" | "S" => Ty::Int,
         "J" => Ty::Long,
+        "F" => Ty::Float,
         "D" => Ty::Double,
         "Z" => Ty::Boolean,
+        "C" => Ty::Char,
         "V" => Ty::Unit,
         "Ljava/lang/String;" => Ty::String,
+        s if s.starts_with('[') => {
+            let elem = desc_to_ty(&s[1..]);
+            Ty::array(elem)
+        }
+        s if s.starts_with('L') && s.ends_with(';') => {
+            Ty::obj(&s[1..s.len() - 1])
+        }
         _ => Ty::Error,
     }
 }
@@ -224,12 +237,35 @@ pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<(&'static
     Some(match (method, arg_tys) {
         ("length", []) => ("()I", Ty::Int),
         ("isEmpty", []) => ("()Z", Ty::Boolean),
+        ("isBlank", []) => ("()Z", Ty::Boolean),
         ("substring", [Ty::Int]) => ("(I)Ljava/lang/String;", Ty::String),
         ("substring", [Ty::Int, Ty::Int]) => ("(II)Ljava/lang/String;", Ty::String),
         ("indexOf", [Ty::String]) => ("(Ljava/lang/String;)I", Ty::Int),
+        ("indexOf", [Ty::Char]) => ("(I)I", Ty::Int),
+        ("lastIndexOf", [Ty::String]) => ("(Ljava/lang/String;)I", Ty::Int),
+        ("lastIndexOf", [Ty::Char]) => ("(I)I", Ty::Int),
+        ("contains", [Ty::String]) => ("(Ljava/lang/CharSequence;)Z", Ty::Boolean),
+        ("startsWith", [Ty::String]) => ("(Ljava/lang/String;)Z", Ty::Boolean),
+        ("endsWith", [Ty::String]) => ("(Ljava/lang/String;)Z", Ty::Boolean),
         ("concat", [Ty::String]) => ("(Ljava/lang/String;)Ljava/lang/String;", Ty::String),
+        ("replace", [Ty::String, Ty::String]) => ("(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", Ty::String),
+        ("uppercase", []) | ("toUpperCase", []) => ("()Ljava/lang/String;", Ty::String),
+        ("lowercase", []) | ("toLowerCase", []) => ("()Ljava/lang/String;", Ty::String),
+        ("trim", []) => ("()Ljava/lang/String;", Ty::String),
+        ("toString", []) => ("()Ljava/lang/String;", Ty::String),
+        ("toCharArray", []) => ("()[C", Ty::array(Ty::Char)),
         _ => return None,
     })
+}
+
+/// Map a Kotlin String method name to its JVM `java/lang/String` method name.
+/// Most are identical; Kotlin 1.5 introduced `uppercase`/`lowercase` as aliases.
+pub fn string_kotlin_to_jvm(kotlin_name: &str) -> &'static str {
+    match kotlin_name {
+        "uppercase" | "toUpperCase" => "toUpperCase",
+        "lowercase" | "toLowerCase" => "toLowerCase",
+        other => crate::types::intern(other),
+    }
 }
 
 /// Resolve an instance method on `java.lang.StringBuilder` (a curated subset). `append` accepts any
@@ -286,6 +322,31 @@ pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Opti
     ci.methods.iter().find(|m| m.name == "<init>" && m.descriptor.starts_with(&prefix)).map(|m| m.descriptor.clone())
 }
 
+/// Resolve a Kotlin (or Java) extension / static method where `receiver` is passed as the first
+/// argument. Searches the classpath extension index for a static method named `method` on any
+/// class, whose first parameter descriptor matches `receiver`'s type and whose remaining params
+/// match `arg_tys`.
+///
+/// Returns `(owner_internal, jvm_method_name, descriptor, return_ty)` or `None` if not found.
+pub fn resolve_extension(
+    cp: &Classpath,
+    receiver: Ty,
+    method: &str,
+    arg_tys: &[Ty],
+) -> Option<(String, String, String, Ty)> {
+    let recv_desc = receiver.descriptor();
+    let rest_params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
+    let full_prefix = format!("({recv_desc}{rest_params})");
+    let candidates = cp.find_extensions(&recv_desc, method);
+    for c in &candidates {
+        if c.descriptor.starts_with(&full_prefix) {
+            let ret = desc_to_ty(&c.ret_desc);
+            return Some((c.owner.clone(), c.name.clone(), c.descriptor.clone(), ret));
+        }
+    }
+    None
+}
+
 fn class_internal(file: &File, name: &str) -> String {
     match &file.package {
         Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), name),
@@ -306,6 +367,35 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     diags.error(c.span, format!("conflicting declarations: {}", c.name));
                 }
             }
+        }
+    }
+
+    // Expand type aliases into class_names.
+    // `typealias A = B` where B is a user-defined class → A resolves to the same internal name.
+    // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
+    // Multiple passes handle chains: A = B, B = C.
+    let mut alias_map: HashMap<String, String> = HashMap::new();
+    for file in files {
+        for (alias, target) in &file.type_aliases {
+            alias_map.insert(alias.clone(), target.clone());
+        }
+    }
+    for _ in 0..8 {
+        let mut changed = false;
+        for (alias, target) in &alias_map {
+            if class_names.contains_key(alias.as_str()) {
+                continue;
+            }
+            if let Some(internal) = class_names.get(target.as_str()).cloned() {
+                class_names.insert(alias.clone(), internal);
+                changed = true;
+            } else if Ty::from_name(target).is_some() {
+                class_names.insert(alias.clone(), format!("__ty/{target}"));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -362,7 +452,14 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             }
                         }
                     }
-                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect() }).is_some() {
+                    let lambda_param_types: Vec<Vec<Ty>> = f.params.iter().map(|p| {
+                        if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
+                            p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &tp, diags)).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    }).collect();
+                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
@@ -425,18 +522,18 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
-                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
+                            (m.name.clone(), { let n = params.len(); Signature { params, ret, vararg: false, required: n, param_names: Vec::new(), lambda_param_types: Vec::new() } })
                         })
                         .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new() });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new() });
                         }
                         methods.insert(
                             "copy".into(),
-                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len(), param_names: Vec::new() },
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len(), param_names: Vec::new(), lambda_param_types: Vec::new() },
                         );
                     }
                     if c.is_object {
@@ -466,7 +563,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
-                            (m.name.clone(), { let required = params.len(); Signature { params, ret, vararg: false, required, param_names: Vec::new() } })
+                            (m.name.clone(), { let n = params.len(); Signature { params, ret, vararg: false, required: n, param_names: Vec::new(), lambda_param_types: Vec::new() } })
                         })
                         .collect();
                     let static_props: HashMap<String, Ty> = c
@@ -509,6 +606,16 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
             }
         }
     }
+
+    // Add ClassSig aliases so that `typealias Bar = Foo` allows `Bar(...)` constructor calls.
+    for (alias, target) in &alias_map {
+        if !table.classes.contains_key(alias.as_str()) {
+            if let Some(cs) = table.classes.get(target.as_str()).cloned() {
+                table.classes.insert(alias.clone(), cs);
+            }
+        }
+    }
+
     table
 }
 
@@ -562,6 +669,32 @@ pub fn map_call_args(
 /// Does the default-argument expression `e` read any of `names` (the function's own parameters)?
 /// Statement-bearing expressions (blocks, lambdas, try, when) are conservatively treated as a
 /// reference so we never silently mis-substitute a default we can't fully analyse.
+fn expr_uses_name(file: &File, e: ExprId, name: &str) -> bool {
+    let set: std::collections::HashSet<&str> = std::iter::once(name).collect();
+    expr_refs_param(file, e, &set)
+}
+
+pub fn expr_uses_name_pub(file: &File, e: ExprId, name: &str) -> bool {
+    expr_uses_name(file, e, name)
+}
+
+fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&str>) -> bool {
+    let r = |x: ExprId| expr_refs_param(file, x, names);
+    match file.stmt(s) {
+        Stmt::Local { init, .. } => r(*init),
+        Stmt::Assign { value, .. } => r(*value),
+        Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
+        Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
+        Stmt::Return(Some(e)) => r(*e),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
+        Stmt::While { cond, body } => r(*cond) || r(*body),
+        Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
+        Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
+        Stmt::Expr(e) => r(*e),
+        Stmt::LocalFun(_) => false,
+    }
+}
+
 fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
     let r = |x: ExprId| expr_refs_param(file, x, names);
     match file.expr(e) {
@@ -576,8 +709,11 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
         Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
         Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
         Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-        // Statement-bearing — analysing param flow through these isn't worth it; reject the default.
-        Expr::Lambda { .. } | Expr::Try { .. } | Expr::Block { .. } | Expr::When { .. } => true,
+        // Blocks, try, and when recurse; Lambda introduces a new `it` scope so stop here.
+        Expr::Block { stmts, trailing } => stmts.iter().any(|&s| stmt_refs_param(file, s, names)) || trailing.map_or(false, |t| r(t)),
+        Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
+        Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
+        Expr::Lambda { .. } => false,
     }
 }
 
@@ -623,6 +759,45 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
         }
     }
     check_e(file, e, outer)
+}
+
+/// Returns `true` if an expression subtree contains a `Stmt::Assign` (or `+=`-style via
+/// `AssignMember` on a Name) whose target is a `Name` that appears in `outer_names`.
+/// Used to detect mutable captures in non-inlined lambda bodies.
+fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collections::HashSet<String>) -> bool {
+    fn check_e(file: &File, e: ExprId, outer_names: &std::collections::HashSet<String>) -> bool {
+        let r = |x: ExprId| check_e(file, x, outer_names);
+        let rs = |x: StmtId| check_s(file, x, outer_names);
+        match file.expr(e) {
+            Expr::Block { stmts, trailing } => stmts.iter().any(|&s| rs(s)) || trailing.map_or(false, |t| r(t)),
+            Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
+            Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
+            Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
+            // Don't recurse into nested lambdas — they have their own scope.
+            Expr::Lambda { .. } => false,
+            _ => false,
+        }
+    }
+    fn check_s(file: &File, s: StmtId, outer_names: &std::collections::HashSet<String>) -> bool {
+        let r = |x: ExprId| check_e(file, x, outer_names);
+        match file.stmt(s) {
+            Stmt::Assign { name, value } => {
+                // `x = expr` or `x += expr` — check if target is an outer var.
+                outer_names.contains(name) || r(*value)
+            }
+            Stmt::Local { init, .. } => r(*init),
+            Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
+            Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
+            Stmt::Return(Some(e)) => r(*e),
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
+            Stmt::While { cond, body } => r(*cond) || r(*body),
+            Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
+            Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
+            Stmt::Expr(e) => r(*e),
+            Stmt::LocalFun(_) => false,
+        }
+    }
+    check_e(file, e, outer_names)
 }
 
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
@@ -690,6 +865,10 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased to `java/lang/Object`).
 fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::collections::HashSet<String>, diags: &mut DiagSink) -> Ty {
+    // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
+    if !r.fun_params.is_empty() || r.name == "<fun>" {
+        return Ty::Fun(r.fun_params.len() as u8);
+    }
     let base = if let Some(t) = Ty::from_name(&r.name) {
         t
     } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
@@ -713,7 +892,12 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
     } else if tparams.contains(&r.name) {
         Ty::obj("java/lang/Object") // erased generic type parameter
     } else if let Some(internal) = classes.get(&r.name) {
-        Ty::obj(internal)
+        // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
+        if let Some(prim) = internal.strip_prefix("__ty/") {
+            Ty::from_name(prim).unwrap_or(Ty::Error)
+        } else {
+            Ty::obj(internal)
+        }
     } else {
         diags.error(r.span, format!("unresolved reference: {}", r.name));
         Ty::Error
@@ -737,6 +921,10 @@ pub struct TypeInfo {
     /// Inferred return types for expression-body functions that lacked an explicit return annotation.
     /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
     pub fun_ret_overrides: HashMap<String, Ty>,
+    /// Extension / static method calls resolved from the classpath:
+    /// `call_expr_id → (owner_internal, jvm_method_name, jvm_descriptor)`.
+    /// Emitter emits `invokestatic owner.name descriptor` (receiver is the first arg).
+    pub ext_calls: HashMap<ExprId, (String, String, String)>,
 }
 
 impl TypeInfo {
@@ -773,6 +961,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_sigs: HashMap::new(),
         local_call_map: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
+        ext_calls: HashMap::new(),
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -918,7 +1107,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
-    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides }
+    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls }
 }
 
 struct Checker<'a> {
@@ -944,6 +1133,7 @@ struct Checker<'a> {
     local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     local_call_map: HashMap<ExprId, StmtId>,
     fun_ret_overrides: HashMap<String, Ty>,
+    ext_calls: HashMap<ExprId, (String, String, String)>,
 }
 
 impl<'a> Checker<'a> {
@@ -983,6 +1173,10 @@ impl<'a> Checker<'a> {
     /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor), but a nullable
     /// *primitive* (`Char?`, `Int?`, …) would need boxing — rejected (the file is skipped).
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
+        // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
+        if !r.fun_params.is_empty() || r.name == "<fun>" {
+            return Ty::Fun(r.fun_params.len() as u8);
+        }
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
         } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
@@ -1156,6 +1350,9 @@ impl<'a> Checker<'a> {
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
     fn resolve_ty_no_diag(&self, r: &TypeRef) -> Ty {
+        if !r.fun_params.is_empty() || r.name == "<fun>" {
+            return Ty::Fun(r.fun_params.len() as u8);
+        }
         if let Some(t) = Ty::from_name(&r.name) {
             t
         } else if self.tparams.contains(&r.name) {
@@ -1192,6 +1389,10 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
+        if f.is_inline {
+            self.diags.error(f.span, "krusty: inline functions are not supported");
+            return;
+        }
         // Use the collected signature's return type; for a companion method (not in `funs`) fall back
         // to the declared return type.
         self.ret_ty = match self.syms.funs.get(&f.name).map(|s| s.ret) {
@@ -1237,6 +1438,10 @@ impl<'a> Checker<'a> {
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
+        if f.is_inline {
+            self.diags.error(f.span, "krusty: inline functions are not supported");
+            return;
+        }
         let added: Vec<String> = f.type_params.iter().filter(|t| self.tparams.insert((*t).clone())).cloned().collect();
         self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit);
         self.push_local_funs();
@@ -1330,6 +1535,11 @@ impl<'a> Checker<'a> {
         if matches!(expected, Ty::Obj("java/lang/Object")) && actual.is_reference() {
             return;
         }
+        // An erased Object (e.g. the return of `FunctionN.invoke()`) is assignable to any reference
+        // type — the JVM emits a checkcast at runtime.
+        if actual == Ty::obj("java/lang/Object") && expected.is_reference() {
+            return;
+        }
         // A class value is assignable to an interface (supertype) it implements.
         if let (Ty::Obj(e), Ty::Obj(a)) = (expected, actual) {
             if self.obj_is_subtype(a, e) {
@@ -1357,11 +1567,34 @@ impl<'a> Checker<'a> {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
             }
-            Expr::Lambda { .. } => {
-                // A bare lambda is only supported as the argument of an inlined scope function
-                // (`let`/`also`), which intercepts it before this point — anywhere else is unsupported.
-                self.diags.error(self.span(e), "krusty: lambdas are only supported as a 'let'/'also' argument".to_string());
-                Ty::Error
+            Expr::Lambda { param, body } => {
+                // A lambda literal `{ param -> body }` — type is `Fun(arity)`.
+                // If no explicit parameter is declared but the body references `it`, bind it
+                // as the implicit parameter (arity 1). Otherwise treat as a no-arg lambda.
+                let (arity, bind_name) = if let Some(ref p) = param {
+                    (1u8, Some(p.clone()))
+                } else if expr_uses_name(self.file, body, "it") {
+                    (1u8, Some("it".to_string()))
+                } else {
+                    (0u8, None)
+                };
+                // Lambdas that are not inlined (let/also/run/apply) become closure classes and
+                // cannot mutate the outer function's local variables. Detect this and reject.
+                let outer_names: std::collections::HashSet<String> = self.scopes.iter()
+                    .flat_map(|s| s.keys().cloned())
+                    .collect();
+                if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
+                    self.diags.error(self.file.expr_spans[e.0 as usize],
+                        "krusty: lambda captures a mutable local variable — not supported".to_string());
+                    return Ty::Fun(arity);
+                }
+                self.push_scope();
+                if let Some(ref name) = bind_name {
+                    self.declare(name, Ty::obj("java/lang/Object"), false);
+                }
+                self.expr(body);
+                self.pop_scope();
+                Ty::Fun(arity)
             }
             Expr::Index { array, index } => {
                 let at = self.expr(array);
@@ -1827,6 +2060,33 @@ impl<'a> Checker<'a> {
         bt
     }
 
+    /// Check a lambda expression with explicit parameter types (for type-directed inference).
+    /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
+    /// type `String` instead of the default `Object`.
+    fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
+        if let Expr::Lambda { param, body } = self.file.expr(e).clone() {
+            let (arity, bind_name) = if let Some(ref p) = param {
+                (param_types.len().max(1) as u8, Some(p.clone()))
+            } else if !param_types.is_empty() {
+                (param_types.len() as u8, Some("it".to_string()))
+            } else if expr_uses_name(self.file, body, "it") {
+                (1u8, Some("it".to_string()))
+            } else {
+                (0u8, None)
+            };
+            self.push_scope();
+            if let Some(ref name) = bind_name {
+                let it_ty = param_types.first().copied().unwrap_or(Ty::obj("java/lang/Object"));
+                self.declare(name, it_ty, false);
+            }
+            self.expr(body);
+            self.pop_scope();
+            let ty = Ty::Fun(arity);
+            return self.set(e, ty);
+        }
+        self.expr(e)
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -2010,11 +2270,26 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Extension / static method from any classpath library (e.g. Kotlin stdlib).
+                // Receiver type is passed as the first argument (invokestatic at the JVM level).
+                if let Some((owner, jvm_name, desc, ret)) = resolve_extension(&self.syms.classpath, rt, &name, &arg_tys) {
+                    self.ext_calls.insert(call, (owner, jvm_name, desc));
+                    return ret;
+                }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
                 Ty::Error
             }
             // free function call: name(args)
             Expr::Name(fname) => {
+                // Calling a local variable of function type: `val f: () -> String = { "OK" }; f()`.
+                if let Some(local) = self.lookup(&fname) {
+                    if let Ty::Fun(_) = local.ty {
+                        let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                        let _ = arg_tys;
+                        // Return type is erased (Object) at the JVM level.
+                        return Ty::obj("java/lang/Object");
+                    }
+                }
                 // Local function call — resolved before top-level funs and constructors.
                 if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
@@ -2037,7 +2312,21 @@ impl<'a> Checker<'a> {
                         return self.check_with_receiver(rt, body, self.span(args[1]));
                     }
                 }
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                // Type-directed lambda checking: if we know the target function's signature and a
+                // parameter is a function type with known inner param types, check lambda args with
+                // the correct `it` type instead of always using Object.
+                let known_sig = self.syms.funs.get(&fname).cloned();
+                let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
+                    if let Some(ref sig) = known_sig {
+                        if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty() {
+                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                let pt = sig.lambda_param_types[i].clone();
+                                return self.check_lambda_with_types(a, &pt);
+                            }
+                        }
+                    }
+                    self.expr(a)
+                }).collect();
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
                 }
@@ -2159,10 +2448,17 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {
-                for a in args {
-                    self.expr(*a);
+                // Check if callee is a Fun type (any expression, e.g. a local variable).
+                let callee_ty = self.expr(callee);
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                let _ = arg_tys;
+                if let Ty::Fun(_) = callee_ty {
+                    // Return type is erased (Object) at the JVM level.
+                    return Ty::obj("java/lang/Object");
                 }
-                self.diags.error(span, "expression is not callable");
+                if callee_ty != Ty::Error {
+                    self.diags.error(span, "expression is not callable");
+                }
                 Ty::Error
             }
         }
@@ -2408,6 +2704,7 @@ impl<'a> Checker<'a> {
             vararg: f.params.last().map_or(false, |p| p.is_vararg),
             required: params.len(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            lambda_param_types: Vec::new(),
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.

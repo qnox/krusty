@@ -25,14 +25,14 @@ fn compile_to(dir: &PathBuf, src: &str) {
 
     for &id in &files[0].decls {
         if let Decl::Class(c) = files[0].decl(id) {
-            let bytes = emit_class(c, &files[0], &info, &c.name, &syms, &mut d);
+            let (bytes, _) = emit_class(c, &files[0], &info, &c.name, &c.name, &syms, &mut d);
             fs::write(dir.join(format!("{}.class", c.name)), bytes).unwrap();
         }
     }
     let has_funs = files[0].decls.iter().any(|&id| matches!(files[0].decl(id), Decl::Fun(_)));
     if has_funs {
         let internal = file_class_name("Ref", None);
-        let bytes = emit_file(&files[0], &info, &syms, &internal, &mut d);
+        let (bytes, _) = emit_file(&files[0], &info, &syms, &internal, &mut d);
         fs::write(dir.join(format!("{internal}.class")), bytes).unwrap();
     }
     assert!(!d.has_errors(), "krusty codegen errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());

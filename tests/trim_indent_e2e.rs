@@ -20,7 +20,7 @@ fn compile(src: &str, internal: &str) -> (Vec<u8>, Vec<String>) {
     let files = vec![file];
     let syms = collect_signatures(&files, &mut d);
     let info = check_file(&files[0], &syms, &mut d);
-    let bytes = emit_file(&files[0], &info, &syms, internal, &mut d);
+    let (bytes, _) = emit_file(&files[0], &info, &syms, internal, &mut d);
     (bytes, d.diags.iter().map(|x| x.msg.clone()).collect())
 }
 

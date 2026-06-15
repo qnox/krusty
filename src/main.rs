@@ -60,14 +60,18 @@ fn main() {
         }
 
         // Each top-level `class` becomes its own `.class` file.
+        let facade_name = file_class_name(&stems[i], file.package.as_deref());
         for &d in &file.decls {
             if let krusty::ast::Decl::Class(c) = file.decl(d) {
                 let internal = match file.package.as_deref() {
                     Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
                     _ => c.name.clone(),
                 };
-                let bytes = emit_class(c, file, &info, &internal, &syms, &mut diags);
+                let (bytes, extra) = emit_class(c, file, &info, &internal, &facade_name, &syms, &mut diags);
                 outputs.push((format!("{internal}.class"), bytes));
+                for (name, eb) in extra {
+                    outputs.push((format!("{name}.class"), eb));
+                }
             }
         }
 
@@ -78,11 +82,14 @@ fn main() {
             .any(|&d| matches!(file.decl(d), krusty::ast::Decl::Fun(_) | krusty::ast::Decl::Property(_)));
         if has_facade_members {
             let internal = file_class_name(&stems[i], file.package.as_deref());
-            let bytes = emit_file(file, &info, &syms, &internal, &mut diags);
+            let (bytes, extra) = emit_file(file, &info, &syms, &internal, &mut diags);
             if !diags.has_errors() {
                 let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
                 module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
                 outputs.push((format!("{internal}.class"), bytes));
+                for (name, eb) in extra {
+                    outputs.push((format!("{name}.class"), eb));
+                }
             }
         }
         // `info` (per-file typecheck state) drops here, before the next file.

@@ -61,7 +61,7 @@ fn smartcast_run() {
     let dir = std::env::temp_dir().join(format!("krusty_sc_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("ScKt.class"), emit_file(&files[0], &info, &syms, "ScKt", &mut d)).unwrap();
+    fs::write(dir.join("ScKt.class"), emit_file(&files[0], &info, &syms, "ScKt", &mut d).0).unwrap();
     for name in ["Animal", "Dog", "Cat"] {
         let cd = files[0]
             .decls
@@ -71,7 +71,7 @@ fn smartcast_run() {
                 _ => None,
             })
             .expect("class decl");
-        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, &syms, &mut d)).unwrap();
+        fs::write(dir.join(format!("{name}.class")), emit_class(&cd, &files[0], &info, name, name, &syms, &mut d).0).unwrap();
     }
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

@@ -53,7 +53,7 @@ fn object_props_run() {
     let dir = std::env::temp_dir().join(format!("krusty_ob_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("ObKt.class"), emit_file(&files[0], &info, &syms, "ObKt", &mut d)).unwrap();
+    fs::write(dir.join("ObKt.class"), emit_file(&files[0], &info, &syms, "ObKt", &mut d).0).unwrap();
     let cfg = files[0]
         .decls
         .iter()
@@ -62,7 +62,7 @@ fn object_props_run() {
             _ => None,
         })
         .expect("Config decl");
-    fs::write(dir.join("Config.class"), emit_class(&cfg, &files[0], &info, "Config", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Config.class"), emit_class(&cfg, &files[0], &info, "Config", "Config", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

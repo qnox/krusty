@@ -51,7 +51,7 @@ fn computed_prop_run() {
     let dir = std::env::temp_dir().join(format!("krusty_cp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("CpKt.class"), emit_file(&files[0], &info, &syms, "CpKt", &mut d)).unwrap();
+    fs::write(dir.join("CpKt.class"), emit_file(&files[0], &info, &syms, "CpKt", &mut d).0).unwrap();
     let rect = files[0]
         .decls
         .iter()
@@ -60,7 +60,7 @@ fn computed_prop_run() {
             _ => None,
         })
         .expect("Rect decl");
-    fs::write(dir.join("Rect.class"), emit_class(&rect, &files[0], &info, "Rect", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Rect.class"), emit_class(&rect, &files[0], &info, "Rect", "Rect", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(

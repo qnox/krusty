@@ -39,6 +39,6 @@ fn package_after_file_annotation_parses_and_emits() {
 
     let internal = file_class_name("Demo", files[0].package.as_deref());
     assert_eq!(internal, "demo/test/DemoKt"); // facade name (krusty ignores @file:JvmName)
-    let _ = emit_file(&files[0], &info, &syms, &internal, &mut d);
+    let (_, _) = emit_file(&files[0], &info, &syms, &internal, &mut d);
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 }

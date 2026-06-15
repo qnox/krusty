@@ -51,7 +51,7 @@ fn scope_fn_run() {
     let dir = std::env::temp_dir().join(format!("krusty_scope_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("ScopeKt.class"), emit_file(&files[0], &info, &syms, "ScopeKt", &mut d)).unwrap();
+    fs::write(dir.join("ScopeKt.class"), emit_file(&files[0], &info, &syms, "ScopeKt", &mut d).0).unwrap();
     let bx = files[0]
         .decls
         .iter()
@@ -60,7 +60,7 @@ fn scope_fn_run() {
             _ => None,
         })
         .expect("Box decl");
-    fs::write(dir.join("Box.class"), emit_class(&bx, &files[0], &info, "Box", &syms, &mut d)).unwrap();
+    fs::write(dir.join("Box.class"), emit_class(&bx, &files[0], &info, "Box", "Box", &syms, &mut d).0).unwrap();
     assert!(!d.has_errors(), "emit errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 
     fs::write(
@@ -83,6 +83,8 @@ fn scope_fn_run() {
 #[test]
 fn lambda_outside_inlined_scope_fn_is_rejected() {
     // A trailing lambda on a non-inlined function (here `filter`, not let/also/run/with/apply).
+    // Lambdas are now first-class values, but the call still fails because `filter` is not a
+    // known method on `String` and `it` is an unresolved reference (the lambda has no param).
     let mut d = DiagSink::new();
     let src = "fun box(): String { \"x\".filter { it }\n return \"OK\" }";
     let toks = lex(src, &mut d);
@@ -90,5 +92,5 @@ fn lambda_outside_inlined_scope_fn_is_rejected() {
     let files = vec![file];
     let syms = collect_signatures(&files, &mut d);
     let _ = check_file(&files[0], &syms, &mut d);
-    assert!(d.diags.iter().any(|x| x.msg.contains("lambda")), "expected a lambda rejection, got {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(d.has_errors(), "expected type errors for unknown method 'filter' / unresolved 'it', got none");
 }
