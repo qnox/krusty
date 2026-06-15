@@ -612,19 +612,27 @@ pub fn emit_class(
     // Members of an `open`/`abstract` class must not be `final` (so subclasses can override).
     let member_access = if class.is_open || class.is_abstract { ACC_PUBLIC } else { ACC_PUBLIC | ACC_FINAL };
 
+    // Pre-build the set of explicitly defined method names so we can skip auto-generated accessors
+    // that would conflict (e.g. `private var r` paired with a hand-written `fun getR()`).
+    let explicit_methods: std::collections::HashSet<String> = class.methods.iter().map(|m| m.name.clone()).collect();
+
     // Accessors: `getX()` for every property (ctor + body); `setX(..)` for `var`.
     for (name, ty, is_var) in &all_props {
         let cap = capitalize(name);
+        let getter_name = format!("get{cap}");
+        let setter_name = format!("set{cap}");
         // getter
-        let mut g = CodeBuilder::new(1);
-        g.aload(0);
-        let f = cw.fieldref(internal_name, name, &ty.descriptor());
-        g.getfield(f, slot_words(*ty) as i32);
-        emit_typed_return(*ty, &mut g);
-        g.link();
-        cw.add_method(member_access, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+        if !explicit_methods.contains(&getter_name) {
+            let mut g = CodeBuilder::new(1);
+            g.aload(0);
+            let f = cw.fieldref(internal_name, name, &ty.descriptor());
+            g.getfield(f, slot_words(*ty) as i32);
+            emit_typed_return(*ty, &mut g);
+            g.link();
+            cw.add_method(member_access, &getter_name, &method_descriptor(&[], *ty), &g);
+        }
         // setter (var only)
-        if *is_var {
+        if *is_var && !explicit_methods.contains(&setter_name) {
             let mut s = CodeBuilder::new(1 + slot_words(*ty));
             s.aload(0);
             load_local(*ty, 1, &mut s);
@@ -632,7 +640,7 @@ pub fn emit_class(
             s.putfield(f, slot_words(*ty) as i32);
             s.ret_void();
             s.link();
-            cw.add_method(member_access, &format!("set{cap}"), &method_descriptor(&[*ty], Ty::Unit), &s);
+            cw.add_method(member_access, &setter_name, &method_descriptor(&[*ty], Ty::Unit), &s);
         }
     }
 
@@ -645,7 +653,11 @@ pub fn emit_class(
         .iter()
         .map(|m| {
             let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
-            let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+            // Prefer the symbol-table return type (infer_lit_ty applied) over re-deriving from AST.
+            let ret = syms.class_by_internal(internal_name)
+                .and_then(|c| c.methods.get(&m.name))
+                .map(|s| s.ret)
+                .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
             let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
             e.props_via_getter = class.is_open || class.is_abstract;
             e.emit_method(m, &params, ret, member_access, &mut cw);
@@ -684,7 +696,13 @@ pub fn emit_class(
     // `companion object` members → `static`/`static final` members on this class.
     for m in &class.companion_methods {
         let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
-        let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+        // Prefer the symbol-table signature (which has infer_lit_ty applied) over re-deriving
+        // from AST, so that expression-body methods with no explicit return type get the right
+        // JVM descriptor.
+        let ret = syms.classes.get(&class.name)
+            .and_then(|c| c.static_methods.get(&m.name))
+            .map(|s| s.ret)
+            .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
         let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
         e.companion_of = Some(class.name.clone());
         e.emit_method(m, &params, ret, ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &mut cw);
@@ -1382,10 +1400,14 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_fun(&mut self, f: &FunDecl, cw: &mut ClassWriter) {
-        let sig = match self.syms.funs.get(&f.name) {
+        let mut sig = match self.syms.funs.get(&f.name) {
             Some(s) => s.clone(),
             None => return,
         };
+        // Use the inferred return type if the checker overrode the defaulted-to-Unit signature.
+        if let Some(&inferred) = self.info.fun_ret_overrides.get(&f.name) {
+            sig.ret = inferred;
+        }
         self.ret_ty = sig.ret;
         for (p, ty) in f.params.iter().zip(&sig.params) {
             self.alloc_slot(&p.name, *ty);
@@ -1665,6 +1687,43 @@ impl<'a> MethodEmitter<'a> {
             Stmt::Expr(e) => {
                 self.emit_expr(e, code, cw);
                 self.discard(self.info.ty(e), code);
+            }
+            Stmt::LocalFun(f) => {
+                // Emit as a private static method on the same class. Save and restore all method-local
+                // state so the parent function's emission context is unaffected.
+                let Some((mangled, sig)) = self.info.local_fun_sigs.get(&s).cloned() else { return };
+                let saved_slots = std::mem::take(&mut self.slots);
+                let saved_next = self.next_slot;
+                let saved_ret = self.ret_ty;
+                let saved_loop = std::mem::take(&mut self.loop_labels);
+                let saved_is_inst = self.is_instance;
+                let saved_props = std::mem::take(&mut self.class_props);
+
+                self.next_slot = 0;
+                self.is_instance = false;
+                self.ret_ty = sig.ret;
+                for (p, &ty) in f.params.iter().zip(&sig.params) {
+                    self.alloc_slot(&p.name, ty);
+                }
+                let mut lcode = CodeBuilder::new(self.next_slot);
+                match &f.body {
+                    FunBody::Expr(e) => {
+                        self.emit_expr_as(*e, sig.ret, &mut lcode, cw);
+                        self.emit_return(sig.ret, &mut lcode);
+                    }
+                    FunBody::Block(b) => self.emit_block_as_body(*b, &mut lcode, cw),
+                    FunBody::None => self.emit_default_return(sig.ret, &mut lcode, cw),
+                }
+                lcode.ensure_locals(self.next_slot);
+                lcode.link();
+                cw.add_method(ACC_PRIVATE | ACC_STATIC, &mangled, &method_descriptor(&sig.params, sig.ret), &lcode);
+
+                self.slots = saved_slots;
+                self.next_slot = saved_next;
+                self.ret_ty = saved_ret;
+                self.loop_labels = saved_loop;
+                self.is_instance = saved_is_inst;
+                self.class_props = saved_props;
             }
         }
     }
@@ -2876,6 +2935,17 @@ impl<'a> MethodEmitter<'a> {
                 code.invokespecial(m, arg_words, 0);
             }
             Expr::Name(fname) => {
+                // Local function call → invokestatic with mangled name on the same class.
+                if let Some((mangled, sig)) = self.info.local_fun_for_call(e).map(|(n, s)| (n.to_string(), s.clone())) {
+                    for (a, &pty) in args.iter().zip(&sig.params) {
+                        self.emit_expr_as(*a, pty, code, cw);
+                    }
+                    let arg_words: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+                    let ret_words = slot_words(sig.ret) as i32;
+                    let m = cw.methodref(&self.class.clone(), &mangled, &method_descriptor(&sig.params, sig.ret));
+                    code.invokestatic(m, arg_words, ret_words);
+                    return;
+                }
                 // Unqualified sibling instance-method call `foo()` → `this.foo()` (invokevirtual),
                 // where `this` is the enclosing instance or a `run`/`with`/`apply` receiver.
                 if (self.is_instance || self.recv.is_some()) && !self.syms.funs.contains_key(&fname) {
@@ -2909,10 +2979,13 @@ impl<'a> MethodEmitter<'a> {
                         return;
                     }
                 }
-                let sig = match self.syms.funs.get(&fname) {
+                let mut sig = match self.syms.funs.get(&fname) {
                     Some(s) => s.clone(),
                     None => return,
                 };
+                if let Some(&inferred) = self.info.fun_ret_overrides.get(&fname) {
+                    sig.ret = inferred;
+                }
                 if sig.vararg {
                     // Emit the fixed args, then pack the trailing args into a fresh array.
                     let fixed = sig.params.len() - 1;
