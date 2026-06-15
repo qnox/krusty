@@ -1500,7 +1500,12 @@ impl<'a> MethodEmitter<'a> {
         match &f.body {
             FunBody::Expr(e) => {
                 self.emit_expr_as(*e, ret, &mut code, cw);
-                self.emit_return(ret, &mut code);
+                // A diverging body (throw / TODO() / error()) has type Nothing — athrow already
+                // exits the method. Emitting a return afterward would produce dead code that
+                // modern JVM verifiers reject with "Expecting a stack map frame".
+                if self.info.ty(*e) != Ty::Nothing {
+                    self.emit_return(ret, &mut code);
+                }
             }
             FunBody::Block(b) => self.emit_block_as_body(*b, &mut code, cw),
             FunBody::None => self.emit_default_return(ret, &mut code, cw),
@@ -1914,7 +1919,12 @@ impl<'a> MethodEmitter<'a> {
             }
             Some(te) if self.ret_ty != Ty::Unit => {
                 self.emit_expr_as(te, self.ret_ty, code, cw);
-                self.emit_return(self.ret_ty, code);
+                // Skip the return if the expression diverges (Nothing): athrow already
+                // exited the method; a trailing return would produce dead code that modern
+                // JVM verifiers reject as "Expecting a stack map frame".
+                if self.info.ty(te) != Ty::Nothing {
+                    self.emit_return(self.ret_ty, code);
+                }
             }
             Some(te) => {
                 self.emit_expr(te, code, cw);

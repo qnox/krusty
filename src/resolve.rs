@@ -1301,7 +1301,17 @@ impl<'a> Checker<'a> {
             let Some(impl_sig) = self.syms.method_of(internal, name) else { continue };
             let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
             let ip: String = impl_sig.params.iter().map(|t| t.descriptor()).collect();
-            if sp == ip && ssig.ret.descriptor() != impl_sig.ret.descriptor() {
+            if sp != ip {
+                // Parameter erasure mismatch: the class has 'name(ConcreteType)' but the
+                // supertype exposes 'name(Object)' at the erased JVM level. A bridge method
+                // that downcasts and delegates is required but not yet supported.
+                self.diags.error(
+                    span,
+                    format!("krusty: method '{name}' needs a bridge method (generic parameter override is not supported)"),
+                );
+                return;
+            }
+            if ssig.ret.descriptor() != impl_sig.ret.descriptor() {
                 self.diags.error(
                     span,
                     format!("krusty: method '{name}' needs a bridge method (covariant/generic return override is not supported)"),
@@ -1330,6 +1340,10 @@ impl<'a> Checker<'a> {
 
     /// Report (and thereby skip the file for) functions whose erased signatures collide.
     fn check_no_erased_clash(&mut self, funs: &[&FunDecl]) {
+        // Two methods with the same name but DIFFERENT erased param-type signatures are
+        // unresolvable by krusty's per-name symbol table — call sites will use the wrong overload.
+        // Detect and skip rather than miscompile.
+        let mut by_name: HashMap<String, String> = HashMap::new(); // name → first erased key
         let mut seen: HashMap<String, Span> = HashMap::new();
         for f in funs {
             let key = self.erased_sig_key(f);
@@ -1339,6 +1353,16 @@ impl<'a> Checker<'a> {
                     format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
                 );
             } else {
+                match by_name.entry(f.name.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) if e.get() != &key => {
+                        self.diags.error(
+                            f.span,
+                            format!("krusty: function '{}' has multiple overloads with different erased signatures (overload dispatch not supported)", f.name),
+                        );
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => { e.insert(key.clone()); }
+                    _ => {}
+                }
                 seen.insert(key, f.span);
             }
         }
