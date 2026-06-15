@@ -1132,6 +1132,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Lookahead: is the `<` at the current position the start of a type-argument list that is
+    /// followed by a call-like token (`(`, `{`, `.`)? Used to distinguish `a<B>(c)` (generic call)
+    /// from `a < b > c` (two comparisons). Returns true without advancing `self.i`.
+    fn lookahead_is_type_args_call(&self) -> bool {
+        let mut j = self.i + 1; // skip the opening `<`
+        let mut depth = 1i32;
+        loop {
+            let k = self.t.get(j).map(|t| t.kind);
+            match k {
+                Some(TokenKind::Lt) => { depth += 1; j += 1; }
+                Some(TokenKind::Gt) => {
+                    depth -= 1;
+                    j += 1;
+                    if depth == 0 { break; }
+                }
+                // `>=` closes the last `<` if depth == 1 (e.g. `Foo<Bar>=` — not valid type args).
+                // Treat as "not type args" to stay safe.
+                Some(TokenKind::GtEq) => return false,
+                // Tokens valid inside type argument lists:
+                Some(TokenKind::Ident) | Some(TokenKind::Dot) | Some(TokenKind::Comma) |
+                Some(TokenKind::Star) | Some(TokenKind::Question) | Some(TokenKind::Colon) => {
+                    j += 1;
+                }
+                _ => return false,
+            }
+        }
+        // After `>`, must be followed by `(`, `{`, or `.` to be a generic call.
+        matches!(self.t.get(j).map(|t| t.kind),
+            Some(TokenKind::LParen) | Some(TokenKind::LBrace) | Some(TokenKind::Dot))
+    }
+
     // ---- expressions (Pratt) ----
     fn parse_expr(&mut self) -> ExprId {
         self.parse_elvis()
@@ -1342,6 +1373,13 @@ impl<'a> Parser<'a> {
                     let end = self.tok().span;
                     self.expect(TokenKind::RBracket, "']'");
                     lhs = self.file.add_expr(Expr::Index { array: lhs, index }, Span::new(lspan.lo, end.hi));
+                }
+                // `expr<TypeArgs>(args)` — generic call with explicit type arguments.
+                // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
+                // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
+                TokenKind::Lt if self.lookahead_is_type_args_call() => {
+                    // Skip the type argument list — krusty erases generics.
+                    self.skip_type_args();
                 }
                 _ => break,
             }
@@ -1651,6 +1689,8 @@ fn infix_op(k: TokenKind) -> Option<BinOp> {
         TokenKind::AndAnd => BinOp::And,
         TokenKind::EqEq => BinOp::Eq,
         TokenKind::NotEq => BinOp::Ne,
+        TokenKind::RefEq => BinOp::RefEq,
+        TokenKind::RefNe => BinOp::RefNe,
         TokenKind::Lt => BinOp::Lt,
         TokenKind::LtEq => BinOp::Le,
         TokenKind::Gt => BinOp::Gt,
@@ -1669,7 +1709,7 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
     match op {
         BinOp::Or => (1, 2),
         BinOp::And => (3, 4),
-        BinOp::Eq | BinOp::Ne => (5, 6),
+        BinOp::Eq | BinOp::Ne | BinOp::RefEq | BinOp::RefNe => (5, 6),
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (7, 8),
         BinOp::Add | BinOp::Sub => (9, 10),
         BinOp::Mul | BinOp::Div | BinOp::Rem => (11, 12),

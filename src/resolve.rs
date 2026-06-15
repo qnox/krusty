@@ -827,7 +827,7 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
             let lt = infer_getter_ty(file, *lhs, locals);
             let rt = infer_getter_ty(file, *rhs, locals);
             match op {
-                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => Ty::Boolean,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
                 BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
                 _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
             }
@@ -853,7 +853,7 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (infer_lit_ty(file, *lhs), infer_lit_ty(file, *rhs));
             match op {
-                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => Ty::Boolean,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
                 BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
                 _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
             }
@@ -1935,6 +1935,7 @@ impl<'a> Checker<'a> {
                     self.bin_err(op, lt, rt, span)
                 }
             }
+            BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
         }
     }
 

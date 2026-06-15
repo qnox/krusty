@@ -52,6 +52,8 @@ pub enum TokenKind {
     Percent,
     EqEq,     // ==
     NotEq,    // !=
+    RefEq,    // ===
+    RefNe,    // !==
     Lt,
     LtEq,
     Gt,

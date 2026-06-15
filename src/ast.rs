@@ -15,6 +15,7 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Rem,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
+    RefEq, RefNe, // === and !==
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -641,6 +642,7 @@ fn binop(op: BinOp) -> &'static str {
         BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/", BinOp::Rem => "%",
         BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Le => "<=",
         BinOp::Gt => ">", BinOp::Ge => ">=", BinOp::And => "&&", BinOp::Or => "||",
+        BinOp::RefEq => "===", BinOp::RefNe => "!==",
     }
 }
 fn unop(op: UnOp) -> &'static str {
