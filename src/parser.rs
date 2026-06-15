@@ -184,13 +184,25 @@ impl<'a> Parser<'a> {
                     let alias = if self.at(TokenKind::Ident) { self.bump().text(self.src).to_string() } else { String::new() };
                     self.skip_type_args(); // skip `<T, R>` if present
                     self.eat(TokenKind::Eq);
-                    // Parse just the target type name (skip complex types gracefully).
+                    // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
                     let target = if self.at(TokenKind::LParen) {
                         // function type — skip entire line
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
                         String::new()
                     } else if self.at(TokenKind::Ident) {
-                        let name = self.text().to_string();
+                        let mut name = self.text().to_string();
+                        self.bump();
+                        while self.at(TokenKind::Dot) {
+                            self.bump();
+                            if self.at(TokenKind::Ident) {
+                                name.push('.');
+                                name.push_str(self.text());
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                        // Skip any remaining tokens on this line (e.g. generic args).
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
                         name
                     } else {
@@ -349,7 +361,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
-                props.push(PropParam { name: pname, ty, is_var, is_property });
+                props.push(PropParam { name: pname, ty, is_var, is_property, default: None });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -460,7 +472,7 @@ impl<'a> Parser<'a> {
     fn parse_fun(&mut self, is_inline: bool) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
-        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
+        let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
             self.bump();
@@ -516,7 +528,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, params, ret, body, type_params, span: Span::new(start.lo, end.hi), is_inline }
+        FunDecl { name, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline }
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -532,7 +544,7 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected class name");
             "<error>".to_string()
         };
-        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
+        let (type_params, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
         let mut props = Vec::new();
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
@@ -548,7 +560,13 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 let ty = self.parse_type();
-                props.push(PropParam { name: pname, ty, is_var, is_property });
+                let default = if self.eat(TokenKind::Eq) {
+                    self.skip_newlines();
+                    Some(self.parse_expr())
+                } else {
+                    None
+                };
+                props.push(PropParam { name: pname, ty, is_var, is_property, default });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -652,7 +670,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let type_params = if self.at(TokenKind::Lt) { self.parse_type_params() } else { Vec::new() };
+        let (type_params, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
         let (supertypes, _base, _base_args) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -751,6 +769,10 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> TypeRef {
         let span = self.tok().span;
+        // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
+        if self.at(TokenKind::Ident) && self.text() == "suspend" {
+            self.bump(); // 'suspend'
+        }
         // Function type: `(A, B) -> R` — starts with `(`.
         if self.at(TokenKind::LParen) {
             self.bump(); // '('
@@ -823,29 +845,40 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse and discard a `<T, reified U : Bound, out V>` type-parameter list, returning the names.
-    fn parse_type_params(&mut self) -> Vec<String> {
+    fn parse_type_params(&mut self) -> (Vec<String>, std::collections::HashSet<String>) {
         let mut names = Vec::new();
+        let mut non_null = std::collections::HashSet::new();
         if !self.eat(TokenKind::Lt) {
-            return names;
+            return (names, non_null);
         }
         loop {
             self.skip_newlines();
             while self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out" | "in") {
                 self.bump();
             }
-            if self.at(TokenKind::Ident) {
-                names.push(self.text().to_string());
+            let tname = if self.at(TokenKind::Ident) {
+                let n = self.text().to_string();
                 self.bump();
+                n
+            } else {
+                String::new()
+            };
+            if !tname.is_empty() {
+                names.push(tname.clone());
             }
             if self.eat(TokenKind::Colon) {
-                let _ = self.parse_type(); // upper bound (erased)
+                let bound = self.parse_type();
+                // `T: Any` → the type param can't be null (erased to Object but non-null).
+                if bound.name == "Any" && !bound.nullable && !tname.is_empty() {
+                    non_null.insert(tname);
+                }
             }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
         self.expect(TokenKind::Gt, "'>'");
-        names
+        (names, non_null)
     }
 
     // ---- statements ----
@@ -1307,6 +1340,20 @@ impl<'a> Parser<'a> {
                     let end = self.t[self.i.saturating_sub(1)].span;
                     lhs = self.file.add_expr(Expr::Member { receiver: lhs, name }, Span::new(lspan.lo, end.hi));
                 }
+                // `expr::name` or `Expr::class` — bound callable reference / class literal.
+                TokenKind::ColonColon => {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    self.bump(); // '::'
+                    let name = if self.at(TokenKind::Ident) {
+                        let n = self.text().to_string(); self.bump(); n
+                    } else if self.at(TokenKind::KwClass) {
+                        self.bump(); "class".to_string()
+                    } else {
+                        "<error>".to_string()
+                    };
+                    let end = self.t[self.i.saturating_sub(1)].span;
+                    lhs = self.file.add_expr(Expr::CallableRef { receiver: Some(lhs), name }, Span::new(lspan.lo, end.hi));
+                }
                 TokenKind::LParen => {
                     self.bump();
                     self.skip_newlines();
@@ -1461,6 +1508,18 @@ impl<'a> Parser<'a> {
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhen => self.parse_when(),
             TokenKind::LBrace => self.parse_lambda(),
+            // `::name` — top-level callable reference / class literal without a receiver.
+            TokenKind::ColonColon => {
+                self.bump(); // '::'
+                let name = if self.at(TokenKind::Ident) {
+                    let n = self.text().to_string(); self.bump(); n
+                } else if self.at(TokenKind::KwClass) {
+                    self.bump(); "class".to_string()
+                } else {
+                    "<error>".to_string()
+                };
+                self.file.add_expr(Expr::CallableRef { receiver: None, name }, span)
+            }
             _ => {
                 self.diags.error(span, "expected an expression");
                 self.bump();
@@ -1668,7 +1727,8 @@ fn is_modifier(text: &str) -> bool {
         text,
         "public" | "private" | "internal" | "protected" | "open" | "final" | "abstract"
             | "inline" | "noinline" | "crossinline" | "operator" | "override" | "suspend"
-            | "lateinit" | "infix" | "reified" | "vararg" | "const" | "sealed"
+            | "lateinit" | "infix" | "reified" | "vararg" | "const" | "sealed" | "actual"
+            | "expect"
     )
 }
 
@@ -1764,6 +1824,8 @@ fn unescape_chunk(inner: &str) -> String {
 /// Parse an integer literal: decimal, `0x`/`0X` hex, or `0b`/`0B` binary, with `_` separators.
 /// Parses into `u64` (so `0xFFFFFFFF`/`0xFFFFFFFFFFFFFFFF` fit) then reinterprets as `i64`.
 fn parse_int_literal(text: &str) -> i64 {
+    // Strip trailing type suffixes (L, u, U, uL, UL) before parsing.
+    let text = text.trim_end_matches(|c: char| matches!(c, 'L' | 'l' | 'u' | 'U'));
     let t: String = text.chars().filter(|c| *c != '_').collect();
     let (radix, digits) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         (16, h)

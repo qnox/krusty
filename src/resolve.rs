@@ -14,6 +14,36 @@ use crate::diag::{DiagSink, Span};
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
+/// Kotlin/JVM stdlib `actual typealias` declarations, mirroring what kotlin-stdlib exposes for the
+/// JVM platform. Parsed once by `collect_signatures` and treated identically to user-defined
+/// typealiases, so `Exception`, `Cloneable`, etc. resolve without explicit imports.
+const KOTLIN_JVM_PRELUDE: &str = "
+actual typealias Throwable = java.lang.Throwable
+actual typealias Exception = java.lang.Exception
+actual typealias RuntimeException = java.lang.RuntimeException
+actual typealias Error = java.lang.Error
+actual typealias IllegalStateException = java.lang.IllegalStateException
+actual typealias IllegalArgumentException = java.lang.IllegalArgumentException
+actual typealias NullPointerException = java.lang.NullPointerException
+actual typealias IndexOutOfBoundsException = java.lang.IndexOutOfBoundsException
+actual typealias UnsupportedOperationException = java.lang.UnsupportedOperationException
+actual typealias ArithmeticException = java.lang.ArithmeticException
+actual typealias ClassCastException = java.lang.ClassCastException
+actual typealias NumberFormatException = java.lang.NumberFormatException
+actual typealias AssertionError = java.lang.AssertionError
+actual typealias Cloneable = java.lang.Cloneable
+actual typealias Comparable = java.lang.Comparable
+actual typealias CharSequence = java.lang.CharSequence
+actual typealias Serializable = java.io.Serializable
+actual typealias Iterable = java.lang.Iterable
+actual typealias Iterator = java.util.Iterator
+actual typealias Collection = java.util.Collection
+actual typealias List = java.util.List
+actual typealias MutableList = java.util.List
+actual typealias Map = java.util.Map
+actual typealias Set = java.util.Set
+";
+
 #[derive(Clone, Debug)]
 pub struct Signature {
     pub params: Vec<Ty>,
@@ -183,6 +213,7 @@ pub fn builtin_exception(name: &str) -> Option<&'static str> {
     })
 }
 
+
 /// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
 pub fn conversion_target(name: &str) -> Option<Ty> {
     Some(match name {
@@ -318,8 +349,18 @@ pub fn resolve_java_instance(cp: &Classpath, internal: &str, method: &str, arg_t
 pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Option<String> {
     let ci = cp.find(internal)?;
     let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    let prefix = format!("({params})");
-    ci.methods.iter().find(|m| m.name == "<init>" && m.descriptor.starts_with(&prefix)).map(|m| m.descriptor.clone())
+    let exact = format!("({params})V");
+    if let Some(m) = ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == exact) {
+        return Some(m.descriptor.clone());
+    }
+    // Widening fallback: replace each reference-type arg with Object (e.g. String → Object).
+    // Needed because e.g. AssertionError has no public (String) ctor, only public (Object).
+    let widened: String = arg_tys.iter().map(|t| match t {
+        Ty::String | Ty::Obj(_) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => "Ljava/lang/Object;".to_string(),
+        _ => t.descriptor(),
+    }).collect();
+    let widened_exact = format!("({widened})V");
+    ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == widened_exact).map(|m| m.descriptor.clone())
 }
 
 /// Resolve a Kotlin (or Java) extension / static method where `receiver` is passed as the first
@@ -373,8 +414,14 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     // Expand type aliases into class_names.
     // `typealias A = B` where B is a user-defined class → A resolves to the same internal name.
     // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
+    // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
-    let mut alias_map: HashMap<String, String> = HashMap::new();
+    //
+    // Seed from the parsed KOTLIN_JVM_PRELUDE (mirrors kotlin-stdlib `actual typealias` decls)
+    // then from any user-defined typealiases in the input files.
+    let prelude_toks = crate::lexer::lex(KOTLIN_JVM_PRELUDE, &mut DiagSink::new());
+    let prelude_file = crate::parser::parse(KOTLIN_JVM_PRELUDE, &prelude_toks, &mut DiagSink::new());
+    let mut alias_map: HashMap<String, String> = prelude_file.type_aliases.into_iter().collect();
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());
@@ -391,6 +438,10 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                 changed = true;
             } else if Ty::from_name(target).is_some() {
                 class_names.insert(alias.clone(), format!("__ty/{target}"));
+                changed = true;
+            } else if target.contains('.') {
+                // Fully-qualified class name (e.g. java.lang.Exception) → JVM internal name.
+                class_names.insert(alias.clone(), target.replace('.', "/"));
                 changed = true;
             }
         }
@@ -713,7 +764,7 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
         Expr::Block { stmts, trailing } => stmts.iter().any(|&s| stmt_refs_param(file, s, names)) || trailing.map_or(false, |t| r(t)),
         Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
         Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
-        Expr::Lambda { .. } => false,
+        Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
     }
 }
 
@@ -740,6 +791,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
             Expr::Try{body,catches,finally} => r(*body)||catches.iter().any(|c|r(c.body))||finally.map_or(false,|f|r(f)),
             Expr::When{subject,arms} => subject.map_or(false,|s|r(s))||arms.iter().any(|a|a.conditions.iter().any(|&c|r(c))||r(a.body)),
             Expr::Block{stmts,trailing} => stmts.iter().any(|&s|rs(s))||trailing.map_or(false,|t|r(t)),
+            Expr::CallableRef{receiver,..} => receiver.map_or(false,|r2|r(r2)),
         }
     }
     fn check_s(file: &File, s: StmtId, outer: &std::collections::HashSet<String>) -> bool {
@@ -1880,6 +1932,14 @@ impl<'a> Checker<'a> {
                 } else {
                     Ty::Unit
                 }
+            }
+            Expr::CallableRef { receiver, name: _ } => {
+                // Visit the receiver expression (if any) so its sub-expressions are type-checked.
+                if let Some(recv) = receiver {
+                    self.expr(recv);
+                }
+                self.diags.error(self.span(e), "krusty: callable references are not supported");
+                Ty::Error
             }
         };
         self.set(e, t)

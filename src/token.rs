@@ -70,6 +70,7 @@ pub enum TokenKind {
     StarEq,   // *=
     SlashEq,  // /=
     PercentEq,// %=
+    ColonColon, // ::  (callable references, class literals)
     Question, // ?   (nullable types, ?. , ?:)
     At,       // @   (annotations)
     // trivia / control
