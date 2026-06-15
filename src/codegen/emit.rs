@@ -837,6 +837,7 @@ pub fn emit_class(
             non_null_type_params: std::collections::HashSet::new(),
             span: bp.span,
             is_inline: false,
+            is_final: false,
         };
         let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
         e.lambda_counter = lambda_ctr;
@@ -896,7 +897,18 @@ pub fn emit_class(
     let mut method_metas = method_metas;
     if class.is_data {
         let user_methods: std::collections::HashSet<&str> = class.methods.iter().map(|m| m.name.as_str()).collect();
-        method_metas.extend(emit_data_members(&mut cw, internal_name, &props, &user_methods));
+        // Collect method names that a parent class (in this file) has declared `final`.
+        // Data-class synthesis must not override final parent methods — the parent's version is used.
+        let parent_final: std::collections::HashSet<String> = class.base_class.as_ref()
+            .and_then(|base| {
+                file.decl_arena.iter().find_map(|d| match d {
+                    crate::ast::Decl::Class(c) if c.name == *base => Some(c),
+                    _ => None,
+                })
+            })
+            .map(|base_cls| base_cls.methods.iter().filter(|m| m.is_final).map(|m| m.name.clone()).collect())
+            .unwrap_or_default();
+        method_metas.extend(emit_data_members(&mut cw, internal_name, &props, &user_methods, &parent_final));
     }
 
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
@@ -946,6 +958,7 @@ fn emit_data_members(
     internal: &str,
     props: &[(&PropParam, Ty)],
     user_methods: &std::collections::HashSet<&str>,
+    parent_final: &std::collections::HashSet<String>,
 ) -> Vec<crate::metadata::class_builder::FnMeta> {
     let simple = internal.rsplit('/').next().unwrap_or(internal).to_string();
     let prop_tys: Vec<Ty> = props.iter().map(|(_, t)| *t).collect();
@@ -1063,7 +1076,7 @@ fn emit_data_members(
     }
 
     // toString() -> "Name(p1=v1, p2=v2)".
-    if !user_methods.contains("toString") {
+    if !user_methods.contains("toString") && !parent_final.contains("toString") {
         let mut c = CodeBuilder::new(1);
         let sb = cw.class_ref("java/lang/StringBuilder");
         let sbinit = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
@@ -1093,7 +1106,7 @@ fn emit_data_members(
     }
 
     // hashCode(): result = hash(p0); result = result*31 + hash(pN); ...
-    if !user_methods.contains("hashCode") {
+    if !user_methods.contains("hashCode") && !parent_final.contains("hashCode") {
         let mut c = CodeBuilder::new(1);
         for (i, (p, ty)) in props.iter().enumerate() {
             if i > 0 {
@@ -1114,7 +1127,7 @@ fn emit_data_members(
     }
 
     // equals(Object): identity, instanceof, then per-property comparison.
-    if !user_methods.contains("equals") {
+    if !user_methods.contains("equals") && !parent_final.contains("equals") {
         use crate::codegen::classfile::VerifType as VT;
         let mut c = CodeBuilder::new(3); // this=0, other=1; cast_other=2
         let cidx = cw.class_ref(internal);
@@ -1954,7 +1967,7 @@ impl<'a> MethodEmitter<'a> {
     fn emit_stmt(&mut self, s: StmtId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         match self.file.stmt(s).clone() {
             Stmt::Local { name, ty, init, .. } => {
-                let lty = ty.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or_else(|| self.info.ty(init));
+                let lty = ty.as_ref().map(|r| resolve_ty(r, self.syms)).unwrap_or_else(|| self.info.ty(init));
                 // A `Unit`-typed local holds no JVM value: evaluate the initializer for its effect.
                 if lty == Ty::Unit {
                     self.emit_expr(init, code, cw);

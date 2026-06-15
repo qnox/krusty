@@ -111,7 +111,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::KwFun => {
-                    let d = self.parse_fun(mods.iter().any(|m| m == "inline"));
+                    let d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -330,7 +330,7 @@ impl<'a> Parser<'a> {
             let lateinit = mods.iter().any(|m| m == "lateinit");
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
-                TokenKind::KwFun => methods.push(self.parse_fun(mods.iter().any(|m| m == "inline"))),
+                TokenKind::KwFun => methods.push(self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"))),
                 TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit, false)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
@@ -413,7 +413,7 @@ impl<'a> Parser<'a> {
                     m
                 } else { Vec::new() };
                 match self.kind() {
-                    TokenKind::KwFun => methods.push(self.parse_fun(emods.iter().any(|m| m == "inline"))),
+                    TokenKind::KwFun => methods.push(self.parse_fun(emods.iter().any(|m| m == "inline"), emods.iter().any(|m| m == "final"))),
                     _ => break,
                 }
             }
@@ -469,7 +469,7 @@ impl<'a> Parser<'a> {
         s
     }
 
-    fn parse_fun(&mut self, is_inline: bool) -> FunDecl {
+    fn parse_fun(&mut self, is_inline: bool, is_final: bool) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
         let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
@@ -528,7 +528,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline }
+        FunDecl { name, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -596,9 +596,10 @@ impl<'a> Parser<'a> {
                 }
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
+                let fun_final = mods.iter().any(|m| m == "final");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline)),
+                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property(lateinit, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
@@ -639,6 +640,8 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 let name = self.parse_qualified_name();
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
+                // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
+                let effective = if name.contains('.') { name.replace('.', "/") } else { simple.clone() };
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class
                     self.skip_newlines();
@@ -652,10 +655,10 @@ impl<'a> Parser<'a> {
                         self.skip_newlines();
                     }
                     self.expect(TokenKind::RParen, "')'");
-                    base = Some(simple);
+                    base = Some(effective);
                     base_args = args;
-                } else if !simple.is_empty() {
-                    ifaces.push(simple);
+                } else if !effective.is_empty() {
+                    ifaces.push(effective);
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -687,7 +690,7 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let f = self.parse_fun(imods.iter().any(|m| m == "inline"));
+                        let f = self.parse_fun(imods.iter().any(|m| m == "inline"), false);
                         // A default method (a `fun` with a body) needs a Java-8 interface (classfile
                         // v52 + StackMapTable), which krusty doesn't emit — only abstract methods.
                         if !matches!(f.body, FunBody::None) {
@@ -742,9 +745,10 @@ impl<'a> Parser<'a> {
                 }
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
+                let fun_final = mods.iter().any(|m| m == "final");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline)),
+                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property(lateinit, false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
@@ -1024,7 +1028,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwFor => self.parse_for(start),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
             TokenKind::KwFun => {
-                let f = self.parse_fun(false);
+                let f = self.parse_fun(false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             // Prefix increment/decrement statement: `++name` / `--name` → `name = name ± 1`.

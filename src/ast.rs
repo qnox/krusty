@@ -182,6 +182,9 @@ pub struct FunDecl {
     pub non_null_type_params: std::collections::HashSet<String>,
     pub span: Span,
     pub is_inline: bool,
+    /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
+    /// `final` (overriding them would produce wrong behavior).
+    pub is_final: bool,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
