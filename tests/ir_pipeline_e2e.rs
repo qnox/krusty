@@ -16,6 +16,16 @@ const SRC: &str = r#"
 class Point(val x: Int, val y: Int) {
     fun sum(): Int = x + y
     fun shifted(d: Int): Int = x + y + d
+    // block-body method: same lower_body path as a block-body top-level fun
+    fun scaled(k: Int): Int {
+        var acc = 0
+        var i = 0
+        while (i < k) {
+            acc = acc + x + y
+            i = i + 1
+        }
+        return acc
+    }
 }
 fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
@@ -32,7 +42,7 @@ fun box(): String {
     val s = add(2, 3)
     val p = Point(3, 4)
     val msg = "v=$s!"                      // string template → String.plus intrinsics
-    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17
+    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17 && p.scaled(3) == 21
     return if (good) "OK" else "no"
 }
 "#;

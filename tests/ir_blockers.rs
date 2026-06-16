@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use krusty::ast::{Expr, ExprId, File, Stmt, StmtId};
+use krusty::ast::{Decl, Expr, ExprId, File, FunBody, Stmt, StmtId};
 use krusty::diag::DiagSink;
 use krusty::ir_lower::lower_file;
 use krusty::lexer::lex;
@@ -43,10 +43,43 @@ fn unsupported(file: &File) -> Vec<&'static str> {
             Stmt::Destructure { .. } => "Stmt::Destructure",
             Stmt::IncDec { .. } => "Stmt::IncDec(++/--)",
             Stmt::LocalFun(_) => "Stmt::LocalFun",
-            Stmt::AssignMember { .. } => "Stmt::AssignMember",
             _ => continue,
         };
         out.push(name);
+    }
+    out
+}
+
+/// Decl-level reasons a file falls outside the IR subset (why `lower_file` bails before any expr) —
+/// the breakdown of the "no unsupported expr/stmt" bucket. Mirrors `is_simple_class`/`lower_file`.
+fn decl_blockers(file: &File) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for id in 0..file.decl_arena.len() {
+        match file.decl(krusty::ast::DeclId(id as u32)) {
+            Decl::Fun(f) => {
+                if f.receiver.is_some() { out.push("fun: extension receiver"); }
+                if f.is_inline { out.push("fun: inline"); }
+            }
+            Decl::Class(c) => {
+                if c.is_data { out.push("class: data"); }
+                if c.is_object { out.push("class: object"); }
+                if c.is_enum { out.push("class: enum"); }
+                if c.is_interface { out.push("class: interface"); }
+                if c.is_abstract { out.push("class: abstract"); }
+                if c.is_open { out.push("class: open"); }
+                if c.base_class.is_some() { out.push("class: base class"); }
+                if !c.supertypes.is_empty() { out.push("class: supertypes"); }
+                if !c.body_props.is_empty() { out.push("class: body properties"); }
+                if !c.companion_methods.is_empty() { out.push("class: companion"); }
+                if !c.secondary_ctors.is_empty() { out.push("class: secondary ctor"); }
+                if !c.init_order.is_empty() { out.push("class: init block"); }
+                if c.props.iter().any(|p| !p.is_property) { out.push("class: ctor non-property param"); }
+                if c.methods.iter().any(|m| m.receiver.is_some()) { out.push("class: method receiver"); }
+                if c.methods.iter().any(|m| !matches!(m.body, FunBody::Expr(_))) { out.push("class: block-body method"); }
+            }
+            Decl::Property(_) => out.push("top-level property"),
+            _ => out.push("other top-level decl"),
+        }
     }
     out
 }
@@ -64,6 +97,7 @@ fn run() {
     let (mut total, mut lowered, mut nearmiss) = (0u32, 0u32, 0u32);
     // count of files that contain each unsupported variant (once per file), and files with classes/decls.
     let mut tally: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut decl_tally: BTreeMap<&str, u32> = BTreeMap::new();
     let mut clean_but_unlowered = 0u32; // no unsupported expr/stmt variant — blocked by a decl-level feature
     for file in &files {
         let src = fs::read_to_string(file).unwrap_or_default();
@@ -94,6 +128,12 @@ fn run() {
             for n in us {
                 *tally.entry(n).or_default() += 1;
             }
+            let mut db = decl_blockers(&f1[0]);
+            db.sort();
+            db.dedup();
+            for n in db {
+                *decl_tally.entry(n).or_default() += 1;
+            }
         }
     }
     let mut v: Vec<_> = tally.into_iter().collect();
@@ -102,6 +142,12 @@ fn run() {
     println!("  of those, {clean_but_unlowered} have NO unsupported expr/stmt (blocked by a decl-level feature: class shape, inheritance, lambdas-as-args resolved elsewhere, etc.)");
     println!("unsupported expr/stmt node variants, by # of near-miss files containing them:");
     for (name, n) in v {
+        println!("  {n:5}  {name}");
+    }
+    let mut dv: Vec<_> = decl_tally.into_iter().collect();
+    dv.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("decl-level blockers, by # of near-miss files containing them:");
+    for (name, n) in dv {
         println!("  {n:5}  {name}");
     }
 }
