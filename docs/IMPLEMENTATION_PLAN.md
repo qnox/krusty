@@ -1106,6 +1106,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   method's real signature) is deferred — it's rejected cleanly (skipped), never miscompiled.
 - ✅ Full suite 182 green. Box conformance **376 OK / 0 FAIL** (+1).
 
+## Phase 91 — Bytecode-equality verified vs the real kotlinc  ✅
+- ✅ Stood up a working reference `kotlinc` from local jars (no assembled dist): a wrapper running
+  `java -cp <kotlin-compiler-embeddable + stdlib + reflect + script-runtime + kotlinx-coroutines +
+  trove4j + jetbrains-annotations> org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -classpath <stdlib>`
+  on **JDK 21** (kotlinc 2.0.21 rejects JDK 25). Recorded in `docs/DIFF_KOTLINC.md`.
+- ✅ Ran the differential harnesses (`tests/diff_kotlinc.rs`, `tests/diff_class_kotlinc.rs`) with
+  `KRUSTY_KOTLINC`/`KRUSTY_REF_JAVA_HOME`/`KRUSTY_KOTLIN_STDLIB`: krusty's **public ABI (javap
+  signatures) and execution output MATCH kotlinc** for the free-function subset
+  (arith/promotion/`if`/`&&`/concat/`String.substring`/`indexOf`) and `class Point(val x, var y)`
+  (ctor + accessors + construction). First confirmed differential pass vs the real compiler.
+- ⬜ Next: widen the diff harness corpus (more constructs) toward byte-exact `.class` comparison, and
+  wire it into CI as the standing bytecode-equality gate.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
