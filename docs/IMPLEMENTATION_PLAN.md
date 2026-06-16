@@ -1099,6 +1099,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   the expression getter body (`infer_lit_ty`), extending Phase 88.
 - ✅ Full suite 182 green. Box conformance **375 OK / 0 FAIL** (+2).
 
+## Phase 90 — `fun interface` parsed as a real interface (partial SAM)  ✅
+- ✅ `fun interface F { fun m(…): R }` now parses as a real interface (`is_fun_interface` flag), so it
+  can be used like any interface (`class C : F`, override, `invokeinterface`) instead of being
+  dropped as an unsupported dummy. **SAM lambda-conversion** (`F { … }` → an anonymous impl with the
+  method's real signature) is deferred — it's rejected cleanly (skipped), never miscompiled.
+- ✅ Full suite 182 green. Box conformance **376 OK / 0 FAIL** (+1).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

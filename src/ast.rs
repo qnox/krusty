@@ -244,6 +244,9 @@ pub struct ClassDecl {
     pub enum_entry_args: Vec<Vec<ExprId>>,
     /// `interface Name { … }` — a JVM interface (abstract methods).
     pub is_interface: bool,
+    /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
+    /// convertible to it.
+    pub is_fun_interface: bool,
     /// `open`/`abstract` — the class is not `final` (may be subclassed); `abstract` also adds
     /// `ACC_ABSTRACT`.
     pub is_open: bool,
