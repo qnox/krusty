@@ -188,8 +188,10 @@ impl<'a> Emitter<'a> {
                 IrConst::Byte(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Char(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Long(v) => code.push_long(*v, self.cw),
+                IrConst::Double(v) => code.push_double(*v, self.cw),
+                IrConst::Float(v) => code.push_float(*v, self.cw),
                 IrConst::String(s) => code.push_string(s, self.cw),
-                _ => {}
+                IrConst::Null => {}
             },
             IrExpr::GetValue(i) => {
                 let (slot, jt) = self.slots[i];
@@ -302,10 +304,11 @@ impl<'a> Emitter<'a> {
             Add | Sub | Mul | Div | Rem => {
                 self.emit_value(lhs, code);
                 self.emit_value(rhs, code);
-                if lt == Ty::Long {
-                    match op { Add => code.ladd(), Sub => code.lsub(), Mul => code.lmul(), Div => code.ldiv(), Rem => code.lrem(), _ => unreachable!() }
-                } else {
-                    match op { Add => code.iadd(), Sub => code.isub(), Mul => code.imul(), Div => code.idiv(), Rem => code.irem(), _ => unreachable!() }
+                match lt {
+                    Ty::Long => match op { Add => code.ladd(), Sub => code.lsub(), Mul => code.lmul(), Div => code.ldiv(), Rem => code.lrem(), _ => unreachable!() },
+                    Ty::Double => match op { Add => code.dadd(), Sub => code.dsub(), Mul => code.dmul(), Div => code.ddiv(), Rem => code.drem(), _ => unreachable!() },
+                    Ty::Float => match op { Add => code.fadd(), Sub => code.fsub(), Mul => code.fmul(), Div => code.fdiv(), Rem => code.frem(), _ => unreachable!() },
+                    _ => match op { Add => code.iadd(), Sub => code.isub(), Mul => code.imul(), Div => code.idiv(), Rem => code.irem(), _ => unreachable!() },
                 }
             }
             And | Or => {
@@ -337,9 +340,12 @@ impl<'a> Emitter<'a> {
         }
         self.emit_value(lhs, code);
         self.emit_value(rhs, code);
-        if lt == Ty::Long {
-            code.lcmp();
-            code.push_int(0, self.cw);
+        // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`.
+        match lt {
+            Ty::Long => { code.lcmp(); code.push_int(0, self.cw); }
+            Ty::Double => { code.dcmpg(); code.push_int(0, self.cw); }
+            Ty::Float => { code.fcmpg(); code.push_int(0, self.cw); }
+            _ => {}
         }
         let t = code.new_label();
         let end = code.new_label();
@@ -439,8 +445,13 @@ impl<'a> Emitter<'a> {
                 IrConst::Boolean(_) => Ty::Boolean,
                 IrConst::Int(_) => Ty::Int,
                 IrConst::Long(_) => Ty::Long,
+                IrConst::Double(_) => Ty::Double,
+                IrConst::Float(_) => Ty::Float,
+                IrConst::Char(_) => Ty::Char,
                 IrConst::String(_) => Ty::String,
-                _ => Ty::Error,
+                IrConst::Short(_) => Ty::Short,
+                IrConst::Byte(_) => Ty::Byte,
+                IrConst::Null => Ty::Error,
             },
             IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
             IrExpr::GetField { class, index, .. } => ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1),
