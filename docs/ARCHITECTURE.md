@@ -55,3 +55,21 @@ The front end is not yet fully decoupled. The concrete blockers, in priority ord
 Migration is incremental and gated by the conformance harness (never regress `0 FAIL`): introduce
 the `Backend` trait first (no behavior change), then move `descriptor()`/JVM-name resolution behind
 it, then flip `Ty` to Kotlin FqNames with the JVM mapping at the boundary.
+
+## The common IR (`src/ir.rs`)
+
+The shared layer is a **high-level typed IR modeled on Kotlin IR** (`IrClass`/`IrFunction`/`IrCall`/
+`IrWhen`/`IrTypeOperatorCall`/…), *not* LLVM IR or MLIR. Rationale: JVM/JS/WASM are **managed VMs**
+that need Kotlin's types, nullability, and object model preserved; LLVM IR is low-level (native code,
+no GC/objects) and has no JVM/JS path, and MLIR offers infrastructure but no managed-target backend
+to reuse. LLVM is the right tool only for a future **native** backend (as in Kotlin/Native).
+
+- `IrType` names classes by **Kotlin FqName** (`kotlin/Int`), never a JVM descriptor — backends map.
+- Representation coercions (box/unbox, erasure) are **explicit IR nodes** (`IrTypeOp::ImplicitCoercion`)
+  inserted by backend lowering, not hidden in codegen — so they are visible and testable.
+- Index-based arenas (`u32` ids into `Vec`s), per krusty's no-`Box`/`Rc` invariant.
+
+Pipeline target: `checked AST → ir (lower) → shared IR passes (desugar when/for/++, boxing form) →
+per-backend lowering + codegen`. Current state: the IR **node set + builder + smoke test** exist; the
+`ast → ir` lowering and the JVM backend consuming IR (replacing direct AST-to-bytecode emit) are the
+next phases.
