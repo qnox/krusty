@@ -1429,6 +1429,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Next: wire the **linked-`actual`** path (resolve a non-intrinsic External's owner/descriptor
   from the platform stdlib and emit a normal call) so WITH_STDLIB box tests lower without per-fn code.
 
+## Phase 118 — `is`/`as` + autobox coercion via `TypeOp` (both backends)  ✅
+- ✅ `x is T`/`x !is T`/`x as T` lower to the **existing** `IrExpr::TypeOp` (no new node — a new AST
+  construct collapsed onto a node already in the IR). `TypeOp` is value⊗*type* (its 2nd operand is an
+  `IrType`, not an expr) — categorically distinct from `PrimitiveBinOp` (value⊗value), exactly as
+  Kotlin IR separates `IrTypeOperatorCall`. JVM: `instanceof`/`checkcast`; JS: `instanceof` /
+  `typeof === "string"` (cast is a no-op in untyped JS).
+- ✅ Autoboxing made **explicit in the IR**: a primitive arg into a reference param (`describe(7)`
+  where param is `Any`) lowers to `TypeOp(ImplicitCoercion)`; the backend boxes (`Integer.valueOf`)
+  / unboxes — visible in the IR, not hidden in codegen. Drove `describe(Box)`/`("hi")`/`(7)` correct
+  on `java -Xverify:all` AND `node`.
+- ✅ Added a blockers diagnostic (`tests/ir_blockers.rs`): of 393 parse+check-OK non-lowered JVM box
+  files, the top real blockers are lambdas (101), WITH_STDLIB (104), is/as (86), inheritance (79),
+  generics (61), nullable (54) — guiding what to collapse next. Conformance holds (all-or-nothing per
+  file: these files also need other features). 195 unit tests green, IR→JVM 21, JS 18, 0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

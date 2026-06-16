@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
 use crate::jvm::emit::method_descriptor;
 use crate::types::Ty;
@@ -255,6 +255,37 @@ impl<'a> Emitter<'a> {
                 }
                 Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
             },
+            IrExpr::TypeOp { op, arg, type_operand } => {
+                let internal = ref_internal(ir_ty_to_jvm(type_operand));
+                self.emit_value(*arg, code);
+                match op {
+                    IrTypeOp::InstanceOf => {
+                        let ci = self.cw.class_ref(&internal);
+                        code.instance_of(ci);
+                    }
+                    IrTypeOp::NotInstanceOf => {
+                        let ci = self.cw.class_ref(&internal);
+                        code.instance_of(ci);
+                        code.push_int(1, self.cw);
+                        code.ixor();
+                    }
+                    IrTypeOp::Cast => {
+                        let ci = self.cw.class_ref(&internal);
+                        code.checkcast(ci);
+                    }
+                    // Box a primitive into a reference target, or unbox a wrapper into a primitive.
+                    IrTypeOp::ImplicitCoercion => {
+                        let at = self.value_ty(*arg);
+                        let target = ir_ty_to_jvm(type_operand);
+                        if at.is_primitive() && target.is_reference() {
+                            self.box_prim(at, code);
+                        } else if at.is_reference() && target.is_primitive() {
+                            self.unbox_to(target, code);
+                        }
+                    }
+                    IrTypeOp::SafeCast => {}
+                }
+            }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
             IrExpr::When { branches } => self.emit_when(branches, code),
             _ => {}
@@ -469,6 +500,42 @@ impl<'a> Emitter<'a> {
         code.bind(end);
     }
 
+    /// Box a primitive value already on the stack to its wrapper (`Integer.valueOf`, …).
+    fn box_prim(&mut self, t: Ty, code: &mut CodeBuilder) {
+        let (cls, desc) = match t {
+            Ty::Int => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
+            Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;"),
+            Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;"),
+            Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;"),
+            Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
+            Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;"),
+            Ty::Byte => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
+            Ty::Short => ("java/lang/Short", "(S)Ljava/lang/Short;"),
+            _ => return,
+        };
+        let m = self.cw.methodref(cls, "valueOf", desc);
+        code.invokestatic(m, slot_words(t) as i32, 1);
+    }
+
+    /// Unbox a wrapper on the stack to the primitive `t` (`checkcast` + `intValue`, …).
+    fn unbox_to(&mut self, t: Ty, code: &mut CodeBuilder) {
+        let (cls, meth, desc) = match t {
+            Ty::Int => ("java/lang/Integer", "intValue", "()I"),
+            Ty::Long => ("java/lang/Long", "longValue", "()J"),
+            Ty::Double => ("java/lang/Double", "doubleValue", "()D"),
+            Ty::Float => ("java/lang/Float", "floatValue", "()F"),
+            Ty::Boolean => ("java/lang/Boolean", "booleanValue", "()Z"),
+            Ty::Char => ("java/lang/Character", "charValue", "()C"),
+            Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
+            Ty::Short => ("java/lang/Short", "shortValue", "()S"),
+            _ => return,
+        };
+        let ci = self.cw.class_ref(cls);
+        code.checkcast(ci);
+        let m = self.cw.methodref(cls, meth, desc);
+        code.invokevirtual(m, 0, slot_words(t) as i32);
+    }
+
     /// The element `Ty` of an array-typed IR expression.
     fn array_elem(&self, e: u32) -> Ty {
         self.value_ty(e).array_elem().unwrap_or(Ty::Error)
@@ -563,8 +630,22 @@ impl<'a> Emitter<'a> {
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
+            IrExpr::TypeOp { op, type_operand, .. } => match op {
+                IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
+                _ => ir_ty_to_jvm(type_operand),
+            },
             _ => Ty::Error,
         }
+    }
+}
+
+/// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.
+fn ref_internal(t: Ty) -> String {
+    match t {
+        Ty::String => "java/lang/String".to_string(),
+        Ty::Obj(n) => n.to_string(),
+        Ty::Array(_) => t.descriptor(),
+        _ => "java/lang/Object".to_string(),
     }
 }
 

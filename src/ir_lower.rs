@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
-use crate::ir::{Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType};
+use crate::ir::{Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp};
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
 
@@ -168,6 +168,42 @@ impl<'a> Lower<'a> {
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
+    }
+
+    /// Lower a call argument, inserting an explicit `ImplicitCoercion` when a primitive must box
+    /// into a reference parameter (`Int` → `Any`) or a wrapper must unbox into a primitive param.
+    /// Box/unbox is the backend's concern, but the *coercion* is explicit in the IR.
+    fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
+        let at = self.info.ty(arg);
+        let e = self.expr(arg)?;
+        let target_ref = ir_type_is_reference(target);
+        if at.is_primitive() && target_ref {
+            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
+        } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
+            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
+        } else {
+            Some(e)
+        }
+    }
+
+    /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
+    /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
+    fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
+        if r.nullable {
+            return None;
+        }
+        let t = if let Some(p) = Ty::from_name(&r.name) {
+            p
+        } else if self.classes.contains_key(&r.name) {
+            Ty::obj(&r.name)
+        } else {
+            return None;
+        };
+        if t.is_reference() {
+            Some(t)
+        } else {
+            None
+        }
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
@@ -355,6 +391,18 @@ impl<'a> Lower<'a> {
                 };
                 self.ir.add_expr(IrExpr::When { branches })
             }
+            // `x is T` / `x !is T` / `x as T` → the existing `IrTypeOp` node (no new node).
+            Expr::Is { operand, ty, negated } => {
+                let arg = self.expr(operand)?;
+                let op = if negated { IrTypeOp::NotInstanceOf } else { IrTypeOp::InstanceOf };
+                let type_operand = ty_to_ir(self.ty_ref(&ty)?);
+                self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
+            }
+            Expr::As { operand, ty, nullable: _ } => {
+                let arg = self.expr(operand)?;
+                let type_operand = ty_to_ir(self.ty_ref(&ty)?);
+                self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg, type_operand })
+            }
             Expr::Unary { op, operand } => {
                 use crate::ast::UnOp;
                 let v = self.expr(operand)?;
@@ -429,8 +477,12 @@ impl<'a> Lower<'a> {
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
+                        let params = self.ir.functions[fid as usize].params.clone();
                         let mut a = Vec::new();
-                        for arg in args { a.push(self.expr(arg)?); }
+                        for (k, arg) in args.iter().enumerate() {
+                            let target = params.get(k).cloned().unwrap_or(IrType::Error);
+                            a.push(self.lower_arg(*arg, &target)?);
+                        }
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
                     } else {
                         // Constructor: the call's result type is the class.
@@ -475,6 +527,18 @@ fn class_internal(file: &ast::File, name: &str) -> String {
 
 fn ty_of(_syms: &SymbolTable, r: &ast::TypeRef) -> Ty {
     Ty::from_name(&r.name).unwrap_or(Ty::Error)
+}
+
+/// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
+fn ir_type_is_reference(t: &IrType) -> bool {
+    match t {
+        IrType::Class { fq_name, .. } => !matches!(
+            fq_name.as_str(),
+            "kotlin/Int" | "kotlin/Long" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Boolean" | "kotlin/Char" | "kotlin/Double" | "kotlin/Float"
+        ),
+        IrType::Function { .. } => true,
+        _ => false,
+    }
 }
 
 /// The element type of a primitive-array constructor name (`IntArray` → `Int`).
