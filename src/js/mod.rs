@@ -157,8 +157,26 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     format!("({} + {})", r, emit_expr(ir, args[0], inst))
                 }
-                "kotlin/String.length" => format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
+                "kotlin/String.length" | "kotlin/Array.size" => format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
                 "kotlin/Any.toString" => format!("String({})", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
+                // Arrays are a regular type the JS backend lowers to a JS `Array`.
+                "kotlin/Array.get" => format!("{}[{}]", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst)),
+                "kotlin/Array.set" => format!("({}[{}] = {})", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst), emit_expr(ir, args[1], inst)),
+                // Primitive arrays lower to JS typed arrays (the real Kotlin/JS representation —
+                // zero-filled, `.length`, indexable). Boolean has no typed array; use a filled Array.
+                _ if fq.ends_with("Array.<init>") => {
+                    let n = emit_expr(ir, args[0], inst);
+                    match fq.trim_start_matches("kotlin/").trim_end_matches(".<init>") {
+                        "IntArray" => format!("new Int32Array({n})"),
+                        "DoubleArray" => format!("new Float64Array({n})"),
+                        "FloatArray" => format!("new Float32Array({n})"),
+                        "ByteArray" => format!("new Int8Array({n})"),
+                        "ShortArray" => format!("new Int16Array({n})"),
+                        "CharArray" => format!("new Uint16Array({n})"),
+                        "BooleanArray" => format!("new Array({n}).fill(false)"),
+                        _ => format!("new Array({n}).fill(0)"), // LongArray etc.
+                    }
+                }
                 _ => "undefined".to_string(),
             },
         },

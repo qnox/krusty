@@ -229,6 +229,12 @@ impl<'a> Lower<'a> {
                 let val = self.expr(value)?;
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
             }
+            Stmt::AssignIndex { array, index, value } => {
+                let a = self.expr(array)?;
+                let i = self.expr(index)?;
+                let v = self.expr(value)?;
+                Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.set".to_string()), dispatch_receiver: Some(a), args: vec![i, v] }))
+            }
             Stmt::While { cond, body } => {
                 let c = self.expr(cond)?;
                 let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { return None };
@@ -302,9 +308,18 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
                 }
             }
+            // `array[i]` read → `kotlin/Array.get` intrinsic (backend reads element from the receiver).
+            Expr::Index { array, index } => {
+                let a = self.expr(array)?;
+                let i = self.expr(index)?;
+                self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.get".to_string()), dispatch_receiver: Some(a), args: vec![i] })
+            }
             Expr::Member { receiver, name } => {
                 let rt = self.info.ty(receiver);
-                if let Some(ci) = self.class_of(rt) {
+                if rt.array_elem().is_some() && name == "size" {
+                    let a = self.expr(receiver)?;
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
+                } else if let Some(ci) = self.class_of(rt) {
                     let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
                     let class = ci.id;
                     let recv = self.expr(receiver)?;
@@ -405,6 +420,12 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // Primitive-array size constructor `IntArray(n)` → a per-element intrinsic that
+                    // encodes the element type (so the backend picks the right allocation).
+                    if prim_array_elem(&fname).is_some() && args.len() == 1 {
+                        let size = self.expr(args[0])?;
+                        return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
+                    }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         let mut a = Vec::new();
                         for arg in args { a.push(self.expr(arg)?); }
@@ -454,6 +475,21 @@ fn ty_of(_syms: &SymbolTable, r: &ast::TypeRef) -> Ty {
     Ty::from_name(&r.name).unwrap_or(Ty::Error)
 }
 
+/// The element type of a primitive-array constructor name (`IntArray` → `Int`).
+fn prim_array_elem(name: &str) -> Option<Ty> {
+    Some(match name {
+        "IntArray" => Ty::Int,
+        "LongArray" => Ty::Long,
+        "DoubleArray" => Ty::Double,
+        "FloatArray" => Ty::Float,
+        "BooleanArray" => Ty::Boolean,
+        "CharArray" => Ty::Char,
+        "ByteArray" => Ty::Byte,
+        "ShortArray" => Ty::Short,
+        _ => return None,
+    })
+}
+
 /// Map a krusty `Ty` to a backend-agnostic `IrType` (a Kotlin FqName).
 fn ty_to_ir(t: Ty) -> IrType {
     let fq = match t {
@@ -469,6 +505,17 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
         Ty::Obj(n) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
+        // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
+        // its representation. Primitive arrays encode the element in the class name.
+        Ty::Array(e) => {
+            let fq = match *e {
+                Ty::Int => "kotlin/IntArray", Ty::Long => "kotlin/LongArray", Ty::Double => "kotlin/DoubleArray",
+                Ty::Float => "kotlin/FloatArray", Ty::Boolean => "kotlin/BooleanArray", Ty::Char => "kotlin/CharArray",
+                Ty::Byte => "kotlin/ByteArray", Ty::Short => "kotlin/ShortArray",
+                _ => return IrType::Class { fq_name: "kotlin/Array".to_string(), type_args: vec![ty_to_ir(*e)], nullable: false },
+            };
+            return IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false };
+        }
         _ => return IrType::Error,
     };
     IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
