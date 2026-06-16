@@ -15,10 +15,19 @@ use krusty::ir_lower::lower_file;
 const SRC: &str = r#"
 fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
+fun sumTo(n: Int): Int {
+    var s = 0
+    var i = 1
+    while (i <= n) {
+        s = s + i
+        i = i + 1
+    }
+    return s
+}
 fun box(): String {
     val s = add(2, 3)
     val msg = "v=$s!"                      // string template → String.plus intrinsics
-    return if (s == 5 && max(7, 4) == 7 && msg == "v=5!") "OK" else "no"
+    return if (s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10) "OK" else "no"
 }
 "#;
 

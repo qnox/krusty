@@ -58,6 +58,13 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, out: &mut String) {
             indent(depth, out);
             out.push_str(&format!("v{var} = {};\n", emit_expr(ir, *value)));
         }
+        IrExpr::While { cond, body } => {
+            indent(depth, out);
+            out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond)));
+            emit_stmt(ir, *body, depth + 1, out);
+            indent(depth, out);
+            out.push_str("}\n");
+        }
         other => {
             indent(depth, out);
             out.push_str(&emit_expr_node(ir, other));

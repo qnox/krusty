@@ -1340,6 +1340,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - Each construct added to `ir_lower` widens the IR path on *both* backends at once — the mechanism
   for eventually moving the JVM path off `emit.rs` onto the IR.
 
+## Phase 109 — `while` loops in the IR  ✅
+- ✅ `ir_lower` lowers `Stmt::While` to `IrExpr::While`; the JVM backend emits the counted
+  back-edge with `StackMapTable` frames, the JS backend a `while (..) { .. }`. Verified on
+  `java -Xverify:all` AND `node` (`sumTo(4) == 10`). 193 unit tests green, JS box 7/7, 0 FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
