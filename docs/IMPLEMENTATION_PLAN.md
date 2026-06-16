@@ -1331,6 +1331,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - Note: chained `+` lowers to nested `String.plus` (runtime-correct); kotlinc flattens to one
   `StringBuilder` — a future bytecode-equality optimization, not a correctness gap.
 
+## Phase 108 — String templates in the IR  ✅
+- ✅ `ir_lower` lowers `Expr::Template` (`"a${x}b"`) to a fold of `Call(Intrinsic("kotlin/String.plus"))`
+  — no new node, reusing the intrinsic-symbol design from Phase 107. Each backend realizes the
+  concatenation + to-string from its stdlib (JVM `StringBuilder`/`append`, JS `+`).
+- ✅ Verified on `java -Xverify:all` AND `node` (`"v=$s!"` → `"v=5!"`). JS box conformance grows
+  **5 → 7 IR-lowered, 7 OK, 0 FAIL** (templates are pervasive in `box()` results).
+- Each construct added to `ir_lower` widens the IR path on *both* backends at once — the mechanism
+  for eventually moving the JVM path off `emit.rs` onto the IR.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
