@@ -107,6 +107,9 @@ pub struct SymbolTable {
     pub enums: HashMap<String, Vec<String>>,
     /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
     pub classpath: Classpath,
+    /// Top-level extension functions: (receiver_descriptor, method_name) → Signature.
+    /// Used to resolve `recv.method(args)` when no instance method matches.
+    pub ext_funs: HashMap<(String, String), Signature>,
 }
 
 impl SymbolTable {
@@ -519,7 +522,20 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             Vec::new()
                         }
                     }).collect();
-                    if table.funs.insert(f.name.clone(), Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }).is_some() {
+                    let sig = Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types };
+                    if let Some(recv_ref) = &f.receiver {
+                        // Extension function: index by (receiver_descriptor, method_name).
+                        let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
+                        // Nullable reference receivers (`fun String?.foo()`) are not supported: the
+                        // receiver descriptor is the same as the non-null form so krusty can't
+                        // distinguish them at the call site, leading to silent miscompiles or
+                        // infinite recursion when the body uses the same operator internally.
+                        if recv_ref.nullable && recv_ty.is_reference() {
+                            diags.error(f.span, "krusty: extension functions on nullable reference types are not supported".to_string());
+                        } else {
+                            table.ext_funs.insert((recv_ty.descriptor(), f.name.clone()), sig);
+                        }
+                    } else if table.funs.insert(f.name.clone(), sig).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));
                     }
                 }
@@ -1132,6 +1148,17 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 c.pop_scope();
                 c.this_ty = None;
+                // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
+                // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
+                if cl.is_enum {
+                    let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
+                    for args in &cl.enum_entry_args {
+                        for (a, expected_ty) in args.iter().zip(&ctor_tys) {
+                            let at = c.expr(*a);
+                            c.expect_assignable(*expected_ty, at, c.span(*a), "enum entry argument");
+                        }
+                    }
+                }
                 // `companion object` members are checked statically, with companion props/methods in
                 // scope unqualified.
                 if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
@@ -1425,6 +1452,31 @@ impl<'a> Checker<'a> {
         subs.iter().all(|d| covered.contains(d))
     }
 
+    /// True if a subject `when` is exhaustive because the subject is an enum type and every
+    /// declared entry is matched by a `EnumName.ENTRY` arm condition.
+    fn when_enum_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
+        let Some(Ty::Obj(internal)) = subj_ty else { return false };
+        // Find the enum's simple name (key in self.syms.enums) matching this internal name.
+        let Some((_, entries)) = self.syms.enums.iter()
+            .find(|(name, _)| self.syms.classes.get(*name).map_or(false, |c| c.internal == internal))
+        else { return false };
+        if entries.is_empty() { return false; }
+        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for arm in arms {
+            for &cnd in &arm.conditions {
+                // Arm condition must be `EnumClass.ENTRY` — a member access on the enum class.
+                if let Expr::Member { receiver, name: entry } = self.file.expr(cnd) {
+                    if let Expr::Name(en) = self.file.expr(*receiver) {
+                        if self.syms.classes.get(en).map_or(false, |c| c.internal == internal) {
+                            covered.insert(entry);
+                        }
+                    }
+                }
+            }
+        }
+        entries.iter().all(|e| covered.contains(e.as_str()))
+    }
+
     /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
     /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
     fn expr_diverges(&self, e: ExprId) -> bool {
@@ -1500,12 +1552,23 @@ impl<'a> Checker<'a> {
             self.diags.error(f.span, "krusty: inline functions are not supported");
             return;
         }
-        // Use the collected signature's return type; for a companion method (not in `funs`) fall back
-        // to the declared return type.
-        self.ret_ty = match self.syms.funs.get(&f.name).map(|s| s.ret) {
-            Some(r) => r,
-            None => f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit),
-        };
+        // Extension function: look up in ext_funs table; set this_ty to the receiver type.
+        let prev_this = self.this_ty;
+        if let Some(recv_ref) = &f.receiver {
+            let recv_ty = self.resolve_ty(recv_ref);
+            self.this_ty = Some(recv_ty);
+            let recv_desc = recv_ty.descriptor();
+            self.ret_ty = self.syms.ext_funs.get(&(recv_desc, f.name.clone())).map(|s| s.ret)
+                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
+                .unwrap_or(Ty::Unit);
+        } else {
+            // Use the collected signature's return type; for a companion method (not in `funs`) fall back
+            // to the declared return type.
+            self.ret_ty = match self.syms.funs.get(&f.name).map(|s| s.ret) {
+                Some(r) => r,
+                None => f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or(Ty::Unit),
+            };
+        }
         // For expression-body functions with no explicit return type, infer the return type from the
         // body expression and record it as an override (so codegen uses the right JVM descriptor).
         let infer_ret = f.ret.is_none() && self.ret_ty == Ty::Unit && matches!(&f.body, FunBody::Expr(_));
@@ -1540,6 +1603,7 @@ impl<'a> Checker<'a> {
         }
         self.pop_scope();
         self.pop_local_funs();
+        self.this_ty = prev_this;
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
@@ -1815,6 +1879,24 @@ impl<'a> Checker<'a> {
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
+                // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
+                // (primitives can never be null), so emit as a direct static call.
+                if !rt.is_reference() {
+                    let recv_desc = rt.descriptor();
+                    if let Some(sig) = self.syms.ext_funs.get(&(recv_desc.clone(), name.clone())).cloned() {
+                        let arg_tys: Vec<Ty> = match &args {
+                            Some(a) => a.iter().map(|x| self.expr(*x)).collect(),
+                            None => vec![],
+                        };
+                        if sig.params.len() != arg_tys.len() {
+                            self.diags.error(self.span(e), format!("extension '{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                        }
+                        let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
+                        let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
+                        self.ext_calls.insert(e, ("$local".to_string(), name.clone(), desc));
+                        return self.set(e, sig.ret);
+                    }
+                }
                 let result = match &args {
                     None => self.check_member(rt, &name, self.span(e)),
                     Some(a) => {
@@ -1879,6 +1961,30 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs } => {
                 let lt = self.expr(lhs);
                 let rt = self.expr(rhs);
+                // User-defined extension operator on a primitive receiver overrides built-in arithmetic.
+                // Only applies to primitive receivers (reference receivers can't distinguish nullable vs
+                // non-null at the krusty type level, risking infinite self-recursion in the body).
+                if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
+                    let op_name = match op {
+                        BinOp::Add => Some("plus"),
+                        BinOp::Sub => Some("minus"),
+                        BinOp::Mul => Some("times"),
+                        BinOp::Div => Some("div"),
+                        BinOp::Rem => Some("rem"),
+                        _ => None,
+                    };
+                    if let Some(fname) = op_name {
+                        let recv_desc = lt.descriptor();
+                        if let Some(sig) = self.syms.ext_funs.get(&(recv_desc.clone(), fname.to_string())).cloned() {
+                            if sig.params.len() == 1 {
+                                let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
+                                let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
+                                self.ext_calls.insert(e, ("$local".to_string(), fname.to_string(), desc));
+                                return self.set(e, sig.ret);
+                            }
+                        }
+                    }
+                }
                 self.check_binary(op, lt, rt, self.span(e))
             }
             Expr::Member { receiver, name } => {
@@ -1993,8 +2099,10 @@ impl<'a> Checker<'a> {
                             // A type-test arm (`is T`) compares by `instanceof`, not `==` — no
                             // comparability constraint (it already validated its own operand/target).
                             _ if is_type_test => {}
-                            // subject form: condition must be comparable to the subject
-                            Some(st) if st != Ty::Error && ct != Ty::Error && st != ct && Ty::promote(st, ct).is_none() => {
+                            // subject form: condition must be comparable to the subject.
+                            // `null` is always a valid condition (the branch simply never matches
+                            // for non-nullable subjects; it may match for nullable ones).
+                            Some(st) if ct != Ty::Null && st != Ty::Error && ct != Ty::Error && st != ct && Ty::promote(st, ct).is_none() => {
                                 self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
                             }
                             // subjectless form: condition must be Boolean
@@ -2019,8 +2127,11 @@ impl<'a> Checker<'a> {
                     });
                 }
                 // A `when` carries a value only when it is exhaustive: it has an `else`, or its
-                // subject is a `sealed` type whose every subclass is matched by an `is` arm.
-                let exhaustive = has_else || self.when_sealed_exhaustive(subj_ty, &arms);
+                // subject is a `sealed` type whose every subclass is matched by an `is` arm, or
+                // its subject is an enum and every entry is covered by an `EnumName.ENTRY` arm.
+                let exhaustive = has_else
+                    || self.when_sealed_exhaustive(subj_ty, &arms)
+                    || self.when_enum_exhaustive(subj_ty, &arms);
                 if exhaustive {
                     result.unwrap_or(Ty::Unit)
                 } else {
@@ -2430,6 +2541,24 @@ impl<'a> Checker<'a> {
                 if let Some((owner, jvm_name, desc, ret)) = resolve_extension(&self.syms.classpath, rt, &name, &arg_tys) {
                     self.ext_calls.insert(call, (owner, jvm_name, desc));
                     return ret;
+                }
+                // User-defined extension function in this file (invokestatic on the file facade).
+                {
+                    let recv_desc = rt.descriptor();
+                    if let Some(sig) = self.syms.ext_funs.get(&(recv_desc.clone(), name.clone())).cloned() {
+                        if sig.params.len() != arg_tys.len() {
+                            self.diags.error(span, format!("extension '{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
+                        } else {
+                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                        }
+                        // Full static descriptor: (receiver_desc + param_descs)ret_desc
+                        let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
+                        let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
+                        self.ext_calls.insert(call, ("$local".to_string(), name.clone(), desc));
+                        return sig.ret;
+                    }
                 }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
                 Ty::Error

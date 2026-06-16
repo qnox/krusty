@@ -173,6 +173,9 @@ pub enum FunBody {
 #[derive(Clone, Debug)]
 pub struct FunDecl {
     pub name: String,
+    /// Extension receiver type (`fun String.foo()` → `Some("String")`). Emitted as a static
+    /// method with the receiver prepended as the first parameter.
+    pub receiver: Option<TypeRef>,
     pub params: Vec<Param>,
     pub ret: Option<TypeRef>,
     pub body: FunBody,
