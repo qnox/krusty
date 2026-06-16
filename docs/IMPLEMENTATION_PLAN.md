@@ -1124,6 +1124,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   comparison to `diff_kotlinc.rs`. krusty's ABI (javap) and execution output **match the real kotlinc**
   for all of them (verified with the reference kotlinc from Phase 91).
 
+## Phase 93 — `data class` ABI verified vs kotlinc  ✅
+- ✅ Added `data_class_abi_matches_kotlinc` to `diff_class_kotlinc.rs`: krusty's synthesized data-class
+  public member surface (`componentN`/`copy`/`equals`/`hashCode`/`toString` + accessors) matches the
+  real kotlinc's exactly for `data class P(val x: Int, val y: String)`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
