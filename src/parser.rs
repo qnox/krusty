@@ -64,21 +64,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Consume a `{ … }` block, balancing nested braces. Assumes the opening `{` is the current token.
-    fn skip_balanced_braces(&mut self) {
-        let mut depth = 0usize;
-        loop {
-            match self.kind() {
-                TokenKind::LBrace => { depth += 1; self.bump(); }
-                TokenKind::RBrace => {
-                    depth -= 1;
-                    self.bump();
-                    if depth == 0 { break; }
-                }
-                TokenKind::Eof => break,
-                _ => { self.bump(); }
-            }
-        }
-    }
 
     // ---- file / decls ----
     fn parse_file(&mut self) {
@@ -199,7 +184,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Ident if self.text() == "typealias" => {
                     self.bump(); // `typealias`
                     let alias = if self.at(TokenKind::Ident) { self.bump().text(self.src).to_string() } else { String::new() };
-                    self.skip_type_args(); // skip `<T, R>` if present
+                    self.parse_type_args(); // skip `<T, R>` if present
                     self.eat(TokenKind::Eq);
                     // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
                     let target = if self.at(TokenKind::LParen) {
@@ -258,41 +243,23 @@ impl<'a> Parser<'a> {
         mods
     }
 
-    /// Skip `(…)` or `{…}` with proper brace nesting. Does nothing if not at `open`.
-    fn skip_balanced(&mut self, open: TokenKind, close: TokenKind) {
-        if !self.at(open) { return; }
-        self.bump();
-        let mut depth = 1usize;
-        while !self.at(TokenKind::Eof) {
-            if self.at(open) { depth += 1; }
-            else if self.at(close) {
-                depth -= 1;
-                if depth == 0 { self.bump(); return; }
-            }
-            self.bump();
-        }
-    }
 
-    /// Skip the body of a nested type declaration after the keyword has been consumed:
-    /// optional name, optional type params, optional primary ctor, optional supertypes, optional `{…}`.
-    fn skip_nested_decl_body(&mut self) {
-        if self.at(TokenKind::Ident) { self.bump(); } // name
-        if self.at(TokenKind::Lt) { self.skip_type_args(); }
-        if self.at(TokenKind::LParen) { self.skip_balanced(TokenKind::LParen, TokenKind::RParen); }
-        // optional supertype list `: Name<T>(args), Iface`
-        if self.eat(TokenKind::Colon) {
-            loop {
-                self.skip_newlines();
-                if !self.at(TokenKind::Ident) && !self.at(TokenKind::Dot) { break; }
-                while self.at(TokenKind::Ident) || self.at(TokenKind::Dot) { self.bump(); }
-                if self.at(TokenKind::Lt) { self.skip_type_args(); }
-                if self.at(TokenKind::LParen) { self.skip_balanced(TokenKind::LParen, TokenKind::RParen); }
-                self.skip_newlines();
-                if !self.eat(TokenKind::Comma) { break; }
-            }
+    /// Parse a nested type declaration (`class`/`object`/`interface`/`data|enum|annotation class`/
+    /// `sealed …`) through the *real* parsers — never by skipping a balanced body. The current
+    /// `class`-body/`object`-body/`enum`-body grammar doesn't support nested types, so the caller
+    /// discards the result; a *reference* to the (dropped) nested type then fails to resolve and the
+    /// file is cleanly skipped, never miscompiled.
+    fn parse_nested_type_decl(&mut self) -> ClassDecl {
+        match self.kind() {
+            TokenKind::KwClass => self.parse_class(),
+            TokenKind::Ident if self.text() == "object" => self.parse_object(),
+            TokenKind::Ident if self.text() == "interface" => self.parse_interface(),
+            TokenKind::Ident if self.text() == "enum" => self.parse_enum(),
+            TokenKind::Ident if self.text() == "data" => { self.bump(); let mut d = self.parse_class(); d.is_data = true; d }
+            TokenKind::Ident if self.text() == "annotation" => { self.bump(); self.parse_class() }
+            TokenKind::Ident if self.text() == "sealed" => { self.bump(); self.parse_nested_type_decl() }
+            _ => self.parse_class(),
         }
-        self.skip_newlines();
-        if self.at(TokenKind::LBrace) { self.skip_balanced(TokenKind::LBrace, TokenKind::RBrace); }
     }
 
     fn skip_annotation(&mut self) {
@@ -303,17 +270,52 @@ impl<'a> Parser<'a> {
             self.bump(); // ':'
         }
         let _ = self.parse_qualified_name();
-        if self.at(TokenKind::LParen) {
-            // skip a balanced argument list
-            let mut depth = 0;
-            loop {
-                match self.kind() {
-                    TokenKind::LParen => { depth += 1; self.bump(); }
-                    TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
-                    TokenKind::Eof => break,
-                    _ => { self.bump(); }
-                }
+        self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
+        self.parse_annotation_args();
+    }
+
+    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar.
+    /// Annotations carry no codegen meaning, so the parsed values are discarded.
+    fn parse_annotation_args(&mut self) {
+        if !self.eat(TokenKind::LParen) {
+            return;
+        }
+        self.skip_newlines();
+        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            // optional named argument `name = value`
+            if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Eq) {
+                self.bump(); // name
+                self.bump(); // '='
             }
+            self.parse_annotation_value();
+            self.skip_newlines();
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RParen, "')'");
+    }
+
+    /// A single annotation argument value: an array literal `[…]`, a nested annotation `@Foo(…)`,
+    /// or an ordinary expression (incl. `Foo::class`).
+    fn parse_annotation_value(&mut self) {
+        if self.at(TokenKind::LBracket) {
+            self.bump(); // '['
+            self.skip_newlines();
+            while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                self.parse_annotation_value();
+                self.skip_newlines();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RBracket, "']'");
+        } else if self.at(TokenKind::At) {
+            self.skip_annotation();
+        } else {
+            let _ = self.parse_expr();
         }
     }
 
@@ -470,33 +472,24 @@ impl<'a> Parser<'a> {
                 } else { Vec::new() };
                 match self.kind() {
                     TokenKind::KwFun => methods.push(self.parse_fun(emods.iter().any(|m| m == "inline"), emods.iter().any(|m| m == "final"))),
-                    // Nested class/object/interface and secondary constructors: skip the entire
-                    // declaration by consuming tokens until balanced braces settle.
-                    TokenKind::KwClass => {
-                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
-                            self.bump();
-                        }
-                        if self.at(TokenKind::LBrace) {
-                            self.skip_balanced_braces();
-                        }
-                    }
+                    // Nested type declarations and secondary constructors in an enum body: parse
+                    // them through the real grammar (no token-skipping) and discard — krusty doesn't
+                    // emit them, so a reference fails to resolve and the file is cleanly skipped.
+                    TokenKind::KwClass => { let _ = self.parse_nested_type_decl(); }
                     TokenKind::Ident if self.text() == "constructor" => {
                         self.diags.error(self.tok().span, "krusty: secondary constructors in enum classes are not supported");
-                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
-                            self.bump();
+                        self.bump(); // 'constructor'
+                        let _ = self.parse_param_list();
+                        if self.eat(TokenKind::Colon) {
+                            self.skip_newlines();
+                            if self.at(TokenKind::Ident) { self.bump(); } // 'this'/'super'
+                            let _ = self.parse_call_arguments();
                         }
-                        if self.at(TokenKind::LBrace) {
-                            self.skip_balanced_braces();
-                        }
+                        self.skip_newlines();
+                        if self.at(TokenKind::LBrace) { let _ = self.parse_block_expr(); }
                     }
-                    TokenKind::Ident if matches!(self.text(), "object" | "interface" | "companion") => {
-                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
-                            self.bump();
-                        }
-                        if self.at(TokenKind::LBrace) {
-                            self.skip_balanced_braces();
-                        }
-                    }
+                    TokenKind::Ident if matches!(self.text(), "object" | "interface") => { let _ = self.parse_nested_type_decl(); }
+                    TokenKind::Ident if self.text() == "companion" => { self.bump(); let _ = self.parse_nested_type_decl(); }
                     _ => break,
                 }
             }
@@ -562,7 +555,7 @@ impl<'a> Parser<'a> {
             self.diags.error(start, "krusty: 'fun interface' (SAM interfaces) are not supported");
             self.bump(); // 'interface'
             if self.at(TokenKind::Ident) { self.bump(); } // interface name
-            self.skip_type_args();
+            self.parse_type_args();
             let (supertypes, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
@@ -587,7 +580,7 @@ impl<'a> Parser<'a> {
             // `fun RecvType<...>?.name(...)` — extension function.
             let span = self.tok().span;
             let mut recv_nullable = false;
-            if self.at(TokenKind::Lt) { self.skip_type_args(); }  // skip type args on receiver
+            if self.at(TokenKind::Lt) { self.parse_type_args(); }  // skip type args on receiver
             if self.eat(TokenKind::Question) { recv_nullable = true; }
             self.expect(TokenKind::Dot, "'.'");
             let recv_ty = TypeRef { name: first_name, nullable: recv_nullable, arg: None, span, fun_params: vec![] };
@@ -783,27 +776,16 @@ impl<'a> Parser<'a> {
                         if mods.iter().any(|m| m == "inner") {
                             self.diags.error(self.tok().span, "krusty: inner classes are not supported");
                         }
-                        self.bump(); // 'class'
-                        self.skip_nested_decl_body();
-                    }
-                    TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
-                        self.bump();
-                        self.skip_nested_decl_body();
+                        let _ = self.parse_nested_type_decl(); // real parse, discarded (nested types unsupported)
                     }
                     TokenKind::Ident
-                        if matches!(self.text(), "data" | "enum" | "annotation")
-                            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                        if matches!(self.text(), "object" | "interface")
+                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                                && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass))
+                            || (self.text() == "sealed"
+                                && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "interface")) =>
                     {
-                        self.bump(); // 'data'/'enum'/'annotation'
-                        self.bump(); // 'class'
-                        self.skip_nested_decl_body();
-                    }
-                    TokenKind::Ident if self.text() == "sealed"
-                        && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "interface") =>
-                    {
-                        self.bump(); // 'sealed'
-                        self.bump(); // 'interface'
-                        self.skip_nested_decl_body();
+                        let _ = self.parse_nested_type_decl();
                     }
                     // Secondary constructor: `constructor(params) [: this/super(args)] { body }`.
                     // krusty doesn't emit these, so a call to the secondary ctor would resolve to a
@@ -861,7 +843,7 @@ impl<'a> Parser<'a> {
                 let effective = if name.contains('.') { name.replace('.', "/") } else { simple.clone() };
                 // Skip optional type arguments (e.g. `A<Int, Number>`); they are erased on JVM.
                 if self.at(TokenKind::Lt) {
-                    self.skip_type_args();
+                    self.parse_type_args();
                 }
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class
@@ -930,15 +912,13 @@ impl<'a> Parser<'a> {
                         }
                         body_props.push(p);
                     }
-                    TokenKind::KwClass => { self.bump(); self.skip_nested_decl_body(); }
-                    TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
-                        self.bump(); self.skip_nested_decl_body();
-                    }
+                    TokenKind::KwClass => { let _ = self.parse_nested_type_decl(); }
                     TokenKind::Ident
-                        if matches!(self.text(), "data" | "enum" | "annotation")
-                            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                        if matches!(self.text(), "object" | "interface")
+                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                                && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass)) =>
                     {
-                        self.bump(); self.bump(); self.skip_nested_decl_body();
+                        let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.text() == "typealias" => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
@@ -996,15 +976,13 @@ impl<'a> Parser<'a> {
                         let block = self.parse_block_expr();
                         init_order.push(ClassInit::Block(block));
                     }
-                    TokenKind::KwClass => { self.bump(); self.skip_nested_decl_body(); }
-                    TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
-                        self.bump(); self.skip_nested_decl_body();
-                    }
+                    TokenKind::KwClass => { let _ = self.parse_nested_type_decl(); }
                     TokenKind::Ident
-                        if matches!(self.text(), "data" | "enum" | "annotation")
-                            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                        if matches!(self.text(), "object" | "interface")
+                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                                && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass)) =>
                     {
-                        self.bump(); self.bump(); self.skip_nested_decl_body();
+                        let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.text() == "typealias" => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
@@ -1069,7 +1047,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Gt, "'>'");
                 Some(Box::new(elem))
             } else {
-                self.skip_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
+                self.parse_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
                 None
             };
             let nullable = self.eat(TokenKind::Question); // `T?`
@@ -1087,20 +1065,32 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip a balanced `<...>` generic type-argument list (types are erased).
-    fn skip_type_args(&mut self) {
-        if !self.at(TokenKind::Lt) {
-            return;
+    /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
+    /// (recursing through `parse_type`, so nested generics like `Map<K, List<V>>` parse correctly).
+    /// The arguments are returned for completeness but JVM-erased, so callers may discard them.
+    fn parse_type_args(&mut self) -> Vec<TypeRef> {
+        let mut args = Vec::new();
+        if !self.eat(TokenKind::Lt) {
+            return args;
         }
-        let mut depth = 0;
-        loop {
-            match self.kind() {
-                TokenKind::Lt => { depth += 1; self.bump(); }
-                TokenKind::Gt => { depth -= 1; self.bump(); if depth == 0 { break; } }
-                TokenKind::Eof => break,
-                _ => { self.bump(); }
+        self.skip_newlines();
+        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+            self.skip_variance(); // `out`/`in`
+            if self.eat(TokenKind::Star) {
+                // Star projection `<*>` — erased to `Any?`.
+                let span = self.tok().span;
+                args.push(TypeRef { name: "Any".to_string(), nullable: true, arg: None, span, fun_params: Vec::new() });
+            } else {
+                args.push(self.parse_type());
             }
+            self.skip_newlines();
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
         }
+        self.expect(TokenKind::Gt, "'>'");
+        args
     }
 
     /// Parse and discard a `<T, reified U : Bound, out V>` type-parameter list, returning the names.
@@ -1706,7 +1696,7 @@ impl<'a> Parser<'a> {
                 // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
                 TokenKind::Lt if self.lookahead_is_type_args_call() => {
                     // Skip the type argument list — krusty erases generics.
-                    self.skip_type_args();
+                    self.parse_type_args();
                 }
                 _ => break,
             }
