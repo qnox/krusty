@@ -3959,6 +3959,41 @@ impl<'a> MethodEmitter<'a> {
             }
             return;
         }
+        // Nested-class constructor `Outer.Inner(args)` → new `Outer$Inner` + invokespecial <init>.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            if let Expr::Name(outer) = self.file.expr(receiver).clone() {
+                if !self.slots.contains_key(&outer) {
+                    if let Some(cls) = self.syms.classes.get(&format!("{outer}.{name}")) {
+                        let internal = cls.internal.clone();
+                        let ctor_tys: Vec<Ty> = cls.ctor_params.clone();
+                        let class_idx = cw.class_ref(&internal);
+                        if args.iter().any(|&a| self.expr_uses_frames(a)) {
+                            let mut tmps = Vec::new();
+                            for (a, pty) in args.iter().zip(&ctor_tys) {
+                                self.emit_expr_as(*a, *pty, code, cw);
+                                let t = self.alloc_temp(*pty);
+                                store_local(*pty, t, code);
+                                tmps.push((t, *pty));
+                            }
+                            code.new_obj(class_idx);
+                            code.dup();
+                            for (t, pty) in tmps { load_local(pty, t, code); }
+                        } else {
+                            code.new_obj(class_idx);
+                            code.dup();
+                            for (a, pty) in args.iter().zip(&ctor_tys) {
+                                self.emit_expr_as(*a, *pty, code, cw);
+                            }
+                        }
+                        let arg_words: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                        let desc = method_descriptor(&ctor_tys, Ty::Unit);
+                        let m = cw.methodref(&internal, "<init>", &desc);
+                        code.invokespecial(m, arg_words, 0);
+                        return;
+                    }
+                }
+            }
+        }
         // Builtin bitwise/shift infix methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`).
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             let rt = self.info.ty(receiver);

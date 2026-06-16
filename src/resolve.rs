@@ -361,9 +361,11 @@ pub fn resolve_extension(
 }
 
 fn class_internal(file: &File, name: &str) -> String {
+    // A nested class's source name `Outer.Inner` maps to the JVM internal name `Outer$Inner`.
+    let mangled = name.replace('.', "$");
     match &file.package {
-        Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), name),
-        _ => name.to_string(),
+        Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), mangled),
+        _ => mangled,
     }
 }
 
@@ -2650,6 +2652,23 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
+                // Nested-class constructor `Outer.Inner(args)` (when `Outer` isn't a local).
+                if let Expr::Name(outer) = self.file.expr(receiver).clone() {
+                    if self.lookup(&outer).is_none() {
+                        let qualified = format!("{outer}.{name}");
+                        if let Some(cls) = self.syms.classes.get(&qualified).cloned() {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            if cls.ctor_params.len() != arg_tys.len() {
+                                self.diags.error(span, format!("constructor '{qualified}' expects {} args, got {}", cls.ctor_params.len(), arg_tys.len()));
+                            } else {
+                                for (i, (p, a)) in cls.ctor_params.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                            }
+                            return Ty::obj(&cls.internal);
+                        }
+                    }
+                }
                 // Inlined scope functions `recv.let { … }` / `recv.also { … }`: bind the lambda's
                 // parameter (default `it`) to the receiver; `let` yields the body, `also` the receiver.
                 if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
