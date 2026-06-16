@@ -138,6 +138,27 @@ pub fn emit_file(
             true
         }
     });
+    // Computed top-level properties (`val g: T get() = …`): a `getG()` static method, no field. Split
+    // them out so they're excluded from the backing-field / `<clinit>` paths below.
+    let (computed_props, backed_props): (Vec<_>, Vec<_>) =
+        tl_props.into_iter().partition(|(p, _)| p.getter.is_some() && p.init.is_none());
+    for (p, ty) in &computed_props {
+        let cap = capitalize(&p.name);
+        let mut g = CodeBuilder::new(0);
+        {
+            let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+            e.lambda_counter = lambda_ctr;
+            match &p.getter {
+                Some(FunBody::Expr(b)) => { e.emit_expr_as(*b, *ty, &mut g, &mut cw); emit_typed_return(*ty, &mut g); }
+                Some(FunBody::Block(b)) => e.emit_block_as_body(*b, &mut g, &mut cw),
+                _ => emit_typed_return(*ty, &mut g),
+            }
+            lambda_ctr = e.lambda_counter;
+        }
+        g.link();
+        cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[], *ty), &g);
+    }
+    let tl_props = backed_props;
     for (p, ty) in &tl_props {
         let access = if p.is_var { ACC_PRIVATE | ACC_STATIC } else { ACC_PRIVATE | ACC_STATIC | ACC_FINAL };
         cw.add_field(access, &p.name, &ty.descriptor());
@@ -2836,9 +2857,12 @@ impl<'a> MethodEmitter<'a> {
                         self.emit_lateinit_guard(&n, ty, code, cw);
                     }
                 } else if let Some(&(ty, _)) = self.syms.props.get(&n) {
-                    // top-level property → static field on the file facade.
+                    // top-level property → static field, or `getX()` for a computed property.
                     if self.is_instance {
                         self.diags.error(self.file.expr_spans[e.0 as usize], "krusty: top-level property access from a member method is not supported");
+                    } else if self.syms.computed_props.contains(&n) {
+                        let m = cw.methodref(&self.class.clone(), &format!("get{}", capitalize(&n)), &method_descriptor(&[], ty));
+                        code.invokestatic(m, 0, slot_words(ty) as i32);
                     } else {
                         let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                         code.getstatic(f, slot_words(ty) as i32);

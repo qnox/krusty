@@ -1087,6 +1087,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   no-initializer declaration, defaulting the slot to `null`. Was "unresolved reference: lateinit".
 - ✅ Full suite 182 green. Box conformance **373 OK / 0 FAIL** (+1).
 
+## Phase 88 — Top-level computed properties (`val g: T get() = …`)  ✅
+- ✅ A top-level property with a custom getter and no initializer emits a `getG()` static method on
+  the facade (no backing field, no `<clinit>`); reads of `g` route to `invokestatic getG`. `SymbolTable`
+  tracks `computed_props`. Requires a type annotation (no top-level getter-return inference yet). Was
+  rejected ("top-level computed properties not supported").
+- ✅ Full suite 182 green. Box conformance **373 OK / 0 FAIL** held.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
