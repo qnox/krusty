@@ -14,6 +14,8 @@ pub mod parser;
 pub mod types;
 pub mod resolve;
 pub mod ir;
+pub mod ir_lower;
+pub mod js;
 pub mod metadata;
 pub mod backend;
 pub mod jvm;
