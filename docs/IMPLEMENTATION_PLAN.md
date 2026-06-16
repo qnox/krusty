@@ -922,6 +922,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   This phase **fixed** the 4 `java.lang` supertype cases and all stdlib-visibility miscompiles, and
   introduced none.
 
+## Phase 73 — Isolate JVM bytecode emission in the `jvm` module  ✅
+- ✅ Dissolved the `codegen` module: `src/codegen/emit.rs` → `src/jvm/emit.rs` and
+  `src/codegen/classfile.rs` → `src/jvm/classfile.rs`. All JVM-specific code (class-file read/write,
+  bytecode emission, the `JavaToKotlinClassMap` port, classpath scanning) now lives under `jvm::`.
+  Public paths: `krusty::jvm::emit`, `krusty::jvm::classfile`. ~25 call sites updated.
+- ✅ Full suite 178 green after the move.
+- ⬜ **North star (in progress):** *no non-`jvm` module should depend on `jvm` at all.* Today
+  `resolve.rs` still calls into `jvm` for classpath resolution and traffics in JVM internal
+  names/descriptors (the `Ty` representation is JVM-coupled). Decoupling this — a front-end type
+  representation + a resolution interface the `jvm` backend implements — is the next architectural
+  step.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krusty::codegen::emit::{emit_class, emit_file, file_class_name};
+use krusty::jvm::emit::{emit_class, emit_file, file_class_name};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;

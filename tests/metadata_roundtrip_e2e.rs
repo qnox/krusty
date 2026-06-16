@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krusty::codegen::emit::emit_file;
+use krusty::jvm::emit::emit_file;
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::lexer::lex;

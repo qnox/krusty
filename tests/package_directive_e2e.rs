@@ -3,7 +3,7 @@
 //! skipped (not modeled). (End-to-end JVM execution of package'd files is covered by the box
 //! conformance suite; here we assert clean parse + check + emit.)
 
-use krusty::codegen::emit::{emit_file, file_class_name};
+use krusty::jvm::emit::{emit_file, file_class_name};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;

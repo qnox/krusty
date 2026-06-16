@@ -6,7 +6,7 @@ use std::fs;
 use std::process::Command;
 
 use krusty::ast::Decl;
-use krusty::codegen::emit::emit_class;
+use krusty::jvm::emit::emit_class;
 use krusty::diag::DiagSink;
 use krusty::jvm::classreader::parse_class;
 use krusty::lexer::lex;

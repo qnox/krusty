@@ -313,7 +313,7 @@ fn decode_modified_utf8(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::classfile::*;
+    use crate::jvm::classfile::*;
 
     #[test]
     fn reads_krusty_emitted_class_roundtrip() {

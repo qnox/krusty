@@ -6,7 +6,7 @@ use std::fs;
 use std::process::Command;
 
 use krusty::ast::Decl;
-use krusty::codegen::emit::emit_class;
+use krusty::jvm::emit::emit_class;
 use krusty::diag::DiagSink;
 use krusty::jvm::classreader::parse_class;
 use krusty::lexer::lex;
@@ -35,7 +35,7 @@ fn object_shape_is_singleton() {
     assert_eq!(inst.descriptor, "LCounter;");
     assert!(ci.method("inc", "(I)I").is_some());
     let ctor = ci.method("<init>", "()V").expect("ctor");
-    assert!(ctor.access & krusty::codegen::classfile::ACC_PRIVATE != 0, "object ctor must be private");
+    assert!(ctor.access & krusty::jvm::classfile::ACC_PRIVATE != 0, "object ctor must be private");
 }
 
 #[test]

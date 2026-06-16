@@ -14,8 +14,9 @@
 //! Env vars:
 //!   KRUSTY_KOTLIN_BOX_DIR   path to compiler/testData/codegen/box
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
-//!   KRUSTY_KOTLIN_STDLIB    kotlin-stdlib.jar (added to runner classpath)
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
+//! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
+//! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
 use std::fs;
 use std::io::Write;
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use krusty::codegen::emit::{emit_class, emit_file, file_class_name};
+use krusty::jvm::emit::{emit_class, emit_file, file_class_name};
 use krusty::diag::DiagSink;
 use krusty::jvm::classreader::parse_class;
 use krusty::lexer::lex;
