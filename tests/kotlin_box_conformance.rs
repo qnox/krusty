@@ -168,7 +168,7 @@ static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
 /// Returns None if compilation fails (unsupported feature).
-fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>, jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
+fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
@@ -185,8 +185,7 @@ fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>, j
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
     // jimage (the bootclasspath). The compiler never reads `JAVA_HOME` — the harness passes the
     // path, exactly as a `kotlinc -classpath` invocation would.
-    let mut cp_paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(p) = stdlib_jar { cp_paths.push(p.to_path_buf()); }
+    let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
     let cp = Classpath::new(cp_paths);
     let syms = collect_signatures_with_cp(&files, cp, &mut diags);
@@ -412,7 +411,23 @@ fn kotlin_codegen_box_conformance() {
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
     let stdlib_jar = common::stdlib_jar();
-    let stdlib = stdlib_jar.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    // Runtime classpath: every candidate stdlib-family jar (kotlin-stdlib, kotlin-test, reflect,
+    // stdlib-jdk8, coroutines, annotations). The per-thread JVM has a fixed classpath, and extra
+    // jars are harmless to tests that don't use them; the *compile* classpath stays directive-exact.
+    let stdlib = {
+        let mut paths: Vec<String> = Vec::new();
+        for p in [
+            stdlib_jar.clone(),
+            common::kotlin_test_jar(),
+            common::find_jar("kotlin-reflect-", &[]),
+            common::find_jar("kotlin-stdlib-jdk8", &[]),
+            common::find_jar("kotlinx-coroutines-core", &["jdk8"]),
+            common::find_jar("annotations-", &[]),
+        ].into_iter().flatten() {
+            paths.push(p.to_string_lossy().into_owned());
+        }
+        paths.join(":")
+    };
     let limit: usize = env("KRUSTY_BOX_LIMIT").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
 
     let mut files = Vec::new();
@@ -474,10 +489,10 @@ fn kotlin_codegen_box_conformance() {
             // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
             // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
             let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File").to_string();
-            let with_stdlib = src.contains("// WITH_STDLIB") || src.contains("// WITH_RUNTIME");
-            let compile_cp = if with_stdlib { stdlib_jar.as_deref() } else { None };
+            // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
+            let compile_cp = common::classpath_jars_for(&src);
             let t0 = std::time::Instant::now();
-            let classes = match compile_source(&src, &stem, compile_cp, jdk_modules.as_deref()) {
+            let classes = match compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref()) {
                 Some(c) => c,
                 None => return (file.clone(), TestResult::Skip),
             };

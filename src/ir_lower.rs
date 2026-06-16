@@ -265,6 +265,16 @@ impl<'a> Lower<'a> {
                 let val = self.expr(value)?;
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
             }
+            // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
+            Stmt::AssignMember { receiver, name, value } => {
+                let rt = self.info.ty(receiver);
+                let ci = self.class_of(rt)?;
+                let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
+                let class = ci.id;
+                let r = self.expr(receiver)?;
+                let v = self.expr(value)?;
+                Some(self.ir.add_expr(IrExpr::SetField { receiver: r, class, index: idx, value: v }))
+            }
             Stmt::AssignIndex { array, index, value } => {
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;

@@ -153,6 +153,16 @@ impl<'a> Emitter<'a> {
                 self.emit_value(value, code);
                 store(jt, slot, code);
             }
+            IrExpr::SetField { receiver, class, index, value } => {
+                let c = &self.ir.classes[class as usize];
+                let (name, fty) = c.fields[index as usize].clone();
+                let jt = ir_ty_to_jvm(&fty);
+                let owner = c.fq_name.clone();
+                self.emit_value(receiver, code);
+                self.emit_value(value, code);
+                let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
+                code.putfield(fref, slot_words(jt) as i32);
+            }
             IrExpr::While { cond, body } => {
                 let start = code.new_label();
                 let end = code.new_label();
