@@ -1978,8 +1978,8 @@ impl<'a> MethodEmitter<'a> {
         match self.file.stmt(s).clone() {
             Stmt::Local { name, ty, init, .. } => {
                 let lty = ty.as_ref().map(|r| resolve_ty(r, self.syms)).unwrap_or_else(|| self.info.ty(init));
-                // A `Unit`-typed local holds no JVM value: evaluate the initializer for its effect.
-                if lty == Ty::Unit {
+                // A `Unit`- or `Nothing`-typed local holds no JVM value: evaluate for effect only.
+                if lty == Ty::Unit || lty == Ty::Nothing {
                     self.emit_expr(init, code, cw);
                     self.discard(self.info.ty(init), code);
                 } else {
@@ -2117,10 +2117,13 @@ impl<'a> MethodEmitter<'a> {
                 }
                 self.rec(start, code, cw);
                 code.bind(start);
+                // Pre-register `cont` before body so a `continue` inside a catch handler
+                // doesn't register it first with the exception variable in scope.
+                self.rec(cont, code, cw);
                 self.loop_labels.push((cont, end)); // continue → increment, break → end
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
-                self.rec(cont, code, cw);
+                self.rec(cont, code, cw); // no-op: already registered above
                 code.bind(cont);
                 // For Through/DownTo: check `i == end` before incrementing to avoid overflow.
                 // For Until: the top-of-loop check already handles termination correctly.
@@ -2197,10 +2200,13 @@ impl<'a> MethodEmitter<'a> {
                     code.array_load(lop, lwords);
                 }
                 store_local(elem, x_slot, code);
+                // Pre-register `cont` before body so a `continue` inside a catch handler
+                // doesn't register it first with the exception variable in scope.
+                self.rec(cont, code, cw);
                 self.loop_labels.push((cont, end));
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
-                self.rec(cont, code, cw);
+                self.rec(cont, code, cw); // no-op: already registered above
                 code.bind(cont);
                 code.iinc(i_slot, 1);
                 self.rec(start, code, cw);
@@ -2282,6 +2288,13 @@ impl<'a> MethodEmitter<'a> {
     fn emit_expr_as(&mut self, e: ExprId, target: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let from = self.info.ty(e);
         self.emit_expr(e, code, cw);
+        if target == Ty::Unit {
+            // Discard any value the expression pushed; stack must be empty for the Unit context.
+            if from != Ty::Unit && from != Ty::Nothing {
+                self.discard(from, code);
+            }
+            return;
+        }
         if from.is_numeric() && target.is_numeric() {
             // Handles both widening (i2l, i2d, …) and narrowing to Byte/Short (i2b/i2s).
             self.emit_numeric_conversion(from, target, code);
@@ -2728,7 +2741,7 @@ impl<'a> MethodEmitter<'a> {
                         // locals allocated in the other branch (same VerifyError root cause as `when` arms).
                         let saved_slots = self.slots.clone();
                         let saved_next = self.next_slot;
-                        if result == Ty::Unit {
+                        if result == Ty::Unit || result == Ty::Nothing || result == Ty::Error {
                             // Statement-if with else: discard both branches; stack empty at l_end.
                             self.emit_cond_jump(cond, l_else, false, code, cw);
                             self.emit_expr_as(then_branch, result, code, cw);
@@ -2933,6 +2946,11 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     false
                 }
+            }
+            // A try diverges when its body AND every catch handler always diverge.
+            // (The finally body doesn't suppress exceptions, so it doesn't affect divergence.)
+            Expr::Try { body, catches, .. } => {
+                self.expr_diverges(*body) && catches.iter().all(|c| self.expr_diverges(c.body))
             }
             _ => false,
         }
