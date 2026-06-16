@@ -282,6 +282,35 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref("java/lang/String", "length", "()I");
                 code.invokevirtual(m, 0, 1);
             }
+            // Array operations: the JVM platform realizes them with native array instructions; the
+            // element type comes from the receiver's IR type (`kotlin/Array.get/set/size`) or from
+            // the per-element constructor name (`kotlin/IntArray.<init>`).
+            "kotlin/Array.get" => {
+                let arr = recv.unwrap();
+                let elem = self.array_elem(arr);
+                self.emit_value(arr, code);
+                self.emit_value(args[0], code);
+                let (op, w) = array_load_op(elem);
+                code.array_load(op, w);
+            }
+            "kotlin/Array.set" => {
+                let arr = recv.unwrap();
+                let elem = self.array_elem(arr);
+                self.emit_value(arr, code);
+                self.emit_value(args[0], code);
+                self.emit_value(args[1], code);
+                let (op, w) = array_store_op(elem);
+                code.array_store(op, w);
+            }
+            "kotlin/Array.size" => {
+                self.emit_value(recv.unwrap(), code);
+                code.arraylength();
+            }
+            _ if fq.ends_with("Array.<init>") => {
+                self.emit_value(args[0], code);
+                let elem = prim_array_atype(fq);
+                code.newarray(elem);
+            }
             // `x.toString()` → `String.valueOf(x)` (the right primitive/Object overload).
             "kotlin/Any.toString" => {
                 let r = recv.unwrap();
@@ -433,6 +462,11 @@ impl<'a> Emitter<'a> {
         code.bind(end);
     }
 
+    /// The element `Ty` of an array-typed IR expression.
+    fn array_elem(&self, e: u32) -> Ty {
+        self.value_ty(e).array_elem().unwrap_or(Ty::Error)
+    }
+
     fn value_ty_of_when(&self, branches: &[(Option<u32>, u32)]) -> Ty {
         // No `else` → the `when` is a Unit statement.
         if !branches.iter().any(|(c, _)| c.is_none()) {
@@ -476,6 +510,8 @@ impl<'a> Emitter<'a> {
             Ty::Float => VerifType::Float,
             Ty::String => VerifType::Object(self.cw.class_ref("java/lang/String")),
             Ty::Obj(n) => VerifType::Object(self.cw.class_ref(n)),
+            // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
+            Ty::Array(_) => VerifType::Object(self.cw.class_ref(&ty.descriptor())),
             _ => VerifType::Top,
         }
     }
@@ -508,8 +544,11 @@ impl<'a> Emitter<'a> {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)
             }
-            IrExpr::Call { callee, .. } => match callee {
+            IrExpr::Call { callee, dispatch_receiver, .. } => match callee {
                 Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
+                // Array `get` returns the receiver's element; an array `<init>` returns the array type.
+                Callee::Intrinsic(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
+                Callee::Intrinsic(fq) if fq.ends_with("Array.<init>") => Ty::array(prim_array_elem_ty(fq)),
                 Callee::Intrinsic(fq) => intrinsic_ret(fq),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
@@ -525,8 +564,58 @@ impl<'a> Emitter<'a> {
 fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
         "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
-        "kotlin/String.length" => Ty::Int,
+        "kotlin/String.length" | "kotlin/Array.size" => Ty::Int,
+        "kotlin/Array.set" => Ty::Unit,
         _ => Ty::Error,
+    }
+}
+
+/// `newarray` atype for a `kotlin/<Prim>Array.<init>` intrinsic.
+fn prim_array_atype(fq: &str) -> u8 {
+    match prim_array_elem_ty(fq) {
+        Ty::Boolean => 4,
+        Ty::Char => 5,
+        Ty::Float => 6,
+        Ty::Double => 7,
+        Ty::Byte => 8,
+        Ty::Short => 9,
+        Ty::Int => 10,
+        Ty::Long => 11,
+        _ => 10,
+    }
+}
+
+/// Element `Ty` for a `kotlin/<Prim>Array.<init>` intrinsic FqName.
+fn prim_array_elem_ty(fq: &str) -> Ty {
+    let cls = fq.trim_start_matches("kotlin/").trim_end_matches(".<init>");
+    match cls {
+        "IntArray" => Ty::Int,
+        "LongArray" => Ty::Long,
+        "DoubleArray" => Ty::Double,
+        "FloatArray" => Ty::Float,
+        "BooleanArray" => Ty::Boolean,
+        "CharArray" => Ty::Char,
+        "ByteArray" => Ty::Byte,
+        "ShortArray" => Ty::Short,
+        _ => Ty::Int,
+    }
+}
+
+/// `(opcode, value-words)` for an array element load (`Xaload`).
+fn array_load_op(elem: Ty) -> (u8, i32) {
+    match elem {
+        Ty::Int => (0x2e, 1), Ty::Long => (0x2f, 2), Ty::Float => (0x30, 1), Ty::Double => (0x31, 2),
+        Ty::Boolean | Ty::Byte => (0x33, 1), Ty::Char => (0x34, 1), Ty::Short => (0x35, 1),
+        _ => (0x32, 1), // aaload
+    }
+}
+
+/// `(opcode, value-words)` for an array element store (`Xastore`).
+fn array_store_op(elem: Ty) -> (u8, i32) {
+    match elem {
+        Ty::Int => (0x4f, 1), Ty::Long => (0x50, 2), Ty::Float => (0x51, 1), Ty::Double => (0x52, 2),
+        Ty::Boolean | Ty::Byte => (0x54, 1), Ty::Char => (0x55, 1), Ty::Short => (0x56, 1),
+        _ => (0x53, 1), // aastore
     }
 }
 
@@ -534,7 +623,7 @@ fn ir_ty_to_jvm(t: &IrType) -> Ty {
     match t {
         IrType::Unit => Ty::Unit,
         IrType::Nothing => Ty::Nothing,
-        IrType::Class { fq_name, .. } => match fq_name.as_str() {
+        IrType::Class { fq_name, type_args, .. } => match fq_name.as_str() {
             "kotlin/Int" => Ty::Int,
             "kotlin/Long" => Ty::Long,
             "kotlin/Short" => Ty::Short,
@@ -544,6 +633,16 @@ fn ir_ty_to_jvm(t: &IrType) -> Ty {
             "kotlin/Double" => Ty::Double,
             "kotlin/Float" => Ty::Float,
             "kotlin/String" => Ty::String,
+            // Arrays are regular class types the JVM backend lowers to JVM array types here.
+            "kotlin/IntArray" => Ty::array(Ty::Int),
+            "kotlin/LongArray" => Ty::array(Ty::Long),
+            "kotlin/DoubleArray" => Ty::array(Ty::Double),
+            "kotlin/FloatArray" => Ty::array(Ty::Float),
+            "kotlin/BooleanArray" => Ty::array(Ty::Boolean),
+            "kotlin/CharArray" => Ty::array(Ty::Char),
+            "kotlin/ByteArray" => Ty::array(Ty::Byte),
+            "kotlin/ShortArray" => Ty::array(Ty::Short),
+            "kotlin/Array" => Ty::array(type_args.first().map(ir_ty_to_jvm).unwrap_or(Ty::obj("java/lang/Object"))),
             _ => Ty::obj(fq_name),
         },
         _ => Ty::Error,

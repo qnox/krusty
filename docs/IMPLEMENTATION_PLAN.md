@@ -1402,6 +1402,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ℹ️ `if` and `when` remain ONE IR node (`IrExpr::When`); `emit_when` is just the backend codegen
   for that node (both lower to it). Unsigned-type files are skipped (krusty has no unsigned model).
 
+## Phase 116 — Arrays as a regular type + intrinsic ops (both backends)  ✅
+- ✅ Arrays are **not** special IR nodes nor a special `IrType` — they are a regular class type
+  (`kotlin/IntArray`, `kotlin/Array<T>`, like `List`) the backend lowers, and their operations are
+  ordinary `Call`-to-intrinsic: `IntArray(n)` → `kotlin/IntArray.<init>`, `a[i]` → `kotlin/Array.get`,
+  `a[i] = v` → `kotlin/Array.set`, `a.size` → `kotlin/Array.size`. The element type is read from the
+  receiver's type (or the per-element ctor name). No node-per-operation.
+- ✅ JVM backend lowers to native array instructions (`newarray`/`Xaload`/`Xastore`/`arraylength`,
+  array verif types); **JS backend lowers primitive arrays to typed arrays** (`IntArray` →
+  `Int32Array`, `DoubleArray` → `Float64Array`, …) — the real Kotlin/JS representation (the full
+  platform answer is `kotlin-stdlib-js`'s array types).
+- ✅ Verified on `java -Xverify:all` AND `node` (fill, index get/set, `.size`, `for` over `0 until
+  a.size`). IR→JVM corpus conformance **20 → 21 / 0 FAIL**; JS **17 → 18 / 0 FAIL**. 194 unit tests.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
