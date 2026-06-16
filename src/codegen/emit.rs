@@ -1585,13 +1585,27 @@ impl<'a> MethodEmitter<'a> {
     fn pre_alloc_loop_locals(&mut self, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let Expr::Block { stmts, .. } = self.file.expr(body).clone() else { return };
         for s in stmts {
-            let Stmt::Local { name, ty, init, .. } = self.file.stmt(s) else { continue };
-            if self.slots.contains_key(name) { continue; } // already in scope (shadowing outer)
-            let lty = ty.as_ref().and_then(|r| Ty::from_name(&r.name))
-                .unwrap_or_else(|| self.info.ty(*init));
-            if lty == Ty::Unit || lty == Ty::Error { continue; }
-            let slot = self.alloc_slot(name, lty);
-            self.init_temp(lty, slot, code, cw);
+            match self.file.stmt(s) {
+                Stmt::Local { name, ty, init, .. } => {
+                    if self.slots.contains_key(name) { continue; } // already in scope (shadowing outer)
+                    let lty = ty.as_ref().and_then(|r| Ty::from_name(&r.name))
+                        .unwrap_or_else(|| self.info.ty(*init));
+                    if lty == Ty::Unit || lty == Ty::Error { continue; }
+                    let slot = self.alloc_slot(name, lty);
+                    self.init_temp(lty, slot, code, cw);
+                }
+                Stmt::Destructure { entries, init } => {
+                    let internal = self.info.ty(*init).obj_internal().unwrap_or("java/lang/Object").to_string();
+                    for (idx, (name, _)) in entries.clone().iter().enumerate() {
+                        if name == "_" || self.slots.contains_key(name) { continue; }
+                        let ret = self.syms.method_of(&internal, &format!("component{}", idx + 1)).map(|s| s.ret).unwrap_or(Ty::Error);
+                        if ret == Ty::Unit || ret == Ty::Error { continue; }
+                        let slot = self.alloc_slot(name, ret);
+                        self.init_temp(ret, slot, code, cw);
+                    }
+                }
+                _ => continue,
+            }
         }
     }
 
@@ -1909,6 +1923,7 @@ impl<'a> MethodEmitter<'a> {
             Stmt::Break | Stmt::Continue => !in_loop, // local to a loop nested inside the guarded region
             Stmt::Expr(e) => self.exit_walk(*e, in_loop),
             Stmt::Local { init, .. } => self.exit_walk(*init, in_loop),
+            Stmt::Destructure { init, .. } => self.exit_walk(*init, in_loop),
             Stmt::While { body, .. } => self.exit_walk(*body, true),
             Stmt::For { body, .. } => self.exit_walk(*body, true),
             _ => false,
@@ -2078,6 +2093,33 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_expr_as(init, lty, code, cw);
                     let slot = self.alloc_slot(&name, lty);
                     self.store(lty, slot, code);
+                }
+            }
+            Stmt::Destructure { entries, init } => {
+                // Evaluate the initializer once, then bind each entry to its `componentN()`. The
+                // receiver is kept on the stack and `dup`'d for each call (no temp slot — a temp
+                // would need pre-allocation to satisfy a loop back-edge frame), consumed by the
+                // last call. The checker has verified the type provides these operators.
+                let recv_ty = self.info.ty(init);
+                let internal = recv_ty.obj_internal().unwrap_or("java/lang/Object").to_string();
+                let bound: Vec<(usize, &String)> = entries.iter().enumerate()
+                    .filter(|(_, (n, _))| n != "_").map(|(i, (n, _))| (i, n)).collect();
+                if bound.is_empty() {
+                    // All entries skipped: evaluate the initializer for effect only.
+                    self.emit_expr_as(init, recv_ty, code, cw);
+                    self.discard(recv_ty, code);
+                } else {
+                    self.emit_expr_as(init, recv_ty, code, cw);
+                    let last = bound.len() - 1;
+                    for (k, (idx, name)) in bound.iter().enumerate() {
+                        let comp = format!("component{}", idx + 1);
+                        let ret = self.syms.method_of(&internal, &comp).map(|s| s.ret).unwrap_or(Ty::Error);
+                        if k != last { code.dup(); } // keep the receiver for the next component call
+                        let m = cw.methodref(&internal, &comp, &method_descriptor(&[], ret));
+                        code.invokevirtual(m, 0, slot_words(ret) as i32);
+                        let slot = self.alloc_slot(name, ret);
+                        self.store(ret, slot, code);
+                    }
                 }
             }
             Stmt::Assign { name, value } => {
@@ -3109,6 +3151,7 @@ impl<'a> MethodEmitter<'a> {
         match self.file.stmt(s) {
             Stmt::Expr(e) => self.expr_uses_frames(*e),
             Stmt::Local { init, .. } => self.expr_uses_frames(*init),
+            Stmt::Destructure { init, .. } => self.expr_uses_frames(*init),
             _ => false,
         }
     }

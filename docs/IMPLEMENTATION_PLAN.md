@@ -862,6 +862,25 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/range_until_e2e.rs` (`0..<n` and `0..<n step 2` summed on the JVM). Full suite
   176 green. The `..<` files carry further blockers, so this compounds rather than landing alone.
 
+## Phase 71 — Destructuring declarations (`val (a, b) = e`)  ✅
+- ✅ Data-driven (the "expected loop variable"/"expected variable name" buckets surfaced `val (a, b)
+  = …` and `for ((a, b) in …)` as the dominant shape). `val`/`var (a, b, …) = init` now parses to a
+  new index-based `Stmt::Destructure { entries, init }`; each entry binds `init.componentN()`
+  (1-based by position). An entry named `_` is skipped — no binding and no `componentN` call, per
+  Kotlin.
+- ✅ The checker resolves each `componentN` via `SymbolTable::method_of`, so destructuring works for
+  any type that declares the operators — notably a krusty `data class` (which already synthesizes
+  `component1..N`). A type without the operator (e.g. `String`, a non-data class) is rejected
+  (`cannot destructure this type (no operator 'componentN')`), never miscompiled.
+- ✅ Codegen evaluates the initializer once and keeps the receiver on the stack, `dup`-ing it for
+  each component call and letting the last call consume it — so **no temp slot** is needed (a temp
+  would otherwise have to be pre-allocated to satisfy a loop back-edge `StackMapTable` frame).
+  `pre_alloc_loop_locals` also reserves the entry slots when a destructuring `val` is a top-level
+  statement of a loop body, so destructuring inside `while`/`for` verifies.
+- ✅ TDD: `tests/destructure_e2e.rs` (data-class destructuring with `_` skips, incl. inside a `for`
+  loop, on the JVM; non-`componentN` type rejection). Full suite 178 green. `for ((a, b) in …)`
+  destructuring loops (often over stdlib `withIndex()`/collections) remain a follow-up.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

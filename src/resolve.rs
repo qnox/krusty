@@ -738,6 +738,7 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
     let r = |x: ExprId| expr_refs_param(file, x, names);
     match file.stmt(s) {
         Stmt::Local { init, .. } => r(*init),
+        Stmt::Destructure { init, .. } => r(*init),
         Stmt::Assign { value, .. } => r(*value),
         Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
         Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
@@ -803,6 +804,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
         let r = |x: ExprId| check_e(file, x, outer);
         match file.stmt(s) {
             Stmt::Local{init,..} => r(*init),
+            Stmt::Destructure{init,..} => r(*init),
             Stmt::Assign{value,..} => r(*value),
             Stmt::AssignMember{receiver,value,..} => r(*receiver)||r(*value),
             Stmt::AssignIndex{array,index,value} => r(*array)||r(*index)||r(*value),
@@ -843,6 +845,7 @@ fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collectio
                 outer_names.contains(name) || r(*value)
             }
             Stmt::Local { init, .. } => r(*init),
+            Stmt::Destructure { init, .. } => r(*init),
             Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
             Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
             Stmt::Return(Some(e)) => r(*e),
@@ -2798,6 +2801,29 @@ impl<'a> Checker<'a> {
                     None => it,
                 };
                 self.declare(&name, bind, is_var);
+            }
+            Stmt::Destructure { entries, init } => {
+                let it = self.expr(init);
+                let span = self.file.stmt_spans[s.0 as usize];
+                // Destructuring requires the initializer to be a known reference type whose class
+                // declares `component1..N` (e.g. a krusty `data class`). Anything else is rejected,
+                // never miscompiled.
+                let internal = it.obj_internal();
+                for (idx, (name, is_var)) in entries.iter().enumerate() {
+                    if name == "_" { continue; } // `_` skips this component (no binding, no call)
+                    if self.lookup(name).is_some() {
+                        self.diags.error(span, format!("krusty: local '{name}' shadows an existing variable (not supported)"));
+                    }
+                    let comp = format!("component{}", idx + 1);
+                    let ty = internal.and_then(|i| self.syms.method_of(i, &comp)).map(|sig| sig.ret);
+                    match ty {
+                        Some(t) => self.declare(name, t, *is_var),
+                        None => {
+                            self.diags.error(span, format!("krusty: cannot destructure this type (no operator '{comp}')"));
+                            self.declare(name, Ty::Error, *is_var);
+                        }
+                    }
+                }
             }
             Stmt::Assign { name, value } => {
                 let vt = self.expr(value);
