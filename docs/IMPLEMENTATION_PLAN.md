@@ -1119,6 +1119,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Next: widen the diff harness corpus (more constructs) toward byte-exact `.class` comparison, and
   wire it into CI as the standing bytecode-equality gate.
 
+## Phase 92 — Widen the kotlinc differential corpus  ✅
+- ✅ Added `when` (subject, comma arm, else), counted `for` loop, `%`, unary `-`, `Char`, and `Long`
+  comparison to `diff_kotlinc.rs`. krusty's ABI (javap) and execution output **match the real kotlinc**
+  for all of them (verified with the reference kotlinc from Phase 91).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
