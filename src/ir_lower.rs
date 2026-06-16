@@ -174,6 +174,32 @@ impl<'a> Lower<'a> {
                 };
                 self.ir.add_expr(IrExpr::When { branches })
             }
+            // String template `"a${x}b"` → fold the parts with the `String.plus` intrinsic. Each
+            // backend realizes the concatenation (and any to-string conversion) from its stdlib.
+            Expr::Template(parts) => {
+                use crate::ast::TemplatePart;
+                let mut iter = parts.iter();
+                // Seed with the first part (a literal seeds directly; otherwise start from "").
+                let mut acc = match iter.clone().next() {
+                    Some(TemplatePart::Str(s)) => {
+                        iter.next();
+                        self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
+                    }
+                    _ => self.ir.add_expr(IrExpr::Const(IrConst::String(String::new()))),
+                };
+                for part in iter {
+                    let rhs = match part {
+                        TemplatePart::Str(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))),
+                        TemplatePart::Expr(e) => self.expr(*e)?,
+                    };
+                    acc = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Intrinsic("kotlin/String.plus".to_string()),
+                        dispatch_receiver: Some(acc),
+                        args: vec![rhs],
+                    });
+                }
+                acc
+            }
             Expr::Call { callee, args } => {
                 let Expr::Name(fname) = self.afile.expr(callee).clone() else { return None };
                 let fid = *self.fun_ids.get(&fname)?;

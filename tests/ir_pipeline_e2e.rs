@@ -17,7 +17,7 @@ fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
 fun box(): String {
     val s = add(2, 3)
-    val msg = "v=" + s + "!"               // String.plus intrinsic, realized per backend
+    val msg = "v=$s!"                      // string template → String.plus intrinsics
     return if (s == 5 && max(7, 4) == 7 && msg == "v=5!") "OK" else "no"
 }
 "#;
