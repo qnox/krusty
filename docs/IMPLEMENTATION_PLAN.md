@@ -1076,6 +1076,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   doesn't matter; `infer_lit_ty` consults it (a function call) before the class-name ctor path.
 - ✅ Full suite 182 green. Box conformance **370 OK / 0 FAIL** (+1).
 
+## Phase 86 — Deferred `var` initialization (`var x: T` then `x = …`)  ✅
+- ✅ A `var` with a type annotation and no initializer (`var x: Int`) synthesizes the type's default
+  value (`0`/`false`/`'\0'`/`null`); a later `x = …` assigns it. Was a parse error ("expected '='").
+  Restricted to `var` (a `val` deferred-init needs assign-once tracking krusty lacks → still rejected).
+- ✅ Full suite 182 green. Box conformance **372 OK / 0 FAIL** (+2).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
