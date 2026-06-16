@@ -10,7 +10,8 @@ use krusty::codegen::emit::{emit_class, emit_file, file_class_name};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::jvm::classpath::Classpath;
+use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 fn main() {
     let opts = cli::parse(std::env::args().skip(1));
@@ -46,8 +47,8 @@ fn main() {
         sources.push(src);
     }
 
-    let mut syms = collect_signatures(&files, &mut diags);
-    syms.classpath = krusty::jvm::classpath::Classpath::new(opts.classpath.clone());
+    let cp = Classpath::new(opts.classpath.clone());
+    let syms = collect_signatures_with_cp(&files, cp, &mut diags);
 
     // Per-file: typecheck → emit → buffer output. Only one file's codegen state is live at a time;
     // emitted class bytes are small, so buffering them (to write a dir or jar at the end) is cheap.
