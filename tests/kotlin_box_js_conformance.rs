@@ -78,54 +78,70 @@ fn run() {
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).unwrap();
 
-    let (mut scanned, mut lowered, mut ok, mut fail) = (0u32, 0u32, 0u32, 0u32);
-    let mut failures = Vec::new();
-
-    for file in &files {
-        let src = fs::read_to_string(file).unwrap_or_default();
-        if src.contains("// FILE:") || src.contains("// MODULE:") || !src.contains("fun box()") {
-            continue;
-        }
-        if !js_applicable(&src) {
-            continue;
-        }
-        scanned += 1;
-
-        let mut d = DiagSink::new();
-        let toks = lex(&src, &mut d);
-        let ast = parse(&src, &toks, &mut d);
-        if d.has_errors() {
-            continue;
-        }
-        let files1 = vec![ast];
-        let syms = collect_signatures(&files1, &mut d);
-        let info = check_file(&files1[0], &syms, &mut d);
-        if d.has_errors() {
-            continue;
-        }
-        let Some(ir) = lower_file(&files1[0], &info, &syms) else { continue };
-        lowered += 1;
-
-        let mut js = krusty::js::emit_file(&ir);
-        js.push_str("\nconst r = box(); process.stdout.write(String(r));\n");
-        let path = work.join("t.js");
-        fs::write(&path, &js).unwrap();
-        let run = Command::new("node").arg(&path).output().unwrap();
-        let out = String::from_utf8_lossy(&run.stdout);
-        if run.status.success() && out.trim() == "OK" {
-            ok += 1;
-        } else {
-            fail += 1;
-            if failures.len() < 20 {
-                failures.push(format!("{}: out={:?} err={}", file.display(), out.trim(), String::from_utf8_lossy(&run.stderr).trim()));
-            }
-        }
-    }
+    use rayon::prelude::*;
+    // Parallel: each file is independent (own diag sink, own node input file keyed by index).
+    // Big worker stacks — some corpus sources nest deeply enough to overflow a default stack.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(256 * 1024 * 1024)
+        .build()
+        .unwrap();
+    let results: Vec<Outcome> = pool.install(|| {
+        files
+            .par_iter()
+            .enumerate()
+            .map(|(i, file)| run_one(file, i, &work))
+            .collect()
+    });
     let _ = fs::remove_dir_all(&work);
 
-    println!("JS backend — scanned(JS-applicable): {scanned}  | IR-lowered: {lowered}  | box()=OK: {ok}  | FAIL: {fail}");
-    for f in &failures {
+    let scanned = results.iter().filter(|o| !matches!(o, Outcome::Irrelevant)).count();
+    let lowered = results.iter().filter(|o| matches!(o, Outcome::Ok | Outcome::Fail(_))).count();
+    let ok = results.iter().filter(|o| matches!(o, Outcome::Ok)).count();
+    let failures: Vec<&String> = results.iter().filter_map(|o| match o { Outcome::Fail(s) => Some(s), _ => None }).collect();
+
+    println!("JS backend — scanned(JS-applicable): {scanned}  | IR-lowered: {lowered}  | box()=OK: {ok}  | FAIL: {}", failures.len());
+    for f in failures.iter().take(20) {
         println!("  FAIL {f}");
     }
-    assert_eq!(fail, 0, "JS backend produced miscompiles");
+    assert_eq!(failures.len(), 0, "JS backend produced miscompiles");
+}
+
+enum Outcome {
+    Irrelevant, // not a JS-applicable single-file box test
+    Skip,       // applicable but outside the IR core subset (or front-end error)
+    Ok,
+    Fail(String),
+}
+
+fn run_one(file: &Path, idx: usize, work: &Path) -> Outcome {
+    let src = fs::read_to_string(file).unwrap_or_default();
+    if src.contains("// FILE:") || src.contains("// MODULE:") || !src.contains("fun box()") || !js_applicable(&src) {
+        return Outcome::Irrelevant;
+    }
+    let mut d = DiagSink::new();
+    let toks = lex(&src, &mut d);
+    let ast = parse(&src, &toks, &mut d);
+    if d.has_errors() {
+        return Outcome::Skip;
+    }
+    let files1 = vec![ast];
+    let syms = collect_signatures(&files1, &mut d);
+    let info = check_file(&files1[0], &syms, &mut d);
+    if d.has_errors() {
+        return Outcome::Skip;
+    }
+    let Some(ir) = lower_file(&files1[0], &info, &syms) else { return Outcome::Skip };
+
+    let mut js = krusty::js::emit_file(&ir);
+    js.push_str("\nconst r = box(); process.stdout.write(String(r));\n");
+    let path = work.join(format!("t{idx}.js"));
+    fs::write(&path, &js).unwrap();
+    let run = Command::new("node").arg(&path).output().unwrap();
+    let _ = fs::remove_file(&path);
+    let out = String::from_utf8_lossy(&run.stdout);
+    if run.status.success() && out.trim() == "OK" {
+        Outcome::Ok
+    } else {
+        Outcome::Fail(format!("{}: out={:?} err={}", file.display(), out.trim(), String::from_utf8_lossy(&run.stderr).trim()))
+    }
 }

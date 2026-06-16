@@ -1316,6 +1316,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ➡️ Next: a JS conformance run over the box corpus (IR-coverable subset) on node, respecting
   `// TARGET_BACKEND:` / `// IGNORE_BACKEND:`; grow the IR subset so the JVM path migrates onto IR.
 
+## Phase 107 — IR intrinsics as `Call`-to-symbol (no per-intrinsic node)  ✅
+- 🎯 Right model for stdlib/operator semantics: **one** `IrExpr::Call` whose `callee` is a
+  [`Callee`] — `Local(FunId)` (a function in this IR) or `Intrinsic(FqName)` (a stdlib/built-in
+  named by Kotlin FqName, e.g. `kotlin/String.plus`). Adding an stdlib op is *data* (a new FqName
+  both backends recognize), **not** a new IR node. `PrimitiveBinOp` stays only because it's a single
+  parameterized node for universal numeric/boolean ops.
+- ✅ `String.plus` lowered to `Call(Intrinsic("kotlin/String.plus"))`; each backend's platform layer
+  realizes it — JVM `StringBuilder().append(..).append(..).toString()`, JS `(a + b)`. Verified on
+  `java -Xverify:all` AND `node`, including the chain `"a"+"b"+"c"+2+"d"` → `"abc2d"`.
+- ✅ JS box conformance **parallelized** (rayon pool, big worker stacks): full corpus scan in
+  **~1.5 s** (was minutes). 5 IR-lowered files, 5 OK, 0 FAIL. The JVM box harness was already
+  parallel (rayon, persistent JVM per thread).
+- Note: chained `+` lowers to nested `String.plus` (runtime-correct); kotlinc flattens to one
+  `StringBuilder` — a future bytecode-equality optimization, not a correctness gap.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

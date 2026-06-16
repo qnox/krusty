@@ -37,6 +37,17 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
+/// The target of an `IrExpr::Call`. A `Local` references a function defined in this IR file; an
+/// `Intrinsic` is a stdlib/built-in operation named by its Kotlin FqName, which each backend's
+/// platform layer maps to target code. This is the single extension point for *all* stdlib/operator
+/// semantics — adding `kotlin.collections.List.add` is data (a new FqName the backends recognize),
+/// not a new IR node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callee {
+    Local(FunId),
+    Intrinsic(String),
+}
+
 /// A compile-time constant (`IrConst` in Kotlin IR).
 #[derive(Clone, Debug, PartialEq)]
 pub enum IrConst {
@@ -61,8 +72,11 @@ pub enum IrExpr {
     GetValue(u32),
     /// Assign to a variable (`IrSetValue`).
     SetValue { var: u32, value: ExprId },
-    /// A call to a function/constructor/operator (`IrCall`) — `callee` resolved at lowering.
-    Call { callee: FunId, dispatch_receiver: Option<ExprId>, args: Vec<ExprId> },
+    /// A call to a function/constructor/operator/stdlib intrinsic (`IrCall`). The `callee` is a
+    /// resolved [`Callee`]: a local function, or an intrinsic identified by Kotlin FqName that each
+    /// backend maps to its platform (`kotlin/String.plus`, `kotlin/io/println`, …). This single node
+    /// expresses every call — there is no dedicated node per stdlib operation.
+    Call { callee: Callee, dispatch_receiver: Option<ExprId>, args: Vec<ExprId> },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),
     /// `IrBlock` — a sequence of statements; value is the last expression (or Unit).
@@ -76,9 +90,12 @@ pub enum IrExpr {
     While { cond: ExprId, body: ExprId },
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
     Variable { index: u32, ty: IrType, init: Option<ExprId> },
-    /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…). Kotlin IR models these as
-    /// `IrCall` to the operator function; krusty keeps a primitive node for the built-in numeric and
-    /// boolean ops so each backend emits the native instruction (JVM `iadd`, JS `+`).
+    /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
+    /// parameterized node (not one-per-intrinsic): Kotlin IR models these as `IrCall` to the
+    /// operator function, but the built-in numeric/boolean ops are universal across backends, so a
+    /// single node lets each emit the native instruction (JVM `iadd`, JS `+`). Every *other*
+    /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
+    /// ordinary `Call` to a `Callee::Intrinsic` symbol the backend maps; there is no per-intrinsic node.
     PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
 }
 
