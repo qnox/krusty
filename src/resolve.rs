@@ -993,6 +993,18 @@ fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
+/// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
+/// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
+fn is_builtin_operator_method(name: &str) -> bool {
+    matches!(
+        name,
+        "plus" | "minus" | "times" | "div" | "rem" | "mod"
+            | "inc" | "dec" | "unaryPlus" | "unaryMinus"
+            | "and" | "or" | "xor" | "inv" | "shl" | "shr" | "ushr"
+            | "compareTo" | "rangeTo"
+    )
+}
+
 fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -2724,6 +2736,15 @@ impl<'a> Checker<'a> {
                     if let Some((_, ret)) = resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys) {
                         return ret;
                     }
+                }
+                // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
+                // primitive operator, which *beats* any same-named user extension (in Kotlin a
+                // member/builtin wins over an extension). krusty doesn't emit primitive
+                // operator-methods, so reject rather than dispatch to the extension — which would
+                // miscompile (e.g. `5.rem(2)` returning the extension's value instead of `1`).
+                if rt.is_primitive() && is_builtin_operator_method(&name) {
+                    self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
+                    return Ty::Error;
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).

@@ -1224,6 +1224,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ➡️ Next: land it behind those fixes (audit every `emit_*` site that reads `info.ty` of a value
   that may now be a wrapper), with a box/unbox helper centralizing the coercion.
 
+## Phase 100 — Infix function call syntax (`a foo b`)  ✅
+- 🎯 Infix calls were the single biggest "expected ')'" parse blocker (~900 files): `1 shl 2`,
+  `a to b`, custom `infix fun`. Now parsed as `a.foo(b)`.
+- ✅ Parser: a simple identifier between two operands is an infix call, with Kotlin precedence —
+  tighter than comparison (bp 7), looser than additive (bp 9), left-associative. The range words
+  `until`/`downTo`/`step` and the soft keywords `is`/`as`/`in` are excluded (the `for` loop parses
+  ranges specially). Guarded by `starts_expr` so it only fires when an operand follows.
+- ✅ TDD: `tests/infix_call_e2e.rs` (chaining + precedence vs `+`) on the JVM.
+- 🛡️ Fixed a miscompile the change *exposed* (`infixFunctionOverBuiltinMember.kt`): an explicit
+  `5.rem(2)`/`5.plus(2)` on a primitive binds to the builtin operator, which beats a same-named
+  user extension. krusty doesn't emit primitive operator-methods, so it now **rejects** such calls
+  (skip) instead of dispatching to the shadowing extension (which returned the wrong value).
+- Box conformance **424 → 425 OK / 0 FAIL** (most unblocked files still need other features;
+  the parse foundation compounds as those land).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
