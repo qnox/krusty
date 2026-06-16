@@ -975,6 +975,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `NotImplementedError`, on the JVM). Full suite 179 green. Fixes the `unreachableUninitializedProperty`
   box FAIL.
 
+## Phase 77 — `++`/`--` as real AST nodes (not desugared)  ✅
+- ✅ `++`/`--` no longer desugar to `name = name + 1` in the parser (which threw away structure and
+  miscompiled `String++` as `"s" + 1` concat). They parse to a real `Stmt::IncDec { name, dec }`
+  node — `inc`/`dec` are overloadable operators, so the resolution belongs after parsing.
+- ✅ The checker resolves the target: a mutable **numeric** variable (local / top-level / class
+  member) uses the built-in inc/dec; a non-numeric target would need a user `inc`/`dec` operator
+  krusty doesn't model → rejected (fixes the `incDecWith2Receivers` box FAIL, `operator fun
+  String.inc()`). Codegen emits `iinc` for an `Int` local, else load/±1/store (with `i2b`/`i2s`
+  narrowing), for locals, top-level `var` props (`getstatic`/`putstatic`), and `this` members
+  (getter/setter or field).
+- ✅ TDD: full suite 179 green; existing `inc_dec_e2e` still passes.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

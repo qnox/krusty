@@ -758,6 +758,7 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
     match file.stmt(s) {
         Stmt::Local { init, .. } => r(*init),
         Stmt::Destructure { init, .. } => r(*init),
+        Stmt::IncDec { name, .. } => names.contains(name.as_str()),
         Stmt::Assign { value, .. } => r(*value),
         Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
         Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
@@ -824,6 +825,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
         match file.stmt(s) {
             Stmt::Local{init,..} => r(*init),
             Stmt::Destructure{init,..} => r(*init),
+            Stmt::IncDec{name,..} => outer.contains(name),
             Stmt::Assign{value,..} => r(*value),
             Stmt::AssignMember{receiver,value,..} => r(*receiver)||r(*value),
             Stmt::AssignIndex{array,index,value} => r(*array)||r(*index)||r(*value),
@@ -859,6 +861,7 @@ fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collectio
     fn check_s(file: &File, s: StmtId, outer_names: &std::collections::HashSet<String>) -> bool {
         let r = |x: ExprId| check_e(file, x, outer_names);
         match file.stmt(s) {
+            Stmt::IncDec { name, .. } => outer_names.contains(name),
             Stmt::Assign { name, value } => {
                 // `x = expr` or `x += expr` — check if target is an outer var.
                 outer_names.contains(name) || r(*value)
@@ -2858,6 +2861,25 @@ impl<'a> Checker<'a> {
                             self.declare(name, Ty::Error, *is_var);
                         }
                     }
+                }
+            }
+            Stmt::IncDec { name, .. } => {
+                // `inc`/`dec` are overloadable operators; krusty only models the built-in numeric
+                // ones. The target must be a mutable numeric variable — a non-numeric type would
+                // need a user `inc`/`dec` operator krusty doesn't support (reject, never miscompile).
+                let span = self.file.stmt_spans[s.0 as usize];
+                let found = self.lookup(&name).map(|l| (l.ty, l.is_var))
+                    .or_else(|| self.syms.props.get(&name).copied());
+                match found {
+                    Some((ty, is_var)) => {
+                        if !is_var {
+                            self.diags.error(span, "val cannot be reassigned".to_string());
+                        }
+                        if !ty.is_numeric() {
+                            self.diags.error(span, "krusty: '++'/'--' is only supported on a numeric variable".to_string());
+                        }
+                    }
+                    None => self.diags.error(span, format!("unresolved reference: {name}")),
                 }
             }
             Stmt::Assign { name, value } => {

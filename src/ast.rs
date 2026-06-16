@@ -106,6 +106,10 @@ pub enum Stmt {
     Destructure { entries: Vec<(String, bool)>, init: ExprId },
     /// `name = value`
     Assign { name: String, value: ExprId },
+    /// `name++` / `name--` / `++name` / `--name` in statement position — the increment/decrement
+    /// operator on a simple variable. Kept as a real node (not desugared) because `inc`/`dec` are
+    /// overloadable operators; the checker resolves built-in numeric inc/dec vs a user operator.
+    IncDec { name: String, dec: bool },
     /// `receiver.name = value` — write a (mutable) property via its setter.
     AssignMember { receiver: ExprId, name: String, value: ExprId },
     /// `array[index] = value` — array element store.
@@ -619,6 +623,9 @@ impl File {
                 out.push_str(&format!("(set {name} "));
                 self.write_expr(*value, out);
                 out.push(')');
+            }
+            Stmt::IncDec { name, dec } => {
+                out.push_str(&format!("({} {name})", if *dec { "dec" } else { "inc" }));
             }
             Stmt::AssignMember { receiver, name, value } => {
                 out.push_str("(set-member ");
