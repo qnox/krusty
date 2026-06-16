@@ -689,6 +689,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                             }
+                            // Custom accessors on a `companion object` property are emitted as the
+                            // default static getter/setter (the body is ignored) — reject rather
+                            // than miscompile.
+                            if p.getter.is_some() || p.setter.is_some() {
+                                diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
+                            }
                             (p.name.clone(), ty)
                         })
                         .collect();
@@ -708,6 +714,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     // A top-level *computed* property (custom getter, no initializer) — needs a type
                     // annotation (no getter-return inference at top level yet); emitted as `getX()`.
                     let is_computed = p.getter.is_some() && p.init.is_none();
+                    // Top-level custom accessors over a *backing field* (a getter with an initializer,
+                    // or any setter) aren't emitted yet — the facade would silently use the default
+                    // accessor. Reject rather than miscompile (member properties are supported).
+                    if (p.getter.is_some() && p.init.is_some()) || p.setter.is_some() {
+                        diags.error(p.span, "krusty: top-level property custom accessors are not supported".to_string());
+                    }
                     // Type from the annotation, else a light inference from a literal initializer (or,
                     // for a computed property, from its expression getter body).
                     let ty = match (&p.ty, &p.getter) {
@@ -1124,6 +1136,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         imports,
         tparams: Default::default(),
         this_ty: None,
+        field_ty: None,
         companion_of: None,
         local_funs: Vec::new(),
         local_fun_sigs: HashMap::new(),
@@ -1198,22 +1211,45 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                             c.expect_assignable(declared, it, c.span(init), "property initializer");
                         }
                     }
-                    // A computed property's getter body is checked like a method returning the
-                    // property type (the implicit-`this` scope of props is already active here).
+                    // A property's accessor bodies are checked like methods, with `field` bound to
+                    // the backing-field type (the implicit-`this` scope of props is already active).
+                    let prop_ty = bp.ty.as_ref().map(|r| c.resolve_ty(r))
+                        .or_else(|| c.syms.classes.get(&cl.name)
+                            .and_then(|cs| cs.props.iter().find(|(n, _, _)| n == &bp.name).map(|(_, t, _)| *t)))
+                        .unwrap_or(Ty::Error);
                     if let Some(getter) = &bp.getter {
                         let prev_ret = c.ret_ty;
-                        c.ret_ty = bp.ty.as_ref().map(|r| c.resolve_ty(r)).unwrap_or(Ty::Error);
+                        let prev_field = c.field_ty;
+                        c.ret_ty = prop_ty;
+                        c.field_ty = Some(prop_ty);
                         match getter {
                             FunBody::Expr(g) => {
                                 let gt = c.expr(*g);
                                 c.expect_assignable(c.ret_ty, gt, c.span(*g), "getter body");
                             }
-                            FunBody::Block(g) => {
-                                let _ = c.expr(*g);
-                            }
+                            FunBody::Block(g) => { let _ = c.expr(*g); }
                             FunBody::None => {}
                         }
                         c.ret_ty = prev_ret;
+                        c.field_ty = prev_field;
+                    }
+                    if let Some(setter) = &bp.setter {
+                        if let Some(body) = &setter.body {
+                            let prev_ret = c.ret_ty;
+                            let prev_field = c.field_ty;
+                            c.ret_ty = Ty::Unit;
+                            c.field_ty = Some(prop_ty);
+                            c.push_scope();
+                            let pname = setter.param.clone().unwrap_or_else(|| "value".to_string());
+                            c.declare(&pname, prop_ty, true);
+                            match body {
+                                FunBody::Expr(g) | FunBody::Block(g) => { let _ = c.expr(*g); }
+                                FunBody::None => {}
+                            }
+                            c.pop_scope();
+                            c.ret_ty = prev_ret;
+                            c.field_ty = prev_field;
+                        }
                     }
                 }
                 for step in &cl.init_order {
@@ -1314,6 +1350,9 @@ struct Checker<'a> {
     tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// The backing-field type while checking a property accessor body — makes the `field`
+    /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
+    field_ty: Option<Ty>,
     /// When checking a `companion object` member, the enclosing class name — its companion
     /// methods/properties are then in scope unqualified.
     companion_of: Option<String>,
@@ -1886,7 +1925,12 @@ impl<'a> Checker<'a> {
                 if let Some(ref name) = bind_name {
                     self.declare(name, Ty::obj("java/lang/Object"), false);
                 }
+                // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
+                // emit a backing-field read from the lambda class. Clear it so `field` inside a
+                // lambda body is unresolved (→ the property skips) rather than miscompiled.
+                let saved_field = self.field_ty.take();
                 let bret = self.expr(body);
+                self.field_ty = saved_field;
                 self.pop_scope();
                 // Params unknown here (no annotation) → erased `Object`; return type comes from the body.
                 Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], bret)
@@ -2039,6 +2083,10 @@ impl<'a> Checker<'a> {
             },
             Expr::Name(n) => match self.lookup(&n) {
                 Some(l) => l.ty,
+                // `field` inside an accessor body → the property's backing field. `field` is a soft
+                // keyword: it only has this meaning when an accessor is being checked (and a real
+                // local named `field` would have been found by `lookup` above).
+                None if n == "field" && self.field_ty.is_some() => self.field_ty.unwrap(),
                 None => {
                     // Unqualified companion property inside a companion member.
                     if let Some(cls) = &self.companion_of {
@@ -2466,7 +2514,10 @@ impl<'a> Checker<'a> {
                 let it_ty = param_types.first().copied().unwrap_or(Ty::obj("java/lang/Object"));
                 self.declare(name, it_ty, false);
             }
+            // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
+            let saved_field = self.field_ty.take();
             let bret = self.expr(body);
+            self.field_ty = saved_field;
             self.pop_scope();
             let _ = arity;
             // Carry the declared parameter types and the inferred body return type.
@@ -3006,7 +3057,11 @@ impl<'a> Checker<'a> {
             }
             Stmt::Assign { name, value } => {
                 let vt = self.expr(value);
-                match self.lookup(&name) {
+                // `field = …` inside a setter writes the backing field.
+                if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
+                    let fty = self.field_ty.unwrap();
+                    self.expect_assignable(fty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
+                } else { match self.lookup(&name) {
                     Some(l) => {
                         let (lty, is_var) = (l.ty, l.is_var);
                         if !is_var {
@@ -3029,7 +3084,7 @@ impl<'a> Checker<'a> {
                             self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference: {name}"));
                         }
                     },
-                }
+                } }
             }
             Stmt::AssignMember { receiver, name, value } => {
                 let rt = self.expr(receiver);

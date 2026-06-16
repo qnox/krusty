@@ -301,10 +301,24 @@ pub struct PropDecl {
     /// `true` if declared `lateinit` — a no-initializer property is only allowed when lateinit
     /// (otherwise it's an abstract/interface property, which krusty rejects).
     pub is_lateinit: bool,
-    /// A custom getter body (`val x: T get() = expr`/`get() { … }`) — a computed property with no
-    /// backing field.
+    /// A custom getter body (`val x: T get() = expr`/`get() { … }`). With no initializer and no
+    /// `field` reference it is a computed property (no backing field); with an initializer or a
+    /// `field` reference it reads the backing field.
     pub getter: Option<FunBody>,
+    /// A custom setter (`var x … set(v) { field = … }`) or a visibility-only setter (`private set`).
+    pub setter: Option<PropAccessor>,
     pub span: Span,
+}
+
+/// A property setter (or, in future, a non-default getter): its parameter name, optional body
+/// (`None` = default accessor, e.g. `private set`), and whether it is `private`.
+#[derive(Clone, Debug)]
+pub struct PropAccessor {
+    /// Setter parameter name (`set(value) { … }` → `"value"`); `None` for a default-bodied setter.
+    pub param: Option<String>,
+    /// `None` = default accessor body (just a visibility change); `Some` = explicit body.
+    pub body: Option<FunBody>,
+    pub is_private: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -1185,6 +1185,25 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Follow-up: read JDK class **bytes** from the jimage (content offset + decompress) so JDK
   members resolve lazily too — today `find` returns `None` for jimage (types resolve, members don't).
 
+## Phase 98 — Custom property accessors + the `field` keyword  ✅
+- 🎯 Box coverage **414 → 424 OK / 0 FAIL**. Custom getters/setters appear in ~500 corpus files.
+- ✅ Parser: `parse_top_property` now parses a custom getter **even with an initializer**
+  (`val x = e\n  get() = field…`), a custom setter (`set(v) { field = … }`), and a
+  visibility-only setter (`private set`) — in either order. New `PropAccessor` in the AST.
+- ✅ `field` soft keyword: a checker `field_ty` binds `field` to the backing-field type inside an
+  accessor body (read and `field = …` write); a `MethodEmitter.field_backing` lowers it to
+  `getfield`/`putfield` on implicit `this`.
+- ✅ Emit (member properties): `bp_has_field` decides the backing field (default getter, or an
+  initializer/`lateinit`); a custom getter/setter body is emitted as `getX`/`setX`, the matching
+  default accessor is suppressed, and `private set` emits a private default setter.
+- ✅ TDD: `tests/prop_accessors_e2e.rs` (getter over `field`, setter mutating `field`, `private
+  set`) on the JVM with `-Xverify:all`.
+- 🛡️ Never-miscompile guards for cases not yet emitted (→ reject/skip, not miscompile):
+  - `field` referenced **inside a lambda** in an accessor (no closure capture of the field) —
+    `field_ty` is cleared when checking a lambda body.
+  - **Top-level** property custom accessors (the facade would use the default accessor).
+  - **Companion-object** property custom accessors (emitted as the default static accessor).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
