@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Expr, ExprId as AstExprId, FunBody, Stmt};
-use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile, IrFunction, IrType};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrFunction, IrType};
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
 
@@ -145,10 +145,22 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::GetValue(v))
             }
             Expr::Binary { op, lhs, rhs } => {
-                let irop = bin_to_ir(op)?;
-                let l = self.expr(lhs)?;
-                let r = self.expr(rhs)?;
-                self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
+                // `+` where either operand is `String` is `String.plus` (a stdlib intrinsic), not a
+                // primitive numeric add — lower it to a `Call` to the intrinsic symbol.
+                if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
+                    let l = self.expr(lhs)?;
+                    let r = self.expr(rhs)?;
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Intrinsic("kotlin/String.plus".to_string()),
+                        dispatch_receiver: Some(l),
+                        args: vec![r],
+                    })
+                } else {
+                    let irop = bin_to_ir(op)?;
+                    let l = self.expr(lhs)?;
+                    let r = self.expr(rhs)?;
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
+                }
             }
             Expr::If { cond, then_branch, else_branch } => {
                 let c = self.expr(cond)?;
@@ -169,7 +181,7 @@ impl<'a> Lower<'a> {
                 for arg in args {
                     a.push(self.expr(arg)?);
                 }
-                self.ir.add_expr(IrExpr::Call { callee: fid, dispatch_receiver: None, args: a })
+                self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
             }
             _ => return None,
         })

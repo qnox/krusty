@@ -5,7 +5,7 @@
 //! the JVM module. If the same IR runs correctly on both the JVM and Node, the IR is genuinely
 //! target-neutral. Like the JVM IR emitter, it covers the core subset (`ir_lower`'s output).
 
-use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile};
 
 /// Emit a whole file's IR as a JavaScript module (one `function` per IR function).
 pub fn emit_file(ir: &IrFile) -> String {
@@ -89,11 +89,22 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr) -> String {
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
             format!("({} {} {})", emit_expr(ir, *lhs), js_op(*op), emit_expr(ir, *rhs))
         }
-        IrExpr::Call { callee, args, .. } => {
-            let name = &ir.functions[*callee as usize].name;
-            let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x)).collect();
-            format!("{}({})", name, a.join(", "))
-        }
+        IrExpr::Call { callee, dispatch_receiver, args } => match callee {
+            Callee::Local(fid) => {
+                let name = &ir.functions[*fid as usize].name;
+                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x)).collect();
+                format!("{}({})", name, a.join(", "))
+            }
+            // The JS platform's realization of a stdlib intrinsic (cf. the JVM `StringBuilder` form).
+            Callee::Intrinsic(fq) => match fq.as_str() {
+                // `String.plus`: JS `+` coerces the rhs to string when the lhs is a string.
+                "kotlin/String.plus" => {
+                    let r = emit_expr(ir, dispatch_receiver.unwrap());
+                    format!("({} + {})", r, emit_expr(ir, args[0]))
+                }
+                _ => "undefined".to_string(),
+            },
+        },
         // `if`/`when` (an expression) → a chained ternary; the final `else` (None condition) is the tail.
         IrExpr::When { branches } => {
             let mut s = String::new();

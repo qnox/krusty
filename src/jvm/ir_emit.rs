@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile, IrType};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
 use crate::jvm::emit::method_descriptor;
 use crate::types::Ty;
@@ -107,25 +107,69 @@ impl<'a> Emitter<'a> {
                 let (slot, jt) = self.slots[i];
                 load(jt, slot, code);
             }
-            IrExpr::Call { callee, args, .. } => {
-                let f = &self.ir.functions[*callee as usize];
-                let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
-                let ret = ir_ty_to_jvm(&f.ret);
-                let name = f.name.clone();
-                let args = args.clone();
-                for &a in &args {
-                    self.emit_value(a, code);
+            IrExpr::Call { callee, dispatch_receiver, args } => match callee {
+                Callee::Local(fid) => {
+                    let f = &self.ir.functions[*fid as usize];
+                    let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                    let ret = ir_ty_to_jvm(&f.ret);
+                    let name = f.name.clone();
+                    let args = args.clone();
+                    for &a in &args {
+                        self.emit_value(a, code);
+                    }
+                    let arg_words: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    let desc = method_descriptor(&param_tys, ret);
+                    let owner = self.internal.clone();
+                    let m = self.cw.methodref(&owner, &name, &desc);
+                    code.invokestatic(m, arg_words, slot_words(ret) as i32);
                 }
-                let arg_words: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let desc = method_descriptor(&param_tys, ret);
-                let owner = self.internal.clone();
-                let m = self.cw.methodref(&owner, &name, &desc);
-                code.invokestatic(m, arg_words, slot_words(ret) as i32);
-            }
+                // Stdlib intrinsic, mapped to the JVM platform here (the IR is target-neutral).
+                Callee::Intrinsic(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
+            },
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
             IrExpr::When { branches } => self.emit_when(branches, code),
             _ => {}
         }
+    }
+
+    /// The JVM platform's realization of a stdlib intrinsic named by Kotlin FqName.
+    fn emit_intrinsic(&mut self, fq: &str, recv: &Option<u32>, args: &[u32], code: &mut CodeBuilder) {
+        match fq {
+            // `String.plus`: `recv + arg` → `new StringBuilder().append(recv).append(arg).toString()`.
+            "kotlin/String.plus" => {
+                let recv = recv.unwrap();
+                let arg = args[0];
+                let sb = self.cw.class_ref("java/lang/StringBuilder");
+                code.new_obj(sb);
+                code.dup();
+                let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                code.invokespecial(init, 0, 0);
+                self.append(recv, code);
+                self.append(arg, code);
+                let ts = self.cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+                code.invokevirtual(ts, 0, 1);
+            }
+            _ => {} // unknown intrinsic — lowering shouldn't produce it (file would have been skipped)
+        }
+    }
+
+    /// Append a value to a `StringBuilder` already on the stack (leaves the builder on the stack).
+    fn append(&mut self, e: u32, code: &mut CodeBuilder) {
+        let ty = self.value_ty(e);
+        self.emit_value(e, code);
+        let desc = match ty {
+            Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",
+            Ty::Long => "(J)Ljava/lang/StringBuilder;",
+            Ty::Boolean => "(Z)Ljava/lang/StringBuilder;",
+            Ty::Char => "(C)Ljava/lang/StringBuilder;",
+            Ty::Double => "(D)Ljava/lang/StringBuilder;",
+            Ty::Float => "(F)Ljava/lang/StringBuilder;",
+            Ty::String => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+        };
+        let m = self.cw.methodref("java/lang/StringBuilder", "append", desc);
+        let aw = slot_words(ty) as i32;
+        code.invokevirtual(m, aw, 1);
     }
 
     fn emit_binop(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
@@ -279,7 +323,10 @@ impl<'a> Emitter<'a> {
                 _ => Ty::Error,
             },
             IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
-            IrExpr::Call { callee, .. } => ir_ty_to_jvm(&self.ir.functions[*callee as usize].ret),
+            IrExpr::Call { callee, .. } => match callee {
+                Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
+                Callee::Intrinsic(fq) => intrinsic_ret(fq),
+            },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
                 _ => self.value_ty(*lhs),
@@ -287,6 +334,14 @@ impl<'a> Emitter<'a> {
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             _ => Ty::Error,
         }
+    }
+}
+
+/// The result type of a stdlib intrinsic (shared by JVM/value-typing).
+fn intrinsic_ret(fq: &str) -> Ty {
+    match fq {
+        "kotlin/String.plus" => Ty::String,
+        _ => Ty::Error,
     }
 }
 
