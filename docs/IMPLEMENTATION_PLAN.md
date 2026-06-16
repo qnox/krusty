@@ -1160,6 +1160,31 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/array_init_lambda_e2e.rs` restored to a branchy body (`if (it==1) 10 else it`),
   verified with `-Xverify:all` on the JVM. Full suite **184 green**. Box conformance **376 OK / 0 FAIL**.
 
+## Phase 97 — JDK bootclasspath via jimage (lazy, explicit) + fallout fixes  ✅
+- 🎯 Box coverage **376 → 414 OK / 0 FAIL**. Driver: JDK types (`StringBuilder`, …) couldn't
+  resolve, so property inference (`val sb = StringBuilder()`) and ~40 tests were blocked.
+- ✅ **No invented hardcode.** JDK types resolve from the running JDK's `lib/modules` **jimage**,
+  read directly (little-endian header → location table → NUL-terminated mUTF8 strings; ref:
+  `jdk.internal.jimage.BasicImageReader`). A removed earlier hack hardcoded
+  `StringBuilder`/`Any` — deleted.
+- ✅ **Explicit on `-classpath`, no `JAVA_HOME` magic.** New `Entry::Jimage` (a cp path named
+  `modules`); the harness passes `<jdk>/lib/modules` explicitly, exactly like a jar. The classpath
+  library reads no env.
+- ✅ **Lazy / name-based indexing** (like kotlinc/javac): `scan_types` builds `simple → internal`
+  from entry **names** (jar central directory, dir walk, jimage location table) without parsing
+  class bytes; only `*TypeAliasesKt.class` is parsed (for aliases). Class bytes are read on demand
+  in `find`.
+- ✅ User-declared classes **shadow** classpath/JDK types of the same simple name (legal Kotlin);
+  only user-vs-user duplicates are `conflicting declarations`.
+- 🐞 Fallout fixed (newly-compiling tests must not miscompile):
+  - `() -> Unit` lambda invoke left the erased `Object` result on the stack → `VerifyError` at the
+    next branch. Now popped (Unit occupies no stack slot). (`divisionByZero.kt`)
+  - A type parameter with a **primitive upper bound** (`<A : Double>`) is *specialized* by kotlinc
+    (primitive/IEEE-754 `==`), not erased — krusty only erases, so it now **rejects** such
+    declarations rather than miscompile. (`eqNullableDoublesWithTP.kt`)
+- ⬜ Follow-up: read JDK class **bytes** from the jimage (content offset + decompress) so JDK
+  members resolve lazily too — today `find` returns `None` for jimage (types resolve, members don't).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
