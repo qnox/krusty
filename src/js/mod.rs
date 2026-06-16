@@ -157,6 +157,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     format!("({} + {})", r, emit_expr(ir, args[0], inst))
                 }
+                "kotlin/String.length" => format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
+                "kotlin/Any.toString" => format!("String({})", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
                 _ => "undefined".to_string(),
             },
         },

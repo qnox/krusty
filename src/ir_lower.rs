@@ -296,11 +296,18 @@ impl<'a> Lower<'a> {
             }
             Expr::Member { receiver, name } => {
                 let rt = self.info.ty(receiver);
-                let ci = self.class_of(rt)?;
-                let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
-                let class = ci.id;
-                let recv = self.expr(receiver)?;
-                self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                if let Some(ci) = self.class_of(rt) {
+                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
+                    let class = ci.id;
+                    let recv = self.expr(receiver)?;
+                    self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                } else if rt == Ty::String && name == "length" {
+                    // `s.length` → stdlib intrinsic (0-arg), `Int`.
+                    let recv = self.expr(receiver)?;
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                } else {
+                    return None;
+                }
             }
             Expr::Binary { op, lhs, rhs } => {
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
@@ -403,16 +410,22 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::New { class, args: a })
                     }
                 }
-                // Instance method call `recv.m(args)`.
+                // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
                     let rt = self.info.ty(receiver);
-                    let ci = self.class_of(rt)?;
-                    let (index, _, _) = *ci.methods.get(&name)?;
-                    let class = ci.id;
-                    let recv = self.expr(receiver)?;
-                    let mut a = Vec::new();
-                    for arg in args { a.push(self.expr(arg)?); }
-                    self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a })
+                    if let Some((index, _, _)) = self.class_of(rt).and_then(|ci| ci.methods.get(&name).copied()) {
+                        let class = self.class_of(rt)?.id;
+                        let recv = self.expr(receiver)?;
+                        let mut a = Vec::new();
+                        for arg in args { a.push(self.expr(arg)?); }
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a })
+                    } else if name == "toString" && args.is_empty() {
+                        // `x.toString()` → stdlib intrinsic, `String`.
+                        let recv = self.expr(receiver)?;
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                    } else {
+                        return None;
+                    }
                 }
                 _ => return None,
             },
