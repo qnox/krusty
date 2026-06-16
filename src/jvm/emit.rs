@@ -3862,6 +3862,34 @@ impl<'a> MethodEmitter<'a> {
             }
             return;
         }
+        // Builtin bitwise/shift infix methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`).
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            let rt = self.info.ty(receiver);
+            if matches!(rt, Ty::Int | Ty::Long) {
+                let is_long = rt == Ty::Long;
+                if name == "inv" && args.is_empty() {
+                    self.emit_expr(receiver, code, cw);
+                    if is_long { code.push_long(-1, cw); code.lxor(); } else { code.push_int(-1, cw); code.ixor(); }
+                    return;
+                }
+                if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor") && args.len() == 1 {
+                    self.emit_expr_as(receiver, rt, code, cw);
+                    // Shifts take an `Int` amount even for a `Long` receiver; bitwise take same type.
+                    let arg_ty = if matches!(name.as_str(), "shl" | "shr" | "ushr") { Ty::Int } else { rt };
+                    self.emit_expr_as(args[0], arg_ty, code, cw);
+                    match (name.as_str(), is_long) {
+                        ("shl", false) => code.ishl(), ("shl", true) => code.lshl(),
+                        ("shr", false) => code.ishr(), ("shr", true) => code.lshr(),
+                        ("ushr", false) => code.iushr(), ("ushr", true) => code.lushr(),
+                        ("and", false) => code.iand(), ("and", true) => code.land(),
+                        ("or", false) => code.ior(), ("or", true) => code.lor(),
+                        ("xor", false) => code.ixor(), ("xor", true) => code.lxor(),
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
+            }
+        }
         // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
