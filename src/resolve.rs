@@ -80,6 +80,10 @@ pub struct SymbolTable {
     /// Top-level extension functions: (receiver_descriptor, method_name) → Signature.
     /// Used to resolve `recv.method(args)` when no instance method matches.
     pub ext_funs: HashMap<(String, String), Signature>,
+    /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
+    /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
+    /// built-ins. The single source of truth for "does this type name resolve, and to what".
+    pub class_names: HashMap<String, String>,
 }
 
 impl SymbolTable {
@@ -167,24 +171,6 @@ impl SymbolTable {
 /// The JVM internal name of a common JDK exception/error referenced by simple name (Kotlin's
 /// auto-imported `kotlin.*` exception aliases map onto these `java.lang` types). Used so
 /// `throw RuntimeException("…")` resolves without an explicit import.
-pub fn builtin_exception(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Throwable" => "java/lang/Throwable",
-        "Exception" => "java/lang/Exception",
-        "RuntimeException" => "java/lang/RuntimeException",
-        "Error" => "java/lang/Error",
-        "IllegalStateException" => "java/lang/IllegalStateException",
-        "IllegalArgumentException" => "java/lang/IllegalArgumentException",
-        "NullPointerException" => "java/lang/NullPointerException",
-        "IndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
-        "UnsupportedOperationException" => "java/lang/UnsupportedOperationException",
-        "ArithmeticException" => "java/lang/ArithmeticException",
-        "ClassCastException" => "java/lang/ClassCastException",
-        "NumberFormatException" => "java/lang/NumberFormatException",
-        "AssertionError" => "java/lang/AssertionError",
-        _ => return None,
-    })
-}
 
 
 /// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
@@ -300,9 +286,14 @@ pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<(S
 /// match. Returns `(owner internal name, method descriptor, return type)`.
 pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
     let ci = cp.find(internal)?;
+    // Only a public method on a public class is callable from generated code (a non-public target
+    // → `IllegalAccessError`); otherwise leave it unresolved so the call is rejected, not miscompiled.
+    if !ci.is_public() {
+        return None;
+    }
     let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
     let prefix = format!("({params})");
-    let m = ci.methods.iter().find(|m| m.name == method && m.is_static() && m.descriptor.starts_with(&prefix))?;
+    let m = ci.methods.iter().find(|m| m.name == method && m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix))?;
     let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
     Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
 }
@@ -311,9 +302,12 @@ pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys
 /// Returns `(method descriptor, return type)` for `invokevirtual`.
 pub fn resolve_java_instance(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
     let ci = cp.find(internal)?;
+    if !ci.is_public() {
+        return None;
+    }
     let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
     let prefix = format!("({params})");
-    let m = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.descriptor.starts_with(&prefix))?;
+    let m = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix))?;
     let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
     Some((m.descriptor.clone(), desc_to_ty(&ret)))
 }
@@ -394,6 +388,15 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
             }
         }
     }
+    // Seed the Kotlin built-in → JVM class mapping (ported from the reference compiler's
+    // `JavaToKotlinClassMap`; see `jvm::jvm_class_map`). These are intrinsic mapped types
+    // (`Comparable`, `Throwable`, `List`, …) — not stdlib `.class` files — so they are always
+    // available. User/classpath declarations above take precedence (`or_insert`).
+    for name in crate::jvm::jvm_class_map::BUILTIN_MAPPED_NAMES {
+        if let Some(internal) = crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(name) {
+            class_names.entry(name.to_string()).or_insert_with(|| internal.to_string());
+        }
+    }
 
     // Expand type aliases into class_names.
     // `typealias A = B` where B is a user-defined class → A resolves to the same internal name.
@@ -420,6 +423,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                 changed = true;
             } else if Ty::from_name(target).is_some() {
                 class_names.insert(alias.clone(), format!("__ty/{target}"));
+                changed = true;
+            } else if target.contains('/') {
+                // Already a JVM internal name (e.g. a classpath `TypeAliasesKt` alias whose
+                // expanded type was read straight from `@Metadata` as `kotlin/Exception` →
+                // `java/lang/Exception`).
+                class_names.insert(alias.clone(), target.clone());
                 changed = true;
             } else if target.contains('.') {
                 // Fully-qualified class name (e.g. java.lang.Exception) → JVM internal name.
@@ -597,13 +606,22 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     if c.is_enum {
                         table.enums.insert(c.name.clone(), c.enum_entries.clone());
                     }
-                    // Implemented interfaces, resolved to internal names (for subtyping/dispatch).
-                    let interfaces: Vec<String> = c
-                        .supertypes
-                        .iter()
-                        .map(|s| class_names.get(s).cloned().unwrap_or_else(|| s.clone()))
-                        .collect();
-                    let super_internal = c.base_class.as_ref().map(|b| class_names.get(b).cloned().unwrap_or_else(|| b.clone()));
+                    // Resolve each supertype to a JVM internal name via `class_names` (user/classpath
+                    // classes, stdlib aliases, mapped built-ins). A supertype that resolves to none
+                    // of those would be emitted as a bare default-package name → `NoClassDefFound`
+                    // at load; reject (skip) instead — never emit an unresolved supertype.
+                    let mut resolve_super = |s: &String| -> String {
+                        match class_names.get(s) {
+                            Some(internal) => internal.clone(),
+                            None if ctp.contains(s) => s.clone(), // erased type parameter (degenerate)
+                            None => {
+                                diags.error(c.span, format!("krusty: supertype '{s}' could not be resolved (provide it on the classpath)"));
+                                s.clone()
+                            }
+                        }
+                    };
+                    let interfaces: Vec<String> = c.supertypes.iter().map(&mut resolve_super).collect();
+                    let super_internal = c.base_class.as_ref().map(|b| resolve_super(b));
                     // `companion object` members → static methods/props on this class.
                     let static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -672,6 +690,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
     }
 
     table.classpath = cp;
+    table.class_names = class_names;
     table
 }
 
@@ -1494,10 +1513,12 @@ impl<'a> Checker<'a> {
     /// The JVM internal name of a `catch` clause's exception type: a common JDK exception, an
     /// imported class, or a declared class. `None` if krusty can't resolve it to a concrete class.
     fn catch_internal(&self, name: &str) -> Option<String> {
-        builtin_exception(name)
-            .map(|s| s.to_string())
-            .or_else(|| self.imports.get(name).cloned())
+        self.imports.get(name).cloned()
             .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+            // Exception types resolve from the classpath: stdlib `TypeAliasesKt` aliases
+            // (`Exception`, `RuntimeException`, …) and the ported `JavaToKotlinClassMap`
+            // built-ins (`Throwable`) are both folded into `class_names`.
+            .or_else(|| self.syms.class_names.get(name).cloned())
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
@@ -2643,12 +2664,13 @@ impl<'a> Checker<'a> {
                             return Ty::obj(&internal);
                         }
                     }
-                    // A common JDK exception by simple name (`throw RuntimeException("msg")`): krusty
-                    // accepts the no-arg and single-`String` constructors.
-                    if let Some(internal) = builtin_exception(&fname) {
-                        let ok = matches!(arg_tys.as_slice(), [] | [Ty::String]);
-                        if ok {
-                            return Ty::obj(internal);
+                    // An exception type by simple name (`throw RuntimeException("msg")`): resolved
+                    // from the classpath (stdlib `TypeAliasesKt` alias / mapped `Throwable`), not a
+                    // hardcoded list. Every JDK `Throwable` has both a no-arg and a single-`String`
+                    // constructor, so those two arg shapes are accepted for a throwable-shaped type.
+                    if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
+                        if crate::jvm::jvm_class_map::is_throwable_internal(&internal) && matches!(arg_tys.as_slice(), [] | [Ty::String]) {
+                            return Ty::obj(&internal);
                         }
                     }
                     // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.

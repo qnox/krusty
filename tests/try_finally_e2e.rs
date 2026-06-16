@@ -11,7 +11,9 @@ use krusty::codegen::emit::{emit_class, emit_file};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+mod common;
 
 const SRC: &str = r#"
 class Log { var s: String = "" }
@@ -65,7 +67,7 @@ fn try_finally_run() {
     let toks = lex(SRC, &mut d);
     let file = parse(SRC, &toks, &mut d);
     let files = vec![file];
-    let syms = collect_signatures(&files, &mut d);
+    let syms = collect_signatures_with_cp(&files, common::stdlib_classpath(), &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

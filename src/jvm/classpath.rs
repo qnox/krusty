@@ -161,8 +161,14 @@ impl Classpath {
 
 fn index_class_bytes(bytes: &[u8], idx: &mut ExtIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
+    // Only public methods on a public class are callable from generated code — a non-public
+    // member (e.g. a multifile-facade *part* class, or a private overload) would `IllegalAccessError`
+    // at runtime. Skip them so such a call stays unresolved (rejected) rather than miscompiled.
+    if !ci.is_public() {
+        return;
+    }
     for m in &ci.methods {
-        if !m.is_static() || m.name.starts_with('<') {
+        if !m.is_static() || !m.is_public() || m.name.starts_with('<') {
             continue;
         }
         // Parse first parameter from descriptor `(Lfoo/Bar;II)V` → `Lfoo/Bar;`

@@ -35,6 +35,8 @@ pub struct FieldSig {
 #[derive(Clone, Debug)]
 pub struct ClassInfo {
     pub major: u16,
+    /// class access flags (`ACC_PUBLIC`, …)
+    pub access: u16,
     /// internal name, e.g. `java/lang/String`
     pub this_class: String,
     pub super_class: Option<String>,
@@ -45,6 +47,10 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub fn is_public(&self) -> bool {
+        self.access & ACC_PUBLIC != 0
+    }
+
     pub fn method(&self, name: &str, descriptor: &str) -> Option<&MethodSig> {
         self.methods.iter().find(|m| m.name == name && m.descriptor == descriptor)
     }
@@ -120,7 +126,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         }
     };
 
-    let _access = r.u2()?;
+    let access = r.u2()?;
     let this_class = class_name(r.u2()?);
     let super_idx = r.u2()?;
     let super_class = if super_idx == 0 { None } else { Some(class_name(super_idx)) };
@@ -155,7 +161,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // Read class-level attributes to find @kotlin.Metadata → d2 array.
     let kotlin_d2 = read_kotlin_d2(&mut r, &cp).unwrap_or_default();
 
-    Ok(ClassInfo { major, this_class, super_class, fields, methods, kotlin_d2 })
+    Ok(ClassInfo { major, access, this_class, super_class, fields, methods, kotlin_d2 })
 }
 
 /// Parse class-level attributes looking for RuntimeVisibleAnnotations → @kotlin/Metadata → d2.
