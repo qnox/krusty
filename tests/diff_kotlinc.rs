@@ -64,6 +64,12 @@ fun greet(name: String): String = "hi " + name
 fun tail(s: String): String = s.substring(1)
 fun mid(s: String): String = s.substring(1, 3)
 fun find(s: String): Int = s.indexOf("b")
+fun classify(n: Int): String = when (n) { 0 -> "zero"; 1, 2 -> "few"; else -> "many" }
+fun sumTo(n: Int): Int { var s = 0; for (i in 1..n) s += i; return s }
+fun rem(a: Int, b: Int): Int = a % b
+fun neg(a: Int): Int = -a
+fun shifted(c: Char): Char = c
+fun isLong(a: Long): Boolean = a > 100L
 "#;
 
     let root = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
@@ -110,6 +116,12 @@ public class Main {
         System.out.println(DiffKt.tail("abcd"));
         System.out.println(DiffKt.mid("abcd"));
         System.out.println(DiffKt.find("abc"));
+        System.out.println(DiffKt.classify(2));
+        System.out.println(DiffKt.sumTo(5));
+        System.out.println(DiffKt.rem(7,3));
+        System.out.println(DiffKt.neg(9));
+        System.out.println(DiffKt.shifted('q'));
+        System.out.println(DiffKt.isLong(200L));
     }
 }"#;
     fs::write(root.join("Main.java"), main).unwrap();
