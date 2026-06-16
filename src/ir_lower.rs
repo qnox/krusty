@@ -130,6 +130,19 @@ impl<'a> Lower<'a> {
                 let val = self.expr(value)?;
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
             }
+            Stmt::While { cond, body } => {
+                let c = self.expr(cond)?;
+                // The body is a `Block` of statements (no trailing value, in the core subset).
+                let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { return None };
+                let depth = self.scope.len();
+                let mut out = Vec::new();
+                for s in stmts {
+                    out.push(self.stmt(s)?);
+                }
+                self.scope.truncate(depth);
+                let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b }))
+            }
             _ => None,
         }
     }

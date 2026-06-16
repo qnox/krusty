@@ -78,6 +78,20 @@ impl<'a> Emitter<'a> {
                 self.emit_value(value, code);
                 store(jt, slot, code);
             }
+            IrExpr::While { cond, body } => {
+                let start = code.new_label();
+                let end = code.new_label();
+                self.frame(start, vec![], code);
+                code.bind(start);
+                self.emit_value(cond, code);
+                self.frame(end, vec![], code);
+                code.ifeq(end); // condition false → exit
+                self.emit(body, code);
+                self.frame(start, vec![], code);
+                code.goto(start);
+                self.frame(end, vec![], code);
+                code.bind(end);
+            }
             other => {
                 self.emit_value_node(&other, code);
                 discard(self.value_ty(e), code);
