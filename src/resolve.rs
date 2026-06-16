@@ -2292,8 +2292,15 @@ impl<'a> Checker<'a> {
                 Some(Ty::Unit)
             }
             ("error", [_]) => Some(Ty::Nothing),
-            ("TODO", []) => Some(Ty::Nothing),
-            ("TODO", [_]) => Some(Ty::Nothing),
+            ("TODO", [] | [_]) => {
+                // `TODO()` throws `kotlin.NotImplementedError`; require it to be resolvable from the
+                // classpath (stdlib), else emitting it would `NoClassDefFound` at runtime.
+                if !self.syms.class_names.contains_key("NotImplementedError") {
+                    self.diags.error(span, "krusty: 'TODO' requires the kotlin stdlib on the classpath".to_string());
+                    return Some(Ty::Error);
+                }
+                Some(Ty::Nothing)
+            }
             // kotlin.test assertions. assertEquals(expected, actual[, msg]); assertTrue/assertFalse
             // (cond[, msg]). All evaluate to Unit; an optional trailing message must be a String.
             ("assertEquals", [a, b] | [a, b, _]) => {

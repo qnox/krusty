@@ -962,6 +962,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ **`inner class` rejected** (was silently dropped → VerifyError when used): an inner class needs
   the outer-instance capture (`Test this$0` + qualified `new`) krusty doesn't model.
 
+## Phase 76 — Diverging property initializers + `TODO()` → `NotImplementedError`  ✅
+- ✅ **`expr_diverges` now recognises any `Nothing`-typed expression** (`TODO()`, `error(…)`, a call
+  to a `Nothing`-returning function, `x!!` on null), not just literal `throw`/`if`/`when`/`try`. A
+  property initializer `val x: String = TODO()` is diverging, so the constructor no longer emits the
+  dead `astore`/`putfield`/`return` after the throw — which had left an unreachable offset with an
+  inconsistent `StackMapTable` (`VerifyError: Expecting a stack map frame`).
+- ✅ **`TODO()` throws the real `kotlin.NotImplementedError`** (was a `java.lang.RuntimeException`
+  stand-in), resolved from the stdlib on the classpath; the checker rejects `TODO` when
+  `NotImplementedError` isn't resolvable (no stdlib) rather than emit a `NoClassDefFound`.
+- ✅ TDD: `tests/diverging_init_e2e.rs` (`val x: String = TODO()` in a class, caught as
+  `NotImplementedError`, on the JVM). Full suite 179 green. Fixes the `unreachableUninitializedProperty`
+  box FAIL.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

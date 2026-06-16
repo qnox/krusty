@@ -3112,7 +3112,9 @@ impl<'a> MethodEmitter<'a> {
             Expr::Try { body, catches, .. } => {
                 self.expr_diverges(*body) && catches.iter().all(|c| self.expr_diverges(c.body))
             }
-            _ => false,
+            // Any `Nothing`-typed expression diverges by definition (`TODO()`, `error(...)`, a call
+            // to a `Nothing`-returning function, `x!!` on null, …) — it never yields a value.
+            _ => self.info.ty(e) == Ty::Nothing,
         }
     }
 
@@ -3969,7 +3971,9 @@ impl<'a> MethodEmitter<'a> {
                         code.bind(ok);
                     }
                     "error" => throw(code, cw, "java/lang/IllegalStateException", Some(&args[0]), self),
-                    "TODO" => throw(code, cw, "java/lang/RuntimeException", args.first(), self),
+                    // Kotlin's `TODO()` throws `kotlin.NotImplementedError` (resolved from the
+                    // stdlib on the classpath; the checker rejects `TODO` when it isn't resolvable).
+                    "TODO" => throw(code, cw, "kotlin/NotImplementedError", args.first(), self),
                     // assertEquals(expected, actual[, msg]) — pass when `expected == actual` (Kotlin
                     // structural equality, reused from the `==` comparison emission).
                     "assertEquals" => {
