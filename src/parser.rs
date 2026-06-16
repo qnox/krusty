@@ -606,6 +606,36 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse an optional generic constraint clause `where T : Bound, U : Bound2` after a function or
+    /// class signature. Constraints are *erased* (krusty erases type parameters to `Object`), but a
+    /// primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
+    /// (see `parse_type_params`). `where` may sit on a following line, so newlines are skipped only
+    /// when the clause is actually present (otherwise the position is restored).
+    fn parse_where_clause(&mut self) {
+        let save = self.i;
+        self.skip_newlines();
+        if !(self.at(TokenKind::Ident) && self.text() == "where") {
+            self.i = save;
+            return;
+        }
+        self.bump(); // 'where'
+        loop {
+            self.skip_newlines();
+            if self.at(TokenKind::Ident) {
+                self.bump(); // type-parameter name
+            }
+            if self.eat(TokenKind::Colon) {
+                let bound = self.parse_type();
+                if crate::types::Ty::from_name(&bound.name).map_or(false, |t| t.is_primitive()) {
+                    self.diags.error(bound.span, "krusty: type parameter with a primitive upper bound is not supported".to_string());
+                }
+            }
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+    }
+
     fn parse_qualified_name(&mut self) -> String {
         let mut s = String::new();
         if self.at(TokenKind::Ident) {
@@ -679,6 +709,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        self.parse_where_clause();
         let body = if self.eat(TokenKind::Eq) {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
@@ -798,6 +829,9 @@ impl<'a> Parser<'a> {
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
         let (supertypes, base_class, base_args) = self.parse_supertypes();
+        // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
+        // supertype list, before the body.
+        self.parse_where_clause();
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
