@@ -1200,6 +1200,21 @@ impl<'a> Parser<'a> {
         self.file.add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
     }
 
+    /// The default-value expression for a type (`var x: T` deferred init): `0`/`false`/`'\0'`/`null`.
+    fn default_init_expr(&mut self, ty: &TypeRef, span: Span) -> ExprId {
+        let e = match ty.name.as_str() {
+            _ if ty.nullable => Expr::NullLit,
+            "Int" | "Byte" | "Short" => Expr::IntLit(0),
+            "Long" => Expr::LongLit(0),
+            "Float" => Expr::FloatLit(0.0),
+            "Double" => Expr::DoubleLit(0.0),
+            "Boolean" => Expr::BoolLit(false),
+            "Char" => Expr::CharLit('\0'),
+            _ => Expr::NullLit,
+        };
+        self.file.add_expr(e, span)
+    }
+
     /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
     fn parse_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
         self.finish_stmt(Stmt::IncDec { name, dec }, start)
@@ -1252,9 +1267,18 @@ impl<'a> Parser<'a> {
                 }
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
-                self.expect(TokenKind::Eq, "'='");
-                self.skip_newlines();
-                let init = self.parse_expr();
+                // `var x: T` with no initializer (deferred assignment) → synthesize the type's default
+                // value (`0`/`false`/`null`); a later `x = …` assigns it. Only for `var` with a type
+                // annotation (a `val` deferred-init needs assign-once tracking krusty lacks → rejected).
+                let init = if is_var && ty.is_some() && !self.at(TokenKind::Eq) {
+                    let sp = self.tok().span;
+                    let e = self.default_init_expr(ty.as_ref().unwrap(), sp);
+                    e
+                } else {
+                    self.expect(TokenKind::Eq, "'='");
+                    self.skip_newlines();
+                    self.parse_expr()
+                };
                 self.finish_stmt(Stmt::Local { is_var, name, ty, init }, start)
             }
             TokenKind::KwReturn => {
