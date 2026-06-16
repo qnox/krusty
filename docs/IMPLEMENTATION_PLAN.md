@@ -1358,6 +1358,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - 🐞 Fixed an IR-emit frame bug: a local's slot was claimed in frames recorded *inside* its branchy
   initializer (verifier saw `top`); now the slot is allocated after the initializer is emitted.
 
+## Phase 111 — `for` range loops in the IR  ✅
+- ✅ `ir_lower` desugars `for (i in a..b [step s])` / `until` / `downTo` over `Int` to the existing
+  `IrExpr::While` (bound hoisted to a local, evaluated once; step defaults to 1; `downTo` counts
+  down). No new node — reuses `While`/`Variable`/`SetValue`/`PrimitiveBinOp`.
+- ✅ Verified on `java -Xverify:all` AND `node` (`1..4` → 10, `0 until 3` → 3). JS box conformance
+  **12 → 13 IR-lowered / 13 OK / 0 FAIL**. 193 unit tests green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
