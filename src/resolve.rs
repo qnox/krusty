@@ -71,6 +71,8 @@ pub struct SymbolTable {
     pub classes: HashMap<String, ClassSig>,
     /// Top-level properties (name → type, is_var), backed by static fields on the file facade.
     pub props: HashMap<String, (Ty, bool)>,
+    /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
+    pub computed_props: std::collections::HashSet<String>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
     pub objects: std::collections::HashSet<String>,
     /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
@@ -698,13 +700,19 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     );
                 }
                 Decl::Property(p) => {
+                    // A top-level *computed* property (custom getter, no initializer) — needs a type
+                    // annotation (no getter-return inference at top level yet); emitted as `getX()`.
+                    let is_computed = p.getter.is_some() && p.init.is_none();
                     // Type from the annotation, else a light inference from a literal initializer.
                     let ty = match &p.ty {
                         Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
                         None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
                     };
-                    if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                    if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
+                    }
+                    if is_computed {
+                        table.computed_props.insert(p.name.clone());
                     }
                     table.props.insert(p.name.clone(), (ty, p.is_var));
                 }
@@ -1260,10 +1268,17 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Property(p) => {
-                // A top-level computed property (custom getter) isn't supported — the facade emits a
-                // backing field, not the getter, so reject to avoid a miscompile.
-                if p.getter.is_some() {
-                    c.diags.error(p.span, "krusty: top-level computed properties (custom getter) are not supported".to_string());
+                // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
+                // (Phase: top-level computed). Type-check the getter body against the declared type.
+                if let Some(g) = &p.getter {
+                    let prev = c.ret_ty;
+                    c.ret_ty = p.ty.as_ref().map(|r| c.resolve_ty(r)).unwrap_or(Ty::Error);
+                    match g {
+                        FunBody::Expr(e) => { let gt = c.expr(*e); c.expect_assignable(c.ret_ty, gt, c.span(*e), "getter body"); }
+                        FunBody::Block(b) => { let _ = c.expr(*b); }
+                        FunBody::None => {}
+                    }
+                    c.ret_ty = prev;
                 }
                 if let Some(init) = p.init {
                     let it = c.expr(init);
