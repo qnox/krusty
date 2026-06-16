@@ -1300,6 +1300,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - Note: tooling switched to **debug** builds for the box gate — proven identical bytecode/results
   to `--release` (same emitted `.class` bytes), at a 1.4 s vs 28 s rebuild.
 
+## Phase 106 — Real AST→IR→backend pipeline + second (JS) backend  ✅
+- 🎯 Validate the front-end/back-end boundary is real, not aspirational: lower a checked AST to the
+  backend-agnostic `krusty-ir`, then lower the **same** IR with **two independent backends**.
+- ✅ `src/ir_lower.rs` — AST→`krusty-ir` lowering for the core subset (top-level functions:
+  const/param/local, primitive arithmetic & comparison, calls, `if`/`when`, `return`, blocks,
+  `val`/`var`). Outside-subset files return `None` (caller keeps the direct emitter) — the IR path
+  grows one construct at a time.
+- ✅ `src/jvm/ir_emit.rs` — IR→JVM bytecode (maps Kotlin FqNames → JVM descriptors *here*; the IR
+  carries no descriptors). Shares `CodeBuilder`/frames with the AST emitter.
+- ✅ `src/js/mod.rs` — IR→JavaScript source. **No** dependency on the JVM module; no shared
+  lowering. The second backend that proves the IR is target-neutral.
+- ✅ TDD: `tests/ir_pipeline_e2e.rs` lowers ONE program to IR, then runs it on **`java -Xverify:all`
+  AND `node`** — both print `OK`. (`IrExpr::PrimitiveBinOp`/`IrBinOp` added for built-in ops.)
+- ➡️ Next: a JS conformance run over the box corpus (IR-coverable subset) on node, respecting
+  `// TARGET_BACKEND:` / `// IGNORE_BACKEND:`; grow the IR subset so the JVM path migrates onto IR.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

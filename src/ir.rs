@@ -76,6 +76,18 @@ pub enum IrExpr {
     While { cond: ExprId, body: ExprId },
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
     Variable { index: u32, ty: IrType, init: Option<ExprId> },
+    /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…). Kotlin IR models these as
+    /// `IrCall` to the operator function; krusty keeps a primitive node for the built-in numeric and
+    /// boolean ops so each backend emits the native instruction (JVM `iadd`, JS `+`).
+    PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
+}
+
+/// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrBinOp {
+    Add, Sub, Mul, Div, Rem,
+    Lt, Le, Gt, Ge, Eq, Ne,
+    And, Or,
 }
 
 /// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).
