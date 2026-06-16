@@ -1381,6 +1381,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - JS box conformance steady at 17/17, 0 FAIL (these box tests need more stdlib to lower); the IR's
   numeric breadth grows with no regression. 193 unit tests green.
 
+## Phase 114 — `toString()` / `String.length` stdlib intrinsics  ✅
+- ✅ `x.toString()` → `Call(Intrinsic("kotlin/Any.toString"))`; `s.length` →
+  `Call(Intrinsic("kotlin/String.length"))` — backend-mapped, no new IR nodes. JVM:
+  `String.valueOf(<overload>)` / `String.length()`; JS: `String(x)` / `x.length`.
+- ✅ Verified on `java -Xverify:all` AND `node` (`42.toString()`, `"hello".length`,
+  `true.toString()`). JS box conformance steady 17/17, 0 FAIL (these files need more features to
+  fully lower); each intrinsic is one symbol the backends map. 193 unit tests green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

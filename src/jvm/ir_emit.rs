@@ -276,6 +276,29 @@ impl<'a> Emitter<'a> {
                 let ts = self.cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
                 code.invokevirtual(ts, 0, 1);
             }
+            // `s.length` → `String.length()`.
+            "kotlin/String.length" => {
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref("java/lang/String", "length", "()I");
+                code.invokevirtual(m, 0, 1);
+            }
+            // `x.toString()` → `String.valueOf(x)` (the right primitive/Object overload).
+            "kotlin/Any.toString" => {
+                let r = recv.unwrap();
+                let ty = self.value_ty(r);
+                self.emit_value(r, code);
+                let desc = match ty {
+                    Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
+                    Ty::Long => "(J)Ljava/lang/String;",
+                    Ty::Boolean => "(Z)Ljava/lang/String;",
+                    Ty::Char => "(C)Ljava/lang/String;",
+                    Ty::Double => "(D)Ljava/lang/String;",
+                    Ty::Float => "(F)Ljava/lang/String;",
+                    _ => "(Ljava/lang/Object;)Ljava/lang/String;",
+                };
+                let m = self.cw.methodref("java/lang/String", "valueOf", desc);
+                code.invokestatic(m, slot_words(ty) as i32, 1);
+            }
             _ => {}
         }
     }
@@ -476,7 +499,8 @@ impl<'a> Emitter<'a> {
 
 fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
-        "kotlin/String.plus" => Ty::String,
+        "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
+        "kotlin/String.length" => Ty::Int,
         _ => Ty::Error,
     }
 }
