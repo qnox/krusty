@@ -4243,6 +4243,57 @@ impl<'a> MethodEmitter<'a> {
                             code.array_store(sop, swords);
                         }
                     }
+                } else if args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
+                    // `IntArray(n) { i -> elem }` — allocate then fill via a counted loop. The lambda
+                    // is inlined (its parameter bound to the index). The element value is evaluated
+                    // into a temp first so a branchy body runs on an empty stack (no array/index
+                    // underneath the frames).
+                    let arr_ty = Ty::array(elem);
+                    self.emit_expr_as(args[0], Ty::Int, code, cw);
+                    let n_slot = self.alloc_temp(Ty::Int);
+                    code.istore(n_slot);
+                    code.iload(n_slot);
+                    self.emit_new_array(elem, code, cw);
+                    let arr_slot = self.alloc_temp(arr_ty);
+                    store_local(arr_ty, arr_slot, code);
+                    code.push_int(0, cw);
+                    let i_slot = self.alloc_temp(Ty::Int);
+                    code.istore(i_slot);
+                    let (param, body) = match self.file.expr(args[1]).clone() {
+                        Expr::Lambda { param, body } => (param.unwrap_or_else(|| "it".to_string()), body),
+                        _ => unreachable!(),
+                    };
+                    // The element temp is written each iteration; allocate + default-init it before
+                    // the loop so the back-edge frame agrees with the header (not `Top`).
+                    let vtmp = self.alloc_temp(elem);
+                    self.init_temp(elem, vtmp, code, cw);
+                    let start = code.new_label();
+                    let end = code.new_label();
+                    // loop top: re-check `i < n` on every back-edge
+                    self.rec(start, code, cw);
+                    code.bind(start);
+                    code.iload(i_slot);
+                    code.iload(n_slot);
+                    self.rec(end, code, cw);
+                    code.if_icmpge(end);
+                    // element value (lambda body with parameter = index), into the temp
+                    let saved = self.slots.get(&param).cloned();
+                    self.slots.insert(param.clone(), (i_slot, Ty::Int));
+                    self.emit_expr_as(body, elem, code, cw);
+                    match saved { Some(s) => { self.slots.insert(param.clone(), s); } None => { self.slots.remove(&param); } }
+                    store_local(elem, vtmp, code);
+                    // arr[i] = value
+                    load_local(arr_ty, arr_slot, code);
+                    code.iload(i_slot);
+                    load_local(elem, vtmp, code);
+                    let (sop, sw) = array_store_op(elem);
+                    code.array_store(sop, sw);
+                    code.iinc(i_slot, 1);
+                    self.rec(start, code, cw);
+                    code.goto(start);
+                    self.rec(end, code, cw);
+                    code.bind(end);
+                    load_local(arr_ty, arr_slot, code);
                 } else {
                     // Size constructor `IntArray(n)` — allocate a zero-filled array of length `n`.
                     self.emit_expr_as(args[0], Ty::Int, code, cw);
