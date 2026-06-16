@@ -1192,14 +1192,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
-    fn desugar_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
-        let end = self.t[self.i.saturating_sub(1)].span;
-        let sp = Span::new(start.lo, end.hi);
-        let lhs = self.file.add_expr(Expr::Name(name.clone()), sp);
-        let one = self.file.add_expr(Expr::IntLit(1), sp);
-        let op = if dec { BinOp::Sub } else { BinOp::Add };
-        let value = self.file.add_expr(Expr::Binary { op, lhs, rhs: one }, sp);
-        self.finish_stmt(Stmt::Assign { name, value }, start)
+    fn parse_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
+        self.finish_stmt(Stmt::IncDec { name, dec }, start)
     }
 
     fn parse_stmt(&mut self) -> StmtId {
@@ -1300,7 +1294,7 @@ impl<'a> Parser<'a> {
                 let dec = self.at(TokenKind::MinusMinus);
                 self.bump();
                 let name = self.ident_or_error("increment target");
-                return self.desugar_incdec(name, dec, start);
+                return self.parse_incdec(name, dec, start);
             }
             _ => {
                 let e = self.parse_expr();
@@ -1309,7 +1303,7 @@ impl<'a> Parser<'a> {
                     if let Expr::Name(n) = self.file.expr(e).clone() {
                         let dec = self.at(TokenKind::MinusMinus);
                         self.bump();
-                        return self.desugar_incdec(n, dec, start);
+                        return self.parse_incdec(n, dec, start);
                     }
                     self.diags.error(self.tok().span, "krusty: '++'/'--' is only supported on a simple variable");
                 }

@@ -1282,6 +1282,25 @@ fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field
     }
 }
 
+/// With a numeric value on the stack, push `1` of the same type and add/subtract it, narrowing the
+/// int-category result back to `Byte`/`Short`. Used for `++`/`--`.
+fn emit_inc_step(code: &mut CodeBuilder, cw: &mut ClassWriter, ty: Ty, dec: bool) {
+    match ty {
+        Ty::Long => { code.push_long(1, cw); if dec { code.lsub() } else { code.ladd() } }
+        Ty::Float => { code.push_float(1.0, cw); if dec { code.fsub() } else { code.fadd() } }
+        Ty::Double => { code.push_double(1.0, cw); if dec { code.dsub() } else { code.dadd() } }
+        _ => {
+            code.push_int(1, cw);
+            if dec { code.isub() } else { code.iadd() }
+            match ty {
+                Ty::Byte => code.i2b(),
+                Ty::Short => code.i2s(),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn store_local(ty: Ty, slot: u16, code: &mut CodeBuilder) {
     match ty {
         Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => code.istore(slot),
@@ -2119,6 +2138,46 @@ impl<'a> MethodEmitter<'a> {
                         let slot = self.alloc_slot(name, ret);
                         self.store(ret, slot, code);
                     }
+                }
+            }
+            Stmt::IncDec { name, dec } => {
+                // `name++`/`name--` on a numeric variable (the checker rejected non-numeric).
+                if let Some(&(slot, ty)) = self.slots.get(&name) {
+                    if ty == Ty::Int {
+                        code.iinc(slot, if dec { -1 } else { 1 });
+                    } else {
+                        load_local(ty, slot, code);
+                        emit_inc_step(code, cw, ty, dec);
+                        store_local(ty, slot, code);
+                    }
+                } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance || self.recv.is_some()) {
+                    // implicit `this.<prop>` — read via getter/field, step, write via setter/field.
+                    let owner = self.implicit_class();
+                    let via_setter = self.recv.is_some() || self.props_via_getter;
+                    self.emit_implicit_this(code); // receiver for the write
+                    self.emit_implicit_this(code); // receiver for the read
+                    if via_setter {
+                        let g = cw.methodref(&owner, &format!("get{}", capitalize(&name)), &method_descriptor(&[], ty));
+                        code.invokevirtual(g, 0, slot_words(ty) as i32);
+                    } else {
+                        let f = cw.fieldref(&owner, &name, &ty.descriptor());
+                        code.getfield(f, slot_words(ty) as i32);
+                    }
+                    emit_inc_step(code, cw, ty, dec);
+                    if via_setter {
+                        let setter = cw.methodref(&owner, &format!("set{}", capitalize(&name)), &method_descriptor(&[ty], Ty::Unit));
+                        code.invokevirtual(setter, slot_words(ty) as i32, 0);
+                    } else {
+                        let f = cw.fieldref(&owner, &name, &ty.descriptor());
+                        code.putfield(f, slot_words(ty) as i32);
+                    }
+                } else if let Some(&(ty, _)) = self.syms.props.get(&name).filter(|_| !self.is_instance && self.recv.is_none()) {
+                    // top-level `var` property → getstatic, step, putstatic on the facade.
+                    let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
+                    code.getstatic(f, slot_words(ty) as i32);
+                    emit_inc_step(code, cw, ty, dec);
+                    let f = cw.fieldref(&self.class.clone(), &name, &ty.descriptor());
+                    code.putstatic(f, slot_words(ty) as i32);
                 }
             }
             Stmt::Assign { name, value } => {
