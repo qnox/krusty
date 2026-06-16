@@ -703,10 +703,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     // A top-level *computed* property (custom getter, no initializer) — needs a type
                     // annotation (no getter-return inference at top level yet); emitted as `getX()`.
                     let is_computed = p.getter.is_some() && p.init.is_none();
-                    // Type from the annotation, else a light inference from a literal initializer.
-                    let ty = match &p.ty {
-                        Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                        None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
+                    // Type from the annotation, else a light inference from a literal initializer (or,
+                    // for a computed property, from its expression getter body).
+                    let ty = match (&p.ty, &p.getter) {
+                        (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
+                        (None, Some(FunBody::Expr(g))) if is_computed => infer_lit_ty(file, *g, &class_names, &fun_rets),
+                        (None, _) => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
                     };
                     if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
