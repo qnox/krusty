@@ -116,3 +116,33 @@ public class Main {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn data_class_abi_matches_kotlinc() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skipping data_class diff: set KRUSTY_KOTLINC");
+        return;
+    };
+    let src = "data class P(val x: Int, val y: String)\n";
+    let root = std::env::temp_dir().join(format!("krusty_dcdiff_{}", std::process::id()));
+    let kr = root.join("kr");
+    let refd = root.join("ref");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&kr).unwrap();
+    fs::create_dir_all(&refd).unwrap();
+    fs::write(kr.join("P.class"), krusty_compile_class(src, "P", "P")).unwrap();
+    fs::write(root.join("P.kt"), src).unwrap();
+    let mut cmd = Command::new(&kotlinc);
+    cmd.arg(root.join("P.kt")).args(["-d", refd.to_str().unwrap()]);
+    if let Some(jh) = env("KRUSTY_REF_JAVA_HOME") {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let kc = cmd.output().expect("run kotlinc");
+    assert!(kc.status.success(), "kotlinc failed: {}", String::from_utf8_lossy(&kc.stderr));
+    // The synthesized data-class member ABI (componentN/copy/equals/hashCode/toString + accessors)
+    // must match kotlinc's public surface exactly.
+    let kr_abi = member_signatures(&kr, "P");
+    let ref_abi = member_signatures(&refd, "P");
+    assert_eq!(kr_abi, ref_abi, "\ndata class ABI mismatch.\n krusty: {kr_abi:#?}\n kotlinc: {ref_abi:#?}");
+    let _ = fs::remove_dir_all(&root);
+}
