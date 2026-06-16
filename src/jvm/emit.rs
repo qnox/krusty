@@ -1294,6 +1294,22 @@ fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field
     }
 }
 
+/// The JVM wrapper class for a primitive `Ty`, with its `valueOf` descriptor and unbox accessor.
+/// Returns `None` for non-primitives. Used for autoboxing/unboxing across reference boundaries.
+fn box_wrapper(ty: Ty) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    Some(match ty {
+        Ty::Int => ("java/lang/Integer", "(I)Ljava/lang/Integer;", "intValue", "()I"),
+        Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;", "longValue", "()J"),
+        Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;", "doubleValue", "()D"),
+        Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;", "floatValue", "()F"),
+        Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;", "booleanValue", "()Z"),
+        Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;", "charValue", "()C"),
+        Ty::Byte => ("java/lang/Byte", "(B)Ljava/lang/Byte;", "byteValue", "()B"),
+        Ty::Short => ("java/lang/Short", "(S)Ljava/lang/Short;", "shortValue", "()S"),
+        _ => return None,
+    })
+}
+
 /// With a numeric value on the stack, push `1` of the same type and add/subtract it, narrowing the
 /// int-category result back to `Byte`/`Short`. Used for `++`/`--`.
 fn emit_inc_step(code: &mut CodeBuilder, cw: &mut ClassWriter, ty: Ty, dec: bool) {
@@ -2502,6 +2518,22 @@ impl<'a> MethodEmitter<'a> {
         if from.is_numeric() && target.is_numeric() {
             // Handles both widening (i2l, i2d, …) and narrowing to Byte/Short (i2b/i2s).
             self.emit_numeric_conversion(from, target, code);
+        } else if from.is_primitive() && target.is_reference() {
+            // Autobox the primitive to its wrapper (`Integer`, …) — the wrapper is-a `Object`/
+            // `Number`/`Comparable`, so no further cast is needed for those targets.
+            if let Some((wrapper, desc, _, _)) = box_wrapper(from) {
+                let m = cw.methodref(wrapper, "valueOf", desc);
+                code.invokestatic(m, slot_words(from) as i32, 1);
+            }
+        } else if from.is_reference() && target.is_primitive() {
+            // Unbox a reference (typically an erased `Object`) to the target primitive: cast to the
+            // wrapper, then call its accessor (`intValue()`, …).
+            if let Some((wrapper, _, unbox, unbox_desc)) = box_wrapper(target) {
+                let ci = cw.class_ref(wrapper);
+                code.checkcast(ci);
+                let m = cw.methodref(wrapper, unbox, unbox_desc);
+                code.invokevirtual(m, 0, slot_words(target) as i32);
+            }
         } else if from == Ty::obj("java/lang/Object") && target.is_reference() && target != Ty::obj("java/lang/Object") {
             // Erased Object (e.g. from FunctionN.invoke()) narrowed to a concrete reference type.
             let ci = cw.class_ref(ref_internal(target));
@@ -4098,10 +4130,28 @@ impl<'a> MethodEmitter<'a> {
                 let internal = cls.internal.clone();
                 let ctor_tys: Vec<Ty> = cls.ctor_params.clone();
                 let class_idx = cw.class_ref(&internal);
-                code.new_obj(class_idx);
-                code.dup();
-                for (a, pty) in args.iter().zip(&ctor_tys) {
-                    self.emit_expr_as(*a, *pty, code, cw);
+                // If an argument branches (frames), the `new`/`dup` references underneath aren't
+                // recorded by those frames → VerifyError. Spill the args to locals first (evaluated
+                // on an empty stack), then `new`/`dup` and reload them for the constructor call.
+                if args.iter().zip(&ctor_tys).any(|(&a, _)| self.expr_uses_frames(a)) {
+                    let mut tmps = Vec::new();
+                    for (a, pty) in args.iter().zip(&ctor_tys) {
+                        self.emit_expr_as(*a, *pty, code, cw);
+                        let t = self.alloc_temp(*pty);
+                        store_local(*pty, t, code);
+                        tmps.push((t, *pty));
+                    }
+                    code.new_obj(class_idx);
+                    code.dup();
+                    for (t, pty) in tmps {
+                        load_local(pty, t, code);
+                    }
+                } else {
+                    code.new_obj(class_idx);
+                    code.dup();
+                    for (a, pty) in args.iter().zip(&ctor_tys) {
+                        self.emit_expr_as(*a, *pty, code, cw);
+                    }
                 }
                 let arg_words: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&ctor_tys, Ty::Unit);
@@ -4391,11 +4441,34 @@ impl<'a> MethodEmitter<'a> {
     /// already on the stack. Boxes primitive arguments.
     fn emit_fun_invoke(&mut self, arity: u8, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let iface = Ty::fun_interface(arity);
-        // Push each argument, boxing primitives to Object.
-        for &a in args {
-            let aty = self.info.ty(a);
-            self.emit_expr(a, code, cw);
-            emit_box(aty, code, cw);
+        // If any argument branches (if/when/try → StackMapTable frames), the function value already
+        // on the stack would sit *under* those frames, which they don't record → VerifyError. Spill
+        // the receiver and each (boxed) argument to locals so the branches evaluate on an empty stack,
+        // then reload them in order for the call.
+        if args.iter().any(|&a| self.expr_uses_frames(a)) {
+            let obj = Ty::obj("java/lang/Object");
+            let recv_tmp = self.alloc_temp(Ty::Fun(arity));
+            store_local(Ty::Fun(arity), recv_tmp, code);
+            let mut arg_tmps = Vec::new();
+            for &a in args {
+                let aty = self.info.ty(a);
+                self.emit_expr(a, code, cw);
+                emit_box(aty, code, cw);
+                let t = self.alloc_temp(obj);
+                store_local(obj, t, code);
+                arg_tmps.push(t);
+            }
+            load_local(Ty::Fun(arity), recv_tmp, code);
+            for t in arg_tmps {
+                load_local(obj, t, code);
+            }
+        } else {
+            // Push each argument, boxing primitives to Object.
+            for &a in args {
+                let aty = self.info.ty(a);
+                self.emit_expr(a, code, cw);
+                emit_box(aty, code, cw);
+            }
         }
         // Descriptor: invoke(Object*)Object
         let invoke_desc: String = {
