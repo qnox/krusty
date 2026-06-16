@@ -77,6 +77,7 @@ impl<'a> Lexer<'a> {
             b';' => self.one(TokenKind::Newline), // `;` is a statement/arm separator like a newline
             b':' if self.peek2() == b':' => self.two(TokenKind::ColonColon),
             b':' => self.one(TokenKind::Colon),
+            b'.' if self.peek2() == b'.' && self.peek3() == b'<' => self.three(TokenKind::DotDotLt),
             b'.' if self.peek2() == b'.' => self.two(TokenKind::DotDot),
             b'.' if !self.peek2().is_ascii_digit() => self.one(TokenKind::Dot),
             b'+' if self.peek2() == b'+' => self.two(TokenKind::PlusPlus),

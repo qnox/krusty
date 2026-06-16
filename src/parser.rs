@@ -1330,6 +1330,8 @@ impl<'a> Parser<'a> {
         let rstart = self.parse_expr();
         let kind = if self.eat(TokenKind::DotDot) {
             RangeKind::Through
+        } else if self.eat(TokenKind::DotDotLt) {
+            RangeKind::Until
         } else if self.at(TokenKind::Ident) && self.text() == "until" {
             self.bump();
             RangeKind::Until

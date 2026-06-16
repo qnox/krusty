@@ -846,6 +846,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   on the JVM) + `kotlin_test_assertions` and `rejects_latent_miscompiles` checker unit tests. Gated by
   the full 10,009-case original Kotlin `codegen/box` suite: **174 → 218 OK / 0 FAIL** (+44).
 
+> Note: phases 64–69 (post-`assertions` work — `value`-as-param, supertype type-arg skipping,
+> `fun interface`/class-delegation rejection, `in`/`out` variance + `Array<*>`, primitive type
+> constants, `Nothing`-typed control flow, extension functions, classpath scanning) landed as
+> commits but predate this plan being brought current; resume the running write-up from Phase 70.
+
+## Phase 70 — `..<` (rangeUntil) operator  ✅
+- ✅ Data-driven (the box `for`-loop survey showed `..<` as a recurring first-error in the
+  "expected an expression"/"expected ')'" buckets). `..<` now lexes as a dedicated `DotDotLt`
+  token (3-char, matched before `..`) and, in a `for` header, is treated exactly like `until`
+  (`RangeKind::Until`) — so `for (i in a..<b)` and `for (i in a..<b step s)` lower to the existing
+  half-open counted loop. ABI/codegen identical to the `until` form kotlinc emits.
+- ✅ Range-as-value (`val r = a..<b`) remains out of subset (needs a real `IntRange` object), so a
+  `..<` outside a `for` header is still cleanly rejected, never miscompiled.
+- ✅ TDD: `tests/range_until_e2e.rs` (`0..<n` and `0..<n step 2` summed on the JVM). Full suite
+  176 green. The `..<` files carry further blockers, so this compounds rather than landing alone.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
