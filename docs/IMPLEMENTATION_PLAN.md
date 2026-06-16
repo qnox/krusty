@@ -1094,6 +1094,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   rejected ("top-level computed properties not supported").
 - ✅ Full suite 182 green. Box conformance **373 OK / 0 FAIL** held.
 
+## Phase 89 — Top-level computed-getter return inference  ✅
+- ✅ A top-level computed property without a type annotation (`val g get() = 42`) infers its type from
+  the expression getter body (`infer_lit_ty`), extending Phase 88.
+- ✅ Full suite 182 green. Box conformance **375 OK / 0 FAIL** (+2).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
