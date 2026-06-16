@@ -152,12 +152,13 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}({})", name, a.join(", "))
             }
-            Callee::Intrinsic(fq) => match fq.as_str() {
+            Callee::External(fq) => match fq.as_str() {
                 "kotlin/String.plus" => {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     format!("({} + {})", r, emit_expr(ir, args[0], inst))
                 }
                 "kotlin/String.length" | "kotlin/Array.size" => format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
+                "kotlin/String.get" => format!("{}[{}]", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst)),
                 "kotlin/Any.toString" => format!("String({})", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
                 // Arrays are a regular type the JS backend lowers to a JS `Array`.
                 "kotlin/Array.get" => format!("{}[{}]", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst)),

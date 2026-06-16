@@ -1415,6 +1415,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Verified on `java -Xverify:all` AND `node` (fill, index get/set, `.size`, `for` over `0 until
   a.size`). IR→JVM corpus conformance **20 → 21 / 0 FAIL**; JS **17 → 18 / 0 FAIL**. 194 unit tests.
 
+## Phase 117 — `Callee::External` (stdlib = expect/actual, not per-op intrinsics)  ✅
+- ✅ Renamed `Callee::Intrinsic` → **`Callee::External`**: a `Call` to any symbol *not defined in this
+  IR file* (a stdlib `expect`/operator by Kotlin FqName). The IR carries only the FqName and decides
+  nothing; the **backend** resolves it the way kotlinc does — (1) if in the small **intrinsic table**
+  (array access, arithmetic, `String.length`/`get`, …) emit target bytecode; (2) else resolve the
+  platform **`actual`** from the linked stdlib (`kotlin-stdlib-jvm`/`-js`) and emit a normal call.
+  So stdlib is **not** "all intrinsics" — only the ~50 kotlinc itself intrinsifies; the rest are
+  `expect`/`actual` library calls. No per-op IR node, no array/string-special types.
+- ✅ Added `String.get` (`s[i]` → `Char`): JVM `String.charAt`, JS `s[i]`; distinct from `Array.get`.
+- ✅ Verified on `java -Xverify:all` AND `node`. IR→JVM corpus **21/21**, JS **18/18**, 0 FAIL.
+  194 unit tests green.
+- ⬜ Next: wire the **linked-`actual`** path (resolve a non-intrinsic External's owner/descriptor
+  from the platform stdlib and emit a normal call) so WITH_STDLIB box tests lower without per-fn code.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

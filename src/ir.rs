@@ -37,15 +37,17 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
-/// The target of an `IrExpr::Call`. A `Local` references a function defined in this IR file; an
-/// `Intrinsic` is a stdlib/built-in operation named by its Kotlin FqName, which each backend's
-/// platform layer maps to target code. This is the single extension point for *all* stdlib/operator
-/// semantics — adding `kotlin.collections.List.add` is data (a new FqName the backends recognize),
-/// not a new IR node.
+/// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file;
+/// `External` references a symbol that is **not** — a stdlib `expect`/operator named by its Kotlin
+/// FqName (`kotlin/Array.size`, `kotlin/String.plus`, `kotlin/collections/listOf`). Each backend
+/// resolves an `External` the way kotlinc does: if it is one of the handful in the **intrinsic
+/// table** (array access, arithmetic, …) it emits target bytecode directly; otherwise it resolves
+/// the platform **`actual`** from the linked stdlib (`kotlin-stdlib-jvm`/`-js`) and emits a normal
+/// call. Either way it is *data* (a FqName), never a new IR node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     Local(FunId),
-    Intrinsic(String),
+    External(String),
 }
 
 /// A compile-time constant (`IrConst` in Kotlin IR).
@@ -95,7 +97,7 @@ pub enum IrExpr {
     /// operator function, but the built-in numeric/boolean ops are universal across backends, so a
     /// single node lets each emit the native instruction (JVM `iadd`, JS `+`). Every *other*
     /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
-    /// ordinary `Call` to a `Callee::Intrinsic` symbol the backend maps; there is no per-intrinsic node.
+    /// ordinary `Call` to a `Callee::External` symbol the backend resolves; there is no per-op node.
     PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField { receiver: ExprId, class: ClassId, index: u32 },
