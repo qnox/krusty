@@ -987,6 +987,26 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   (getter/setter or field).
 - ✅ TDD: full suite 179 green; existing `inc_dec_e2e` still passes.
 
+## Phase 78 — Interface default-method return types + checker/emit type-resolution consistency  ✅
+- ✅ **Interface default methods infer their return type.** `interface I { fun foo() = 42 }` was
+  emitted as `void foo()` (the AST has no explicit return type → defaulted to `Unit`), so the `()I`
+  call site `i.foo()` hit `NoSuchMethodError`. Emit now takes the return type from the **collected
+  signature** (which applied body inference) → `int foo()`. Fixes the `kt67218i` box FAIL.
+- ✅ **Checker and emit resolve the same type universe.** The checker's `resolve_ty` and emit's
+  `resolve_ty` only consulted user classes, so a built-in mapped / classpath / alias type (`Number`,
+  `Comparable`, `List`, …) degraded to `Ty::Error` (checker, lenient) or `java/lang/Object` (emit) —
+  an inconsistency that miscompiled `x is Number` to `instanceof java/lang/Object` (always true) and
+  let `Number = 0.0` through to a `VerifyError`. Both now fall back to the alias/built-in-expanded
+  `class_names` (handling the `__ty/<Prim>` alias encoding), so `is`/`as`/descriptors use the real
+  JVM class and primitive-to-reference assignments (which need boxing krusty doesn't do) are rejected.
+  Fixes the `kt16581` box FAIL and the latent `is Number` miscompile Phase 27 had guarded by rejection.
+- ✅ TDD: full suite 179 green; `is Number` runs correctly (`instanceof java/lang/Number`);
+  `is_as_e2e` updated (unresolved-target case uses a genuinely-unknown type).
+- ✅ **Milestone: box conformance 351 OK / 0 FAIL** — the never-miscompile invariant holds across all
+  10,009 cases (down from 11 FAIL at the start of this protocol stretch). krusty is correct on 100%
+  of what it accepts; remaining growth is coverage (the big subsystems: lambdas/HOF, collections,
+  real generics), not correctness.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

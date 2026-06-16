@@ -1328,6 +1328,15 @@ impl<'a> Checker<'a> {
             Ty::obj("java/lang/Object") // erased generic type parameter
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
+        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
+            // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
+            // type aliases — the *same* map emit resolves against, so the checker and codegen agree
+            // (otherwise a leniently-`Error` type here becomes a real `Obj` in emit → VerifyError).
+            // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
+            match internal.strip_prefix("__ty/") {
+                Some(prim) => Ty::from_name(prim).unwrap_or(Ty::Error),
+                None => Ty::obj(internal),
+            }
         } else {
             Ty::Error
         };
