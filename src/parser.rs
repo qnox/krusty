@@ -481,12 +481,50 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected function name");
             "<error>".to_string()
         };
+        // Detect extension function: after the (potential receiver) name, if we see `.`, `<`, or `?`
+        // this is `fun RecvType.foo(...)` / `fun RecvType<T>.foo(...)` / `fun RecvType?.foo(...)`.
+        // krusty doesn't support extension functions; skip the entire declaration.
+        if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
+            self.diags.error(start, "krusty: extension functions are not supported");
+            self.skip_type_args();          // skip `<...>` on receiver type if parameterized
+            self.eat(TokenKind::Question);  // skip `?` on nullable receiver
+            if self.eat(TokenKind::Dot) && self.at(TokenKind::Ident) { self.bump(); } // skip actual name
+            // Skip parameter list `(...)`.
+            if self.eat(TokenKind::LParen) {
+                let mut depth = 1usize;
+                loop {
+                    match self.kind() {
+                        TokenKind::LParen => { depth += 1; self.bump(); }
+                        TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
+                        TokenKind::Eof => break,
+                        _ => { self.bump(); }
+                    }
+                }
+            }
+            // Skip return type annotation.
+            if self.eat(TokenKind::Colon) { let _ = self.parse_type(); }
+            // Skip `where` clause (bounds like `where R : I1, R : I2`).
+            if self.at(TokenKind::Ident) && self.text() == "where" {
+                while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Eq | TokenKind::Newline | TokenKind::Eof) {
+                    self.bump();
+                }
+            }
+            // Skip body: expression body `= expr` (single-line) or block body `{ ... }`.
+            if self.eat(TokenKind::Eq) {
+                while !matches!(self.kind(), TokenKind::Newline | TokenKind::Eof) { self.bump(); }
+            } else if self.at(TokenKind::LBrace) {
+                let _ = self.parse_block_expr();
+            }
+            return FunDecl { name: "<extension>".to_string(), params: vec![], ret: None,
+                body: FunBody::None, type_params, non_null_type_params, span: start, is_inline, is_final };
+        }
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let mut pmods = Vec::new();
-            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+            // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers.
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value") {
                 pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
             }
             let is_vararg = pmods.iter().any(|m| m == "vararg");
@@ -549,7 +587,7 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value") {
                     self.skip_decl_prefix(); // `private val x`, `@Anno val y`, ...
                 }
                 let (is_property, is_var) = match self.kind() {
