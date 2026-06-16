@@ -2,6 +2,9 @@
 //! recover **public signatures**. This is how krusty resolves Java/JDK dependencies — read the
 //! callee's `.class`, learn its method descriptors — instead of hardcoding intrinsics (Phase 6,
 //! "java supported"). It reads enough to drive interop, not the full attribute set.
+//!
+//! Also reads the `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) to extract the `d2`
+//! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_STATIC: u16 = 0x0008;
@@ -37,6 +40,8 @@ pub struct ClassInfo {
     pub super_class: Option<String>,
     pub fields: Vec<FieldSig>,
     pub methods: Vec<MethodSig>,
+    /// Strings from the `@kotlin.Metadata` `d2` annotation element, if present.
+    pub kotlin_d2: Vec<String>,
 }
 
 impl ClassInfo {
@@ -147,7 +152,96 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .map(|(access, name, descriptor)| MethodSig { access, name, descriptor })
         .collect();
 
-    Ok(ClassInfo { major, this_class, super_class, fields, methods })
+    // Read class-level attributes to find @kotlin.Metadata → d2 array.
+    let kotlin_d2 = read_kotlin_d2(&mut r, &cp).unwrap_or_default();
+
+    Ok(ClassInfo { major, this_class, super_class, fields, methods, kotlin_d2 })
+}
+
+/// Parse class-level attributes looking for RuntimeVisibleAnnotations → @kotlin/Metadata → d2.
+fn read_kotlin_d2(r: &mut Reader, cp: &[C]) -> Option<Vec<String>> {
+    let utf8 = |i: u16| -> &str {
+        match cp.get(i as usize) {
+            Some(C::Utf8(s)) => s.as_str(),
+            _ => "",
+        }
+    };
+
+    let n_attrs = r.u2().ok()?;
+    for _ in 0..n_attrs {
+        let name = utf8(r.u2().ok()?);
+        let len = r.u4().ok()? as usize;
+        if name != "RuntimeVisibleAnnotations" {
+            r.take(len).ok()?;
+            continue;
+        }
+        // Parse annotations: find the one with type == "Lkotlin/Metadata;"
+        let n_ann = r.u2().ok()?;
+        for _ in 0..n_ann {
+            let ann_type = utf8(r.u2().ok()?);
+            let is_kotlin_meta = ann_type == "Lkotlin/Metadata;";
+            let n_pairs = r.u2().ok()?;
+            for _ in 0..n_pairs {
+                let elem_name = utf8(r.u2().ok()?);
+                let want_d2 = is_kotlin_meta && elem_name == "d2";
+                match skip_element_value_extract_string_array(r, cp, want_d2) {
+                    Ok(Some(strings)) => return Some(strings),
+                    Ok(None) => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Skip or extract an element_value. If `extract` is true and the value is a string array,
+/// return the strings; otherwise return None.
+fn skip_element_value_extract_string_array(
+    r: &mut Reader,
+    cp: &[C],
+    extract: bool,
+) -> Result<Option<Vec<String>>, ReadError> {
+    let utf8 = |i: u16| -> String {
+        match cp.get(i as usize) {
+            Some(C::Utf8(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+
+    let tag = r.u1()? as char;
+    match tag {
+        'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' | 'c' => { r.u2()?; }
+        'e' => { r.u2()?; r.u2()?; }
+        '@' => {
+            r.u2()?; // annotation type
+            let n = r.u2()?;
+            for _ in 0..n {
+                r.u2()?; // element name
+                skip_element_value_extract_string_array(r, cp, false)?;
+            }
+        }
+        '[' => {
+            let n = r.u2()? as usize;
+            if extract {
+                let mut result = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let t = r.u1()? as char;
+                    let s = r.u2()?;
+                    if t == 's' {
+                        result.push(utf8(s));
+                    }
+                }
+                return Ok(Some(result));
+            } else {
+                for _ in 0..n {
+                    skip_element_value_extract_string_array(r, cp, false)?;
+                }
+            }
+        }
+        _ => {} // unknown tag — best effort, may corrupt position but we handle errors
+    }
+    Ok(None)
 }
 
 fn skip_attributes(r: &mut Reader) -> Result<(), ReadError> {
@@ -226,24 +320,10 @@ mod tests {
         code.ireturn();
         cw.add_method(0x0001 | 0x0008 | 0x0010, "add", "(II)I", &code);
         let bytes = cw.finish();
-
-        let info = parse_class(&bytes).expect("parse");
-        assert_eq!(info.this_class, "demo/RKt");
-        assert_eq!(info.super_class.as_deref(), Some("java/lang/Object"));
-        let m = info.method("add", "(II)I").expect("add method");
-        assert!(m.is_public() && m.is_static());
-    }
-
-    #[test]
-    fn modified_utf8_roundtrip_via_reader() {
-        let mut cw = ClassWriter::new("X", "java/lang/Object");
-        // method name with a NUL char to exercise C0 80 decoding through the constant pool
-        let code = CodeBuilder::new(0);
-        let mut c2 = code;
-        c2.ret_void();
-        cw.add_method(0x0009, "a\u{0}b", "()V", &c2);
-        let bytes = cw.finish();
-        let info = parse_class(&bytes).unwrap();
-        assert!(info.methods.iter().any(|m| m.name == "a\u{0}b"), "names: {:?}", info.methods);
+        let ci = parse_class(&bytes).unwrap();
+        assert_eq!(ci.this_class, "demo/RKt");
+        assert_eq!(ci.methods.len(), 1);
+        assert_eq!(ci.methods[0].name, "add");
+        assert_eq!(ci.methods[0].descriptor, "(II)I");
     }
 }

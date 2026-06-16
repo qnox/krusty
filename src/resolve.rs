@@ -14,36 +14,6 @@ use crate::diag::{DiagSink, Span};
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
-/// Kotlin/JVM stdlib `actual typealias` declarations, mirroring what kotlin-stdlib exposes for the
-/// JVM platform. Parsed once by `collect_signatures` and treated identically to user-defined
-/// typealiases, so `Exception`, `Cloneable`, etc. resolve without explicit imports.
-const KOTLIN_JVM_PRELUDE: &str = "
-actual typealias Throwable = java.lang.Throwable
-actual typealias Exception = java.lang.Exception
-actual typealias RuntimeException = java.lang.RuntimeException
-actual typealias Error = java.lang.Error
-actual typealias IllegalStateException = java.lang.IllegalStateException
-actual typealias IllegalArgumentException = java.lang.IllegalArgumentException
-actual typealias NullPointerException = java.lang.NullPointerException
-actual typealias IndexOutOfBoundsException = java.lang.IndexOutOfBoundsException
-actual typealias UnsupportedOperationException = java.lang.UnsupportedOperationException
-actual typealias ArithmeticException = java.lang.ArithmeticException
-actual typealias ClassCastException = java.lang.ClassCastException
-actual typealias NumberFormatException = java.lang.NumberFormatException
-actual typealias AssertionError = java.lang.AssertionError
-actual typealias Cloneable = java.lang.Cloneable
-actual typealias Comparable = java.lang.Comparable
-actual typealias CharSequence = java.lang.CharSequence
-actual typealias Serializable = java.io.Serializable
-actual typealias Iterable = java.lang.Iterable
-actual typealias Iterator = java.util.Iterator
-actual typealias Collection = java.util.Collection
-actual typealias List = java.util.List
-actual typealias MutableList = java.util.List
-actual typealias Map = java.util.Map
-actual typealias Set = java.util.Set
-";
-
 #[derive(Clone, Debug)]
 pub struct Signature {
     pub params: Vec<Ty>,
@@ -400,9 +370,20 @@ fn class_internal(file: &File, name: &str) -> String {
 
 /// Stage C: collect top-level function + class signatures across all files. Two passes so that a
 /// class type can be referenced before its declaration (and across files).
+/// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
+    collect_signatures_with_cp(files, Classpath::empty(), diags)
+}
+
+/// Like `collect_signatures` but also scans `cp` for class names and type aliases from the
+/// classpath (e.g. kotlin-stdlib.jar), eliminating the need for any hardcoded type lists.
+pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut DiagSink) -> SymbolTable {
+    // Scan classpath to get types and type aliases (e.g. StringBuilder → java/lang/StringBuilder).
+    let type_idx = cp.scan_types();
+
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
-    let mut class_names: HashMap<String, String> = HashMap::new();
+    // Pre-seed from the classpath type index so imports/stdlib types are visible.
+    let mut class_names: HashMap<String, String> = type_idx.class_names.clone();
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
@@ -420,11 +401,9 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
     //
-    // Seed from the parsed KOTLIN_JVM_PRELUDE (mirrors kotlin-stdlib `actual typealias` decls)
+    // Seed from classpath type aliases (read from @kotlin.Metadata in *TypeAliasesKt.class files)
     // then from any user-defined typealiases in the input files.
-    let prelude_toks = crate::lexer::lex(KOTLIN_JVM_PRELUDE, &mut DiagSink::new());
-    let prelude_file = crate::parser::parse(KOTLIN_JVM_PRELUDE, &prelude_toks, &mut DiagSink::new());
-    let mut alias_map: HashMap<String, String> = prelude_file.type_aliases.into_iter().collect();
+    let mut alias_map: HashMap<String, String> = type_idx.type_aliases.into_iter().collect();
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());
@@ -481,7 +460,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             // to Unit; check_fun will do a deeper inference pass and record any
                             // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
                             if let FunBody::Expr(e) = &f.body {
-                                let t = infer_lit_ty(file, *e);
+                                let t = infer_lit_ty(file, *e, &class_names);
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -578,7 +557,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                                 let locals: HashMap<&str, Ty> = props.iter().map(|(n, t, _)| (n.as_str(), *t)).collect();
                                 infer_getter_ty(file, *g, &locals)
                             }
-                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
+                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
                         };
                         if ty == Ty::Error && bp.init.is_some() && bp.ty.is_none() {
                             diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
@@ -594,7 +573,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty(file, *e);
+                                    let t = infer_lit_ty(file, *e, &class_names);
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
@@ -635,7 +614,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty(file, *e);
+                                    let t = infer_lit_ty(file, *e, &class_names);
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
@@ -648,7 +627,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -672,7 +651,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                     // Type from the annotation, else a light inference from a literal initializer.
                     let ty = match &p.ty {
                         Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                        None => p.init.map(|i| infer_lit_ty(file, i)).unwrap_or(Ty::Error),
+                        None => p.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
                     };
                     if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -692,6 +671,7 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
         }
     }
 
+    table.classpath = cp;
     table
 }
 
@@ -929,7 +909,7 @@ fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
-fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
+fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -947,15 +927,25 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg => infer_lit_ty(file, *operand),
+            UnOp::Neg => infer_lit_ty(file, *operand, class_names),
         },
         Expr::Binary { op, lhs, rhs } => {
-            let (lt, rt) = (infer_lit_ty(file, *lhs), infer_lit_ty(file, *rhs));
+            let (lt, rt) = (infer_lit_ty(file, *lhs, class_names), infer_lit_ty(file, *rhs, class_names));
             match op {
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
                 BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
                 _ => Ty::promote(lt, rt).unwrap_or(Ty::Error),
             }
+        }
+        // Constructor call `Foo(args)` — infer type from callee name via class_names (seeded from
+        // classpath scan + user-defined classes).
+        Expr::Call { callee, .. } => {
+            if let Expr::Name(n) = file.expr(*callee) {
+                if let Some(internal) = class_names.get(n.as_str()) {
+                    return Ty::obj(internal);
+                }
+            }
+            Ty::Error
         }
         _ => Ty::Error,
     }
@@ -3073,8 +3063,6 @@ mod tests {
     fn rejects_latent_miscompiles() {
         // Local shadowing (slot aliasing in the emitter).
         err_contains("fun box(): String { var x = 1; if (1>0) { var x = 2 }; return \"OK\" }", "shadows");
-        // Property whose type can't be inferred (would emit an erased Object accessor).
-        err_contains("class F(val x: Int)\nclass A { var f = F(0) }\nfun box(): String = \"OK\"", "cannot infer the type");
         // Init block that calls a member method before a later property initializer (init order).
         err_contains(
             "class Foo(v: Int) { init { set(v) }\n fun set(x: Int) { field = x }\n var field: Int = 0 }\nfun box(): String = \"OK\"",

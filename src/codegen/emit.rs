@@ -338,20 +338,58 @@ fn emit_enum(class: &ClassDecl, file: &File, info: &TypeInfo, internal: &str, sy
     cw.finish()
 }
 
-/// Lower an `interface Name { fun sig(): T }` to a JVM interface: `public abstract` methods, no
-/// bodies. Extended interfaces (supertypes) become super-interfaces.
-fn emit_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<u8> {
+/// Lower an `interface Name { fun sig(): T }` to a JVM interface.
+/// Abstract methods (no body) become `ACC_ABSTRACT`; methods with a body become default methods.
+fn emit_interface(
+    class: &ClassDecl,
+    file: &File,
+    info: &TypeInfo,
+    internal: &str,
+    file_facade: &str,
+    syms: &SymbolTable,
+    diags: &mut DiagSink,
+) -> Vec<u8> {
     let mut cw = ClassWriter::new(internal, "java/lang/Object");
     cw.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
     for st in &class.supertypes {
         let si = syms.classes.get(st).map(|c| c.internal.clone()).unwrap_or_else(|| st.clone());
         cw.add_interface(&si);
     }
+    // Interface properties visible to default methods (abstract getters via invokeinterface).
+    let class_props: HashMap<String, Ty> = class.body_props.iter()
+        .filter_map(|p| p.ty.as_ref().map(|r| (p.name.clone(), resolve_ty(r, syms))))
+        .collect();
+    let imports: HashMap<String, String> = HashMap::new();
     let mut method_metas = Vec::new();
     for m in &class.methods {
         let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
         let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
-        cw.add_abstract_method(ACC_PUBLIC, &m.name, &method_descriptor(&params, ret));
+        if matches!(m.body, FunBody::None) {
+            // Abstract method.
+            cw.add_abstract_method(ACC_PUBLIC, &m.name, &method_descriptor(&params, ret));
+        } else {
+            // Default method: concrete body in the interface.
+            let mut e = MethodEmitter::new_instance(file, info, syms, internal, &imports, class_props.clone(), diags);
+            e.props_via_getter = true;
+            e.file_facade = file_facade.to_string();
+            for (p, ty) in m.params.iter().zip(&params) {
+                e.alloc_slot(&p.name, *ty);
+            }
+            e.ret_ty = ret;
+            e.tparams = m.type_params.iter().map(|n| (n.clone(), false)).collect();
+            let mut code = CodeBuilder::new(e.next_slot);
+            match &m.body {
+                FunBody::Expr(b) => {
+                    e.emit_expr_as(*b, ret, &mut code, &mut cw);
+                    if info.ty(*b) != Ty::Nothing { e.emit_return(ret, &mut code); }
+                }
+                FunBody::Block(b) => e.emit_block_as_body(*b, &mut code, &mut cw),
+                FunBody::None => unreachable!(),
+            }
+            code.ensure_locals(e.next_slot);
+            code.link();
+            cw.add_method(ACC_PUBLIC, &m.name, &method_descriptor(&params, ret), &code);
+        }
         method_metas.push(crate::metadata::class_builder::FnMeta::plain(
             m.name.clone(),
             m.params.iter().zip(&params).map(|(p, t)| (p.name.clone(), *t)).collect(),
@@ -522,7 +560,7 @@ pub fn emit_class(
         return (bytes, extra);
     }
     if class.is_interface {
-        let bytes = emit_interface(class, internal_name, syms);
+        let bytes = emit_interface(class, file, info, internal_name, file_facade, syms, diags);
         let extra = drain_lambda_classes();
         return (bytes, extra);
     }

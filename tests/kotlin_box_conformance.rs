@@ -33,7 +33,8 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classreader::parse_class;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::jvm::classpath::Classpath;
+use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -152,7 +153,13 @@ fn compile_source(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
         return None;
     }
     let t2 = std::time::Instant::now();
-    let syms = collect_signatures(&files, &mut diags);
+    let stdlib_paths: Vec<std::path::PathBuf> = std::env::var("KRUSTY_KOTLIN_STDLIB")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![std::path::PathBuf::from(s)])
+        .unwrap_or_default();
+    let cp = Classpath::new(stdlib_paths);
+    let syms = collect_signatures_with_cp(&files, cp, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;

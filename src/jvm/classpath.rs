@@ -5,6 +5,10 @@
 //! Extension function index: scans all classpath classes for static methods whose first parameter
 //! matches a given descriptor. Used to resolve Kotlin extension functions (e.g. `str.uppercase()`)
 //! from any library JAR without hardcoding method lists.
+//!
+//! Type index: scans all classpath classes to build:
+//! - `simple_name → internal_name` for every class in the classpath
+//! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,11 +41,23 @@ struct ExtIndex {
     by_recv: HashMap<String, HashMap<String, Vec<ExtCandidate>>>,
 }
 
+/// Full type index from the classpath: class names and Kotlin type aliases.
+#[derive(Default, Clone, Debug)]
+pub struct TypeIndex {
+    /// Simple name → JVM internal name (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
+    /// Only includes unambiguous mappings (if two classes share a simple name, neither appears).
+    pub class_names: HashMap<String, String>,
+    /// Kotlin type alias simple name → JVM internal name
+    /// (e.g. `"StringBuilder"` → `"java/lang/StringBuilder"`).
+    pub type_aliases: HashMap<String, String>,
+}
+
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
     cache: RefCell<HashMap<String, Option<ClassInfo>>>,
     ext: RefCell<Option<ExtIndex>>,
+    types: RefCell<Option<TypeIndex>>,
 }
 
 impl Classpath {
@@ -61,11 +77,35 @@ impl Classpath {
                 }
             })
             .collect();
-        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None) }
+        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None) }
     }
 
     pub fn empty() -> Classpath {
         Classpath::default()
+    }
+
+    /// Scan all classpath entries and return the full type index (class names + type aliases).
+    /// Result is cached after the first call.
+    pub fn scan_types(&self) -> TypeIndex {
+        if let Some(idx) = self.types.borrow().as_ref() {
+            return idx.clone();
+        }
+        let mut idx = TypeIndex::default();
+        // Track ambiguous simple names so we can remove them.
+        let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for e in &self.entries {
+            match e {
+                Entry::Dir(d) => scan_types_dir(d, &mut idx, &mut ambiguous),
+                Entry::Jar(j) => scan_types_jar(j, &mut idx, &mut ambiguous),
+            }
+        }
+        // Remove ambiguous simple names that map to multiple internal names.
+        for name in &ambiguous {
+            idx.class_names.remove(name.as_str());
+        }
+        *self.types.borrow_mut() = Some(idx.clone());
+        idx
     }
 
     pub fn find(&self, internal: &str) -> Option<ClassInfo> {
@@ -222,4 +262,82 @@ fn read_jar_entry(jar: &Path, name: &str) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut buf).ok()?;
     Some(buf)
+}
+
+fn process_class_bytes_for_types(bytes: &[u8], idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+    let Ok(ci) = parse_class(bytes) else { return };
+    let internal = ci.this_class.clone();
+    if internal.is_empty() { return; }
+    // Simple name = last segment of internal name.
+    let simple = internal.rsplit('/').next().unwrap_or(&internal).to_string();
+    // Skip synthetic/anonymous classes (contain '$').
+    if simple.contains('$') { return; }
+
+    // Register class name (detect ambiguity).
+    if let Some(existing) = idx.class_names.get(&simple) {
+        if existing != &internal {
+            ambiguous.insert(simple.clone());
+        }
+    } else if !ambiguous.contains(&simple) {
+        idx.class_names.insert(simple.clone(), internal.clone());
+    }
+
+    // Type aliases from *TypeAliasesKt.class files: parse the $annotations() method names
+    // to get alias names, then correlate with d2 to find the target descriptors.
+    if simple.ends_with("TypeAliasesKt") && !ci.kotlin_d2.is_empty() {
+        let alias_names: Vec<String> = ci.methods.iter()
+            .filter(|m| m.name.ends_with("$annotations"))
+            .map(|m| m.name.trim_end_matches("$annotations").to_string())
+            .collect();
+        // In d2, alias name and its JVM descriptor appear as consecutive strings:
+        // name → "Lsome/Target;" (a JVM class descriptor).
+        let d2 = &ci.kotlin_d2;
+        for alias in &alias_names {
+            // Find the alias name in d2, then look for the next JVM descriptor.
+            for i in 0..d2.len() {
+                if d2[i] == *alias {
+                    if let Some(desc) = d2.get(i + 1) {
+                        if let Some(internal_name) = desc_to_internal(desc) {
+                            idx.type_aliases.insert(alias.clone(), internal_name);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Convert a JVM class descriptor `Lsome/Class;` to internal name `some/Class`.
+fn desc_to_internal(desc: &str) -> Option<String> {
+    let s = desc.strip_prefix('L')?.strip_suffix(';')?;
+    if s.is_empty() { return None; }
+    Some(s.to_string())
+}
+
+fn scan_types_dir(dir: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            scan_types_dir(&p, idx, ambiguous);
+        } else if p.extension().map_or(false, |x| x == "class") {
+            if let Ok(b) = std::fs::read(&p) {
+                process_class_bytes_for_types(&b, idx, ambiguous);
+            }
+        }
+    }
+}
+
+fn scan_types_jar(jar: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+    let Ok(f) = File::open(jar) else { return };
+    let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
+    for i in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(i) else { continue };
+        if !entry.name().ends_with(".class") { continue; }
+        let mut buf = Vec::new();
+        if entry.read_to_end(&mut buf).is_ok() {
+            process_class_bytes_for_types(&buf, idx, ambiguous);
+        }
+    }
 }

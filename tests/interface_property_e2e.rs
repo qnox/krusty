@@ -90,10 +90,10 @@ fn interface_property_run() {
 }
 
 #[test]
-fn interface_default_method_is_rejected() {
+fn interface_default_method_compiles() {
     let src = "interface I { fun f(): String = \"x\" }\nfun box(): String = \"OK\"";
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let _ = parse(src, &toks, &mut d);
-    assert!(d.diags.iter().any(|x| x.msg.contains("default methods")), "expected default-method rejection");
+    assert!(d.diags.iter().all(|x| !x.msg.contains("default methods")), "unexpected default-method rejection");
 }
