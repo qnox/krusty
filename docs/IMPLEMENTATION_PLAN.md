@@ -934,6 +934,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   representation + a resolution interface the `jvm` backend implements — is the next architectural
   step.
 
+## Phase 74 — Real grammar parsing (kill the delimiter-skipping hacks, start)  🚧
+- ✅ **Secondary constructors parse through real productions.** Replaced the `skip_balanced(LParen,
+  RParen)` / `skip_balanced(LBrace, RBrace)` token-skipping with proper parsing: extracted
+  `parse_param_list` (the real parameter grammar, shared with `parse_fun`) and `parse_call_arguments`
+  (real argument expressions), and parse `constructor(params) : this/super(args) { body }` into a
+  real `SecondaryCtor` AST node (`CtorDelegation::{None,This,Super}`). Construction-overload emission
+  is the next step; until then the checker rejects a class with secondary ctors (parsed correctly,
+  not skipped → no miscompile). Fixes the secondaryConstructors/sealed-delegating box FAILs.
+- ✅ **`inner class` rejected** (was silently dropped → VerifyError when used): an inner class needs
+  the outer-instance capture (`Test this$0` + qualified `new`) krusty doesn't model.
+- ⬜ **Remaining delimiter-skipping to convert to real productions:** `skip_type_args` (generic type
+  arguments — the biggest, 6+ sites), `skip_nested_decl_body` (nested type declarations),
+  `skip_balanced` in the `fun interface` handler, `skip_balanced_braces` (enum-entry bodies).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

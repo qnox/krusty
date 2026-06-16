@@ -252,7 +252,27 @@ pub struct ClassDecl {
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
     pub base_class: Option<String>,
     pub base_args: Vec<ExprId>,
+    /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
+    pub secondary_ctors: Vec<SecondaryCtor>,
     pub span: Span,
+}
+
+/// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
+#[derive(Clone, Debug)]
+pub struct SecondaryCtor {
+    pub params: Vec<Param>,
+    pub delegation: CtorDelegation,
+    pub body: Option<ExprId>,
+    pub span: Span,
+}
+
+/// How a secondary constructor delegates: to another constructor of the same class (`this(...)`),
+/// to a base-class constructor (`super(...)`), or implicitly (none written).
+#[derive(Clone, Debug)]
+pub enum CtorDelegation {
+    None,
+    This(Vec<ExprId>),
+    Super(Vec<ExprId>),
 }
 
 /// A primary-constructor init step (source-ordered): a body-property initializer or an `init` block.
