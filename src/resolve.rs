@@ -586,7 +586,15 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
-                            (m.name.clone(), { let n = params.len(); Signature { params, ret, vararg: false, required: n, param_names: Vec::new(), lambda_param_types: Vec::new() } })
+                            (m.name.clone(), {
+                                let n = params.len();
+                                let lambda_param_types: Vec<Vec<Ty>> = m.params.iter().map(|p| {
+                                    if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
+                                        p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
+                                    } else { Vec::new() }
+                                }).collect();
+                                Signature { params, ret, vararg: false, required: n, param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                            })
                         })
                         .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
@@ -636,7 +644,15 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
-                            (m.name.clone(), { let n = params.len(); Signature { params, ret, vararg: false, required: n, param_names: Vec::new(), lambda_param_types: Vec::new() } })
+                            (m.name.clone(), {
+                                let n = params.len();
+                                let lambda_param_types: Vec<Vec<Ty>> = m.params.iter().map(|p| {
+                                    if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
+                                        p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
+                                    } else { Vec::new() }
+                                }).collect();
+                                Signature { params, ret, vararg: false, required: n, param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                            })
                         })
                         .collect();
                     let static_props: HashMap<String, Ty> = c
@@ -2547,7 +2563,22 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let rt = self.expr(receiver);
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                // For a class method with function-type parameters, type lambda arguments against the
+                // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
+                let method_sig = match rt {
+                    Ty::Obj(internal) => self.lookup_method(internal, &name),
+                    _ => None,
+                };
+                let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
+                    if let Some(ref sig) = method_sig {
+                        if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty()
+                            && matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            let pt = sig.lambda_param_types[i].clone();
+                            return self.check_lambda_with_types(a, &pt);
+                        }
+                    }
+                    self.expr(a)
+                }).collect();
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
