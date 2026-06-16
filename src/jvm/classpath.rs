@@ -21,6 +21,9 @@ use crate::jvm::classreader::{parse_class, ClassInfo};
 enum Entry {
     Dir(PathBuf),
     Jar(PathBuf),
+    /// A JDK `lib/modules` jimage container (the JVM bootclasspath). Added explicitly to the
+    /// classpath, exactly like a jar — there is no implicit `JAVA_HOME` lookup.
+    Jimage(PathBuf),
 }
 
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
@@ -70,7 +73,11 @@ impl Classpath {
                     .and_then(|e| e.to_str())
                     .map(|e| e.eq_ignore_ascii_case("jar") || e.eq_ignore_ascii_case("zip"))
                     .unwrap_or(false);
-                if is_archive {
+                // A JDK jimage is conventionally `<jdk>/lib/modules` (a file named `modules`).
+                let is_jimage = p.is_file() && p.file_name().map_or(false, |n| n == "modules");
+                if is_jimage {
+                    Entry::Jimage(p)
+                } else if is_archive {
                     Entry::Jar(p)
                 } else {
                     Entry::Dir(p)
@@ -98,6 +105,7 @@ impl Classpath {
             match e {
                 Entry::Dir(d) => scan_types_dir(d, &mut idx, &mut ambiguous),
                 Entry::Jar(j) => scan_types_jar(j, &mut idx, &mut ambiguous),
+                Entry::Jimage(p) => scan_types_jimage(p, &mut idx, &mut ambiguous),
             }
         }
         // Remove ambiguous simple names that map to multiple internal names.
@@ -118,6 +126,10 @@ impl Classpath {
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
                 Entry::Jar(j) => read_jar_entry(j, &name),
+                // Reading class bytes from the jimage (lazy member resolution for JDK types) is a
+                // follow-up: it needs jimage content extraction + decompression. For now JDK types
+                // resolve as types but their members stay unresolved (rejected, never miscompiled).
+                Entry::Jimage(_) => None,
             };
             if let Some(b) = bytes {
                 if let Ok(ci) = parse_class(&b) {
@@ -153,6 +165,8 @@ impl Classpath {
             match e {
                 Entry::Dir(d) => index_dir(d, &mut idx),
                 Entry::Jar(j) => index_jar(j, &mut idx),
+                // No extension functions live in the JDK (Kotlin extensions come from stdlib jars).
+                Entry::Jimage(_) => {}
             }
         }
         *self.ext.borrow_mut() = Some(idx);
@@ -270,48 +284,55 @@ fn read_jar_entry(jar: &Path, name: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn process_class_bytes_for_types(bytes: &[u8], idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
-    let Ok(ci) = parse_class(bytes) else { return };
-    let internal = ci.this_class.clone();
+/// Register `internal` (e.g. `java/lang/StringBuilder`) into the simple-name → internal index,
+/// tracking ambiguity. **Name-based** — does not parse the class file. This is the lazy path:
+/// kotlinc/javac likewise index by entry/package name and only read a `.class` when its members
+/// are actually needed (see `find`).
+fn register_class_name(internal: &str, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
     if internal.is_empty() { return; }
-    // Simple name = last segment of internal name.
-    let simple = internal.rsplit('/').next().unwrap_or(&internal).to_string();
-    // Skip synthetic/anonymous classes (contain '$').
-    if simple.contains('$') { return; }
-
-    // Register class name (detect ambiguity).
-    if let Some(existing) = idx.class_names.get(&simple) {
-        if existing != &internal {
-            ambiguous.insert(simple.clone());
-        }
-    } else if !ambiguous.contains(&simple) {
-        idx.class_names.insert(simple.clone(), internal.clone());
+    let simple = internal.rsplit('/').next().unwrap_or(internal);
+    // Skip synthetic/anonymous/nested (`$`) and module/package descriptors.
+    if simple.contains('$') || simple == "module-info" || simple == "package-info" { return; }
+    match idx.class_names.get(simple) {
+        Some(existing) if existing != internal => { ambiguous.insert(simple.to_string()); }
+        Some(_) => {}
+        None => { idx.class_names.insert(simple.to_string(), internal.to_string()); }
     }
+}
 
-    // Type aliases from *TypeAliasesKt.class files: parse the $annotations() method names
-    // to get alias names, then correlate with d2 to find the target descriptors.
-    if simple.ends_with("TypeAliasesKt") && !ci.kotlin_d2.is_empty() {
-        let alias_names: Vec<String> = ci.methods.iter()
-            .filter(|m| m.name.ends_with("$annotations"))
-            .map(|m| m.name.trim_end_matches("$annotations").to_string())
-            .collect();
-        // In d2, alias name and its JVM descriptor appear as consecutive strings:
-        // name → "Lsome/Target;" (a JVM class descriptor).
-        let d2 = &ci.kotlin_d2;
-        for alias in &alias_names {
-            // Find the alias name in d2, then look for the next JVM descriptor.
-            for i in 0..d2.len() {
-                if d2[i] == *alias {
-                    if let Some(desc) = d2.get(i + 1) {
-                        if let Some(internal_name) = desc_to_internal(desc) {
-                            idx.type_aliases.insert(alias.clone(), internal_name);
-                        }
+/// `Xxx.class` entry name (jar/jimage path) → internal name, or `None` if not an indexable class.
+fn class_internal_from_entry(name: &str) -> Option<&str> {
+    name.strip_suffix(".class").filter(|s| !s.is_empty())
+}
+
+/// Parse Kotlin type aliases from a `*TypeAliasesKt.class` file's `@Metadata` `d2` array. Only such
+/// files are ever parsed for the type index — every other class is indexed by name alone.
+fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
+    let Ok(ci) = parse_class(bytes) else { return };
+    if ci.kotlin_d2.is_empty() { return; }
+    let alias_names: Vec<String> = ci.methods.iter()
+        .filter(|m| m.name.ends_with("$annotations"))
+        .map(|m| m.name.trim_end_matches("$annotations").to_string())
+        .collect();
+    // In d2, alias name and its JVM descriptor appear as consecutive strings:
+    // name → "Lsome/Target;" (a JVM class descriptor).
+    let d2 = &ci.kotlin_d2;
+    for alias in &alias_names {
+        for i in 0..d2.len() {
+            if d2[i] == *alias {
+                if let Some(desc) = d2.get(i + 1) {
+                    if let Some(internal_name) = desc_to_internal(desc) {
+                        idx.type_aliases.insert(alias.clone(), internal_name);
                     }
-                    break;
                 }
+                break;
             }
         }
     }
+}
+
+fn is_type_aliases_kt(internal: &str) -> bool {
+    internal.rsplit('/').next().unwrap_or(internal).ends_with("TypeAliasesKt")
 }
 
 /// Convert a JVM class descriptor `Lsome/Class;` to internal name `some/Class`.
@@ -322,14 +343,26 @@ fn desc_to_internal(desc: &str) -> Option<String> {
 }
 
 fn scan_types_dir(dir: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+    scan_types_dir_rooted(dir, dir, idx, ambiguous);
+}
+
+/// Walk `dir`, registering each `*.class` by its path relative to `root` (the internal name).
+/// Only `*TypeAliasesKt.class` files are read+parsed (for aliases); all others are name-only.
+fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            scan_types_dir(&p, idx, ambiguous);
+            scan_types_dir_rooted(root, &p, idx, ambiguous);
         } else if p.extension().map_or(false, |x| x == "class") {
-            if let Ok(b) = std::fs::read(&p) {
-                process_class_bytes_for_types(&b, idx, ambiguous);
+            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            let Some(internal) = class_internal_from_entry(&rel) else { continue };
+            register_class_name(internal, idx, ambiguous);
+            if is_type_aliases_kt(internal) {
+                if let Ok(b) = std::fs::read(&p) {
+                    parse_aliases_from_bytes(&b, idx);
+                }
             }
         }
     }
@@ -340,10 +373,79 @@ fn scan_types_jar(jar: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collecti
     let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else { continue };
-        if !entry.name().ends_with(".class") { continue; }
-        let mut buf = Vec::new();
-        if entry.read_to_end(&mut buf).is_ok() {
-            process_class_bytes_for_types(&buf, idx, ambiguous);
+        let name = entry.name().to_string();
+        let Some(internal) = class_internal_from_entry(&name) else { continue };
+        register_class_name(internal, idx, ambiguous);
+        // Parse bytes only for the rare alias-carrier classes — everything else is name-only.
+        if is_type_aliases_kt(internal) {
+            let mut buf = Vec::new();
+            if entry.read_to_end(&mut buf).is_ok() {
+                parse_aliases_from_bytes(&buf, idx);
+            }
         }
+    }
+}
+
+/// Index class names from a JDK `lib/modules` jimage. Name-only (no class parsing), reading the
+/// jimage location table directly — the bootclasspath equivalent of a jar's central directory.
+/// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
+/// ImageLocation. Inner classes (`A$B`) and ambiguous simple names are dropped, like any entry.
+fn scan_types_jimage(path: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+    let Ok(b) = std::fs::read(path) else { return };
+    if b.len() < 28 { return; }
+    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    if u32le(0) != 0xCAFE_DADA { return; }
+    let table_length = u32le(16) as usize;
+    let locations_size = u32le(20) as usize;
+    let header = 28;
+    let offsets = header + table_length * 4; // skip redirect table (table_length × i32)
+    let locations = offsets + table_length * 4;
+    let strings = locations + locations_size;
+    if strings > b.len() { return; }
+    // A jimage string is NUL-terminated modified-UTF8 at `strings + off` (off 0 = empty).
+    let read_str = |off: usize| -> &str {
+        if off == 0 { return ""; }
+        let start = strings + off;
+        let mut e = start;
+        while e < b.len() && b[e] != 0 { e += 1; }
+        std::str::from_utf8(&b[start..e]).unwrap_or("")
+    };
+    // Decode an ImageLocation attribute stream into (module, parent, base, extension) string offsets.
+    let decode = |mut p: usize| -> (usize, usize, usize, usize) {
+        let (mut m, mut par, mut base, mut ext) = (0usize, 0usize, 0usize, 0usize);
+        while p < b.len() {
+            let byte = b[p];
+            p += 1;
+            let kind = byte >> 3;
+            if kind == 0 { break; } // ATTRIBUTE_END
+            let len = ((byte & 0x7) + 1) as usize;
+            let mut v = 0usize;
+            for _ in 0..len {
+                if p >= b.len() { break; }
+                v = (v << 8) | b[p] as usize;
+                p += 1;
+            }
+            match kind {
+                1 => m = v,    // MODULE
+                2 => par = v,  // PARENT (package, '/'-separated)
+                3 => base = v, // BASE (simple file name, incl. extension separator handling below)
+                4 => ext = v,  // EXTENSION
+                _ => {}        // OFFSET/COMPRESSED/UNCOMPRESSED — content attrs, unused for the index
+            }
+        }
+        (m, par, base, ext)
+    };
+    for i in 0..table_length {
+        let loc_off = u32le(offsets + i * 4) as usize;
+        if loc_off == 0 { continue; }
+        let (m, par, base, ext) = decode(locations + loc_off);
+        // Index java module classes (`java.base`, `java.*`); skip the JDK's own `jdk.*`/`sun.*`
+        // implementation modules' resources only by what they expose by name + ambiguity rules.
+        if read_str(ext) != "class" { continue; }
+        let parent = read_str(par);
+        if parent.is_empty() { continue; }
+        let internal = format!("{parent}/{}", read_str(base));
+        let _ = m;
+        register_class_name(&internal, idx, ambiguous);
     }
 }

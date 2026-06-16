@@ -144,7 +144,7 @@ static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
 /// Returns None if compilation fails (unsupported feature).
-fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
+fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>, jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
@@ -158,7 +158,13 @@ fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>) -
     let t2 = std::time::Instant::now();
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
-    let cp = Classpath::new(stdlib_jar.map(|p| vec![p.to_path_buf()]).unwrap_or_default());
+    // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
+    // jimage (the bootclasspath). The compiler never reads `JAVA_HOME` — the harness passes the
+    // path, exactly as a `kotlinc -classpath` invocation would.
+    let mut cp_paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(p) = stdlib_jar { cp_paths.push(p.to_path_buf()); }
+    if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
+    let cp = Classpath::new(cp_paths);
     let syms = collect_signatures_with_cp(&files, cp, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
@@ -371,6 +377,12 @@ fn kotlin_codegen_box_conformance() {
         return;
     };
     let java = format!("{java_home}/bin/java");
+    // The JDK bootclasspath as an explicit `-classpath` entry: the running JDK's `lib/modules`
+    // jimage, so JDK types (`StringBuilder`, …) resolve like any classpath type.
+    let jdk_modules: Option<std::path::PathBuf> = {
+        let p = Path::new(&java_home).join("lib").join("modules");
+        p.is_file().then_some(p)
+    };
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
     let stdlib_jar = common::stdlib_jar();
@@ -441,7 +453,7 @@ fn kotlin_codegen_box_conformance() {
             let with_stdlib = src.contains("// WITH_STDLIB") || src.contains("// WITH_RUNTIME");
             let compile_cp = if with_stdlib { stdlib_jar.as_deref() } else { None };
             let t0 = std::time::Instant::now();
-            let classes = match compile_source(&src, &stem, compile_cp) {
+            let classes = match compile_source(&src, &stem, compile_cp, jdk_modules.as_deref()) {
                 Some(c) => c,
                 None => return (file.clone(), TestResult::Skip),
             };

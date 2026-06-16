@@ -380,13 +380,18 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
     // Pre-seed from the classpath type index so imports/stdlib types are visible.
     let mut class_names: HashMap<String, String> = type_idx.class_names.clone();
+    // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
+    // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
+    // user's own declarations is a conflict, so track which names the user has defined.
+    let mut user_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
                 let internal = class_internal(file, &c.name);
-                if class_names.insert(c.name.clone(), internal).is_some() {
+                if !user_defined.insert(c.name.clone()) {
                     diags.error(c.span, format!("conflicting declarations: {}", c.name));
                 }
+                class_names.insert(c.name.clone(), internal);
             }
         }
     }
@@ -1012,6 +1017,7 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, f
                 if let Some(ret) = fun_rets.get(n.as_str()) {
                     return *ret;
                 }
+                // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
                 if let Some(internal) = class_names.get(n.as_str()) {
                     return Ty::obj(internal);
                 }

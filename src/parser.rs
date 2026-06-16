@@ -1130,7 +1130,13 @@ impl<'a> Parser<'a> {
                 let bound = self.parse_type();
                 // `T: Any` → the type param can't be null (erased to Object but non-null).
                 if bound.name == "Any" && !bound.nullable && !tname.is_empty() {
-                    non_null.insert(tname);
+                    non_null.insert(tname.clone());
+                }
+                // A primitive upper bound (`T: Double`) is *specialized* by kotlinc (e.g. it emits a
+                // primitive `==`/IEEE-754 comparison), not erased to Object. krusty only erases type
+                // parameters, so it would miscompile such code — reject it instead.
+                if crate::types::Ty::from_name(&bound.name).map_or(false, |t| t.is_primitive()) {
+                    self.diags.error(bound.span, "krusty: type parameter with a primitive upper bound is not supported".to_string());
                 }
             }
             if !self.eat(TokenKind::Comma) {

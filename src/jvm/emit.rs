@@ -4573,7 +4573,12 @@ impl<'a> MethodEmitter<'a> {
         // invokeinterface: consumes 1 (receiver) + arity (args), pushes 1 (result, an Object).
         code.invokeinterface(m, arity as i32, 1);
         // Coerce the `Object` result to the declared return type.
-        if let Some((wrapper, _, unbox, unbox_desc)) = box_wrapper(ret) {
+        if matches!(ret, Ty::Unit | Ty::Nothing) {
+            // A `() -> Unit` invoke still returns `Object` (erased) on the JVM, but krusty's
+            // convention is that a `Unit` value occupies no stack slot — pop the leftover so the
+            // operand stack matches the frames (otherwise it lingers under the next branch/return).
+            code.pop();
+        } else if let Some((wrapper, _, unbox, unbox_desc)) = box_wrapper(ret) {
             let ci = cw.class_ref(wrapper);
             code.checkcast(ci);
             let um = cw.methodref(wrapper, unbox, unbox_desc);
