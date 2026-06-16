@@ -320,6 +320,55 @@ impl<'a> Lower<'a> {
                 };
                 self.ir.add_expr(IrExpr::When { branches })
             }
+            Expr::Unary { op, operand } => {
+                use crate::ast::UnOp;
+                let v = self.expr(operand)?;
+                match op {
+                    // `-x` → `0 - x` (zero typed to match); `!x` → `x == false`.
+                    UnOp::Neg => {
+                        let zero = match self.info.ty(operand) {
+                            Ty::Long => self.ir.add_expr(IrExpr::Const(IrConst::Long(0))),
+                            _ => self.ir.add_expr(IrExpr::Const(IrConst::Int(0))),
+                        };
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Sub, lhs: zero, rhs: v })
+                    }
+                    UnOp::Not => {
+                        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: v, rhs: f })
+                    }
+                }
+            }
+            // `when` → `IrWhen`. With a subject, each arm becomes `subject == cond` (OR-ed for
+            // multiple conditions); the subject is re-evaluated per comparison (correct for the
+            // side-effect-free subjects in the core subset). Without a subject, the conditions are
+            // boolean tests directly.
+            Expr::When { subject, arms } => {
+                let mut branches = Vec::new();
+                for arm in &arms {
+                    let body = self.expr(arm.body)?;
+                    if arm.conditions.is_empty() {
+                        branches.push((None, body)); // else
+                    } else {
+                        let mut cond: Option<u32> = None;
+                        for &c in &arm.conditions {
+                            let test = match subject {
+                                Some(subj) => {
+                                    let s = self.expr(subj)?;
+                                    let cv = self.expr(c)?;
+                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                }
+                                None => self.expr(c)?,
+                            };
+                            cond = Some(match cond {
+                                Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: prev, rhs: test }),
+                                None => test,
+                            });
+                        }
+                        branches.push((cond, body));
+                    }
+                }
+                self.ir.add_expr(IrExpr::When { branches })
+            }
             Expr::Template(parts) => {
                 let mut iter = parts.iter();
                 let mut acc = match iter.clone().next() {
