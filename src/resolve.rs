@@ -981,7 +981,9 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>) -
 fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::collections::HashSet<String>, diags: &mut DiagSink) -> Ty {
     // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
     if !r.fun_params.is_empty() || r.name == "<fun>" {
-        return Ty::Fun(r.fun_params.len() as u8);
+        let params: Vec<Ty> = r.fun_params.iter().map(|p| ty_of_ref(p, classes, tparams, diags)).collect();
+        let ret = r.arg.as_ref().map(|a| ty_of_ref(a, classes, tparams, diags)).unwrap_or(Ty::Unit);
+        return Ty::fun(params, ret);
     }
     let base = if let Some(t) = Ty::from_name(&r.name) {
         t
@@ -1306,7 +1308,9 @@ impl<'a> Checker<'a> {
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
         // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
         if !r.fun_params.is_empty() || r.name == "<fun>" {
-            return Ty::Fun(r.fun_params.len() as u8);
+            let params: Vec<Ty> = r.fun_params.iter().map(|p| self.resolve_ty(p)).collect();
+            let ret = r.arg.as_ref().map(|a| self.resolve_ty(a)).unwrap_or(Ty::Unit);
+            return Ty::fun(params, ret);
         }
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
@@ -1542,7 +1546,9 @@ impl<'a> Checker<'a> {
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
     fn resolve_ty_no_diag(&self, r: &TypeRef) -> Ty {
         if !r.fun_params.is_empty() || r.name == "<fun>" {
-            return Ty::Fun(r.fun_params.len() as u8);
+            let params: Vec<Ty> = r.fun_params.iter().map(|p| self.resolve_ty_no_diag(p)).collect();
+            let ret = r.arg.as_ref().map(|a| self.resolve_ty_no_diag(a)).unwrap_or(Ty::Unit);
+            return Ty::fun(params, ret);
         }
         if let Some(t) = Ty::from_name(&r.name) {
             t
@@ -1767,6 +1773,14 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // Function types are assignable by arity — both lower to the same `FunctionN`; parameter and
+        // return variance is handled by erasure/boxing at the JVM level (the call still recovers the
+        // declared return type from `expected`).
+        if let (Ty::Fun(e), Ty::Fun(a)) = (expected, actual) {
+            if e.params.len() == a.params.len() {
+                return;
+            }
+        }
         if expected != actual {
             let _ = ctx;
             self.diags.error(span, format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name()));
@@ -1807,15 +1821,16 @@ impl<'a> Checker<'a> {
                 if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
                     self.diags.error(self.file.expr_spans[e.0 as usize],
                         "krusty: lambda captures a mutable local variable — not supported".to_string());
-                    return Ty::Fun(arity);
+                    return Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], Ty::Unit);
                 }
                 self.push_scope();
                 if let Some(ref name) = bind_name {
                     self.declare(name, Ty::obj("java/lang/Object"), false);
                 }
-                self.expr(body);
+                let bret = self.expr(body);
                 self.pop_scope();
-                Ty::Fun(arity)
+                // Params unknown here (no annotation) → erased `Object`; return type comes from the body.
+                Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], bret)
             }
             Expr::Index { array, index } => {
                 let at = self.expr(array);
@@ -2385,9 +2400,11 @@ impl<'a> Checker<'a> {
                 let it_ty = param_types.first().copied().unwrap_or(Ty::obj("java/lang/Object"));
                 self.declare(name, it_ty, false);
             }
-            self.expr(body);
+            let bret = self.expr(body);
             self.pop_scope();
-            let ty = Ty::Fun(arity);
+            let _ = arity;
+            // Carry the declared parameter types and the inferred body return type.
+            let ty = Ty::fun(param_types.to_vec(), bret);
             return self.set(e, ty);
         }
         self.expr(e)
@@ -2607,11 +2624,13 @@ impl<'a> Checker<'a> {
             Expr::Name(fname) => {
                 // Calling a local variable of function type: `val f: () -> String = { "OK" }; f()`.
                 if let Some(local) = self.lookup(&fname) {
-                    if let Ty::Fun(_) = local.ty {
+                    if let Ty::Fun(s) = local.ty {
+                        let ret = s.ret;
                         let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                         let _ = arg_tys;
-                        // Return type is erased (Object) at the JVM level.
-                        return Ty::obj("java/lang/Object");
+                        // The call yields the function type's real return type (erased to `Object` only
+                        // at the JVM level by `FunctionN.invoke`, which the backend unboxes/casts).
+                        return ret;
                     }
                 }
                 // Local function call — resolved before top-level funs and constructors.
@@ -2781,9 +2800,8 @@ impl<'a> Checker<'a> {
                 let callee_ty = self.expr(callee);
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                 let _ = arg_tys;
-                if let Ty::Fun(_) = callee_ty {
-                    // Return type is erased (Object) at the JVM level.
-                    return Ty::obj("java/lang/Object");
+                if let Ty::Fun(s) = callee_ty {
+                    return s.ret;
                 }
                 if callee_ty != Ty::Error {
                     self.diags.error(span, "expression is not callable");
@@ -2839,8 +2857,14 @@ impl<'a> Checker<'a> {
                 if self.lookup(&name).is_some() {
                     self.diags.error(self.file.stmt_spans[s.0 as usize], format!("krusty: local '{name}' shadows an existing variable (not supported)"));
                 }
-                let it = self.expr(init);
                 let declared = ty.as_ref().map(|r| self.resolve_ty(r));
+                // A lambda initializer with a declared function type takes its parameter types from
+                // the annotation, so `val f: (Int) -> Int = { it * 2 }` types `it`/`x` as `Int`
+                // (not the erased `Object`). HOF *arguments* already do this.
+                let it = match (declared, matches!(self.file.expr(init), Expr::Lambda { .. })) {
+                    (Some(Ty::Fun(s)), true) => self.check_lambda_with_types(init, &s.params),
+                    _ => self.expr(init),
+                };
                 let bind = match declared {
                     Some(d) => {
                         self.expect_assignable(d, it, self.span(init), "initializer");
