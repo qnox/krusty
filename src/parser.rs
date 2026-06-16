@@ -1628,6 +1628,27 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
+            // Infix function call `a foo b` → `a.foo(b)`: a simple identifier between two operands.
+            // Binds tighter than comparison (bp 7) and looser than additive (bp 9) — Kotlin's
+            // `infixFunctionCall`. Resolution checks `foo` is actually an `infix`/member function.
+            if min_bp <= 8 && self.at(TokenKind::Ident) {
+                let name = self.text();
+                // Exclude soft keywords and the range words (`until`/`downTo`/`step`), which the
+                // `for` loop parses specially as `ForRange` — not as generic infix calls.
+                let is_soft_kw = matches!(name, "is" | "as" | "in" | "until" | "downTo" | "step");
+                let next_starts_expr = self.t.get(self.i + 1).map_or(false, |t| starts_expr(t.kind));
+                if !is_soft_kw && next_starts_expr {
+                    let name = name.to_string();
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    self.bump(); // infix function name
+                    self.skip_newlines();
+                    let rhs = self.parse_bp(9); // operand binds at additive precedence or tighter
+                    let rspan = self.file.expr_spans[rhs.0 as usize];
+                    let callee = self.file.add_expr(Expr::Member { receiver: lhs, name }, Span::new(lspan.lo, rspan.hi));
+                    lhs = self.file.add_expr(Expr::Call { callee, args: vec![rhs] }, Span::new(lspan.lo, rspan.hi));
+                    continue;
+                }
+            }
             let op = match infix_op(self.kind()) {
                 Some(o) => o,
                 None => break,
@@ -2132,6 +2153,31 @@ fn compound_op(k: TokenKind) -> Option<BinOp> {
         TokenKind::PercentEq => BinOp::Rem,
         _ => return None,
     })
+}
+
+/// Whether `k` can begin an expression — used to decide if `a IDENT …` is an infix function call
+/// (the identifier must be followed by an operand). Conservative: false only stops an infix call.
+fn starts_expr(k: TokenKind) -> bool {
+    matches!(
+        k,
+        TokenKind::Ident
+            | TokenKind::IntLit
+            | TokenKind::LongLit
+            | TokenKind::DoubleLit
+            | TokenKind::FloatLit
+            | TokenKind::StringLit
+            | TokenKind::CharLit
+            | TokenKind::TemplateStart
+            | TokenKind::KwTrue
+            | TokenKind::KwFalse
+            | TokenKind::KwNull
+            | TokenKind::KwIf
+            | TokenKind::KwWhen
+            | TokenKind::LParen
+            | TokenKind::LBrace
+            | TokenKind::Minus
+            | TokenKind::Not
+    )
 }
 
 fn infix_op(k: TokenKind) -> Option<BinOp> {
