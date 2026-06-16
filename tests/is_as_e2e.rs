@@ -111,8 +111,9 @@ fn rejects(src: &str) -> bool {
 
 #[test]
 fn unsafe_is_as_are_rejected() {
-    // Unresolved target → would erase to Object (instanceof always true): reject.
-    assert!(rejects("fun box(): String { val x: Any = \"\"\n if (x is Number) return \"a\"\n return \"b\" }"));
+    // Unresolved target (not a user class / classpath type / mapped built-in) → would erase to
+    // Object (instanceof always true): reject. (`Number`/`List`/… now resolve to their JVM class.)
+    assert!(rejects("fun box(): String { val x: Any = \"\"\n if (x is Frobnicator) return \"a\"\n return \"b\" }"));
     // Nullable `is T?` → `null is T?` is true but instanceof is false: reject.
     assert!(rejects("fun box(): String { val x: Any = \"\"\n if (x is String?) return \"a\"\n return \"b\" }"));
     // Primitive `is`/`as` would need boxing: reject.

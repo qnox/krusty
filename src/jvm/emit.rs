@@ -363,7 +363,12 @@ fn emit_interface(
     let mut method_metas = Vec::new();
     for m in &class.methods {
         let params: Vec<Ty> = m.params.iter().map(|p| resolve_ty(&p.ty, syms)).collect();
-        let ret = m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit);
+        // Prefer the collected signature's return type (which applied body inference for an
+        // expression-bodied default method, e.g. `fun foo() = 42` → `Int`) over re-deriving from the
+        // AST, where a missing annotation would wrongly default to `Unit` — a `()V` default method
+        // the `()I` call site can't resolve (`NoSuchMethodError`).
+        let ret = syms.method_of(internal, &m.name).map(|s| s.ret)
+            .unwrap_or_else(|| m.ret.as_ref().map(|r| resolve_ty(r, syms)).unwrap_or(Ty::Unit));
         if matches!(m.body, FunBody::None) {
             // Abstract method.
             cw.add_abstract_method(ACC_PUBLIC, &m.name, &method_descriptor(&params, ret));
@@ -530,6 +535,13 @@ fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
     }
     Ty::from_name(&r.name)
         .or_else(|| syms.classes.get(&r.name).map(|c| Ty::obj(&c.internal)))
+        // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
+        // aliases — the same map the checker resolves against, so `is`/`as`/descriptors use the real
+        // JVM name (`java/lang/Number`) instead of degrading to `Object` (an always-true instanceof).
+        .or_else(|| syms.class_names.get(&r.name).map(|internal| match internal.strip_prefix("__ty/") {
+            Some(prim) => Ty::from_name(prim).unwrap_or_else(|| Ty::obj(internal)),
+            None => Ty::obj(internal),
+        }))
         .unwrap_or_else(|| Ty::obj("java/lang/Object"))
 }
 
