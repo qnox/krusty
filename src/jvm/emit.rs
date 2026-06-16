@@ -117,6 +117,15 @@ pub fn emit_file(
             e.emit_fun(f, &mut cw);
             lambda_ctr = e.lambda_counter;
         }
+        // Extension properties → static `getName(Recv)` / `setName(Recv, T)` accessors.
+        if let Decl::Property(p) = file.decl(d) {
+            if let Some(recv_ref) = &p.receiver {
+                let mut e = MethodEmitter::new(file, info, syms, internal_name, &imports, diags);
+                e.lambda_counter = lambda_ctr;
+                e.emit_ext_prop(p, recv_ref, &mut cw);
+                lambda_ctr = e.lambda_counter;
+            }
+        }
     }
 
     // Top-level properties: a private static backing field + accessors, initialized in `<clinit>`.
@@ -124,7 +133,8 @@ pub fn emit_file(
         .decls
         .iter()
         .filter_map(|&d| match file.decl(d) {
-            Decl::Property(p) => Some((p, syms.props.get(&p.name).map(|(t, _)| *t).unwrap_or(Ty::Error))),
+            // Extension properties are emitted as static get/set methods (below), not fields.
+            Decl::Property(p) if p.receiver.is_none() => Some((p, syms.props.get(&p.name).map(|(t, _)| *t).unwrap_or(Ty::Error))),
             _ => None,
         })
         .collect();
@@ -2088,6 +2098,60 @@ impl<'a> MethodEmitter<'a> {
         cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &f.name, &method_descriptor(&sig.params, sig.ret), &code);
     }
 
+    /// Emit an extension property's accessors as static methods: `getName(Recv)Ty` (and, for a
+    /// `var`, `setName(Recv, Ty)V`). The receiver is slot 0 under `this` (like `emit_ext_fun`); the
+    /// getter has no backing field, so it just runs its body.
+    fn emit_ext_prop(&mut self, p: &PropDecl, recv_ref: &crate::ast::TypeRef, cw: &mut ClassWriter) {
+        let recv_ty = resolve_ty(recv_ref, self.syms);
+        let prop_ty = match self.syms.ext_props.get(&(recv_ty.descriptor(), p.name.clone())) {
+            Some((t, _)) => *t,
+            None => return,
+        };
+        let cap = capitalize(&p.name);
+        // getter: getName(Recv) -> prop_ty
+        {
+            let saved = (std::mem::take(&mut self.slots), self.next_slot);
+            self.slots.insert("this".to_string(), (0, recv_ty));
+            self.next_slot = slot_words(recv_ty);
+            self.ret_ty = prop_ty;
+            let mut code = CodeBuilder::new(self.next_slot);
+            match &p.getter {
+                Some(FunBody::Expr(e)) => { self.emit_expr_as(*e, prop_ty, &mut code, cw); self.emit_return(prop_ty, &mut code); }
+                Some(FunBody::Block(b)) => self.emit_block_as_body(*b, &mut code, cw),
+                _ => self.emit_default_return(prop_ty, &mut code, cw),
+            }
+            code.ensure_locals(self.next_slot);
+            code.link();
+            cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &format!("get{cap}"), &method_descriptor(&[recv_ty], prop_ty), &code);
+            self.slots = saved.0;
+            self.next_slot = saved.1;
+        }
+        // setter (var only): setName(Recv, value) -> Unit
+        if p.is_var {
+            if let Some(setter) = &p.setter {
+                if let Some(body) = &setter.body {
+                    let saved = (std::mem::take(&mut self.slots), self.next_slot);
+                    self.slots.insert("this".to_string(), (0, recv_ty));
+                    self.next_slot = slot_words(recv_ty);
+                    let pname = setter.param.clone().unwrap_or_else(|| "value".to_string());
+                    self.alloc_slot(&pname, prop_ty);
+                    self.ret_ty = Ty::Unit;
+                    let mut code = CodeBuilder::new(self.next_slot);
+                    match body {
+                        FunBody::Expr(e) => { self.emit_expr(*e, &mut code, cw); self.discard(self.info.ty(*e), &mut code); code.ret_void(); }
+                        FunBody::Block(b) => self.emit_block_as_body(*b, &mut code, cw),
+                        FunBody::None => code.ret_void(),
+                    }
+                    code.ensure_locals(self.next_slot);
+                    code.link();
+                    cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &format!("set{cap}"), &method_descriptor(&[recv_ty, prop_ty], Ty::Unit), &code);
+                    self.slots = saved.0;
+                    self.next_slot = saved.1;
+                }
+            }
+        }
+    }
+
     /// Emit a top-level extension function as a static method with the receiver as first param.
     /// `this` inside the body maps to slot 0 via `slots["this"]` (works for primitives too).
     fn emit_ext_fun(&mut self, f: &FunDecl, recv_ref: &crate::ast::TypeRef, cw: &mut ClassWriter) {
@@ -2324,6 +2388,16 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Stmt::AssignMember { receiver, name, value } => {
+                // Extension-property write → `invokestatic setName(Recv, value)` on the file facade.
+                let recv_ty_ep = self.info.ty(receiver);
+                if let Some((pty, true)) = self.syms.ext_props.get(&(recv_ty_ep.descriptor(), name.clone())).copied() {
+                    self.emit_expr_as(receiver, recv_ty_ep, code, cw);
+                    self.emit_expr_as(value, pty, code, cw);
+                    let owner = self.class.clone();
+                    let m = cw.methodref(&owner, &format!("set{}", capitalize(&name)), &method_descriptor(&[recv_ty_ep, pty], Ty::Unit));
+                    code.invokestatic(m, (slot_words(recv_ty_ep) + slot_words(pty)) as i32, 0);
+                    return;
+                }
                 if let Ty::Obj(internal) = self.info.ty(receiver) {
                     let prop_ty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
                     let is_iface = self.syms.class_by_internal(internal).map_or(false, |c| c.is_interface);
@@ -3037,6 +3111,15 @@ impl<'a> MethodEmitter<'a> {
                             }
                         }
                     }
+                }
+                // Extension property read → `invokestatic getName(Recv)` on the file facade.
+                let recv_ty_ep = self.info.ty(receiver);
+                if let Some((pty, _)) = self.syms.ext_props.get(&(recv_ty_ep.descriptor(), name.clone())).copied() {
+                    self.emit_expr_as(receiver, recv_ty_ep, code, cw);
+                    let owner = self.class.clone();
+                    let m = cw.methodref(&owner, &format!("get{}", capitalize(&name)), &method_descriptor(&[recv_ty_ep], pty));
+                    code.invokestatic(m, slot_words(recv_ty_ep) as i32, slot_words(pty) as i32);
+                    return;
                 }
                 if name == "size" && matches!(self.info.ty(receiver), Ty::Array(_)) {
                     self.emit_expr(receiver, code, cw);

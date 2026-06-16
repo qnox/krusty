@@ -1259,6 +1259,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `Long` and/or/xor pop two longs → −2).
 - ✅ TDD: `tests/bitwise_e2e.rs` (every op, `Int` + `Long`) on the JVM with `-Xverify:all`.
 
+## Phase 103 — Extension properties (`val Recv.name get() = …`)  ✅
+- 🎯 Dominant cause of the "property without an initializer must be 'lateinit'" bucket (~80 of 172).
+- ✅ Parser: optional receiver on a top-level property (`val [<T>] Recv[<…>][?].name`), mirroring
+  extension functions; `PropDecl.receiver`. Exempt from the lateinit rule.
+- ✅ Resolve: registered by `(receiver descriptor, name)` in `SymbolTable.ext_props`; `recv.name`
+  reads resolve via `check_member`, `recv.name = v` writes via `Stmt::AssignMember`; accessor
+  bodies type-checked with `this` = receiver.
+- ✅ Emit: static `getName(Recv)` / `setName(Recv, T)` methods (receiver = slot 0, like an
+  extension function); reads → `invokestatic getName`, writes → `invokestatic setName`.
+- ✅ TDD: `tests/ext_prop_e2e.rs` (`String`/`Int` receivers, getter over `this`) on the JVM.
+- Box conformance **426 → 431 OK / 0 FAIL**.
+- ⬜ Known limit (shared with extension functions): unqualified receiver-member access in a body
+  (`v` rather than `this.v`) is unresolved — use `this.`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
