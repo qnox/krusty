@@ -117,6 +117,30 @@ class TestClassLoader extends ClassLoader {
 }
 "#;
 
+/// Whether a box test applies to the given backend(s), per kotlinc's directives:
+/// `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all);
+/// `// IGNORE_BACKEND[_K1|_K2]:` excludes the listed backends. `names` is the set of backend tokens
+/// the current run identifies as (e.g. `["JVM", "JVM_IR"]` or `["JS", "JS_IR"]`).
+pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
+    let mentions = |line: &str| line.split(',').any(|t| names.contains(&t.trim()));
+    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
+        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
+            return false;
+        }
+    }
+    for l in src.lines().filter(|l| {
+        l.starts_with("// IGNORE_BACKEND:")
+            || l.starts_with("// IGNORE_BACKEND_K1:")
+            || l.starts_with("// IGNORE_BACKEND_K2:")
+    }) {
+        let rest = l.splitn(2, ':').nth(1).unwrap_or("");
+        if mentions(rest.trim()) {
+            return false;
+        }
+    }
+    true
+}
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -432,12 +456,10 @@ fn kotlin_codegen_box_conformance() {
             if src.contains("// LAMBDAS: INDY") || src.contains("IGNORE_BACKEND_K2: JVM_IR") {
                 return (file.clone(), TestResult::Skip);
             }
-            // Skip tests with a TARGET_BACKEND directive that doesn't include JVM.
-            if let Some(tb_line) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-                let targets = tb_line.trim_start_matches("// TARGET_BACKEND:").trim();
-                if !targets.split(',').any(|t| matches!(t.trim(), "JVM" | "JVM_IR")) {
-                    return (file.clone(), TestResult::Skip);
-                }
+            // Respect the backend directives: a `// TARGET_BACKEND:` that excludes JVM, or an
+            // `// IGNORE_BACKEND[_K1/_K2]:` that names JVM/JVM_IR, means this test is not for us.
+            if !backend_applicable(&src, &["JVM", "JVM_IR"]) {
+                return (file.clone(), TestResult::Skip);
             }
             // Skip tests that rely on unsigned-integer-to-string conversion with unsigned semantics.
             if src.contains("U.toString()") || src.contains("UL.toString()") {

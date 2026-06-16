@@ -19,7 +19,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     let mut lo = Lower {
         afile: file,
         info,
-        syms,
         ir: IrFile { package: file.package.clone(), ..Default::default() },
         fun_ids: HashMap::new(),
         scope: Vec::new(),
@@ -75,7 +74,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
-    syms: &'a SymbolTable,
     ir: IrFile,
     fun_ids: HashMap<String, u32>,
     /// In-scope values: (name, value index, Kotlin type). A stack used as block scopes.
