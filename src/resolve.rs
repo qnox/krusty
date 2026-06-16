@@ -82,6 +82,9 @@ pub struct SymbolTable {
     /// Top-level extension functions: (receiver_descriptor, method_name) → Signature.
     /// Used to resolve `recv.method(args)` when no instance method matches.
     pub ext_funs: HashMap<(String, String), Signature>,
+    /// Top-level extension properties: (receiver_descriptor, prop_name) → (type, is_var). The
+    /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
+    pub ext_props: HashMap<(String, String), (Ty, bool)>,
     /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
@@ -711,6 +714,21 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     );
                 }
                 Decl::Property(p) => {
+                    // Extension property `val Recv.name: T get() = …`: register by (receiver
+                    // descriptor, name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
+                    if let Some(recv_ref) = &p.receiver {
+                        let recv_ty = ty_of_ref(recv_ref, &class_names, &Default::default(), diags);
+                        let ty = p.ty.as_ref().map(|r| ty_of_ref(r, &class_names, &Default::default(), diags))
+                            .or_else(|| match &p.getter {
+                                Some(FunBody::Expr(g)) => Some(infer_lit_ty(file, *g, &class_names, &fun_rets)),
+                                _ => None,
+                            })
+                            .unwrap_or(Ty::Error);
+                        if recv_ty != Ty::Error && ty != Ty::Error {
+                            table.ext_props.insert((recv_ty.descriptor(), p.name.clone()), (ty, p.is_var));
+                        }
+                        continue;
+                    }
                     // A top-level *computed* property (custom getter, no initializer) — needs a type
                     // annotation (no getter-return inference at top level yet); emitted as `getX()`.
                     let is_computed = p.getter.is_some() && p.init.is_none();
@@ -1324,11 +1342,22 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Property(p) => {
+                // For an extension property (`val Recv.name: T get() = …`), `this` inside the
+                // accessors is the receiver.
+                let prev_this = c.this_ty;
+                let recv_ty = p.receiver.as_ref().map(|r| c.resolve_ty(r));
+                if let Some(rt) = recv_ty {
+                    c.this_ty = Some(rt);
+                }
+                let prop_ty = p.ty.as_ref().map(|r| c.resolve_ty(r))
+                    .or_else(|| p.receiver.as_ref().map(|r| c.resolve_ty(r)).and_then(|rt|
+                        c.syms.ext_props.get(&(rt.descriptor(), p.name.clone())).map(|(t, _)| *t)))
+                    .unwrap_or(Ty::Error);
                 // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
                 // (Phase: top-level computed). Type-check the getter body against the declared type.
                 if let Some(g) = &p.getter {
                     let prev = c.ret_ty;
-                    c.ret_ty = p.ty.as_ref().map(|r| c.resolve_ty(r)).unwrap_or(Ty::Error);
+                    c.ret_ty = prop_ty;
                     match g {
                         FunBody::Expr(e) => { let gt = c.expr(*e); c.expect_assignable(c.ret_ty, gt, c.span(*e), "getter body"); }
                         FunBody::Block(b) => { let _ = c.expr(*b); }
@@ -1336,6 +1365,21 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                     c.ret_ty = prev;
                 }
+                // Extension-property setter body: bind the parameter and check with `this` = receiver.
+                if p.receiver.is_some() {
+                    if let Some(setter) = &p.setter {
+                        if let Some(body) = &setter.body {
+                            let prev = c.ret_ty;
+                            c.ret_ty = Ty::Unit;
+                            c.push_scope();
+                            c.declare(setter.param.as_deref().unwrap_or("value"), prop_ty, true);
+                            match body { FunBody::Expr(g) | FunBody::Block(g) => { let _ = c.expr(*g); } FunBody::None => {} }
+                            c.pop_scope();
+                            c.ret_ty = prev;
+                        }
+                    }
+                }
+                c.this_ty = prev_this;
                 if let Some(init) = p.init {
                     let it = c.expr(init);
                     if let Some((declared, _)) = syms.props.get(&p.name).copied().filter(|(t, _)| *t != Ty::Error) {
@@ -2567,6 +2611,10 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // Extension property: `recv.name` resolved by (receiver descriptor, name).
+        if let Some((ty, _)) = self.syms.ext_props.get(&(rt.descriptor(), name.to_string())) {
+            return *ty;
+        }
         self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
         Ty::Error
     }
@@ -3125,20 +3173,28 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(receiver);
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];
-                match rt {
-                    Ty::Error => {}
-                    Ty::Obj(internal) => match self.syms.prop_of(internal, &name) {
-                        Some((lty, is_var)) => {
-                            if !is_var {
-                                self.diags.error(span, "val cannot be reassigned".to_string());
+                // Extension-property write: `recv.name = value` for a `var` extension property.
+                if let Some((lty, is_var)) = self.syms.ext_props.get(&(rt.descriptor(), name.clone())).copied() {
+                    if !is_var {
+                        self.diags.error(span, "val cannot be reassigned".to_string());
+                    }
+                    self.expect_assignable(lty, vt, span, "assignment");
+                } else {
+                    match rt {
+                        Ty::Error => {}
+                        Ty::Obj(internal) => match self.syms.prop_of(internal, &name) {
+                            Some((lty, is_var)) => {
+                                if !is_var {
+                                    self.diags.error(span, "val cannot be reassigned".to_string());
+                                }
+                                self.expect_assignable(lty, vt, span, "assignment");
                             }
-                            self.expect_assignable(lty, vt, span, "assignment");
-                        }
-                        None => {
-                            self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
-                        }
-                    },
-                    _ => self.diags.error(span, format!("cannot assign to a member of '{}'", rt.name())),
+                            None => {
+                                self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
+                            }
+                        },
+                        _ => self.diags.error(span, format!("cannot assign to a member of '{}'", rt.name())),
+                    }
                 }
             }
             Stmt::AssignIndex { array, index, value } => {

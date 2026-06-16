@@ -293,6 +293,9 @@ pub enum ClassInit {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// Extension-property receiver type (`val String.foo: T` → `Some("String")`). The getter/setter
+    /// are emitted as static `getFoo(Recv)`/`setFoo(Recv, T)` methods, like an extension function.
+    pub receiver: Option<TypeRef>,
     pub ty: Option<TypeRef>,
     pub is_var: bool,
     /// `None` for a `lateinit var` (declared without an initializer; the backing field defaults to

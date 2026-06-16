@@ -335,7 +335,24 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
-        let name = self.ident_or_error("property name");
+        // Optional generic type parameters on an extension property (`val <T> T.foo: T`) — erased.
+        if self.at(TokenKind::Lt) {
+            self.parse_type_params();
+        }
+        let first = self.ident_or_error("property name");
+        // Optional extension receiver: `val Recv[<…>][?].name` (like an extension function).
+        let (receiver, name) = if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
+            let span = self.tok().span;
+            if self.at(TokenKind::Lt) {
+                self.parse_type_args(); // type args on the receiver — erased
+            }
+            let nullable = self.eat(TokenKind::Question);
+            self.expect(TokenKind::Dot, "'.'");
+            let recv = TypeRef { name: first, nullable, arg: None, span, fun_params: vec![] };
+            (Some(recv), self.ident_or_error("property name"))
+        } else {
+            (None, first)
+        };
         let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
         let init = if self.eat(TokenKind::Eq) {
             self.skip_newlines();
@@ -387,12 +404,13 @@ impl<'a> Parser<'a> {
             }
         }
         // A property with no initializer, no getter, and no backing-field need must be `lateinit`
-        // (or an abstract/interface property); otherwise it is unsupported.
-        if init.is_none() && getter.is_none() && setter.is_none() && !is_lateinit && !abstract_ok {
+        // (or an abstract/interface property); an extension property always has a getter, so it is
+        // exempt.
+        if init.is_none() && getter.is_none() && setter.is_none() && !is_lateinit && !abstract_ok && receiver.is_none() {
             self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        PropDecl { name, ty, is_var, init, is_lateinit, getter, setter, span: Span::new(start.lo, end.hi) }
+        PropDecl { name, receiver, ty, is_var, init, is_lateinit, getter, setter, span: Span::new(start.lo, end.hi) }
     }
 
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
