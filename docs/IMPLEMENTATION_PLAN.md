@@ -934,7 +934,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   representation + a resolution interface the `jvm` backend implements — is the next architectural
   step.
 
-## Phase 74 — Real grammar parsing (kill the delimiter-skipping hacks, start)  🚧
+## Phase 75 — Kill the remaining delimiter-skipping hacks  ✅
+- ✅ **`skip_type_args` → `parse_type_args`:** generic type-argument lists `< (out|in)? type | * ,+ >`
+  now parse through the real grammar, recursing via `parse_type` (so `Map<K, List<V>>` parses
+  correctly). Arguments are JVM-erased, so callers discard them — but parsing is real.
+- ✅ **`skip_nested_decl_body` → `parse_nested_type_decl`:** nested `class`/`object`/`interface`/
+  `data|enum|annotation class`/`sealed …` parse through the real per-kind parsers (recursively) and
+  are discarded (nested types still unsupported → a reference fails to resolve, never miscompiled).
+- ✅ **Annotation arguments** parse through a real `parse_annotation_args`/`parse_annotation_value`
+  (named args, array literals `[…]`, nested `@Anno`, and expression values incl. `Foo::class`),
+  replacing the balanced-`)` token skip.
+- ✅ **Enum-body** nested types / secondary ctors and the **`skip_balanced`/`skip_balanced_braces`**
+  helpers removed entirely — no depth-counting delimiter skips remain in the parser.
+- ✅ Full suite 178 green. Box conformance **350 OK / 4 FAIL** (FAIL 9→4: the secondary-ctor and
+  `inner class` cases now reject cleanly instead of miscompiling; OK 356→350 as a few annotation/
+  nested-heavy tests that the old lenient skip tolerated now reject). Remaining 4 FAIL are unrelated
+  pre-existing miscompiles (devirtualization, inc/dec-two-receivers, two VerifyErrors).
+
+## Phase 74 — Secondary constructors via real grammar; reject inner classes  ✅
 - ✅ **Secondary constructors parse through real productions.** Replaced the `skip_balanced(LParen,
   RParen)` / `skip_balanced(LBrace, RBrace)` token-skipping with proper parsing: extracted
   `parse_param_list` (the real parameter grammar, shared with `parse_fun`) and `parse_call_arguments`
@@ -944,9 +961,6 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   not skipped → no miscompile). Fixes the secondaryConstructors/sealed-delegating box FAILs.
 - ✅ **`inner class` rejected** (was silently dropped → VerifyError when used): an inner class needs
   the outer-instance capture (`Test this$0` + qualified `new`) krusty doesn't model.
-- ⬜ **Remaining delimiter-skipping to convert to real productions:** `skip_type_args` (generic type
-  arguments — the biggest, 6+ sites), `skip_nested_decl_body` (nested type declarations),
-  `skip_balanced` in the `fun interface` handler, `skip_balanced_braces` (enum-entry bodies).
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
