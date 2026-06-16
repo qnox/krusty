@@ -1139,10 +1139,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 
 ## Phase 94 — Primitive-array init lambda `IntArray(n) { i -> … }`  ✅
 - ✅ The size constructor with an init lambda (`IntArray(n) { it * 2 }`, `CharArray(n) { … }`, …)
-  types the lambda parameter (the index) as `Int` and inlines the body into a counted fill loop
-  (element value evaluated into a temp first, so a branchy body runs on an empty stack — frame-safe).
-- ✅ TDD: `tests/array_init_lambda_e2e.rs` (Int/Char arrays, branchy body, on the JVM). Full suite
-  183 green. Box conformance **376 OK / 0 FAIL** held.
+  types the lambda parameter (the index) as `Int` and inlines the body into a counted fill loop.
+- ✅ TDD: `tests/array_init_lambda_e2e.rs` (Int/Char arrays on the JVM). Box conformance held.
+
+## Phase 95 — Frame-safe guard: reject branchy array-init bodies  ✅
+- ⚠️ Phase 94's inline fill loop computes its own `StackMapTable` frames. A *branching* body
+  (`if`/`when`/`try`/elvis/safe-call) introduces merge frames the inline loop mishandles —
+  `IntArray(3) { if (it==1) 10 else it }` produced a `VerifyError` ("locals[N] top vs integer").
+- ✅ Fix: `expr_branches()` in `resolve.rs`; `check_array_builtin` rejects a branchy init body
+  (falls through to the unsupported path — **never miscompile**). Simple bodies (`it`, `it*2`,
+  constants) keep working. A proper fix lives in the `ast → krusty-ir` loop-lowering pass.
+- ✅ TDD: e2e uses a non-branchy body. Full suite green. Box conformance **376 OK / 0 FAIL**.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
