@@ -1485,6 +1485,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   emitter instead of miscompiling. IR→JVM corpus **34/34 run-verified OK, 0 FAIL**; JS 29 OK; lower
   count 32→35. e2e: a top-level `val` + mutated `var` run `OK` on java and node.
 
+- ✅ **Classpath `scan_types` is process-globally memoized** (keyed by the entry path set). The JDK
+  jimage (`java.base`) and stdlib jars are identical across every compiled file, but the harness
+  builds a fresh `Classpath` per file, so the whole-JDK scan ran ~80× (~2.5 s each → it dominated
+  wall time). Now the first file pays, the rest reuse. Box suite: **1500 files 75 s → 12.6 s** (sigs
+  thread-sum 199 s → 7.4 s); the **full 10 009-file corpus now runs in 59 s** (was impractical),
+  re-establishing the production drop-in baseline: **431 box()=OK, 0 FAIL** (~4.3% — the direct
+  emitter never miscompiles, it is just narrow). This is the metric the drop-in goal is measured by;
+  the IR path (34/34) is the future production backend catching up to it.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
