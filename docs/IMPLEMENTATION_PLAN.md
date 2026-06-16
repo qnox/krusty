@@ -1529,6 +1529,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   the **0-FAIL** invariant. This and value classes are each a large, intricate, byte-exact codegen
   phase; the corpus's alphabetically-first `annotations/` dir front-loads exactly these.
 
+- ✅ **`Object` methods on any reference type** (`hashCode`/`equals`/`toString` on user classes,
+  data classes, `Any`, etc.) — resolve + emit via virtual dispatch (so overrides still win). Fixed
+  two latent bugs this exposed: data-class member `hashCode` is now null-safe (`Objects.hashCode`,
+  was NPE on a null member — `genericNull`), and `toString` lowers through `String.valueOf` to match
+  Kotlin's null-safe `toString` (`null.toString() == "null"` — `noCoercion…`). Function/lambda
+  receivers are excluded (their `hashCode` identity needs lambda-singleton codegen, not yet done).
+  Production drop-in: **442 → 455 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

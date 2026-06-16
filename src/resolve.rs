@@ -2873,11 +2873,10 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                 }
-                // `hashCode`/`toString`/`equals` on an annotation instance are inherited from `Object`
-                // (the annotation impl provides JLS versions). Narrowly scoped to annotation receivers
-                // so we don't enable these on arbitrary references (which can hide null/ semantics bugs).
-                let is_ann_recv = rt.obj_internal().map_or(false, |i| self.syms.classes.values().any(|cs| cs.internal == i && cs.is_annotation));
-                if is_ann_recv {
+                // `hashCode`/`toString`/`equals` are inherited from `Object` by every reference type.
+                // (Function/lambda receivers excluded: their identity semantics need lambda-singleton
+                // codegen krusty doesn't do yet — skip rather than miscompile a `.hashCode()` on one.)
+                if rt.is_reference() && !matches!(rt, Ty::Fun(_)) {
                     match (name.as_str(), arg_tys.len()) {
                         ("hashCode", 0) => return Ty::Int,
                         ("toString", 0) => return Ty::String,
