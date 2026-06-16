@@ -1373,6 +1373,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Verified on `java -Xverify:all` AND `node` (`when (n) { 0->; 1,2->; else-> }`, `-5`, `!(a>0)`).
   JS box conformance **13 → 17 IR-lowered / 17 OK / 0 FAIL**. 193 unit tests green.
 
+## Phase 113 — Double/Float/Char primitives in the IR  ✅
+- ✅ `ir_lower` lowers `Double`/`Float`/`Char` literals; the JVM backend emits the native
+  instructions (`dadd`/`fadd`/…, `dcmpg`/`fcmpg` for compares, `push_double`/`push_float`), the JS
+  backend numeric literals (`Char` as a 1-char string). Verified on `java -Xverify:all` AND `node`
+  (`2.5 * 4.0 + 1.0`, `1.5f + 0.5f`, `'q' == 'q'`).
+- JS box conformance steady at 17/17, 0 FAIL (these box tests need more stdlib to lower); the IR's
+  numeric breadth grows with no regression. 193 unit tests green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

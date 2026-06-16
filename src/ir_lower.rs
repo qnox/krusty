@@ -276,6 +276,9 @@ impl<'a> Lower<'a> {
         Some(match self.afile.expr(e).clone() {
             Expr::IntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as i32))),
             Expr::LongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
+            Expr::DoubleLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Double(v))),
+            Expr::FloatLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Float(v))),
+            Expr::CharLit(c) => self.ir.add_expr(IrExpr::Const(IrConst::Char(c))),
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
             Expr::Name(n) => {
