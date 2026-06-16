@@ -1782,6 +1782,8 @@ impl<'a> Checker<'a> {
                         let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
                         if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                             Ty::String
+                        } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
+                            Ty::Int // Int (not a reference), so safe-call rejection fires below
                         } else if rt == Ty::String {
                             resolve_string_instance(&name, &arg_tys).map(|(_, r)| r).unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal) = rt {
@@ -2471,6 +2473,10 @@ impl<'a> Checker<'a> {
                     // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
                     if fname == "StringBuilder" && matches!(arg_tys.as_slice(), [] | [Ty::String] | [Ty::Int]) {
                         return Ty::obj("java/lang/StringBuilder");
+                    }
+                    // `Any()` constructs java.lang.Object (Kotlin's root type).
+                    if fname == "Any" && arg_tys.is_empty() {
+                        return Ty::obj("java/lang/Object");
                     }
                 }
                 // Unqualified call to a sibling instance method: `foo()` → `this.foo()`.

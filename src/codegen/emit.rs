@@ -3834,6 +3834,16 @@ impl<'a> MethodEmitter<'a> {
                     self.emit_new_array(elem, code, cw);
                 }
             }
+            // `Any()` constructs java.lang.Object (Kotlin's root type).
+            Expr::Name(fname)
+                if fname == "Any" && args.is_empty() && !self.slots.contains_key(&fname) && !self.syms.funs.contains_key(&fname) =>
+            {
+                let obj = cw.class_ref("java/lang/Object");
+                code.new_obj(obj);
+                code.dup();
+                let m = cw.methodref("java/lang/Object", "<init>", "()V");
+                code.invokespecial(m, 0, 0);
+            }
             // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
             Expr::Name(fname)
                 if fname == "StringBuilder" && !self.slots.contains_key(&fname) && !self.syms.funs.contains_key(&fname) =>
