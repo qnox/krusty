@@ -63,6 +63,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume a `{ … }` block, balancing nested braces. Assumes the opening `{` is the current token.
+    fn skip_balanced_braces(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match self.kind() {
+                TokenKind::LBrace => { depth += 1; self.bump(); }
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    self.bump();
+                    if depth == 0 { break; }
+                }
+                TokenKind::Eof => break,
+                _ => { self.bump(); }
+            }
+        }
+    }
+
     // ---- file / decls ----
     fn parse_file(&mut self) {
         self.skip_newlines();
@@ -263,6 +280,8 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `abstract_ok` — allow missing initializer (abstract/interface props, class/object body props
+    /// with init blocks, etc.). Top-level properties always require an initializer.
     fn parse_top_property(&mut self, is_lateinit: bool, abstract_ok: bool) -> PropDecl {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
@@ -414,6 +433,33 @@ impl<'a> Parser<'a> {
                 } else { Vec::new() };
                 match self.kind() {
                     TokenKind::KwFun => methods.push(self.parse_fun(emods.iter().any(|m| m == "inline"), emods.iter().any(|m| m == "final"))),
+                    // Nested class/object/interface and secondary constructors: skip the entire
+                    // declaration by consuming tokens until balanced braces settle.
+                    TokenKind::KwClass => {
+                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
+                            self.bump();
+                        }
+                        if self.at(TokenKind::LBrace) {
+                            self.skip_balanced_braces();
+                        }
+                    }
+                    TokenKind::Ident if self.text() == "constructor" => {
+                        self.diags.error(self.tok().span, "krusty: secondary constructors in enum classes are not supported");
+                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
+                            self.bump();
+                        }
+                        if self.at(TokenKind::LBrace) {
+                            self.skip_balanced_braces();
+                        }
+                    }
+                    TokenKind::Ident if matches!(self.text(), "object" | "interface" | "companion") => {
+                        while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Newline | TokenKind::RBrace | TokenKind::Eof) {
+                            self.bump();
+                        }
+                        if self.at(TokenKind::LBrace) {
+                            self.skip_balanced_braces();
+                        }
+                    }
                     _ => break,
                 }
             }
@@ -484,12 +530,14 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::LBrace) {
                 let _ = self.parse_block_expr();
             }
-            return FunDecl { name: "<fun-interface>".to_string(), params: vec![], ret: None,
+            return FunDecl { name: "<fun-interface>".to_string(), receiver: None, params: vec![], ret: None,
                 body: FunBody::None, type_params: vec![], non_null_type_params: Default::default(),
                 span: start, is_inline: false, is_final: false };
         }
         let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
-        let name = if self.at(TokenKind::Ident) {
+        // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
+        // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
+        let first_name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
             self.bump();
             n
@@ -497,43 +545,26 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected function name");
             "<error>".to_string()
         };
-        // Detect extension function: after the (potential receiver) name, if we see `.`, `<`, or `?`
-        // this is `fun RecvType.foo(...)` / `fun RecvType<T>.foo(...)` / `fun RecvType?.foo(...)`.
-        // krusty doesn't support extension functions; skip the entire declaration.
-        if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
-            self.diags.error(start, "krusty: extension functions are not supported");
-            self.skip_type_args();          // skip `<...>` on receiver type if parameterized
-            self.eat(TokenKind::Question);  // skip `?` on nullable receiver
-            if self.eat(TokenKind::Dot) && self.at(TokenKind::Ident) { self.bump(); } // skip actual name
-            // Skip parameter list `(...)`.
-            if self.eat(TokenKind::LParen) {
-                let mut depth = 1usize;
-                loop {
-                    match self.kind() {
-                        TokenKind::LParen => { depth += 1; self.bump(); }
-                        TokenKind::RParen => { depth -= 1; self.bump(); if depth == 0 { break; } }
-                        TokenKind::Eof => break,
-                        _ => { self.bump(); }
-                    }
-                }
-            }
-            // Skip return type annotation.
-            if self.eat(TokenKind::Colon) { let _ = self.parse_type(); }
-            // Skip `where` clause (bounds like `where R : I1, R : I2`).
-            if self.at(TokenKind::Ident) && self.text() == "where" {
-                while !matches!(self.kind(), TokenKind::LBrace | TokenKind::Eq | TokenKind::Newline | TokenKind::Eof) {
-                    self.bump();
-                }
-            }
-            // Skip body: expression body `= expr` (single-line) or block body `{ ... }`.
-            if self.eat(TokenKind::Eq) {
-                while !matches!(self.kind(), TokenKind::Newline | TokenKind::Eof) { self.bump(); }
-            } else if self.at(TokenKind::LBrace) {
-                let _ = self.parse_block_expr();
-            }
-            return FunDecl { name: "<extension>".to_string(), params: vec![], ret: None,
-                body: FunBody::None, type_params, non_null_type_params, span: start, is_inline, is_final };
-        }
+        let (receiver, name) = if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
+            // `fun RecvType<...>?.name(...)` — extension function.
+            let span = self.tok().span;
+            let mut recv_nullable = false;
+            if self.at(TokenKind::Lt) { self.skip_type_args(); }  // skip type args on receiver
+            if self.eat(TokenKind::Question) { recv_nullable = true; }
+            self.expect(TokenKind::Dot, "'.'");
+            let recv_ty = TypeRef { name: first_name, nullable: recv_nullable, arg: None, span, fun_params: vec![] };
+            let fun_name = if self.at(TokenKind::Ident) {
+                let n = self.text().to_string();
+                self.bump();
+                n
+            } else {
+                self.diags.error(self.tok().span, "expected extension function name");
+                "<error>".to_string()
+            };
+            (Some(recv_ty), fun_name)
+        } else {
+            (None, first_name)
+        };
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
@@ -582,7 +613,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
+        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -651,11 +682,14 @@ impl<'a> Parser<'a> {
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
+                let is_abstract = mods.iter().any(|m| m == "abstract");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property(lateinit, false);
+                        // Non-abstract body props may omit the initializer; init blocks supply the value.
+                        // Abstract body props (unsupported) remain rejected via abstract_ok=false.
+                        let p = self.parse_top_property(lateinit, !is_abstract);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -816,7 +850,7 @@ impl<'a> Parser<'a> {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property(lateinit, false);
+                        let p = self.parse_top_property(lateinit, true); // init blocks may supply the value
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }

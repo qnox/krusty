@@ -280,10 +280,6 @@ fn emit_enum(class: &ClassDecl, file: &File, info: &TypeInfo, internal: &str, sy
     let cidx = cw.class_ref(internal);
     let self_init = cw.methodref(internal, "<init>", &ctor_desc);
     for (i, entry) in class.enum_entries.iter().enumerate() {
-        cl.new_obj(cidx);
-        cl.dup();
-        cl.push_string(entry, &mut cw);
-        cl.push_int(i as i32, &mut cw);
         let args = class.enum_entry_args.get(i).cloned().unwrap_or_default();
         // Entry arguments are emitted with the enum as the current class, so an unqualified name
         // (e.g. a top-level `val`) would resolve to the wrong owner. Restrict to name-free
@@ -291,9 +287,25 @@ fn emit_enum(class: &ClassDecl, file: &File, info: &TypeInfo, internal: &str, sy
         if args.iter().any(|a| expr_contains_name(file, *a)) {
             diags.error(file.expr_spans[args[0].0 as usize], "krusty: enum entry arguments referencing a name are not supported".to_string());
         }
+        // Evaluate args FIRST (with empty stack) so `emit_bool` / frame registration work
+        // correctly. Store results in temp locals, then push the enum object.
         let mut ie = MethodEmitter::new(file, info, syms, internal, &imports, diags);
+        let mut arg_slots: Vec<(u16, Ty)> = Vec::new();
         for (a, ty) in args.iter().zip(&ctor_param_tys) {
+            let slot = ie.alloc_temp(*ty);
+            ie.init_temp(*ty, slot, &mut cl, &mut cw);
             ie.emit_expr_as(*a, *ty, &mut cl, &mut cw);
+            if !ie.expr_diverges(*a) {
+                store_local(*ty, slot, &mut cl);
+            }
+            arg_slots.push((slot, *ty));
+        }
+        cl.new_obj(cidx);
+        cl.dup();
+        cl.push_string(entry, &mut cw);
+        cl.push_int(i as i32, &mut cw);
+        for (slot, ty) in &arg_slots {
+            load_local(*ty, *slot, &mut cl);
         }
         let aw: i32 = ctor_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
         cl.invokespecial(self_init, 2 + aw, 0);
@@ -830,6 +842,7 @@ pub fn emit_class(
             .unwrap_or(Ty::Error);
         let getter_fn = FunDecl {
             name: format!("get{}", capitalize(&bp.name)),
+            receiver: None,
             params: Vec::new(),
             ret: bp.ty.clone(),
             body: getter.clone(),
@@ -1865,6 +1878,10 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_fun(&mut self, f: &FunDecl, cw: &mut ClassWriter) {
+        if let Some(recv_ref) = &f.receiver {
+            self.emit_ext_fun(f, recv_ref, cw);
+            return;
+        }
         let mut sig = match self.syms.funs.get(&f.name) {
             Some(s) => s.clone(),
             None => return,
@@ -1892,6 +1909,43 @@ impl<'a> MethodEmitter<'a> {
         code.ensure_locals(self.next_slot);
         code.link();
         cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &f.name, &method_descriptor(&sig.params, sig.ret), &code);
+    }
+
+    /// Emit a top-level extension function as a static method with the receiver as first param.
+    /// `this` inside the body maps to slot 0 via `slots["this"]` (works for primitives too).
+    fn emit_ext_fun(&mut self, f: &FunDecl, recv_ref: &crate::ast::TypeRef, cw: &mut ClassWriter) {
+        let recv_ty = resolve_ty(recv_ref, self.syms);
+        let recv_desc = recv_ty.descriptor();
+        let sig = match self.syms.ext_funs.get(&(recv_desc, f.name.clone())) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        self.ret_ty = sig.ret;
+        self.tparams = f.type_params.iter().map(|n| (n.clone(), f.non_null_type_params.contains(n))).collect();
+        // Register receiver as slot 0 under "this" — load_local handles int/ref/long/etc. correctly.
+        let recv_words = slot_words(recv_ty);
+        self.slots.insert("this".to_string(), (0, recv_ty));
+        self.next_slot = recv_words;
+        for (p, ty) in f.params.iter().zip(&sig.params) {
+            self.alloc_slot(&p.name, *ty);
+        }
+        let mut code = CodeBuilder::new(self.next_slot);
+        match &f.body {
+            FunBody::Expr(e) => {
+                self.emit_expr_as(*e, sig.ret, &mut code, cw);
+                self.emit_return(sig.ret, &mut code);
+            }
+            FunBody::Block(b) => {
+                self.emit_block_as_body(*b, &mut code, cw);
+            }
+            FunBody::None => self.emit_default_return(sig.ret, &mut code, cw),
+        }
+        code.ensure_locals(self.next_slot);
+        code.link();
+        // Descriptor: (RecvType Params…)Ret — receiver is first param.
+        let mut all_params = vec![recv_ty];
+        all_params.extend_from_slice(&sig.params);
+        cw.add_method(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, &f.name, &method_descriptor(&all_params, sig.ret), &code);
     }
 
     /// A `{ ... }` used directly as a function body: emit statements; a trailing expr (if the fn is
@@ -2456,6 +2510,25 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::SafeCall { receiver, name, args } => {
+                // Primitive receiver: safe call on a non-nullable type is a direct invokestatic
+                // (recorded in ext_calls by the resolver).
+                if self.info.ext_calls.contains_key(&e) {
+                    let (raw_owner, jvm_name, desc) = self.info.ext_calls[&e].clone();
+                    let owner = if raw_owner == "$local" { self.file_facade.clone() } else { raw_owner };
+                    let recv_ty = self.info.ty(receiver);
+                    let ret_desc = desc[desc.find(')').unwrap() + 1..].to_string();
+                    let ret = crate::resolve::desc_to_ty(&ret_desc);
+                    self.emit_expr(receiver, code, cw);
+                    if let Some(call_args) = &args {
+                        for &a in call_args { self.emit_expr(a, code, cw); }
+                    }
+                    let recv_words = slot_words(recv_ty) as i32;
+                    let arg_words: i32 = args.as_ref().map(|a| a.iter().map(|x| slot_words(self.info.ty(*x)) as i32).sum()).unwrap_or(0);
+                    let m = cw.methodref(&owner, &jvm_name, &desc);
+                    code.invokestatic(m, recv_words + arg_words, slot_words(ret) as i32);
+                    let _ = name;
+                    return;
+                }
                 let rt = self.info.ty(receiver);
                 let result = self.info.ty(e);
                 // Use temp slots so all branch targets (lnull, end) have empty operand stacks.
@@ -2947,6 +3020,14 @@ impl<'a> MethodEmitter<'a> {
                     false
                 }
             }
+            // An if-else diverges when both branches always diverge.
+            Expr::If { then_branch, else_branch, .. } => {
+                if let Some(eb) = else_branch {
+                    self.expr_diverges(*then_branch) && self.expr_diverges(*eb)
+                } else {
+                    false
+                }
+            }
             // A try diverges when its body AND every catch handler always diverge.
             // (The finally body doesn't suppress exceptions, so it doesn't affect divergence.)
             Expr::Try { body, catches, .. } => {
@@ -2996,8 +3077,11 @@ impl<'a> MethodEmitter<'a> {
 
     /// Emit `if (subject == cond) goto target`, with subject in local `slot` of type `st`.
     fn emit_eq_jump(&mut self, slot: u16, st: Ty, cond: ExprId, target: Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let ct = self.info.ty(cond);
         match st {
             Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => {
+                // A null literal can never equal a primitive — the arm is unreachable; emit nothing.
+                if ct == Ty::Null { return; }
                 code.iload(slot);
                 self.emit_expr_as(cond, st, code, cw);
                 self.rec(target, code, cw);
@@ -3026,8 +3110,20 @@ impl<'a> MethodEmitter<'a> {
             }
             _ => {
                 // reference: null-safe `Objects.equals(subject, cond)` (Kotlin's `==`).
-                code.aload(slot);
-                self.emit_expr(cond, code, cw);
+                // If the condition expression emits branch instructions (e.g. a nested `when`),
+                // its frame registrations assume an empty stack. Evaluate it FIRST and store the
+                // result in a temp so the stack is empty during the condition emit.
+                if self.expr_uses_frames(cond) {
+                    let tmp = self.alloc_temp(ct);
+                    self.init_temp(ct, tmp, code, cw);
+                    self.emit_expr(cond, code, cw);
+                    store_local(ct, tmp, code);
+                    code.aload(slot);
+                    load_local(ct, tmp, code);
+                } else {
+                    code.aload(slot);
+                    self.emit_expr(cond, code, cw);
+                }
                 let eqm = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
                 code.invokestatic(eqm, 2, 1);
                 self.rec(target, code, cw);
@@ -3213,6 +3309,22 @@ impl<'a> MethodEmitter<'a> {
     }
 
     fn emit_arith_expr(&mut self, e: ExprId, op: BinOp, lhs: ExprId, rhs: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        // Extension operator override recorded by the resolver.
+        if let Some((raw_owner, jvm_name, desc)) = self.info.ext_calls.get(&e).cloned() {
+            let owner = if raw_owner == "$local" { self.file_facade.clone() } else { raw_owner };
+            let lhs_ty = self.info.ty(lhs);
+            let rhs_ty = self.info.ty(rhs);
+            let ret_desc = desc[desc.find(')').unwrap() + 1..].to_string();
+            let ret = crate::resolve::desc_to_ty(&ret_desc);
+            self.emit_expr(lhs, code, cw);
+            self.emit_expr(rhs, code, cw);
+            let lw = slot_words(lhs_ty) as i32;
+            let rw = slot_words(rhs_ty) as i32;
+            let m = cw.methodref(&owner, &jvm_name, &desc);
+            code.invokestatic(m, lw + rw, slot_words(ret) as i32);
+            let _ = op;
+            return;
+        }
         let result = self.info.ty(e);
         if op == BinOp::Add && result == Ty::String {
             self.emit_concat(lhs, rhs, code, cw);
@@ -3725,12 +3837,14 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref(internal, &name, &desc);
                 code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
-            // Extension / static method from classpath (e.g. Kotlin stdlib StringsKt.uppercase).
+            // Extension / static method from classpath or file-local extension function.
             // Receiver is pushed first, then the rest of the args → invokestatic.
             Expr::Member { receiver, .. }
                 if self.info.ext_calls.contains_key(&e) =>
             {
-                let (owner, jvm_name, desc) = self.info.ext_calls[&e].clone();
+                let (raw_owner, jvm_name, desc) = self.info.ext_calls[&e].clone();
+                // "$local" is a sentinel for a file-local extension function; replace with the facade.
+                let owner = if raw_owner == "$local" { self.file_facade.clone() } else { raw_owner };
                 let recv_ty = self.info.ty(receiver);
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
                 let ret_desc = desc[desc.find(')').unwrap() + 1..].to_string();
