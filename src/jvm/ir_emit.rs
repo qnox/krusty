@@ -21,6 +21,7 @@ pub fn emit_all(ir: &IrFile, facade: &str) -> Vec<(String, Vec<u8>)> {
         }
         emit_method(ir, i as u32, facade, facade, &mut cw, false);
     }
+    emit_statics(ir, facade, &mut cw);
     out.push((facade.to_string(), cw.finish()));
     // Each class.
     for c in &ir.classes {
@@ -37,7 +38,31 @@ pub fn emit_file(ir: &IrFile, facade: &str) -> Vec<u8> {
             emit_method(ir, i as u32, facade, facade, &mut cw, false);
         }
     }
+    emit_statics(ir, facade, &mut cw);
     cw.finish()
+}
+
+/// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
+/// their initializers in declaration order.
+fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
+    if ir.statics.is_empty() {
+        return;
+    }
+    for s in &ir.statics {
+        cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
+    }
+    let mut e = Emitter { ir, cw, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit };
+    let mut code = CodeBuilder::new(0);
+    for s in &ir.statics {
+        e.emit_value(s.init, &mut code);
+        let jt = ir_ty_to_jvm(&s.ty);
+        let fref = e.cw.fieldref(facade, &s.name, &jt.descriptor());
+        code.putstatic(fref, slot_words(jt) as i32);
+    }
+    code.ret_void();
+    code.ensure_locals(e.next_slot);
+    code.link();
+    e.cw.add_method(0x0008 /* STATIC */, "<clinit>", "()V", &code);
 }
 
 fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
@@ -182,6 +207,15 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
                 code.putfield(fref, slot_words(jt) as i32);
             }
+            IrExpr::SetStatic { index, value } => {
+                let s = &self.ir.statics[index as usize];
+                let jt = ir_ty_to_jvm(&s.ty);
+                let name = s.name.clone();
+                let facade = self.facade.clone();
+                self.emit_value(value, code);
+                let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
+                code.putstatic(fref, slot_words(jt) as i32);
+            }
             IrExpr::While { cond, body } => {
                 let start = code.new_label();
                 let end = code.new_label();
@@ -234,6 +268,14 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
                 code.getfield(fref, slot_words(jt) as i32);
+            }
+            IrExpr::GetStatic(i) => {
+                let s = &self.ir.statics[*i as usize];
+                let jt = ir_ty_to_jvm(&s.ty);
+                let name = s.name.clone();
+                let facade = self.facade.clone();
+                let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
+                code.getstatic(fref, slot_words(jt) as i32);
             }
             IrExpr::New { class, args } => {
                 let c = &self.ir.classes[*class as usize];
@@ -645,6 +687,7 @@ impl<'a> Emitter<'a> {
             },
             IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
             IrExpr::GetField { class, index, .. } => ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1),
+            IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
             IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];

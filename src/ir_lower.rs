@@ -31,6 +31,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         ir: IrFile { package: file.package.clone(), ..Default::default() },
         fun_ids: HashMap::new(),
         classes: HashMap::new(),
+        statics: HashMap::new(),
         scope: Vec::new(),
         next_value: 0,
         cur_class: None,
@@ -41,6 +42,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         match file.decl(d) {
             Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
             Decl::Class(c) if is_simple_class(c) => {}
+            Decl::Property(p) if is_plain_body_prop(p) => {}
             _ => return None,
         }
     }
@@ -100,6 +102,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
             let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None });
             lo.fun_ids.insert(f.name.clone(), id);
+        }
+    }
+    // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
+    // any body so a function may read a top-level property as `GetStatic`.
+    for &d in &file.decls {
+        if let Decl::Property(p) = file.decl(d) {
+            let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
+            let idx = lo.statics.len() as u32;
+            lo.statics.insert(p.name.clone(), (idx, ty));
         }
     }
 
@@ -177,6 +188,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
             }
+            Decl::Property(p) => {
+                lo.scope.clear();
+                lo.next_value = 0;
+                lo.cur_class = None;
+                let (_, ty) = lo.statics[&p.name].clone();
+                let ir_ty = ty_to_ir(ty);
+                let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
+                lo.ir.statics.push(crate::ir::IrStatic { name: p.name.clone(), ty: ir_ty, init });
+            }
             _ => {}
         }
     }
@@ -211,6 +231,8 @@ struct Lower<'a> {
     ir: IrFile,
     fun_ids: HashMap<String, u32>,
     classes: HashMap<String, ClassInfo>,
+    /// Top-level property name → (index into `ir.statics`, type).
+    statics: HashMap<String, (u32, Ty)>,
     scope: Vec<(String, u32, Ty)>,
     next_value: u32,
     cur_class: Option<String>,
@@ -242,6 +264,10 @@ impl<'a> Lower<'a> {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
         } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
+        } else if at.is_primitive() && !target_ref && *target != IrType::Error && ty_to_ir(at) != *target {
+            // Primitive widening/narrowing (`Int` → `Long`) isn't modeled yet — bail so the file falls
+            // back to the direct emitter rather than putting an `Int` into a `Long` slot.
+            None
         } else {
             Some(e)
         }
@@ -325,6 +351,9 @@ impl<'a> Lower<'a> {
                 if let Some((v, _)) = self.lookup(&name) {
                     let val = self.expr(value)?;
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
+                } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.ir.add_expr(IrExpr::SetStatic { index: idx, value: val }))
                 } else {
                     // Unqualified write to a `var` field of the enclosing class (`this.<field> = …`).
                     let (this_v, _) = self.lookup("this")?;
@@ -417,6 +446,8 @@ impl<'a> Lower<'a> {
             Expr::Name(n) => {
                 if let Some((v, _)) = self.lookup(&n) {
                     self.ir.add_expr(IrExpr::GetValue(v))
+                } else if let Some(&(idx, _)) = self.statics.get(&n) {
+                    self.ir.add_expr(IrExpr::GetStatic(idx))
                 } else {
                     // Unqualified field of the enclosing class (`this.<field>`).
                     let (this_v, _) = self.lookup("this")?;
