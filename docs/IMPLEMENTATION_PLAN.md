@@ -1064,6 +1064,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `check_lambda_with_types`, Phase 82). Was a parse error ("expected an expression").
 - ✅ Full suite 182 green. Box conformance **369 OK / 0 FAIL** (+2).
 
+## Phase 84 — Member methods with function-type parameters (HOF methods)  ✅
+- ✅ Class/companion method signatures now compute `lambda_param_types` (was empty), and the instance
+  method-call site types lambda arguments against the method's `lambda_param_types` (so `it`/`x`
+  resolve) — mirroring the free-function HOF path. `C().call { it * 2 }` works end-to-end.
+- ✅ Full suite 182 green. Box conformance **369 OK / 0 FAIL** held.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
