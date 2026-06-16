@@ -472,6 +472,22 @@ impl<'a> Parser<'a> {
     fn parse_fun(&mut self, is_inline: bool, is_final: bool) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
+        // `fun interface` is a SAM/functional interface declaration — not a regular function.
+        // Skip the entire interface body with a clean unsupported-feature message.
+        if self.at(TokenKind::Ident) && self.text() == "interface" {
+            self.diags.error(start, "krusty: 'fun interface' (SAM interfaces) are not supported");
+            self.bump(); // 'interface'
+            if self.at(TokenKind::Ident) { self.bump(); } // interface name
+            self.skip_type_args();
+            let (supertypes, _, _) = self.parse_supertypes();
+            let _ = supertypes;
+            if self.at(TokenKind::LBrace) {
+                let _ = self.parse_block_expr();
+            }
+            return FunDecl { name: "<fun-interface>".to_string(), params: vec![], ret: None,
+                body: FunBody::None, type_params: vec![], non_null_type_params: Default::default(),
+                span: start, is_inline: false, is_final: false };
+        }
         let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
@@ -701,6 +717,14 @@ impl<'a> Parser<'a> {
                     base_args = args;
                 } else if !effective.is_empty() {
                     ifaces.push(effective);
+                }
+                // Class delegation: `: Iface by DelegateExpr` — not supported (would silently
+                // mis-implement delegated methods). Skip but mark as unsupported so the file is
+                // correctly excluded from compilation.
+                if self.at(TokenKind::Ident) && self.text() == "by" {
+                    self.diags.error(self.tok().span, "krusty: class delegation ('by' clause) is not supported");
+                    self.bump(); // 'by'
+                    let _ = self.parse_expr();
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
