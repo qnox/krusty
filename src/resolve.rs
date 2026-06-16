@@ -888,6 +888,21 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     }
 }
 
+/// Type of a primitive-type companion constant: `Int.MAX_VALUE`, `Long.MIN_VALUE`, etc.
+fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
+    match (prim, field) {
+        ("Int", "MAX_VALUE" | "MIN_VALUE" | "SIZE_BITS" | "SIZE_BYTES") => Some(Ty::Int),
+        ("Long", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Long),
+        ("Long", "SIZE_BITS" | "SIZE_BYTES") => Some(Ty::Int),
+        ("Short", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Short),
+        ("Byte", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Byte),
+        ("Char", "MAX_VALUE" | "MIN_VALUE") => Some(Ty::Char),
+        ("Float", "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY") => Some(Ty::Float),
+        ("Double", "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY") => Some(Ty::Double),
+        _ => None,
+    }
+}
+
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
 fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
     match file.expr(e) {
@@ -898,6 +913,13 @@ fn infer_lit_ty(file: &File, e: ExprId) -> Ty {
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        Expr::Member { receiver, name } => {
+            if let Expr::Name(prim) = file.expr(*receiver) {
+                prim_companion_ty(prim, name).unwrap_or(Ty::Error)
+            } else {
+                Ty::Error
+            }
+        }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
             UnOp::Neg => infer_lit_ty(file, *operand),
@@ -1843,6 +1865,14 @@ impl<'a> Checker<'a> {
                 self.check_binary(op, lt, rt, self.span(e))
             }
             Expr::Member { receiver, name } => {
+                // Primitive companion constants: `Int.MAX_VALUE`, `Long.MIN_VALUE`, etc.
+                if let Expr::Name(prim) = self.file.expr(receiver).clone() {
+                    if self.lookup(&prim).is_none() {
+                        if let Some(ty) = prim_companion_ty(&prim, &name) {
+                            return self.set(e, ty);
+                        }
+                    }
+                }
                 // `EnumName.ENTRY` — a static enum entry access (receiver is the enum type name).
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
                     if self.lookup(&en).is_none() {

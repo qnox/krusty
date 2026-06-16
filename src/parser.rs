@@ -1523,7 +1523,12 @@ impl<'a> Parser<'a> {
             TokenKind::IntLit => {
                 let v = parse_int_literal(self.text());
                 self.bump();
-                self.file.add_expr(Expr::IntLit(v), span)
+                // Values outside the i32 range are Long literals in Kotlin (no L suffix needed).
+                if v > i32::MAX as i64 || v < i32::MIN as i64 {
+                    self.file.add_expr(Expr::LongLit(v), span)
+                } else {
+                    self.file.add_expr(Expr::IntLit(v), span)
+                }
             }
             TokenKind::LongLit => {
                 let t = self.text();

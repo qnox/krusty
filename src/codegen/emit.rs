@@ -2106,21 +2106,30 @@ impl<'a> MethodEmitter<'a> {
                 // without this, a back-edge where slot N holds `A` would fail against a header
                 // frame that shows slot N as `Top`.
                 self.pre_alloc_loop_locals(body, code, cw);
-                self.rec(start, code, cw);
-                code.bind(start);
+                // Empty-range check: skip the entire loop if start > end (Through) or < (DownTo).
                 code.iload(i);
                 code.iload(end_slot);
                 self.rec(end, code, cw);
                 match range.kind {
-                    RangeKind::Through => code.if_icmpgt(end), // exit when i > end
-                    RangeKind::Until => code.if_icmpge(end),   // exit when i >= end
-                    RangeKind::DownTo => code.if_icmplt(end),  // exit when i < end
+                    RangeKind::Through => code.if_icmpgt(end), // skip when start > end
+                    RangeKind::Until => code.if_icmpge(end),   // skip when start >= end
+                    RangeKind::DownTo => code.if_icmplt(end),  // skip when start < end
                 }
-                self.loop_labels.push((cont, end)); // continue → the increment step, break → end
+                self.rec(start, code, cw);
+                code.bind(start);
+                self.loop_labels.push((cont, end)); // continue → increment, break → end
                 self.emit_block_discard(body, code, cw);
                 self.loop_labels.pop();
                 self.rec(cont, code, cw);
                 code.bind(cont);
+                // For Through/DownTo: check `i == end` before incrementing to avoid overflow.
+                // For Until: the top-of-loop check already handles termination correctly.
+                if range.kind != RangeKind::Until && step_slot.is_none() {
+                    code.iload(i);
+                    code.iload(end_slot);
+                    self.rec(end, code, cw);
+                    code.if_icmpeq(end); // done when i == end (overflow-safe)
+                }
                 code.iload(i);
                 match step_slot {
                     Some(ss) => code.iload(ss),
@@ -2132,6 +2141,17 @@ impl<'a> MethodEmitter<'a> {
                     code.iadd();
                 }
                 code.istore(i);
+                // For Until with explicit step, fall back to top-of-loop check.
+                if range.kind == RangeKind::Until || step_slot.is_some() {
+                    code.iload(i);
+                    code.iload(end_slot);
+                    self.rec(end, code, cw);
+                    match range.kind {
+                        RangeKind::Through => code.if_icmpgt(end),
+                        RangeKind::Until => code.if_icmpge(end),
+                        RangeKind::DownTo => code.if_icmplt(end),
+                    }
+                }
                 self.rec(start, code, cw);
                 code.goto(start);
                 self.rec(end, code, cw);
@@ -2582,6 +2602,38 @@ impl<'a> MethodEmitter<'a> {
             }
             Expr::Call { callee, args } => self.emit_call(e, callee, &args, code, cw),
             Expr::Member { receiver, name } => {
+                // Primitive companion constants: `Int.MAX_VALUE`, `Long.MIN_VALUE`, etc.
+                if let Expr::Name(prim) = self.file.expr(receiver).clone() {
+                    if !self.slots.contains_key(&prim) {
+                        match (prim.as_str(), name.as_str()) {
+                            ("Int", "MAX_VALUE") => { code.push_int(i32::MAX, cw); return; }
+                            ("Int", "MIN_VALUE") => { code.push_int(i32::MIN, cw); return; }
+                            ("Int", "SIZE_BITS") => { code.push_int(32, cw); return; }
+                            ("Int", "SIZE_BYTES") => { code.push_int(4, cw); return; }
+                            ("Long", "MAX_VALUE") => { code.push_long(i64::MAX, cw); return; }
+                            ("Long", "MIN_VALUE") => { code.push_long(i64::MIN, cw); return; }
+                            ("Long", "SIZE_BITS") => { code.push_int(64, cw); return; }
+                            ("Long", "SIZE_BYTES") => { code.push_int(8, cw); return; }
+                            ("Short", "MAX_VALUE") => { code.push_int(32767, cw); return; }
+                            ("Short", "MIN_VALUE") => { code.push_int(-32768, cw); return; }
+                            ("Byte", "MAX_VALUE") => { code.push_int(127, cw); return; }
+                            ("Byte", "MIN_VALUE") => { code.push_int(-128, cw); return; }
+                            ("Char", "MAX_VALUE") => { code.push_int(65535, cw); return; }
+                            ("Char", "MIN_VALUE") => { code.push_int(0, cw); return; }
+                            ("Float", "MAX_VALUE") => { code.push_float(f32::MAX, cw); return; }
+                            ("Float", "MIN_VALUE") => { code.push_float(f32::from_bits(1), cw); return; }
+                            ("Float", "NaN") => { code.push_float(f32::NAN, cw); return; }
+                            ("Float", "POSITIVE_INFINITY") => { code.push_float(f32::INFINITY, cw); return; }
+                            ("Float", "NEGATIVE_INFINITY") => { code.push_float(f32::NEG_INFINITY, cw); return; }
+                            ("Double", "MAX_VALUE") => { code.push_double(f64::MAX, cw); return; }
+                            ("Double", "MIN_VALUE") => { code.push_double(f64::from_bits(1), cw); return; }
+                            ("Double", "NaN") => { code.push_double(f64::NAN, cw); return; }
+                            ("Double", "POSITIVE_INFINITY") => { code.push_double(f64::INFINITY, cw); return; }
+                            ("Double", "NEGATIVE_INFINITY") => { code.push_double(f64::NEG_INFINITY, cw); return; }
+                            _ => {}
+                        }
+                    }
+                }
                 // `EnumName.ENTRY` → getstatic the entry's static field.
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
                     if !self.slots.contains_key(&en) {
