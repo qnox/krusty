@@ -876,7 +876,12 @@ impl<'a> Parser<'a> {
             let arg = if name == "Array" && self.at(TokenKind::Lt) {
                 self.bump(); // '<'
                 self.skip_variance(); // `out`/`in`
-                let elem = self.parse_type();
+                // Star projection `Array<*>` — erase to Object.
+                let elem = if self.eat(TokenKind::Star) {
+                    TypeRef { name: "Any".to_string(), nullable: true, arg: None, span, fun_params: Vec::new() }
+                } else {
+                    self.parse_type()
+                };
                 self.expect(TokenKind::Gt, "'>'");
                 Some(Box::new(elem))
             } else {
@@ -923,7 +928,8 @@ impl<'a> Parser<'a> {
         }
         loop {
             self.skip_newlines();
-            while self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out" | "in") {
+            // Skip variance/reified modifiers. `in` is a keyword; `out`/`reified` are idents.
+            while (self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out")) || self.at(TokenKind::KwIn) {
                 self.bump();
             }
             let tname = if self.at(TokenKind::Ident) {
