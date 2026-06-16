@@ -2350,10 +2350,17 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Size constructor: `IntArray(n)` etc.
+        // Size constructor: `IntArray(n)`, or `IntArray(n) { i -> elem }` with an init lambda whose
+        // parameter is the index (`Int`).
         if let Some(elem) = Ty::primitive_array_element(fname) {
             if arg_tys.len() == 1 {
                 self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
+                return Some(Ty::array(elem));
+            }
+            if arg_tys.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
+                self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
+                let init = self.check_lambda_with_types(args[1], &[Ty::Int]); // `it`/index : Int
+                let _ = init;
                 return Some(Ty::array(elem));
             }
         }
@@ -2727,7 +2734,14 @@ impl<'a> Checker<'a> {
                 // parameter is a function type with known inner param types, check lambda args with
                 // the correct `it` type instead of always using Object.
                 let known_sig = self.syms.funs.get(&fname).cloned();
+                // A primitive-array init constructor `IntArray(n) { i -> … }` types its lambda's
+                // parameter (the index) as `Int`.
+                let array_init_lambda = Ty::primitive_array_element(&fname).is_some()
+                    && args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
+                    if array_init_lambda && i == 1 {
+                        return self.check_lambda_with_types(a, &[Ty::Int]);
+                    }
                     if let Some(ref sig) = known_sig {
                         if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty() {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {

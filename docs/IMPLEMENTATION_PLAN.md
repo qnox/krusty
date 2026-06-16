@@ -1137,6 +1137,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   (field access + accessor bodies + init + read paths all branch on `is_object`); deferred. Verified
   via `javap` diff against kotlinc.
 
+## Phase 94 — Primitive-array init lambda `IntArray(n) { i -> … }`  ✅
+- ✅ The size constructor with an init lambda (`IntArray(n) { it * 2 }`, `CharArray(n) { … }`, …)
+  types the lambda parameter (the index) as `Int` and inlines the body into a counted fill loop
+  (element value evaluated into a temp first, so a branchy body runs on an empty stack — frame-safe).
+- ✅ TDD: `tests/array_init_lambda_e2e.rs` (Int/Char arrays, branchy body, on the JVM). Full suite
+  183 green. Box conformance **376 OK / 0 FAIL** held.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
