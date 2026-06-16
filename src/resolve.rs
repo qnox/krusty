@@ -976,6 +976,24 @@ fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
+/// Whether an expression contains a branching construct (`if`/`when`/`try`) — i.e. would emit
+/// `StackMapTable` frames. Used to keep inlined-lambda fill loops (array init) frame-simple.
+fn expr_branches(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::If { .. } | Expr::When { .. } | Expr::Try { .. } | Expr::Elvis { .. } | Expr::SafeCall { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => expr_branches(file, *lhs) || expr_branches(file, *rhs),
+        Expr::Unary { operand, .. } | Expr::NotNull { operand } => expr_branches(file, *operand),
+        Expr::Member { receiver, .. } => expr_branches(file, *receiver),
+        Expr::Index { array, index } => expr_branches(file, *array) || expr_branches(file, *index),
+        Expr::Call { callee, args } => expr_branches(file, *callee) || args.iter().any(|&a| expr_branches(file, a)),
+        Expr::Block { stmts, trailing } => {
+            trailing.map_or(false, |t| expr_branches(file, t))
+                || stmts.iter().any(|&s| matches!(file.stmt(s), Stmt::Expr(ie) if expr_branches(file, *ie)))
+        }
+        _ => false,
+    }
+}
+
 fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -2357,11 +2375,18 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
                 return Some(Ty::array(elem));
             }
-            if arg_tys.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
-                self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
-                let init = self.check_lambda_with_types(args[1], &[Ty::Int]); // `it`/index : Int
-                let _ = init;
-                return Some(Ty::array(elem));
+            if arg_tys.len() == 2 {
+                if let Expr::Lambda { body, .. } = self.file.expr(args[1]).clone() {
+                    // The init lambda is inlined into a fill loop; a *branching* body (if/when/try)
+                    // would need frame handling the inline loop doesn't provide — reject it (skip),
+                    // never miscompile. The common simple bodies (`it`, `it * 2`, a constant) work.
+                    if expr_branches(self.file, body) {
+                        return None;
+                    }
+                    self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
+                    let _ = self.check_lambda_with_types(args[1], &[Ty::Int]); // `it`/index : Int
+                    return Some(Ty::array(elem));
+                }
             }
         }
         None
