@@ -49,13 +49,24 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
-            let fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), ty_of(syms, &p.ty))).collect();
+            // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
+            let ctor_fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
+                .map(|p| (p.name.clone(), ty_of(file, &p.ty))).collect();
+            let ctor_param_count = ctor_fields.len() as u32;
+            let body_fields: Vec<(String, Ty)> = c.body_props.iter()
+                .map(|p| {
+                    let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
+                    (p.name.clone(), ty)
+                })
+                .collect();
+            let fields: Vec<(String, Ty)> = ctor_fields.into_iter().chain(body_fields).collect();
             let class_ty = IrType::Class { fq_name: internal.clone(), type_args: vec![], nullable: false };
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 supertypes: vec![],
                 fields: fields.iter().map(|(n, t)| (n.clone(), ty_to_ir(*t))).collect(),
+                ctor_param_count,
+                init_body: None,
                 methods: vec![],
                 is_interface: false,
             });
@@ -126,6 +137,45 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
                 }
+                // Constructor body: run body-property initializers and `init { … }` blocks in source
+                // order, with `this` = value 0 and the constructor params as values 1..=N.
+                if !c.init_order.is_empty() {
+                    let class_id = lo.classes[&internal].id;
+                    let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    for p in c.props.iter().filter(|p| p.is_property) {
+                        let v = lo.fresh_value();
+                        lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
+                    }
+                    let mut stmts = Vec::new();
+                    for step in &c.init_order {
+                        match step {
+                            ast::ClassInit::PropInit(i) => {
+                                let field_idx = ctor_count + *i as u32;
+                                let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize].1.clone();
+                                let val = lo.lower_arg(c.body_props[*i].init.unwrap(), &field_ty)?;
+                                let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                                stmts.push(lo.ir.add_expr(IrExpr::SetField { receiver: recv, class: class_id, index: field_idx, value: val }));
+                            }
+                            ast::ClassInit::Block(e) => {
+                                // An `init { … }` block: lower its statements for effect.
+                                let Expr::Block { stmts: bs, trailing } = lo.afile.expr(*e).clone() else { return None };
+                                for s in bs {
+                                    stmts.push(lo.stmt(s)?);
+                                }
+                                if let Some(t) = trailing {
+                                    stmts.push(lo.expr(t)?);
+                                }
+                            }
+                        }
+                    }
+                    let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
+                    lo.ir.classes[class_id as usize].init_body = Some(body);
+                }
             }
             _ => {}
         }
@@ -139,12 +189,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 fn is_simple_class(c: &ast::ClassDecl) -> bool {
     !c.is_data && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
         && c.base_class.is_none() && c.supertypes.is_empty()
-        && c.body_props.is_empty() && c.companion_methods.is_empty() && c.secondary_ctors.is_empty()
-        && c.init_order.is_empty()
+        && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
+        // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
+        // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
+        && c.body_props.iter().all(is_plain_body_prop)
         // Methods may be expr- OR block-bodied — both route through the same `lower_body` as
         // top-level funs (a block-body method is no different from a block-body top-level fun).
         && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+}
+
+/// A class-body property that is a plain backing field: a normal (non-extension) `val`/`var` with an
+/// initializer and no custom getter/setter and not `lateinit`.
+fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_none() && !p.is_lateinit && p.getter.is_none() && p.setter.is_none() && p.init.is_some()
 }
 
 struct Lower<'a> {
@@ -264,9 +322,21 @@ impl<'a> Lower<'a> {
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
             }
             Stmt::Assign { name, value } => {
-                let (v, _) = self.lookup(&name)?;
-                let val = self.expr(value)?;
-                Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
+                if let Some((v, _)) = self.lookup(&name) {
+                    let val = self.expr(value)?;
+                    Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
+                } else {
+                    // Unqualified write to a `var` field of the enclosing class (`this.<field> = …`).
+                    let (this_v, _) = self.lookup("this")?;
+                    let (class, idx, field_ty) = {
+                        let ci = self.cur_class.as_ref().and_then(|c| self.classes.get(c))?;
+                        let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
+                        (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
+                    };
+                    let val = self.lower_arg(value, &field_ty)?;
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    Some(self.ir.add_expr(IrExpr::SetField { receiver: recv, class, index: idx, value: val }))
+                }
             }
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
             Stmt::AssignMember { receiver, name, value } => {
@@ -538,8 +608,19 @@ fn class_internal(file: &ast::File, name: &str) -> String {
     }
 }
 
-fn ty_of(_syms: &SymbolTable, r: &ast::TypeRef) -> Ty {
-    Ty::from_name(&r.name).unwrap_or(Ty::Error)
+/// Resolve a written type to a `Ty`: a builtin (`Int`, `String`, …), else a class declared in this
+/// file (`A` → its internal name), else an erased reference (generic type param / external type →
+/// `Object`). Without this, class-typed fields resolve to `Error` and emit a bad descriptor.
+fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
+    if let Some(t) = Ty::from_name(&r.name) {
+        return t;
+    }
+    let is_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
+    if is_class {
+        Ty::obj(&class_internal(file, &r.name))
+    } else {
+        Ty::obj("java/lang/Object")
+    }
 }
 
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).

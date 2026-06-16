@@ -135,7 +135,11 @@ fn run_one(file: &Path, idx: usize, work: &Path, jh: &str) -> Outcome {
     let classes = krusty::jvm::ir_emit::emit_all(&ir, "BoxKt");
     // Find the facade that has box(): it's BoxKt.
     for (n, b) in &classes {
-        fs::write(dir.join(format!("{n}.class")), b).unwrap();
+        let path = dir.join(format!("{n}.class"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b).unwrap();
     }
     fs::write(dir.join("M.java"), "public class M{public static void main(String[] a){System.out.println(BoxKt.box());}}").unwrap();
     let jc = Command::new(format!("{jh}/bin/javac")).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap();
