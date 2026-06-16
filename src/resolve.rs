@@ -1090,6 +1090,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Class(cl) => {
+                // Secondary constructors are parsed (real grammar), but krusty doesn't yet emit the
+                // extra `<init>` overloads + delegation — a call to one would resolve to a missing
+                // constructor. Reject the class until emission lands, rather than miscompile.
+                if !cl.secondary_ctors.is_empty() {
+                    c.diags.error(cl.span, "krusty: secondary constructors are not supported".to_string());
+                }
                 // Class type parameters are in scope for all members.
                 c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)

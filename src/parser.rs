@@ -531,6 +531,7 @@ impl<'a> Parser<'a> {
             supertypes: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
+            secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -602,6 +603,27 @@ impl<'a> Parser<'a> {
         } else {
             (None, first_name)
         };
+        let params = self.parse_param_list();
+        let ret = if self.eat(TokenKind::Colon) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let body = if self.eat(TokenKind::Eq) {
+            self.skip_newlines();
+            FunBody::Expr(self.parse_expr())
+        } else if self.at(TokenKind::LBrace) {
+            FunBody::Block(self.parse_block_expr())
+        } else {
+            FunBody::None
+        };
+        let end = self.t[self.i.saturating_sub(1)].span;
+        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
+    }
+
+    /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
+    /// grammar — never by skipping to a balanced `)`.
+    fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
@@ -636,21 +658,27 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
-        let ret = if self.eat(TokenKind::Colon) {
-            Some(self.parse_type())
-        } else {
-            None
-        };
-        let body = if self.eat(TokenKind::Eq) {
+        params
+    }
+
+    /// Parse a parenthesised argument list `( expr,* )` into expressions, via the real grammar.
+    /// Returns an empty list if no `(` is present.
+    fn parse_call_arguments(&mut self) -> Vec<ExprId> {
+        let mut args = Vec::new();
+        if !self.eat(TokenKind::LParen) {
+            return args;
+        }
+        self.skip_newlines();
+        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            args.push(self.parse_expr());
             self.skip_newlines();
-            FunBody::Expr(self.parse_expr())
-        } else if self.at(TokenKind::LBrace) {
-            FunBody::Block(self.parse_block_expr())
-        } else {
-            FunBody::None
-        };
-        let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RParen, "')'");
+        args
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -706,6 +734,7 @@ impl<'a> Parser<'a> {
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut companion_methods: Vec<FunDecl> = Vec::new();
         let mut companion_props: Vec<PropDecl> = Vec::new();
+        let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -747,6 +776,13 @@ impl<'a> Parser<'a> {
                     // requires nesting the full resolver/emitter; for now we drop them and the
                     // file compiles so tests that don't exercise the nested type still pass.
                     TokenKind::KwClass => {
+                        // An `inner class` captures the outer instance (a `Test this$0` field +
+                        // qualified `new`), which krusty doesn't model — silently dropping it
+                        // miscompiles any use (`outer.Inner()`). Reject; plain nested classes are
+                        // still dropped (only a problem if referenced, which then fails to resolve).
+                        if mods.iter().any(|m| m == "inner") {
+                            self.diags.error(self.tok().span, "krusty: inner classes are not supported");
+                        }
                         self.bump(); // 'class'
                         self.skip_nested_decl_body();
                     }
@@ -769,24 +805,31 @@ impl<'a> Parser<'a> {
                         self.bump(); // 'interface'
                         self.skip_nested_decl_body();
                     }
-                    // Secondary constructor: `constructor(params) [: this/super(args)] { body }`
+                    // Secondary constructor: `constructor(params) [: this/super(args)] { body }`.
+                    // krusty doesn't emit these, so a call to the secondary ctor would resolve to a
+                    // non-existent `<init>` (NoSuchMethodError). Reject the class rather than silently
+                    // drop the constructor and miscompile.
                     TokenKind::Ident if self.text() == "constructor" => {
+                        // Parse the secondary constructor through real productions — the parameter
+                        // list, the `: this(args)`/`: super(args)` delegation, and the body block —
+                        // never by skipping to a balanced delimiter.
+                        let ctor_span = self.tok().span;
                         self.bump(); // 'constructor'
-                        if self.at(TokenKind::LParen) {
-                            self.skip_balanced(TokenKind::LParen, TokenKind::RParen);
-                        }
-                        // optional delegation `: this(…)` or `: super(…)`
+                        let params = self.parse_param_list();
+                        let mut delegation = CtorDelegation::None;
                         if self.eat(TokenKind::Colon) {
                             self.skip_newlines();
-                            if self.at(TokenKind::Ident) { self.bump(); } // 'this' or 'super'
-                            if self.at(TokenKind::LParen) {
-                                self.skip_balanced(TokenKind::LParen, TokenKind::RParen);
-                            }
+                            let target = if self.at(TokenKind::Ident) { let t = self.text().to_string(); self.bump(); t } else { String::new() };
+                            let args = self.parse_call_arguments();
+                            delegation = match target.as_str() {
+                                "this" => CtorDelegation::This(args),
+                                "super" => CtorDelegation::Super(args),
+                                _ => { self.diags.error(ctor_span, "expected 'this' or 'super' in constructor delegation"); CtorDelegation::None }
+                            };
                         }
                         self.skip_newlines();
-                        if self.at(TokenKind::LBrace) {
-                            self.skip_balanced(TokenKind::LBrace, TokenKind::RBrace);
-                        }
+                        let body = if self.at(TokenKind::LBrace) { Some(self.parse_block_expr()) } else { None };
+                        secondary_ctors.push(SecondaryCtor { params, delegation, body, span: ctor_span });
                     }
                     TokenKind::Ident if self.text() == "typealias" => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
@@ -800,7 +843,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -913,7 +956,7 @@ impl<'a> Parser<'a> {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
-            supertypes, base_class: None, base_args: Vec::new(),
+            supertypes, base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -975,7 +1018,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
