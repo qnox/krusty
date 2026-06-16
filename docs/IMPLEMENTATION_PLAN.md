@@ -1129,6 +1129,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   public member surface (`componentN`/`copy`/`equals`/`hashCode`/`toString` + accessors) matches the
   real kotlinc's exactly for `data class P(val x: Int, val y: String)`.
 
+## Known bytecode divergence — `object` properties  ⬜
+- An `object`'s properties are emitted by krusty as **instance** fields (`private final int v`,
+  `getfield`); the real kotlinc emits them as **static** fields on the singleton (`private static
+  final int v`, `getstatic`). The **public ABI matches** (`INSTANCE`, `getV()`, `f()`), and behavior
+  is identical, but the private backing field differs → not byte-exact. Fixing it is pervasive
+  (field access + accessor bodies + init + read paths all branch on `is_object`); deferred. Verified
+  via `javap` diff against kotlinc.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
