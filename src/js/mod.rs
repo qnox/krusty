@@ -6,7 +6,7 @@
 //! target-neutral. Covers the core subset (`ir_lower`'s output): functions, simple classes,
 //! control flow, and stdlib intrinsics realized from the JS platform.
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
 
 /// Emit a whole file's IR as a JavaScript module (one `class` per IR class, one `function` per
 /// top-level function).
@@ -47,6 +47,17 @@ pub fn emit_file(ir: &IrFile) -> String {
 
 fn class_simple(fq: &str) -> &str {
     fq.rsplit('/').next().unwrap_or(fq)
+}
+
+/// `x instanceof T` in JS — `String` is a primitive (`typeof`), a class is a real `instanceof`.
+fn js_instanceof(arg: &str, t: &IrType) -> String {
+    if let IrType::Class { fq_name, .. } = t {
+        match fq_name.as_str() {
+            "kotlin/String" => return format!("(typeof {arg} === \"string\")"),
+            _ => return format!("({arg} instanceof {})", class_simple(fq_name)),
+        }
+    }
+    "false".to_string()
 }
 
 fn indent(n: usize, out: &mut String) {
@@ -181,6 +192,15 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 _ => "undefined".to_string(),
             },
         },
+        IrExpr::TypeOp { op, arg, type_operand } => {
+            let a = emit_expr(ir, *arg, inst);
+            match op {
+                IrTypeOp::InstanceOf => js_instanceof(&a, type_operand),
+                IrTypeOp::NotInstanceOf => format!("(!{})", js_instanceof(&a, type_operand)),
+                // JS is untyped — a cast is the value itself.
+                _ => a,
+            }
+        }
         IrExpr::When { branches } => {
             let mut s = String::new();
             let mut closes = 0;
