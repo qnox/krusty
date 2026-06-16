@@ -343,35 +343,102 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        // Optional custom getter: `val x: T get() = expr` / `get() { … }` — a computed property.
-        let save = self.i;
-        self.skip_newlines();
-        let getter = if init.is_none() && self.at(TokenKind::Ident) && self.text() == "get"
-            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LParen)
-        {
-            self.bump(); // 'get'
-            self.expect(TokenKind::LParen, "'('");
-            self.expect(TokenKind::RParen, "')'");
-            if self.eat(TokenKind::Eq) {
+        // Optional custom accessors: `get() = expr` / `get() { … }` and/or `[private] set(v) { … }`
+        // / `private set`. Either order; at most one of each. An accessor begins with `get`/`set`
+        // (optionally preceded by a visibility modifier) — anything else ends the property.
+        let mut getter: Option<FunBody> = None;
+        let mut setter: Option<PropAccessor> = None;
+        loop {
+            let save = self.i;
+            self.skip_newlines();
+            // Optional visibility modifier on the accessor (`private set`, …).
+            let mut is_private = false;
+            let vis_save = self.i;
+            if self.at(TokenKind::Ident) && matches!(self.text(), "private" | "protected" | "internal" | "public") {
+                is_private = self.text() == "private";
+                self.bump();
                 self.skip_newlines();
-                Some(FunBody::Expr(self.parse_expr()))
-            } else if self.at(TokenKind::LBrace) {
-                Some(FunBody::Block(self.parse_block_expr()))
-            } else {
-                self.diags.error(self.tok().span, "expected '=' or '{' for a property getter");
-                None
             }
-        } else {
-            self.i = save;
-            None
-        };
-        // A property with neither an initializer nor a getter must be `lateinit` (or an abstract
-        // interface property); otherwise it is unsupported.
-        if init.is_none() && getter.is_none() && !is_lateinit && !abstract_ok {
+            if !self.at(TokenKind::Ident) || !matches!(self.text(), "get" | "set") {
+                self.i = save; // not an accessor — restore (incl. any consumed newlines/modifier)
+                break;
+            }
+            let is_get = self.text() == "get";
+            self.bump(); // 'get' / 'set'
+            if is_get && self.eat_accessor_parens(true).is_none() {
+                self.i = vis_save;
+                break;
+            }
+            if is_get {
+                getter = Some(self.parse_accessor_body());
+                let _ = is_private; // getter visibility not modeled (rare); ignored
+            } else {
+                // setter: optional `(param)` then optional body; `private set` has neither.
+                let param = self.parse_setter_param();
+                let body = if self.eat(TokenKind::Eq) {
+                    self.skip_newlines();
+                    Some(FunBody::Expr(self.parse_expr()))
+                } else if self.at(TokenKind::LBrace) {
+                    Some(FunBody::Block(self.parse_block_expr()))
+                } else {
+                    None // default-bodied setter (e.g. `private set`)
+                };
+                setter = Some(PropAccessor { param, body, is_private });
+            }
+        }
+        // A property with no initializer, no getter, and no backing-field need must be `lateinit`
+        // (or an abstract/interface property); otherwise it is unsupported.
+        if init.is_none() && getter.is_none() && setter.is_none() && !is_lateinit && !abstract_ok {
             self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        PropDecl { name, ty, is_var, init, is_lateinit, getter, span: Span::new(start.lo, end.hi) }
+        PropDecl { name, ty, is_var, init, is_lateinit, getter, setter, span: Span::new(start.lo, end.hi) }
+    }
+
+    /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
+    /// missing `(` is an error (getter) — setters route through `parse_setter_param` instead.
+    fn eat_accessor_parens(&mut self, require: bool) -> Option<()> {
+        if !self.at(TokenKind::LParen) {
+            if require {
+                self.i -= 1; // un-consume `get` so the caller can bail cleanly
+            }
+            return None;
+        }
+        self.expect(TokenKind::LParen, "'('");
+        self.expect(TokenKind::RParen, "')'");
+        Some(())
+    }
+
+    /// Parse a setter's optional `(param)` (type annotation discarded). Returns the param name.
+    fn parse_setter_param(&mut self) -> Option<String> {
+        if !self.eat(TokenKind::LParen) {
+            return None;
+        }
+        let name = if self.at(TokenKind::Ident) {
+            let n = self.text().to_string();
+            self.bump();
+            Some(n)
+        } else {
+            None
+        };
+        if self.eat(TokenKind::Colon) {
+            let _ = self.parse_type();
+        }
+        self.expect(TokenKind::RParen, "')'");
+        name
+    }
+
+    /// Parse a getter body after its `()`: `= expr` or `{ block }`.
+    fn parse_accessor_body(&mut self) -> FunBody {
+        if self.eat(TokenKind::Eq) {
+            self.skip_newlines();
+            FunBody::Expr(self.parse_expr())
+        } else if self.at(TokenKind::LBrace) {
+            FunBody::Block(self.parse_block_expr())
+        } else {
+            self.diags.error(self.tok().span, "expected '=' or '{' for a property getter".to_string());
+            FunBody::None
+        }
     }
 
     /// `companion object [Name] [: Super] { fun…; val… }` — collect its functions/properties to be

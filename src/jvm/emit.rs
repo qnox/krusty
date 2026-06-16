@@ -577,6 +577,14 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Whether a class body property has a backing field. A *default* getter (no custom `get()`) always
+/// reads a backing field; a custom getter needs a field only when there's an initializer (or
+/// `lateinit`) — a custom getter with no initializer is a computed property. (In valid Kotlin a
+/// no-initializer property cannot reference `field`, so these conditions suffice.)
+fn bp_has_field(bp: &crate::ast::PropDecl) -> bool {
+    bp.getter.is_none() || bp.init.is_some() || bp.is_lateinit
+}
+
 /// Lower a `class C(val a: T, var b: U)` to a JVM class with private backing fields, a primary
 /// constructor that calls `super()` and stores each field, and `getX`/`setX` accessors — matching
 /// kotlinc's public ABI for a simple property-holding class.
@@ -646,8 +654,14 @@ pub fn emit_class(
         .iter()
         .filter(|(p, _)| p.is_property)
         .map(|(p, t)| (p.name.clone(), *t, p.is_var))
-        .chain(body_props_t.iter().filter(|(bp, _)| bp.getter.is_none()).map(|(bp, t)| (bp.name.clone(), *t, bp.is_var)))
+        .chain(body_props_t.iter().filter(|(bp, _)| bp_has_field(bp)).map(|(bp, t)| (bp.name.clone(), *t, bp.is_var)))
         .collect();
+    // Body properties with custom accessors: skip the *default* getX/setX for these (their bodies
+    // are emitted separately) and, for a custom setter, honor its visibility.
+    let custom_getter_names: std::collections::HashSet<&str> =
+        class.body_props.iter().filter(|bp| bp.getter.is_some()).map(|bp| bp.name.as_str()).collect();
+    let custom_setters: HashMap<&str, &crate::ast::PropAccessor> =
+        class.body_props.iter().filter_map(|bp| bp.setter.as_ref().map(|s| (bp.name.as_str(), s))).collect();
 
     // Backing fields: `private final` for `val`, `private` for `var`.
     for (name, ty, is_var) in &all_props {
@@ -823,8 +837,8 @@ pub fn emit_class(
         let cap = capitalize(name);
         let getter_name = format!("get{cap}");
         let setter_name = format!("set{cap}");
-        // getter
-        if !explicit_methods.contains(&getter_name) {
+        // getter — skip the default if this property defines a custom getter (emitted below).
+        if !explicit_methods.contains(&getter_name) && !custom_getter_names.contains(name.as_str()) {
             let is_lateinit = syms.class_by_internal(internal_name)
                 .map_or(false, |c| c.lateinit_props.contains(name.as_str()));
             let mut g = CodeBuilder::new(1);
@@ -864,8 +878,13 @@ pub fn emit_class(
             g.link();
             cw.add_method(member_access, &getter_name, &method_descriptor(&[], *ty), &g);
         }
-        // setter (var only)
-        if *is_var && !explicit_methods.contains(&setter_name) {
+        // setter (var only) — skip the default if a custom-bodied setter is defined below. A
+        // visibility-only setter (`private set`, no body) still uses the default field write but with
+        // the declared access flag.
+        let custom = custom_setters.get(name.as_str()).copied();
+        let custom_bodied = custom.map_or(false, |s| s.body.is_some());
+        if *is_var && !explicit_methods.contains(&setter_name) && !custom_bodied {
+            let access = if custom.map_or(false, |s| s.is_private) { ACC_PRIVATE } else { member_access };
             let mut s = CodeBuilder::new(1 + slot_words(*ty));
             s.aload(0);
             load_local(*ty, 1, &mut s);
@@ -873,7 +892,7 @@ pub fn emit_class(
             s.putfield(f, slot_words(*ty) as i32);
             s.ret_void();
             s.link();
-            cw.add_method(member_access, &setter_name, &method_descriptor(&[*ty], Ty::Unit), &s);
+            cw.add_method(access, &setter_name, &method_descriptor(&[*ty], Ty::Unit), &s);
         }
     }
 
@@ -929,7 +948,40 @@ pub fn emit_class(
         e.lambda_counter = lambda_ctr;
         e.file_facade = file_facade.to_string();
         e.props_via_getter = class.is_open || class.is_abstract;
+        // A getter over a property *with* a backing field can read `field`.
+        if bp_has_field(bp) { e.field_backing = Some((bp.name.clone(), ty)); }
         e.emit_method(&getter_fn, &[], ty, member_access, &mut cw);
+        lambda_ctr = e.lambda_counter;
+    }
+
+    // Custom-bodied setters (`var x … set(v) { field = … }`) → a `setX(v)` method whose body runs
+    // with `field` bound to the backing field and the setter parameter in scope.
+    for bp in &class.body_props {
+        let Some(setter) = &bp.setter else { continue };
+        let Some(body) = &setter.body else { continue }; // visibility-only setter handled above
+        let ty = syms.class_by_internal(internal_name).and_then(|c| c.prop(&bp.name)).map(|(t, _)| t)
+            .or_else(|| bp.ty.as_ref().map(|r| resolve_ty(r, syms))).unwrap_or(Ty::Error);
+        let pname = setter.param.clone().unwrap_or_else(|| "value".to_string());
+        let pty_ref = bp.ty.clone().unwrap_or(TypeRef { name: "Any".into(), nullable: false, arg: None, span: bp.span, fun_params: vec![] });
+        let setter_fn = FunDecl {
+            name: format!("set{}", capitalize(&bp.name)),
+            receiver: None,
+            params: vec![crate::ast::Param { name: pname, ty: pty_ref, is_vararg: false, default: None }],
+            ret: None,
+            body: body.clone(),
+            type_params: Vec::new(),
+            non_null_type_params: std::collections::HashSet::new(),
+            span: bp.span,
+            is_inline: false,
+            is_final: false,
+        };
+        let access = if setter.is_private { ACC_PRIVATE } else { member_access };
+        let mut e = MethodEmitter::new_instance(file, info, syms, internal_name, &imports, class_props.clone(), diags);
+        e.lambda_counter = lambda_ctr;
+        e.file_facade = file_facade.to_string();
+        e.props_via_getter = class.is_open || class.is_abstract;
+        e.field_backing = Some((bp.name.clone(), ty));
+        e.emit_method(&setter_fn, &[ty], Ty::Unit, access, &mut cw);
         lambda_ctr = e.lambda_counter;
     }
 
@@ -1419,6 +1471,9 @@ struct MethodEmitter<'a> {
     /// In an `open`/`abstract` class, `this.<prop>` must dispatch through the (virtual) accessor so
     /// overrides are honored, instead of reading the backing field directly.
     props_via_getter: bool,
+    /// When emitting a property accessor body, the backing field `(name, type)` so the `field`
+    /// soft keyword maps to `this.<name>` (getfield in a getter, putfield in a setter).
+    field_backing: Option<(String, Ty)>,
     /// When emitting a `companion object` member, the enclosing class — its static members are then
     /// reachable unqualified (`MAX` → `getstatic`, `create(…)` → `invokestatic`).
     companion_of: Option<String>,
@@ -1448,7 +1503,7 @@ impl<'a> MethodEmitter<'a> {
         MethodEmitter {
             file, info, syms, class: class.to_string(), diags,
             slots: HashMap::new(), next_slot: 0, ret_ty: Ty::Unit, imports,
-            class_props: HashMap::new(), is_instance: false, props_via_getter: false, companion_of: None,
+            class_props: HashMap::new(), is_instance: false, props_via_getter: false, field_backing: None, companion_of: None,
             loop_labels: Vec::new(), recv: None,
             lambda_counter: 0,
             local_fun_emitted_class: HashMap::new(),
@@ -2232,7 +2287,15 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Stmt::Assign { name, value } => {
-                if let Some(&(slot, ty)) = self.slots.get(&name) {
+                if name == "field" && self.field_backing.is_some() && !self.slots.contains_key(&name) {
+                    // `field = value` in a setter → write the backing field via implicit `this`.
+                    let (fname, fty) = self.field_backing.clone().unwrap();
+                    let owner = self.implicit_class();
+                    self.emit_implicit_this(code);
+                    self.emit_expr_as(value, fty, code, cw);
+                    let f = cw.fieldref(&owner, &fname, &fty.descriptor());
+                    code.putfield(f, slot_words(fty) as i32);
+                } else if let Some(&(slot, ty)) = self.slots.get(&name) {
                     self.emit_expr_as(value, ty, code, cw);
                     self.store(ty, slot, code);
                 } else if let Some(&ty) = self.class_props.get(&name).filter(|_| self.is_instance || self.recv.is_some()) {
@@ -2817,7 +2880,14 @@ impl<'a> MethodEmitter<'a> {
                 self.emit_implicit_this(code);
             }
             Expr::Name(n) => {
-                if let Some(&(slot, ty)) = self.slots.get(&n) {
+                if n == "field" && self.field_backing.is_some() {
+                    // `field` in an accessor body → read the backing field via implicit `this`.
+                    let (fname, fty) = self.field_backing.clone().unwrap();
+                    let owner = self.implicit_class();
+                    self.emit_implicit_this(code);
+                    let f = cw.fieldref(&owner, &fname, &fty.descriptor());
+                    code.getfield(f, slot_words(fty) as i32);
+                } else if let Some(&(slot, ty)) = self.slots.get(&n) {
                     load_local(ty, slot, code);
                     // Smart-cast: the checker narrowed this use to a more specific reference type
                     // (e.g. inside `if (x is T)`). The slot holds the wider type, so insert the cast.
