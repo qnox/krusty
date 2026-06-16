@@ -441,6 +441,22 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
         }
     }
 
+    // Top-level function return types (explicit annotations only), collected first so a property
+    // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
+    let mut fun_rets: HashMap<String, Ty> = HashMap::new();
+    for file in files {
+        for &d in &file.decls {
+            if let Decl::Fun(f) = file.decl(d) {
+                if f.receiver.is_none() {
+                    if let Some(r) = &f.ret {
+                        let tp: std::collections::HashSet<String> = f.type_params.iter().cloned().collect();
+                        fun_rets.insert(f.name.clone(), ty_of_ref(r, &class_names, &tp, diags));
+                    }
+                }
+            }
+        }
+    }
+
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
     for file in files {
@@ -469,7 +485,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                             // to Unit; check_fun will do a deeper inference pass and record any
                             // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
                             if let FunBody::Expr(e) = &f.body {
-                                let t = infer_lit_ty(file, *e, &class_names);
+                                let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -566,7 +582,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                                 let locals: HashMap<&str, Ty> = props.iter().map(|(n, t, _)| (n.as_str(), *t)).collect();
                                 infer_getter_ty(file, *g, &locals)
                             }
-                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
+                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
                         };
                         if ty == Ty::Error && bp.init.is_some() && bp.ty.is_none() {
                             diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
@@ -582,7 +598,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty(file, *e, &class_names);
+                                    let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
@@ -640,7 +656,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty(file, *e, &class_names);
+                                    let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
@@ -661,7 +677,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -685,7 +701,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     // Type from the annotation, else a light inference from a literal initializer.
                     let ty = match &p.ty {
                         Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                        None => p.init.map(|i| infer_lit_ty(file, i, &class_names)).unwrap_or(Ty::Error),
+                        None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
                     };
                     if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -950,7 +966,7 @@ fn prim_companion_ty(prim: &str, field: &str) -> Option<Ty> {
 }
 
 /// Best-effort type of a simple literal initializer (for an unannotated top-level property).
-fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>) -> Ty {
+fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -968,10 +984,10 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>) -
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg => infer_lit_ty(file, *operand, class_names),
+            UnOp::Neg => infer_lit_ty(file, *operand, class_names, fun_rets),
         },
         Expr::Binary { op, lhs, rhs } => {
-            let (lt, rt) = (infer_lit_ty(file, *lhs, class_names), infer_lit_ty(file, *rhs, class_names));
+            let (lt, rt) = (infer_lit_ty(file, *lhs, class_names, fun_rets), infer_lit_ty(file, *rhs, class_names, fun_rets));
             match op {
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
                 BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,
@@ -982,6 +998,10 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>) -
         // classpath scan + user-defined classes).
         Expr::Call { callee, .. } => {
             if let Expr::Name(n) = file.expr(*callee) {
+                // A call to a top-level function with a known return type (`val v = mk()`).
+                if let Some(ret) = fun_rets.get(n.as_str()) {
+                    return *ret;
+                }
                 if let Some(internal) = class_names.get(n.as_str()) {
                     return Ty::obj(internal);
                 }

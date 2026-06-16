@@ -1070,6 +1070,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   resolve) — mirroring the free-function HOF path. `C().call { it * 2 }` works end-to-end.
 - ✅ Full suite 182 green. Box conformance **369 OK / 0 FAIL** held.
 
+## Phase 85 — Property type inference from a function-return  ✅
+- ✅ A property initializer `val v = f()` infers its type from `f`'s return type. A pre-pass collects
+  top-level function return types (explicit annotations) before pass-2 property processing, so order
+  doesn't matter; `infer_lit_ty` consults it (a function call) before the class-name ctor path.
+- ✅ Full suite 182 green. Box conformance **370 OK / 0 FAIL** (+1).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
