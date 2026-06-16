@@ -1025,6 +1025,25 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/boxing_e2e.rs` (Int/Double/Char box+unbox round-trip on the JVM). Full suite 180
   green. **Box conformance 367 OK / 0 FAIL** (+16 from boxing; invariant held).
 
+## Phase 80 — Front-end/back-end boundary  ✅
+- ✅ `docs/ARCHITECTURE.md` + a `Backend` trait: the front end is backend-agnostic; each target is a
+  pluggable backend (JVM today, WASM/JS future). The common `backend::compile` orchestrator runs the
+  front-end type-check per file then hands the **checked** output to the backend's `lower_file`/
+  `finalize` — `check_file` no longer lives inside the backend. Driver (`main.rs`) is a thin wrapper.
+
+## Phase 81 — Common IR scaffold (`krusty-ir`, modeled on Kotlin IR)  ✅
+- ✅ `src/ir.rs`: a **backend-agnostic, typed, index-based** IR — `IrType` (classes by Kotlin FqName,
+  not JVM descriptors), `IrFunction`/`IrClass`/`IrFile`, and `IrExpr` (`Const`/`GetValue`/`SetValue`/
+  `Call`/`Return`/`Block`/`When`/`TypeOp`/`While`/`Variable`) with `IrTypeOp` including an explicit
+  `ImplicitCoercion` (so box/unbox/erasure are visible IR nodes, decided by backend lowering — not
+  hidden in codegen). Taxonomy mirrors Kotlin IR ("don't reinvent the wheel"); deliberately **not**
+  LLVM/MLIR (those are low-level/native and have no managed-VM JVM/JS path — see ARCHITECTURE.md).
+- ✅ Smoke test builds a trivial `fun answer(): Int = 42` IR by hand and checks the return type is the
+  Kotlin FqName `kotlin/Int`. Full suite green.
+- ⬜ **Next:** `ast → ir` lowering (where the parser-rejected desugarings — `when`/`for`/`++` — belong
+  as IR passes), then rewire the JVM backend to consume IR instead of the AST directly; gated by the
+  conformance harness at `0 FAIL`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
