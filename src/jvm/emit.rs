@@ -512,7 +512,7 @@ fn ref_internal(ty: Ty) -> &'static str {
         Ty::Obj(n) => n,
         // An array's `instanceof`/`checkcast` operand is its descriptor (`[LData;`, `[I`), not a name.
         Ty::Array(_) => crate::types::intern(&ty.descriptor()),
-        Ty::Fun(n) => crate::types::intern(&Ty::fun_interface(n)),
+        Ty::Fun(s) => crate::types::intern(&Ty::fun_interface(s.params.len() as u8)),
         _ => "java/lang/Object",
     }
 }
@@ -523,7 +523,9 @@ fn ref_internal(ty: Ty) -> &'static str {
 fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
     // Function type `(A) -> B` — parsed with fun_params non-empty.
     if !r.fun_params.is_empty() || r.name == "<fun>" {
-        return Ty::Fun(r.fun_params.len() as u8);
+        let params: Vec<Ty> = r.fun_params.iter().map(|p| resolve_ty(p, syms)).collect();
+        let ret = r.arg.as_ref().map(|a| resolve_ty(a, syms)).unwrap_or(Ty::Unit);
+        return Ty::fun(params, ret);
     }
     if let Some(elem) = Ty::primitive_array_element(&r.name) {
         return Ty::array(elem);
@@ -1522,8 +1524,8 @@ impl<'a> MethodEmitter<'a> {
                     let desc = format!("[{}", elem.descriptor());
                     VerifType::Object(cw.class_ref(&desc))
                 }
-                Ty::Fun(n) => {
-                    let iname = format!("kotlin/jvm/functions/Function{}", n);
+                Ty::Fun(s) => {
+                    let iname = format!("kotlin/jvm/functions/Function{}", s.params.len());
                     VerifType::Object(cw.class_ref(&iname))
                 }
                 Ty::Unit | Ty::Nothing | Ty::Error => VerifType::Top,
@@ -1569,8 +1571,8 @@ impl<'a> MethodEmitter<'a> {
                 let desc = crate::types::intern(&format!("[{}", elem.descriptor()));
                 VerifType::Object(cw.class_ref(desc))
             }
-            Ty::Fun(n) => {
-                let iname = crate::types::intern(&Ty::fun_interface(n));
+            Ty::Fun(s) => {
+                let iname = crate::types::intern(&Ty::fun_interface(s.params.len() as u8));
                 VerifType::Object(cw.class_ref(iname))
             }
             _ => VerifType::Top,
@@ -4279,7 +4281,7 @@ impl<'a> MethodEmitter<'a> {
                 // Calling a local variable of function type: `f()` where `f: () -> String`.
                 if let Some(&(slot, Ty::Fun(arity))) = self.slots.get(&fname) {
                     load_local(Ty::Fun(arity), slot, code);
-                    self.emit_fun_invoke(arity, args, code, cw);
+                    self.emit_fun_invoke(arity.params.len() as u8, arity.ret, args, code, cw);
                     return;
                 }
                 // Calling a class property of function type: `fnc()` where `val fnc: () -> String`.
@@ -4294,7 +4296,7 @@ impl<'a> MethodEmitter<'a> {
                         let f = cw.fieldref(&owner, &fname, &Ty::Fun(arity).descriptor());
                         code.getfield(f, 1);
                     }
-                    self.emit_fun_invoke(arity, args, code, cw);
+                    self.emit_fun_invoke(arity.params.len() as u8, arity.ret, args, code, cw);
                     return;
                 }
                 // Local function call → invokestatic with mangled name on the same class.
@@ -4429,7 +4431,7 @@ impl<'a> MethodEmitter<'a> {
                 let callee_ty = self.info.ty(callee);
                 if let Ty::Fun(arity) = callee_ty {
                     self.emit_expr(callee, code, cw);
-                    self.emit_fun_invoke(arity, args, code, cw);
+                    self.emit_fun_invoke(arity.params.len() as u8, arity.ret, args, code, cw);
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], "krusty v0: unsupported call form");
                 }
@@ -4438,8 +4440,9 @@ impl<'a> MethodEmitter<'a> {
     }
 
     /// Emit the `invokeinterface FunctionN.invoke(...)Object` sequence, with the function value
-    /// already on the stack. Boxes primitive arguments.
-    fn emit_fun_invoke(&mut self, arity: u8, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    /// already on the stack. Boxes primitive arguments and coerces the `Object` result to `ret`
+    /// (unbox a primitive return / checkcast a reference return).
+    fn emit_fun_invoke(&mut self, arity: u8, ret: Ty, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let iface = Ty::fun_interface(arity);
         // If any argument branches (if/when/try → StackMapTable frames), the function value already
         // on the stack would sit *under* those frames, which they don't record → VerifyError. Spill
@@ -4447,8 +4450,11 @@ impl<'a> MethodEmitter<'a> {
         // then reload them in order for the call.
         if args.iter().any(|&a| self.expr_uses_frames(a)) {
             let obj = Ty::obj("java/lang/Object");
-            let recv_tmp = self.alloc_temp(Ty::Fun(arity));
-            store_local(Ty::Fun(arity), recv_tmp, code);
+            // The receiver is a `FunctionN` reference; only its JVM reference-ness matters for the
+            // local slot, so a placeholder `Fun` signature of the right arity suffices.
+            let fun_ty = Ty::fun(vec![obj; arity as usize], obj);
+            let recv_tmp = self.alloc_temp(fun_ty);
+            store_local(fun_ty, recv_tmp, code);
             let mut arg_tmps = Vec::new();
             for &a in args {
                 let aty = self.info.ty(a);
@@ -4458,7 +4464,7 @@ impl<'a> MethodEmitter<'a> {
                 store_local(obj, t, code);
                 arg_tmps.push(t);
             }
-            load_local(Ty::Fun(arity), recv_tmp, code);
+            load_local(fun_ty, recv_tmp, code);
             for t in arg_tmps {
                 load_local(obj, t, code);
             }
@@ -4480,8 +4486,18 @@ impl<'a> MethodEmitter<'a> {
             d
         };
         let m = cw.interface_methodref(&iface, "invoke", &invoke_desc);
-        // invokeinterface: consumes 1 (receiver) + arity (args), pushes 1 (result).
+        // invokeinterface: consumes 1 (receiver) + arity (args), pushes 1 (result, an Object).
         code.invokeinterface(m, arity as i32, 1);
+        // Coerce the `Object` result to the declared return type.
+        if let Some((wrapper, _, unbox, unbox_desc)) = box_wrapper(ret) {
+            let ci = cw.class_ref(wrapper);
+            code.checkcast(ci);
+            let um = cw.methodref(wrapper, unbox, unbox_desc);
+            code.invokevirtual(um, 0, slot_words(ret) as i32);
+        } else if ret.is_reference() && ref_internal(ret) != "java/lang/Object" {
+            let ci = cw.class_ref(ref_internal(ret));
+            code.checkcast(ci);
+        }
     }
 }
 

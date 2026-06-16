@@ -32,6 +32,27 @@ pub fn intern_ty(t: Ty) -> &'static Ty {
     leaked
 }
 
+/// A function type's signature: parameter types and return type. Interned (`intern_fnsig`) so
+/// `Ty::Fun` stays `Copy`. Lets a `Fun`-typed call recover its real return type (not erased `Object`).
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct FnSig {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+/// Intern a `FnSig` to a canonical `&'static FnSig` (leaked; the compiler is short-lived).
+pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
+    static I: OnceLock<Mutex<HashSet<&'static FnSig>>> = OnceLock::new();
+    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = set.lock().unwrap();
+    if let Some(&v) = set.get(&s) {
+        return v;
+    }
+    let leaked: &'static FnSig = Box::leak(Box::new(s));
+    set.insert(leaked);
+    leaked
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Int,
@@ -56,9 +77,10 @@ pub enum Ty {
     Nothing,
     /// Placeholder after a type error, suppresses cascading diagnostics.
     Error,
-    /// A Kotlin function type `(A, B) -> R`, erased to `kotlin/jvm/functions/FunctionN` at the JVM
-    /// level (where N is the arity). Parameter and return types are erased.
-    Fun(u8),
+    /// A Kotlin function type `(A, B) -> R` — lowered to `kotlin/jvm/functions/FunctionN` (N = arity)
+    /// by the JVM backend, but the front end keeps the real parameter/return types (interned `FnSig`)
+    /// so a call through a `Fun` value recovers its return type instead of erasing to `Object`.
+    Fun(&'static FnSig),
 }
 
 impl Ty {
@@ -76,6 +98,35 @@ impl Ty {
     pub fn array_elem(self) -> Option<Ty> {
         match self {
             Ty::Array(e) => Some(*e),
+            _ => None,
+        }
+    }
+
+    /// A function type `(params) -> ret`.
+    pub fn fun(params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::Fun(intern_fnsig(FnSig { params, ret }))
+    }
+
+    /// Arity of a function type.
+    pub fn fun_arity(self) -> Option<u8> {
+        match self {
+            Ty::Fun(s) => Some(s.params.len() as u8),
+            _ => None,
+        }
+    }
+
+    /// Return type of a function type.
+    pub fn fun_ret(self) -> Option<Ty> {
+        match self {
+            Ty::Fun(s) => Some(s.ret),
+            _ => None,
+        }
+    }
+
+    /// Parameter types of a function type.
+    pub fn fun_params(self) -> Option<&'static [Ty]> {
+        match self {
+            Ty::Fun(s) => Some(&s.params),
             _ => None,
         }
     }
@@ -170,7 +221,7 @@ impl Ty {
             Ty::Nothing => "Ljava/lang/Object;".into(),
             Ty::Array(elem) => format!("[{}", elem.descriptor()),
             Ty::Error => "Ljava/lang/Object;".into(),
-            Ty::Fun(n) => format!("Lkotlin/jvm/functions/Function{n};"),
+            Ty::Fun(s) => format!("Lkotlin/jvm/functions/Function{};", s.params.len()),
         }
     }
 

@@ -1044,17 +1044,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   as IR passes), then rewire the JVM backend to consume IR instead of the AST directly; gated by the
   conformance harness at `0 FAIL`.
 
-## Next: higher-order functions — the `Ty::Fun` blocker (diagnosed)  ⬜
-- Typed function variables (`val f: (Int) -> Int = { it * 2 }; f(3)`) don't work, but **not** because
-  of `it` typing — checking the lambda against the annotation's param types (`check_lambda_with_types`
-  in the `Stmt::Local` handler) correctly types `it`/`x` as `Int`. The real blocker is that
-  **`Ty::Fun(u8)` carries only the arity, erasing the parameter/return types** — so `f(3)` is typed
-  `Object` (the erased `FunctionN.invoke` return) and `f(3) == 6` then fails ("operator cannot be
-  applied to Object and Int").
-- **Fix (next phase):** make `Ty::Fun` carry interned param/return types (like `Ty::Array(&'static Ty)`
-  keeps `Ty` `Copy`): `Ty::Fun(&'static FnTy { params, ret })`. Then a `Fun`-typed call returns the
-  real return type, lambdas check against the declared signature end-to-end, and HOF results compose.
-  This is the foundation for general lambdas / higher-order functions.
+## Phase 82 — `Ty::Fun` carries parameter/return types (typed function variables)  ✅
+- ✅ **`Ty::Fun(u8)` → `Ty::Fun(&'static FnSig { params, ret })`** (interned, keeping `Ty` `Copy`, like
+  `Ty::Array`). 35 sites across `types`/`resolve`/`emit` updated. The front end now keeps the real
+  function-type signature; the JVM backend still lowers to `FunctionN` (arity).
+- ✅ End-to-end typed function variables: `val f: (Int) -> Int = { it * 2 }; f(3)`. The lambda checks
+  against the annotation's param types (`it`/`x` typed `Int`); a `Fun`-typed call recovers the real
+  **return type** (was erased `Object`); `emit_fun_invoke` **unboxes/casts** the `Object` invoke
+  result to that return type. Works for primitive and reference returns and HOF arguments.
+- ✅ Function-type **assignability is by arity** (param/ret variance handled by erasure/boxing) so the
+  stricter `FnSig` equality doesn't over-reject.
+- ✅ TDD: `tests/fun_type_e2e.rs` (typed vars, explicit params, reference return, HOF arg on the JVM).
+  Full suite 182 green. **Box conformance 367 OK / 0 FAIL** — invariant held across the type-model
+  change. Foundation for general lambdas / higher-order functions.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
