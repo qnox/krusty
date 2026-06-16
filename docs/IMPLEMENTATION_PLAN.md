@@ -1007,6 +1007,24 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   of what it accepts; remaining growth is coverage (the big subsystems: lambdas/HOF, collections,
   real generics), not correctness.
 
+## Phase 79 — Autoboxing (primitive ↔ boxed reference)  ✅
+- ✅ A primitive flowing to `Any`/`Object` (or an erased generic parameter) **boxes** to its wrapper
+  (`Integer.valueOf`, `Double.valueOf`, …); a reference flowing to a primitive **unboxes**
+  (checkcast + `intValue()`, …). Implemented purely at the **emit coercion site** (`emit_expr_as` +
+  `box_wrapper`) — the *representation* (primitive vs boxed) is a backend concern.
+- ✅ **Layering fix (per maintainer):** the checker no longer reasons about primitive-vs-boxed. Its
+  `expect_assignable` expresses pure Kotlin subtyping — every type is a subtype of `Any`/`Object`,
+  and the top type narrows back by an unchecked cast — with **no `is_primitive` in the front end**.
+  (The real root cause, `Ty` conflating the Kotlin type with its JVM representation, is the
+  multiplatform-backend refactor below.)
+- ✅ **Frame-spill fixes** the boxing exposed: when a call/constructor **argument branches**
+  (`if`/`when`/`try` → StackMapTable frames), the receiver / `new`+`dup` already on the stack aren't
+  recorded by those frames → `VerifyError`. `emit_fun_invoke` (FunctionN) and krusty-class
+  construction now spill args (and the receiver) to locals first, evaluate the branchy arg on an
+  empty stack, then reload — a general latent codegen bug, now fixed.
+- ✅ TDD: `tests/boxing_e2e.rs` (Int/Double/Char box+unbox round-trip on the JVM). Full suite 180
+  green. **Box conformance 367 OK / 0 FAIL** (+16 from boxing; invariant held).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

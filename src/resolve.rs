@@ -1751,13 +1751,14 @@ impl<'a> Checker<'a> {
         if matches!(expected, Ty::Float | Ty::Double) && matches!(actual, Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float) {
             return;
         }
-        // Any reference type is assignable to `Any`/`Object` (e.g. an erased generic parameter).
-        if matches!(expected, Ty::Obj("java/lang/Object")) && actual.is_reference() {
+        // In Kotlin every type is a subtype of `Any`/`Object`, and the top type narrows back to a
+        // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
+        // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
+        // emit coercion site — not the type checker's. (`Unit` is excluded: it has no JVM value here.)
+        if expected == Ty::obj("java/lang/Object") && actual != Ty::Unit {
             return;
         }
-        // An erased Object (e.g. the return of `FunctionN.invoke()`) is assignable to any reference
-        // type — the JVM emits a checkcast at runtime.
-        if actual == Ty::obj("java/lang/Object") && expected.is_reference() {
+        if actual == Ty::obj("java/lang/Object") && expected != Ty::Unit {
             return;
         }
         // A class value is assignable to an interface (supertype) it implements.
