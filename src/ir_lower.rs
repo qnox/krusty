@@ -233,7 +233,7 @@ impl<'a> Lower<'a> {
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
                 let v = self.expr(value)?;
-                Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.set".to_string()), dispatch_receiver: Some(a), args: vec![i, v] }))
+                Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.set".to_string()), dispatch_receiver: Some(a), args: vec![i, v] }))
             }
             Stmt::While { cond, body } => {
                 let c = self.expr(cond)?;
@@ -308,17 +308,19 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
                 }
             }
-            // `array[i]` read → `kotlin/Array.get` intrinsic (backend reads element from the receiver).
+            // `a[i]` read → an intrinsic; `String[i]` is `kotlin/String.get` (a `Char`), else
+            // `kotlin/Array.get` (backend reads element from the receiver type).
             Expr::Index { array, index } => {
+                let fq = if self.info.ty(array) == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
-                self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.get".to_string()), dispatch_receiver: Some(a), args: vec![i] })
+                self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: Some(a), args: vec![i] })
             }
             Expr::Member { receiver, name } => {
                 let rt = self.info.ty(receiver);
                 if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
                 } else if let Some(ci) = self.class_of(rt) {
                     let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
                     let class = ci.id;
@@ -327,7 +329,7 @@ impl<'a> Lower<'a> {
                 } else if rt == Ty::String && name == "length" {
                     // `s.length` → stdlib intrinsic (0-arg), `Int`.
                     let recv = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
                 } else {
                     return None;
                 }
@@ -336,7 +338,7 @@ impl<'a> Lower<'a> {
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
                 } else {
                     let irop = bin_to_ir(op)?;
                     let l = self.expr(lhs)?;
@@ -413,7 +415,7 @@ impl<'a> Lower<'a> {
                         TemplatePart::Str(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))),
                         TemplatePart::Expr(e) => self.expr(*e)?,
                     };
-                    acc = self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![rhs] });
+                    acc = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![rhs] });
                 }
                 acc
             }
@@ -424,7 +426,7 @@ impl<'a> Lower<'a> {
                     // encodes the element type (so the backend picks the right allocation).
                     if prim_array_elem(&fname).is_some() && args.len() == 1 {
                         let size = self.expr(args[0])?;
-                        return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
+                        return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         let mut a = Vec::new();
@@ -451,7 +453,7 @@ impl<'a> Lower<'a> {
                     } else if name == "toString" && args.is_empty() {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
                     } else {
                         return None;
                     }

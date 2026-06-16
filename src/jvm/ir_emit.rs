@@ -253,7 +253,7 @@ impl<'a> Emitter<'a> {
                     let m = self.cw.methodref(&owner, &name, &method_descriptor(&param_tys, ret));
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
-                Callee::Intrinsic(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
+                Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
             },
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
             IrExpr::When { branches } => self.emit_when(branches, code),
@@ -281,6 +281,13 @@ impl<'a> Emitter<'a> {
                 self.emit_value(recv.unwrap(), code);
                 let m = self.cw.methodref("java/lang/String", "length", "()I");
                 code.invokevirtual(m, 0, 1);
+            }
+            // `s[i]` → `String.charAt(i)`.
+            "kotlin/String.get" => {
+                self.emit_value(recv.unwrap(), code);
+                self.emit_value(args[0], code);
+                let m = self.cw.methodref("java/lang/String", "charAt", "(I)C");
+                code.invokevirtual(m, 1, 1);
             }
             // Array operations: the JVM platform realizes them with native array instructions; the
             // element type comes from the receiver's IR type (`kotlin/Array.get/set/size`) or from
@@ -547,9 +554,9 @@ impl<'a> Emitter<'a> {
             IrExpr::Call { callee, dispatch_receiver, .. } => match callee {
                 Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
-                Callee::Intrinsic(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
-                Callee::Intrinsic(fq) if fq.ends_with("Array.<init>") => Ty::array(prim_array_elem_ty(fq)),
-                Callee::Intrinsic(fq) => intrinsic_ret(fq),
+                Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
+                Callee::External(fq) if fq.ends_with("Array.<init>") => Ty::array(prim_array_elem_ty(fq)),
+                Callee::External(fq) => intrinsic_ret(fq),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
@@ -565,6 +572,7 @@ fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
         "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
         "kotlin/String.length" | "kotlin/Array.size" => Ty::Int,
+        "kotlin/String.get" => Ty::Char,
         "kotlin/Array.set" => Ty::Unit,
         _ => Ty::Error,
     }
