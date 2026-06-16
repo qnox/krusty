@@ -1273,6 +1273,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ⬜ Known limit (shared with extension functions): unqualified receiver-member access in a body
   (`v` rather than `this.v`) is unresolved — use `this.`.
 
+## Phase 104 — Unqualified receiver-member access in extension bodies  ✅
+- ✅ `fun Box.f() = v` / `val Box.x get() = v` now resolve `v` as the receiver's property (i.e.
+  `this.v`) — previously only `this.v` worked (sibling *method* calls already resolved via
+  `this_ty`). Checker: unqualified `Name` falls back to `lookup_prop(this_ty, n)`. Emit: a new
+  `ext_receiver_prop` loads `this` (slot 0) and calls the getter.
+- ✅ TDD: `tests/ext_unqual_e2e.rs` (ext function + ext property using unqualified `v`) on the JVM.
+- 🛡️ Fixed a latent Phase 103 bug this exposed: two extension properties erasing to the same
+  `(receiver, name)` (generic overloads `C<T:Any?>.p` / `C<T:Any>.p`) emitted duplicate `getP`
+  methods → `ClassFormatError`. Now rejected (skip) at registration. (`genericWithSameName.kt`)
+- Box conformance **431 OK / 0 FAIL** (capability + bug-fix; the unblocked files need further
+  features to fully compile).
+- 🛠️ Dev workflow: iterate with **debug** builds (~1.4 s rebuild) + probes/unit; reserve the full
+  `--release` box conformance for the pre-commit gate. `KRUSTY_BOX_LIMIT` samples the corpus.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

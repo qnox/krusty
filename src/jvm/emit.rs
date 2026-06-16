@@ -1539,6 +1539,15 @@ impl<'a> MethodEmitter<'a> {
         }
     }
 
+    /// For an extension function/property body, an unqualified name that is a property of the
+    /// receiver (`this` in slot 0): returns `(this_slot, receiver_internal, prop_type)`.
+    fn ext_receiver_prop(&self, n: &str) -> Option<(u16, String, Ty)> {
+        let &(slot, ty) = self.slots.get("this")?;
+        let internal = ty.obj_internal()?;
+        let (pty, _) = self.syms.prop_of(internal, n)?;
+        Some((slot, internal.to_string(), pty))
+    }
+
     fn new_instance(file: &'a File, info: &'a TypeInfo, syms: &'a SymbolTable, class: &str, imports: &'a HashMap<String, String>, class_props: HashMap<String, Ty>, diags: &'a mut DiagSink) -> Self {
         let mut e = MethodEmitter::new(file, info, syms, class, imports, diags);
         e.class_props = class_props;
@@ -3011,6 +3020,11 @@ impl<'a> MethodEmitter<'a> {
                         let f = cw.fieldref(&self.class.clone(), &n, &ty.descriptor());
                         code.getstatic(f, slot_words(ty) as i32);
                     }
+                } else if let Some((this_slot, internal, pty)) = self.ext_receiver_prop(&n) {
+                    // Unqualified property of an extension receiver: `fun Box.f() = v` → `this.getV()`.
+                    load_local(Ty::obj(&internal), this_slot, code);
+                    let m = cw.methodref(&internal, &format!("get{}", capitalize(&n)), &method_descriptor(&[], pty));
+                    code.invokevirtual(m, 0, slot_words(pty) as i32);
                 } else {
                     self.diags.error(self.file.expr_spans[e.0 as usize], format!("krusty: unbound local '{n}' in codegen"));
                 }

@@ -725,7 +725,14 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                             })
                             .unwrap_or(Ty::Error);
                         if recv_ty != Ty::Error && ty != Ty::Error {
-                            table.ext_props.insert((recv_ty.descriptor(), p.name.clone()), (ty, p.is_var));
+                            let key = (recv_ty.descriptor(), p.name.clone());
+                            // Two extension properties that erase to the same `(receiver, name)` (e.g.
+                            // generic overloads `C<T: Any?>.p` and `C<T: Any>.p`) would emit duplicate
+                            // `getName` methods → `ClassFormatError`. Reject (skip), never miscompile.
+                            if table.ext_props.contains_key(&key) {
+                                diags.error(p.span, format!("krusty: conflicting extension property '{}' (same erased receiver)", p.name));
+                            }
+                            table.ext_props.insert(key, (ty, p.is_var));
                         }
                         continue;
                     }
@@ -2154,6 +2161,13 @@ impl<'a> Checker<'a> {
                         if self.syms.props.contains_key(&n) {
                             self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
                             return self.set(e, Ty::Error);
+                        }
+                    }
+                    // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
+                    // means `this.v` (sibling method calls already resolve via `this_ty`).
+                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                        if let Some((ty, _)) = self.lookup_prop(internal, &n) {
+                            return self.set(e, ty);
                         }
                     }
                     match self.syms.props.get(&n) {
