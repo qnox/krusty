@@ -1204,6 +1204,26 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   - **Top-level** property custom accessors (the facade would use the default accessor).
   - **Companion-object** property custom accessors (emitted as the default static accessor).
 
+## Phase 99 — Nullable primitives (`Int?`): investigated, deferred  ⏸️
+- 🎯 Goal: support `Int?`/`Double?`/… (120+ corpus files). Design: a nullable primitive lowers to
+  its JVM wrapper (`Int?` → `java/lang/Integer`), exactly as kotlinc — so it reuses the existing
+  reference + autobox machinery. Mapping owned by the type system (`Ty::boxed`/`Ty::unboxed`),
+  keeping `resolve.rs` free of JVM class names.
+- ✅ Front end worked end-to-end on a JVM (`!!`→unbox, `?:`→unbox, params/returns as wrapper,
+  `== null`/`!= null`, assignment-boxing): a focused e2e passed with `-Xverify:all`.
+- ⚠️ Deferred: enabling it surfaced **13 box-test miscompiles** — emit sites that consume/produce a
+  nullable primitive without the right box/unbox/frame handling. The never-miscompile invariant
+  forced a clean revert (back to **424 OK / 0 FAIL**). The remaining emit work, by failure:
+  - **string templates** — `"$x"` for `x: Int?` must box in `emit_append` (`interpolation.kt`).
+  - **`===`/`!==`** identity on boxed primitives must stay reference equality, not unbox
+    (`identityEqualsWithNullable/*`, `negateObjectComp{,2}`).
+  - **safe calls** returning `Nothing?`/nullable (`nothingNReturningSafeCall.kt`) — frame at the
+    null-branch merge.
+  - **data class** components/`equals` over nullable primitives (`ieee754/dataClass.kt`).
+  - a few residual frame mismatches (`kt37505.kt`).
+- ➡️ Next: land it behind those fixes (audit every `emit_*` site that reads `info.ty` of a value
+  that may now be a wrapper), with a box/unbox helper centralizing the coercion.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
