@@ -1610,8 +1610,10 @@ fn emit_hash_of(cw: &mut ClassWriter, c: &mut CodeBuilder, internal: &str, field
             c.invokestatic(m, 1, 1);
         }
         _ => {
-            let m = cw.methodref("java/lang/Object", "hashCode", "()I");
-            c.invokevirtual(m, 0, 1);
+            // Null-safe: a nullable member may be null (`data class A<T>(val t: T)` with `T = String?`)
+            // — `Objects.hashCode` returns 0 for null instead of NPE-ing.
+            let m = cw.methodref("java/util/Objects", "hashCode", "(Ljava/lang/Object;)I");
+            c.invokestatic(m, 1, 1);
         }
     }
 }
@@ -4386,18 +4388,24 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
         }
-        // `Object` methods on an annotation instance (`x.hashCode()`/`toString()`/`equals(y)`) —
-        // dispatched virtually to the annotation impl's JLS versions. Scoped to annotation receivers
-        // to match resolution (a broad rule would intercept null-safe `toString` paths elsewhere).
+        // `Object` methods on any reference receiver (`x.hashCode()`/`toString()`/`equals(y)`) —
+        // dispatched virtually, so a user/data/annotation override is still called. Skip the
+        // class-name (static/companion) form, handled elsewhere.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             let rt = self.info.ty(receiver);
             let obj_method = matches!((name.as_str(), args.len()), ("hashCode", 0) | ("toString", 0) | ("equals", 1));
-            let is_ann_recv = rt.obj_internal().map_or(false, |i| self.syms.classes.values().any(|cs| cs.internal == i && cs.is_annotation));
-            if is_ann_recv && obj_method {
+            let recv_is_class_name = matches!(self.file.expr(receiver), Expr::Name(n) if self.syms.classes.contains_key(n) && !self.slots.contains_key(n));
+            if rt.is_reference() && obj_method && !recv_is_class_name {
                 self.emit_expr(receiver, code, cw);
+                // `toString` goes through `String.valueOf`, matching Kotlin's null-safe `toString`
+                // (`null.toString() == "null"`); for non-null receivers it's identical.
+                if name == "toString" {
+                    let m = cw.methodref("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;");
+                    code.invokestatic(m, 1, 1);
+                    return;
+                }
                 let (desc, argw): (&str, i32) = match name.as_str() {
                     "hashCode" => ("()I", 0),
-                    "toString" => ("()Ljava/lang/String;", 0),
                     _ => {
                         self.emit_expr_as(args[0], Ty::obj("java/lang/Object"), code, cw);
                         ("(Ljava/lang/Object;)Z", 1)
