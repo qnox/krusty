@@ -1365,6 +1365,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Verified on `java -Xverify:all` AND `node` (`1..4` → 10, `0 until 3` → 3). JS box conformance
   **12 → 13 IR-lowered / 13 OK / 0 FAIL**. 193 unit tests green.
 
+## Phase 112 — `when` (subject) + unary ops in the IR  ✅
+- ✅ `when` is just if/elseif/else — it lowers to the same `IrExpr::When` (branches of
+  `(condition → result)`, `else` = `None` condition). With a subject, each branch condition becomes
+  `subject == arm_value` (OR-ed for multi-value arms like `1, 2 ->`). No separate node from `if`.
+- ✅ Unary: `-x` → `0 - x` (typed zero); `!x` → `x == false` — reusing `PrimitiveBinOp`, no unary node.
+- ✅ Verified on `java -Xverify:all` AND `node` (`when (n) { 0->; 1,2->; else-> }`, `-5`, `!(a>0)`).
+  JS box conformance **13 → 17 IR-lowered / 17 OK / 0 FAIL**. 193 unit tests green.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
