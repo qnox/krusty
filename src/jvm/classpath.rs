@@ -26,6 +26,21 @@ enum Entry {
     Jimage(PathBuf),
 }
 
+impl Entry {
+    fn path(&self) -> &Path {
+        match self {
+            Entry::Dir(p) | Entry::Jar(p) | Entry::Jimage(p) => p,
+        }
+    }
+}
+
+/// Process-global `scan_types` results keyed by the entry path set. The JDK jimage and stdlib jars
+/// are identical across every compiled file, so this collapses N re-scans into one.
+fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, TypeIndex>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, TypeIndex>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
@@ -92,9 +107,16 @@ impl Classpath {
     }
 
     /// Scan all classpath entries and return the full type index (class names + type aliases).
-    /// Result is cached after the first call.
+    /// Cached per-instance after the first call, and **process-globally** keyed by the entry paths —
+    /// so scanning the JDK jimage (the whole `java.base`) happens once per process, not once per
+    /// compiled file (which dominated box-suite wall time).
     pub fn scan_types(&self) -> TypeIndex {
         if let Some(idx) = self.types.borrow().as_ref() {
+            return idx.clone();
+        }
+        let key: Vec<PathBuf> = self.entries.iter().map(|e| e.path().to_path_buf()).collect();
+        if let Some(idx) = global_type_cache().lock().unwrap().get(&key) {
+            *self.types.borrow_mut() = Some(idx.clone());
             return idx.clone();
         }
         let mut idx = TypeIndex::default();
@@ -112,6 +134,7 @@ impl Classpath {
         for name in &ambiguous {
             idx.class_names.remove(name.as_str());
         }
+        global_type_cache().lock().unwrap().insert(key, idx.clone());
         *self.types.borrow_mut() = Some(idx.clone());
         idx
     }
