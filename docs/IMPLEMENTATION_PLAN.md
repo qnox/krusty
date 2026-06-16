@@ -1389,6 +1389,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `true.toString()`). JS box conformance steady 17/17, 0 FAIL (these files need more features to
   fully lower); each intrinsic is one symbol the backends map. 193 unit tests green.
 
+## Phase 115 — IR→JVM conformance on the real corpus (+ statement-`when`/Unit fixes)  ✅
+- ✅ New harness `tests/kotlin_box_ir_jvm_conformance.rs`: for each JVM-applicable box test in the
+  IR core subset, lower AST→`krusty-ir`→**`ir_emit`** (NOT the AST emitter) and run on a real JVM.
+  This measures the IR pipeline's *JVM* coverage of the actual corpus — the precursor to routing
+  the JVM box path through `ir_emit` and retiring `emit.rs`. Result: **20 lowered / 20 OK / 0 FAIL**
+  (JS path: 17/17). Respects `TARGET_BACKEND`/`IGNORE_BACKEND`; parallel (rayon, big stacks).
+- 🐞 Fixes the corpus surfaced (the e2e hadn't): (a) a Unit function's trailing expression was
+  lowered but dropped — now run for effect; (b) a no-`else` `when` is a Unit *statement* — emitted
+  for effect, not as a value; (c) the resulting double `return` (explicit + `emit_method` fallback)
+  left a frameless dead instruction → keep only the backend's single trailing `return`.
+- ℹ️ `if` and `when` remain ONE IR node (`IrExpr::When`); `emit_when` is just the backend codegen
+  for that node (both lower to it). Unsigned-type files are skipped (krusty has no unsigned model).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

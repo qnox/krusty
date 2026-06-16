@@ -392,6 +392,27 @@ impl<'a> Emitter<'a> {
 
     fn emit_when(&mut self, branches: &[(Option<u32>, u32)], code: &mut CodeBuilder) {
         let end = code.new_label();
+        let has_else = branches.iter().any(|(c, _)| c.is_none());
+        if !has_else {
+            // A `when` with no `else` is a *statement* (`Unit`): each matched branch runs for effect
+            // (its value discarded), and no value reaches the operand stack.
+            for (cond, body) in branches {
+                if let Some(c) = cond {
+                    self.emit_value(*c, code);
+                    let next = code.new_label();
+                    self.frame(next, vec![], code);
+                    code.ifeq(next);
+                    self.emit_value(*body, code);
+                    discard(self.value_ty(*body), code);
+                    self.frame(end, vec![], code);
+                    code.goto(end);
+                    code.bind(next);
+                }
+            }
+            self.frame(end, vec![], code);
+            code.bind(end);
+            return;
+        }
         let result_stack = self.verif_stack(self.value_ty_of_when(branches));
         for (cond, body) in branches {
             match cond {
@@ -413,6 +434,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn value_ty_of_when(&self, branches: &[(Option<u32>, u32)]) -> Ty {
+        // No `else` → the `when` is a Unit statement.
+        if !branches.iter().any(|(c, _)| c.is_none()) {
+            return Ty::Unit;
+        }
         branches.last().map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit)
     }
 

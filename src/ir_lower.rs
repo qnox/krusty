@@ -174,8 +174,12 @@ impl<'a> Lower<'a> {
         let b = match body {
             FunBody::Expr(e) => {
                 let ve = self.expr(*e)?;
-                let ret = self.ir.add_expr(IrExpr::Return(if *ret_ty == IrType::Unit { None } else { Some(ve) }));
-                self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None })
+                let stmts = if *ret_ty == IrType::Unit {
+                    vec![ve] // run for effect; the backend appends the single `return`
+                } else {
+                    vec![self.ir.add_expr(IrExpr::Return(Some(ve)))]
+                };
+                self.ir.add_expr(IrExpr::Block { stmts, value: None })
             }
             FunBody::Block(blk) => self.block_as_body(*blk, ret_ty)?,
             FunBody::None => return None,
@@ -193,7 +197,11 @@ impl<'a> Lower<'a> {
         }
         if let Some(t) = trailing {
             let ve = self.expr(*t)?;
-            out.push(self.ir.add_expr(IrExpr::Return(if *ret_ty == IrType::Unit { None } else { Some(ve) })));
+            if *ret_ty == IrType::Unit {
+                out.push(ve); // run the trailing for effect; the backend appends the single `return`
+            } else {
+                out.push(self.ir.add_expr(IrExpr::Return(Some(ve))));
+            }
         }
         self.scope.truncate(depth);
         Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
