@@ -27,6 +27,14 @@ class Point(val x: Int, val y: Int) {
         return acc
     }
 }
+class Counter(val start: Int) {
+    val base: Int = start * 2     // body-property initializer (run in <init>)
+    var total: Int = 0            // body property, default then set by init {}
+    init {
+        total = base + start      // init block writes a var field
+    }
+    fun get(): Int = total
+}
 fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
 fun sumTo(n: Int): Int {
@@ -42,7 +50,7 @@ fun box(): String {
     val s = add(2, 3)
     val p = Point(3, 4)
     val msg = "v=$s!"                      // string template → String.plus intrinsics
-    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17 && p.scaled(3) == 21
+    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17 && p.scaled(3) == 21 && Counter(5).get() == 15
     return if (good) "OK" else "no"
 }
 "#;

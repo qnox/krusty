@@ -1463,6 +1463,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   properties 59, init block 58, top-level property 46, base class 44, block-body method 41, enum 37,
   open 37, interface 29, supertypes 25, data 16 — guiding what to collapse next.
 
+- ✅ **Class-body properties + `init {}` blocks** in the IR class subset (the fattest decl-level
+  bucket — 59+58 near-miss files). `IrClass` gains `ctor_param_count` (the leading fields that are
+  constructor parameters) and `init_body` (an effect `Block` run in the constructor after the params
+  are stored). Lowering: body-prop fields append after ctor-param fields; `init_order` lowers to
+  `SetField`s (property initializers) + lowered `init` blocks, with `this`=value 0 and the ctor
+  params as values 1..=N. Unqualified writes to a `var` field (`total = …` in an `init`/method) now
+  fall back to `SetField` like the read path. `ty_of` resolves user-class names to their internal
+  type (was `Error` → bad descriptor). JVM: ctor descriptor uses only the param fields, `New` too;
+  the constructor emits `init_body`. JS: constructor params are `v1..=vN`, then `init_body`. Also:
+  Kotlin `==`/`!=` on **reference** operands emits `Objects.equals` (was `if_icmp*` → `VerifyError`
+  on `Object`). IR→JVM corpus **31/31 run-verified OK, 0 FAIL** (was 21); JS 26 OK; lower count
+  22→32. e2e: a `Counter` with a body-prop initializer + `init` block runs `OK` on java and node.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

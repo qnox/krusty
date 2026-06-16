@@ -148,8 +148,16 @@ pub struct IrFunction {
 pub struct IrClass {
     pub fq_name: String,
     pub supertypes: Vec<IrType>,
-    /// Instance fields `(name, type)`, also the constructor parameters in order.
+    /// Instance fields `(name, type)`. The first `ctor_param_count` are the primary-constructor
+    /// parameters (stored directly from args, in order); any after them are class-body properties
+    /// initialized by `init_body`.
     pub fields: Vec<(String, IrType)>,
+    /// How many leading `fields` are constructor parameters (the rest are body properties).
+    pub ctor_param_count: u32,
+    /// Constructor body run after the parameter fields are stored: an effect `Block` (body-property
+    /// initializers as `SetField`, `init { … }` blocks) lowered with `this` = value 0 and the
+    /// constructor parameters as values `1..=ctor_param_count`. `None` when there's nothing to run.
+    pub init_body: Option<ExprId>,
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,

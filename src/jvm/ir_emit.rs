@@ -47,24 +47,43 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     for (name, ty) in &c.fields {
         cw.add_field(0x0001 /* PUBLIC */, name, &ir_ty_to_jvm(ty).descriptor());
     }
-    // Constructor: super(); store each ctor param into its field.
+    // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
+    // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
+    // properties — not parameters — so the descriptor covers only the leading parameter fields.
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
-    let mut ctor = CodeBuilder::new(1 + field_tys.iter().map(|t| slot_words(*t)).sum::<u16>());
+    let n_params = c.ctor_param_count as usize;
+    let param_tys: Vec<Ty> = field_tys[..n_params].to_vec();
+    let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+    let mut ctor = CodeBuilder::new(1 + params_words);
     ctor.aload(0);
     let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
     ctor.invokespecial(obj_init, 0, 0);
     let mut slot = 1u16;
-    for ((name, _), t) in c.fields.iter().zip(&field_tys) {
+    for ((name, _), t) in c.fields[..n_params].iter().zip(&param_tys) {
         ctor.aload(0);
         load(*t, slot, &mut ctor);
         let fref = cw.fieldref(&c.fq_name, name, &t.descriptor());
         ctor.putfield(fref, slot_words(*t) as i32);
         slot += slot_words(*t);
     }
+    let mut max_slot = slot;
+    if let Some(init_body) = c.init_body {
+        // Emit the init block with `this` = value 0 and the ctor params as values 1..=N, reusing the
+        // method emitter's value→slot machinery (the params already occupy slots 1..`slot`).
+        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: slot, ret: Ty::Unit };
+        e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
+        let mut s = 1u16;
+        for (vi, t) in param_tys.iter().enumerate() {
+            e.slots.insert(vi as u32 + 1, (s, *t));
+            s += slot_words(*t);
+        }
+        e.emit(init_body, &mut ctor);
+        max_slot = e.next_slot;
+    }
     ctor.ret_void();
-    ctor.ensure_locals(slot);
+    ctor.ensure_locals(max_slot);
     ctor.link();
-    cw.add_method(0x0001, "<init>", &method_descriptor(&field_tys, Ty::Unit), &ctor);
+    cw.add_method(0x0001, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
     // Instance methods.
     for &fid in &c.methods {
         if ir.functions[fid as usize].body.is_some() {
@@ -219,7 +238,8 @@ impl<'a> Emitter<'a> {
             IrExpr::New { class, args } => {
                 let c = &self.ir.classes[*class as usize];
                 let owner = c.fq_name.clone();
-                let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+                // The constructor takes only the parameter fields; body properties are set inside it.
+                let field_tys: Vec<Ty> = c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
                 let args = args.clone();
                 let ci = self.cw.class_ref(&owner);
                 code.new_obj(ci);
@@ -427,7 +447,9 @@ impl<'a> Emitter<'a> {
 
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         let lt = self.value_ty(lhs);
-        if lt == Ty::String {
+        // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
+        // null-safe `Objects.equals`. Primitives keep the `if_icmp*`/3-way-compare path below.
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
             self.emit_value(lhs, code);
             self.emit_value(rhs, code);
             let m = self.cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");

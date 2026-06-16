@@ -13,11 +13,18 @@ use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
 pub fn emit_file(ir: &IrFile) -> String {
     let mut out = String::new();
     for c in &ir.classes {
-        let field_params: Vec<String> = c.fields.iter().map(|(n, _)| n.clone()).collect();
+        // Constructor params are the leading `ctor_param_count` fields, named `v1..=vN` to match the
+        // IR value numbering (value 0 = `this`); fields after them are body properties set by
+        // `init_body`.
+        let n_params = c.ctor_param_count as usize;
+        let params: Vec<String> = (1..=n_params).map(|i| format!("v{i}")).collect();
         out.push_str(&format!("class {} {{\n", class_simple(&c.fq_name)));
-        out.push_str(&format!("  constructor({}) {{\n", field_params.join(", ")));
-        for (n, _) in &c.fields {
-            out.push_str(&format!("    this.{n} = {n};\n"));
+        out.push_str(&format!("  constructor({}) {{\n", params.join(", ")));
+        for (i, (n, _)) in c.fields.iter().take(n_params).enumerate() {
+            out.push_str(&format!("    this.{n} = v{};\n", i + 1));
+        }
+        if let Some(init_body) = c.init_body {
+            emit_stmt(ir, init_body, 2, true, &mut out);
         }
         out.push_str("  }\n");
         for &fid in &c.methods {
