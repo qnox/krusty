@@ -97,6 +97,11 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             indent(depth, out);
             out.push_str(&format!("{} = {};\n", val_name(*var, inst), emit_expr(ir, *value, inst)));
         }
+        IrExpr::SetField { receiver, class, index, value } => {
+            indent(depth, out);
+            let name = &ir.classes[*class as usize].fields[*index as usize].0;
+            out.push_str(&format!("{}.{} = {};\n", emit_expr(ir, *receiver, inst), name, emit_expr(ir, *value, inst)));
+        }
         IrExpr::While { cond, body } => {
             indent(depth, out);
             out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond, inst)));

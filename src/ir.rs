@@ -101,6 +101,8 @@ pub enum IrExpr {
     PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField { receiver: ExprId, class: ClassId, index: u32 },
+    /// Write an instance field (`IrSetField`): `receiver.<fields[index]> = value` (statement).
+    SetField { receiver: ExprId, class: ClassId, index: u32, value: ExprId },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
     New { class: ClassId, args: Vec<ExprId> },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`.

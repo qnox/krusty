@@ -1444,6 +1444,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   generics (61), nullable (54) — guiding what to collapse next. Conformance holds (all-or-nothing per
   file: these files also need other features). 195 unit tests green, IR→JVM 21, JS 18, 0 FAIL.
 
+- ✅ Member write `obj.f = v` lowers to the new `IrExpr::SetField` (mirroring the existing
+  `GetField`/`SetValue` pair — read+write symmetry, not a new family of nodes). JVM `putfield`,
+  JS `recv.f = v`; verified `c.n = 5; c.n = c.n + 3` → `"OK"` on `java` and `node`.
+- ✅ Box-test **classpath former is directive-aware and self-provisioning** (`tests/common`):
+  `WITH_STDLIB`/`WITH_RUNTIME` add kotlin-stdlib + kotlin-test + annotations; `WITH_REFLECT` reflect;
+  `STDLIB_JDK8` stdlib-jdk8; `WITH_COROUTINES` coroutines — mirroring kotlinc's
+  `JvmEnvironmentConfigurator`. Jars are resolved **dist-first** (the exact `lib/` of the kotlinc we
+  differential-test against, via `KRUSTY_KOTLINC`), then **downloaded from Maven Central** into
+  `~/.cache/krusty-deps` if absent — so `kotlin.test.*` assertions actually resolve+run instead of
+  silently skipping. `tests/dep_resolution.rs` proves it.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
