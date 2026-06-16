@@ -161,15 +161,17 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
-                // `annotation class Name(...)` — annotations carry no runtime representation krusty
-                // emits; parse the declaration to consume it, then drop it. Uses (`@Name(...)`) are
-                // skipped as annotations; referring to the type as a value then fails to resolve and
-                // the file is cleanly skipped (no miscompile).
+                // `annotation class Name(...)` — emitted as an interface extending
+                // `java/lang/annotation/Annotation` with an accessor per primary-ctor property;
+                // instantiation synthesizes an impl class (see emit).
                 TokenKind::Ident
                     if self.text() == "annotation" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
                 {
                     self.bump(); // 'annotation'
-                    let _ = self.parse_class();
+                    let mut d = self.parse_class();
+                    d.is_annotation = true;
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
                 }
                 // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
                 TokenKind::Ident
@@ -606,6 +608,7 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
+            is_annotation: false,
             is_object: false,
             is_enum: true,
             enum_entries: entries,
@@ -970,7 +973,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -1079,7 +1082,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
-            is_data: false, is_value: false, is_object: false, is_enum: false,
+            is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
@@ -1141,7 +1144,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

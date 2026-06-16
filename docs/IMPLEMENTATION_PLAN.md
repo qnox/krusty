@@ -1508,6 +1508,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   lands, `is_value` skips cleanly at resolve, preserving the **0-FAIL** invariant. Full `Some` spec
   captured from kotlinc 2.4.0 for the real implementation.
 
+- ◐ **Instantiable annotations — groundwork only** (the literal first failing single-file box test,
+  `annotations/instances/annotationAnnotationParam.kt`: `A("a")` constructs an annotation instance
+  with JLS member-wise equality). kotlinc 2.4.0 emits the annotation as an interface extending
+  `java/lang/annotation/Annotation` plus a synthetic `<facade>$annotationImpl$A$0` class with
+  `equals`/`hashCode` (JLS: `Σ 127·name.hashCode() ^ value.hashCode()`), `toString` (`@A(t=…)`),
+  and `annotationType()` — full bytecode captured. Added `ClassDecl.is_annotation` + parser keeps the
+  decl (was silently dropped). Emitting it as a plain class gives identity equals (a FAIL), so it
+  skips at resolve until the impl-class synthesis (incl. `Array`/nested members) lands — preserving
+  the **0-FAIL** invariant. This and value classes are each a large, intricate, byte-exact codegen
+  phase; the corpus's alphabetically-first `annotations/` dir front-loads exactly these.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -237,6 +237,9 @@ pub struct ClassDecl {
     /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
     /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
     pub is_value: bool,
+    /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
+    /// instantiation (`A("x")`) synthesizes a `<facade>$annotationImpl$A$0` impl class.
+    pub is_annotation: bool,
     /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
     pub is_object: bool,
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).

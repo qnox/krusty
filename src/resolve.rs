@@ -1211,6 +1211,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 if cl.is_value {
                     c.diags.error(cl.span, "krusty: value/inline classes are not supported".to_string());
                 }
+                // `annotation class` instances (`A("x")`) need the synthetic `$annotationImpl$` class
+                // with JLS member-wise equals/hashCode; a normal class gives identity equals (FAIL).
+                // Skip until the impl-class synthesis lands (groundwork: `is_annotation` flag + parser).
+                if cl.is_annotation {
+                    c.diags.error(cl.span, "krusty: annotation-class instances are not supported".to_string());
+                }
                 // Class type parameters are in scope for all members.
                 c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)
