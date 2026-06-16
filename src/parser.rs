@@ -913,9 +913,21 @@ impl<'a> Parser<'a> {
                             self.file.decls.push(id);
                         }
                     }
+                    // Nested `data class Inner(…)` → hoist like a plain nested class (`Outer.Inner`),
+                    // constructed as `Outer.Inner(…)`; its data members emit normally.
+                    TokenKind::Ident
+                        if self.text() == "data" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                    {
+                        self.bump(); // 'data'
+                        let mut nested = self.parse_class();
+                        nested.is_data = true;
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                            || (matches!(self.text(), "enum" | "annotation")
                                 && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass))
                             || (self.text() == "sealed"
                                 && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "interface")) =>
