@@ -1287,6 +1287,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - 🛠️ Dev workflow: iterate with **debug** builds (~1.4 s rebuild) + probes/unit; reserve the full
   `--release` box conformance for the pre-commit gate. `KRUSTY_BOX_LIMIT` samples the corpus.
 
+## Phase 105 — Nested (non-`inner`) classes  ✅
+- ✅ `class Outer { class Inner(…) { … } }` — a plain nested class is a separate JVM class
+  `Outer$Inner`, used in source as `Outer.Inner(…)`. The parser hoists it to the file's top level
+  (name `Outer.Inner`); `class_internal` maps `.`→`$`. `inner class` stays rejected (needs the
+  captured outer instance).
+- ✅ Construction/use `Outer.Inner(args)` resolves (checker) and emits (`new Outer$Inner` +
+  `invokespecial <init>`) via a qualified-`Member`-callee path; methods/properties on the nested
+  class work like any class.
+- ✅ TDD: `tests/nested_class_e2e.rs` (two nested classes, property + method) on the JVM.
+- Box conformance **431 → 433 OK / 0 FAIL**.
+- Note: tooling switched to **debug** builds for the box gate — proven identical bytecode/results
+  to `--release` (same emitted `.class` bytes), at a 1.4 s vs 28 s rebuild.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

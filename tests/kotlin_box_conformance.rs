@@ -185,9 +185,11 @@ fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>, j
     // Emit declared classes.
     for &d in &file.decls {
         if let krusty::ast::Decl::Class(c) = file.decl(d) {
+            // A nested class's source name `Outer.Inner` maps to JVM internal `Outer$Inner`.
+            let mangled = c.name.replace('.', "$");
             let internal = match file.package.as_deref() {
-                Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
-                _ => c.name.clone(),
+                Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), mangled),
+                _ => mangled,
             };
             let (bytes, extra) = emit_class(c, &file, &info, &internal, &facade_name, &syms, &mut diags);
             if diags.has_errors() {

@@ -899,13 +899,19 @@ impl<'a> Parser<'a> {
                     // file compiles so tests that don't exercise the nested type still pass.
                     TokenKind::KwClass => {
                         // An `inner class` captures the outer instance (a `Test this$0` field +
-                        // qualified `new`), which krusty doesn't model — silently dropping it
-                        // miscompiles any use (`outer.Inner()`). Reject; plain nested classes are
-                        // still dropped (only a problem if referenced, which then fails to resolve).
+                        // qualified `new`), which krusty doesn't model — reject.
                         if mods.iter().any(|m| m == "inner") {
                             self.diags.error(self.tok().span, "krusty: inner classes are not supported");
+                            let _ = self.parse_nested_type_decl();
+                        } else {
+                            // A plain *nested* class `Outer { class Inner … }` is a separate class
+                            // (internal name `Outer$Inner`, source name `Outer.Inner`). Hoist it to
+                            // the file's top level so it is registered and emitted like any class.
+                            let mut nested = self.parse_class();
+                            nested.name = format!("{}.{}", name, nested.name);
+                            let id = self.file.add_decl(Decl::Class(nested));
+                            self.file.decls.push(id);
                         }
-                        let _ = self.parse_nested_type_decl(); // real parse, discarded (nested types unsupported)
                     }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
