@@ -1213,18 +1213,6 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 if cl.is_value {
                     c.diags.error(cl.span, "krusty: value/inline classes are not supported".to_string());
                 }
-                // Annotation impls support reference/primitive members and arrays of references; an
-                // array-of-primitive member needs a different `Arrays.equals`/`hashCode` overload —
-                // skip until that lands rather than miscompile.
-                if cl.is_annotation {
-                    for p in &cl.props {
-                        if let Ty::Array(elem) = c.resolve_ty(&p.ty) {
-                            if elem.is_primitive() {
-                                c.diags.error(cl.span, "krusty: annotation with a primitive-array member is not supported".to_string());
-                            }
-                        }
-                    }
-                }
                 // Class type parameters are in scope for all members.
                 c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)

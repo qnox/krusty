@@ -1389,6 +1389,22 @@ fn annotation_impl_name(facade: &str, ann_simple: &str) -> String {
     format!("{facade}$annotationImpl${ann_simple}$0")
 }
 
+/// The `java/util/Arrays` array-argument descriptor for an array whose element is `elem`
+/// (`Int` → `[I`, a reference → `[Ljava/lang/Object;`).
+fn arrays_arg_desc(elem: Ty) -> &'static str {
+    match elem {
+        Ty::Int => "[I",
+        Ty::Long => "[J",
+        Ty::Double => "[D",
+        Ty::Float => "[F",
+        Ty::Boolean => "[Z",
+        Ty::Byte => "[B",
+        Ty::Short => "[S",
+        Ty::Char => "[C",
+        _ => "[Ljava/lang/Object;",
+    }
+}
+
 /// Build the synthetic impl class for instantiating an annotation (`A("x")`): implements the
 /// annotation interface with JLS member-wise `equals`/`hashCode`, `toString`, and `annotationType()`.
 /// Semantics match kotlinc (box-OK), not its exact bytecode.
@@ -1464,8 +1480,9 @@ fn build_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(St
                 Ty::Long => { c.lcmp(); c.ifeq(cont); }
                 Ty::Double => { c.dcmpg(); c.ifeq(cont); }
                 Ty::Float => { c.fcmpg(); c.ifeq(cont); }
-                Ty::Array(_) => {
-                    let m = cw.methodref("java/util/Arrays", "equals", "([Ljava/lang/Object;[Ljava/lang/Object;)Z");
+                Ty::Array(elem) => {
+                    let ad = arrays_arg_desc(**elem);
+                    let m = cw.methodref("java/util/Arrays", "equals", &format!("({ad}{ad})Z"));
                     c.invokestatic(m, 2, 1);
                     c.ifne(cont);
                 }
@@ -1494,11 +1511,12 @@ fn build_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(St
             c.invokevirtual(sh, 0, 1);
             c.push_int(127, &mut cw);
             c.imul();
-            if let Ty::Array(_) = ty {
+            if let Ty::Array(elem) = ty {
                 c.aload(0);
                 let f = cw.fieldref(impl_internal, name, &ty.descriptor());
                 c.getfield(f, slot_words(*ty) as i32);
-                let m = cw.methodref("java/util/Arrays", "hashCode", "([Ljava/lang/Object;)I");
+                let ad = arrays_arg_desc(**elem);
+                let m = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
                 c.invokestatic(m, 1, 1);
             } else {
                 emit_hash_of(&mut cw, &mut c, impl_internal, name, *ty);
@@ -1530,8 +1548,9 @@ fn build_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(St
             let f = cw.fieldref(impl_internal, name, &ty.descriptor());
             c.getfield(f, slot_words(*ty) as i32);
             match ty {
-                Ty::Array(_) => {
-                    let m = cw.methodref("java/util/Arrays", "toString", "([Ljava/lang/Object;)Ljava/lang/String;");
+                Ty::Array(elem) => {
+                    let ad = arrays_arg_desc(**elem);
+                    let m = cw.methodref("java/util/Arrays", "toString", &format!("({ad})Ljava/lang/String;"));
                     c.invokestatic(m, 1, 1);
                     c.invokevirtual(app_s, 1, 1);
                 }
