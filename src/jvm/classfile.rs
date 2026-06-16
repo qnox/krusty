@@ -833,6 +833,17 @@ impl CodeBuilder {
     pub fn array_store(&mut self, opcode: u8, words: i32) { self.op(opcode, -(2 + words)); }
     pub fn ixor(&mut self) { self.op(0x82, -1); }
     pub fn iand(&mut self) { self.op(0x7e, -1); }
+    pub fn ior(&mut self) { self.op(0x80, -1); }
+    pub fn ishl(&mut self) { self.op(0x78, -1); }
+    pub fn ishr(&mut self) { self.op(0x7a, -1); }
+    pub fn iushr(&mut self) { self.op(0x7c, -1); }
+    // Long bitwise/shift: `and`/`or`/`xor` pop two longs (push one) → -2; shifts take long + int → -1.
+    pub fn land(&mut self) { self.op(0x7f, -2); }
+    pub fn lor(&mut self) { self.op(0x81, -2); }
+    pub fn lxor(&mut self) { self.op(0x83, -2); }
+    pub fn lshl(&mut self) { self.op(0x79, -1); }
+    pub fn lshr(&mut self) { self.op(0x7b, -1); }
+    pub fn lushr(&mut self) { self.op(0x7d, -1); }
     pub fn aconst_null(&mut self) { self.op(0x01, 1); }
     pub fn athrow(&mut self) { self.op(0xbf, -1); }
 

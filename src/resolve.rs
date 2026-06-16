@@ -2737,6 +2737,20 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Builtin bitwise/shift infix methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`).
+                // These have no operator symbol in Kotlin (only the named form), so there's no
+                // shadowing concern — resolve to the receiver's type. Shifts take an `Int` amount;
+                // `and`/`or`/`xor` take the same type; `inv` is unary.
+                if matches!(rt, Ty::Int | Ty::Long) {
+                    if name == "inv" && arg_tys.is_empty() {
+                        return rt;
+                    }
+                    if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor") && arg_tys.len() == 1 {
+                        let expected = if matches!(name.as_str(), "shl" | "shr" | "ushr") { Ty::Int } else { rt };
+                        self.expect_assignable(expected, arg_tys[0], self.span(args[0]), "argument");
+                        return rt;
+                    }
+                }
                 // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
                 // primitive operator, which *beats* any same-named user extension (in Kotlin a
                 // member/builtin wins over an extension). krusty doesn't emit primitive

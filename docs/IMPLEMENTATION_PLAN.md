@@ -1249,6 +1249,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   no-`where` declarations are unaffected. Box conformance **425 OK / 0 FAIL** (unchanged — these
   files still need generics to fully compile; the parse blocker is removed for when they do).
 
+## Phase 102 — `Int`/`Long` bitwise & shift infix methods  ✅
+- ✅ `shl` `shr` `ushr` `and` `or` `xor` `inv` on `Int`/`Long` — Kotlin's named bitwise operators
+  (no operator symbol, only the infix form, so no extension-shadowing concern). Now that infix
+  call syntax parses (Phase 100), these resolve to the receiver type and emit the JVM bitwise
+  opcodes (`ishl`/`iand`/…, `lshl`/`land`/…); `inv` is `x xor -1`.
+- ✅ New `CodeBuilder` opcodes: `ior`/`ishl`/`ishr`/`iushr` and the `Long` variants
+  `land`/`lor`/`lxor`/`lshl`/`lshr`/`lushr` (shifts take an `Int` amount → stack delta −1; the
+  `Long` and/or/xor pop two longs → −2).
+- ✅ TDD: `tests/bitwise_e2e.rs` (every op, `Int` + `Long`) on the JVM with `-Xverify:all`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
