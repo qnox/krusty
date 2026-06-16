@@ -1044,6 +1044,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   as IR passes), then rewire the JVM backend to consume IR instead of the AST directly; gated by the
   conformance harness at `0 FAIL`.
 
+## Next: higher-order functions — the `Ty::Fun` blocker (diagnosed)  ⬜
+- Typed function variables (`val f: (Int) -> Int = { it * 2 }; f(3)`) don't work, but **not** because
+  of `it` typing — checking the lambda against the annotation's param types (`check_lambda_with_types`
+  in the `Stmt::Local` handler) correctly types `it`/`x` as `Int`. The real blocker is that
+  **`Ty::Fun(u8)` carries only the arity, erasing the parameter/return types** — so `f(3)` is typed
+  `Object` (the erased `FunctionN.invoke` return) and `f(3) == 6` then fails ("operator cannot be
+  applied to Object and Int").
+- **Fix (next phase):** make `Ty::Fun` carry interned param/return types (like `Ty::Array(&'static Ty)`
+  keeps `Ty` `Copy`): `Ty::Fun(&'static FnTy { params, ret })`. Then a `Fun`-typed call returns the
+  real return type, lambdas check against the declared signature end-to-end, and HOF results compose.
+  This is the foundation for general lambdas / higher-order functions.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
