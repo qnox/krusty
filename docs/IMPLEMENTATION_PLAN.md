@@ -1455,6 +1455,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `~/.cache/krusty-deps` if absent — so `kotlin.test.*` assertions actually resolve+run instead of
   silently skipping. `tests/dep_resolution.rs` proves it.
 
+- ✅ Block-body methods (`fun m(): R { … }`) join expr-body methods in the class subset — they route
+  through the **same `lower_body`/`block_as_body`** as block-body top-level funs (a block-body method
+  is no different from a block-body top-level fun), so `is_simple_class` no longer rejects them. e2e:
+  a `while`-loop method runs `OK` on `java -Xverify:all` and `node`. `ir_blockers` also reworked to
+  rank **decl-level** blockers — the 267-file "no unsupported expr" bucket breaks down as: body
+  properties 59, init block 58, top-level property 46, base class 44, block-body method 41, enum 37,
+  open 37, interface 29, supertypes 25, data 16 — guiding what to collapse next.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

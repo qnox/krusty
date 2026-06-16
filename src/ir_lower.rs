@@ -134,14 +134,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 }
 
 /// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
-/// class/interfaces, no body properties, no companion/secondary/init, and only expr-body methods.
+/// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
+/// block-bodied) without an extension receiver.
 fn is_simple_class(c: &ast::ClassDecl) -> bool {
     !c.is_data && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
         && c.base_class.is_none() && c.supertypes.is_empty()
         && c.body_props.is_empty() && c.companion_methods.is_empty() && c.secondary_ctors.is_empty()
         && c.init_order.is_empty()
         && c.props.iter().all(|p| p.is_property)
-        && c.methods.iter().all(|m| m.receiver.is_none() && matches!(m.body, FunBody::Expr(_)))
+        // Methods may be expr- OR block-bodied — both route through the same `lower_body` as
+        // top-level funs (a block-body method is no different from a block-body top-level fun).
+        && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
 }
 
 struct Lower<'a> {
