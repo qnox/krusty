@@ -1239,6 +1239,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - Box conformance **424 → 425 OK / 0 FAIL** (most unblocked files still need other features;
   the parse foundation compounds as those land).
 
+## Phase 101 — `where` generic-constraint clauses  ✅
+- ✅ Parser now accepts a `where T : A, T : B` clause after a function signature (before the body)
+  and after a class supertype list (before the body) — a top-level parse blocker in ~15+ corpus
+  files (`fun <T> T.foo(): String where T : A, T : B`, `class D<T> : Base<T>() where …`).
+- ✅ Constraints are **erased** (krusty erases type parameters to `Object`); a **primitive** bound
+  is rejected, same as an inline bound (Phase 97) — kotlinc specializes it, krusty can't.
+- ✅ `where` may sit on a following line; the clause is peeked (position restored if absent) so
+  no-`where` declarations are unaffected. Box conformance **425 OK / 0 FAIL** (unchanged — these
+  files still need generics to fully compile; the parse blocker is removed for when they do).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
