@@ -22,6 +22,17 @@ thread_local! {
     /// Tracks which FunctionN stub arities have already been pushed in this compilation unit,
     /// so we don't emit duplicate stub classes.
     static FUNCTION_STUBS: RefCell<std::collections::HashSet<u8>> = RefCell::new(std::collections::HashSet::new());
+    /// Synthetic annotation-impl class internal names already emitted in this unit (dedup).
+    static ANNOTATION_IMPLS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+/// Ensure the annotation impl class `impl_internal` is emitted once (registered as a synthetic class).
+fn ensure_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(String, Ty)]) {
+    let fresh = ANNOTATION_IMPLS.with(|s| s.borrow_mut().insert(impl_internal.to_string()));
+    if fresh {
+        let bytes = build_annotation_impl(impl_internal, ann_internal, members);
+        push_lambda_class(impl_internal.to_string(), bytes);
+    }
 }
 
 fn push_lambda_class(name: String, bytes: Vec<u8>) {
@@ -30,6 +41,7 @@ fn push_lambda_class(name: String, bytes: Vec<u8>) {
 
 fn drain_lambda_classes() -> Vec<(String, Vec<u8>)> {
     FUNCTION_STUBS.with(|s| s.borrow_mut().clear());
+    ANNOTATION_IMPLS.with(|s| s.borrow_mut().clear());
     LAMBDA_CLASSES.with(|lc| std::mem::take(&mut *lc.borrow_mut()))
 }
 
@@ -614,6 +626,11 @@ pub fn emit_class(
     }
     if class.is_interface {
         let bytes = emit_interface(class, file, info, internal_name, file_facade, syms, diags);
+        let extra = drain_lambda_classes();
+        return (bytes, extra);
+    }
+    if class.is_annotation {
+        let bytes = emit_annotation_interface(class, internal_name, syms);
         let extra = drain_lambda_classes();
         return (bytes, extra);
     }
@@ -1343,6 +1360,207 @@ fn emit_data_members(
     }
 
     metas
+}
+
+/// Whether krusty can synthesize an annotation impl for a member of type `ty` (so the file isn't
+/// miscompiled). Reference types, primitives, and arrays of references are supported.
+fn annotation_member_supported(ty: Ty) -> bool {
+    match ty {
+        Ty::Array(elem) => !elem.is_primitive(),
+        _ => true,
+    }
+}
+
+/// `annotation class A(val t: T, …)` → a JVM interface `A extends java/lang/annotation/Annotation`
+/// with an abstract accessor per primary-constructor property.
+fn emit_annotation_interface(class: &ClassDecl, internal: &str, syms: &SymbolTable) -> Vec<u8> {
+    let mut cw = ClassWriter::new(internal, "java/lang/Object");
+    cw.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT | 0x2000 /* ANNOTATION */);
+    cw.add_interface("java/lang/annotation/Annotation");
+    for p in &class.props {
+        let ty = resolve_ty(&p.ty, syms);
+        cw.add_abstract_method(ACC_PUBLIC | ACC_ABSTRACT, &p.name, &method_descriptor(&[], ty));
+    }
+    cw.finish()
+}
+
+/// The deterministic impl-class name for instantiating annotation `ann_simple` from `facade`.
+fn annotation_impl_name(facade: &str, ann_simple: &str) -> String {
+    format!("{facade}$annotationImpl${ann_simple}$0")
+}
+
+/// Build the synthetic impl class for instantiating an annotation (`A("x")`): implements the
+/// annotation interface with JLS member-wise `equals`/`hashCode`, `toString`, and `annotationType()`.
+/// Semantics match kotlinc (box-OK), not its exact bytecode.
+fn build_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(String, Ty)]) -> Vec<u8> {
+    use crate::jvm::classfile::VerifType as VT;
+    let ann_fqname = ann_internal.replace('/', ".");
+    let mut cw = ClassWriter::new(impl_internal, "java/lang/Object");
+    cw.set_access(ACC_PUBLIC | ACC_FINAL | ACC_SUPER);
+    cw.add_interface(ann_internal);
+    for (name, ty) in members {
+        cw.add_field(ACC_PRIVATE | ACC_FINAL, name, &ty.descriptor());
+    }
+    let member_tys: Vec<Ty> = members.iter().map(|(_, t)| *t).collect();
+    // <init>(members…): super(); store each field.
+    {
+        let total_words: u16 = member_tys.iter().map(|t| slot_words(*t)).sum();
+        let mut c = CodeBuilder::new(1 + total_words);
+        c.aload(0);
+        let oi = cw.methodref("java/lang/Object", "<init>", "()V");
+        c.invokespecial(oi, 0, 0);
+        let mut slot = 1u16;
+        for (name, ty) in members {
+            c.aload(0);
+            load_local(*ty, slot, &mut c);
+            let f = cw.fieldref(impl_internal, name, &ty.descriptor());
+            c.putfield(f, slot_words(*ty) as i32);
+            slot += slot_words(*ty);
+        }
+        c.ret_void();
+        c.link();
+        cw.add_method(ACC_PUBLIC, "<init>", &method_descriptor(&member_tys, Ty::Unit), &c);
+    }
+    // Accessors.
+    for (name, ty) in members {
+        let mut c = CodeBuilder::new(1);
+        c.aload(0);
+        let f = cw.fieldref(impl_internal, name, &ty.descriptor());
+        c.getfield(f, slot_words(*ty) as i32);
+        emit_typed_return(*ty, &mut c);
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, name, &method_descriptor(&[], *ty), &c);
+    }
+    // equals(Object): `o instanceof A` then member-wise compare via the interface accessors.
+    {
+        let ann_cidx = cw.class_ref(ann_internal);
+        let impl_cidx = cw.class_ref(impl_internal);
+        let obj_cidx = cw.class_ref("java/lang/Object");
+        let frm2 = vec![VT::Object(impl_cidx), VT::Object(obj_cidx)];
+        let frm3 = vec![VT::Object(impl_cidx), VT::Object(obj_cidx), VT::Object(ann_cidx)];
+        let mut c = CodeBuilder::new(3);
+        c.aload(1);
+        c.instance_of(ann_cidx);
+        let is_inst = c.new_label();
+        c.add_frame_if_new(is_inst, frm2.clone(), vec![]);
+        c.ifne(is_inst);
+        c.push_int(0, &mut cw);
+        c.ireturn();
+        c.bind(is_inst);
+        c.aload(1);
+        c.checkcast(ann_cidx);
+        c.astore(2);
+        for (name, ty) in members {
+            c.aload(0);
+            let f = cw.fieldref(impl_internal, name, &ty.descriptor());
+            c.getfield(f, slot_words(*ty) as i32);
+            c.aload(2);
+            let acc = cw.interface_methodref(ann_internal, name, &method_descriptor(&[], *ty));
+            c.invokeinterface(acc, 0, slot_words(*ty) as i32);
+            let cont = c.new_label();
+            c.add_frame_if_new(cont, frm3.clone(), vec![]);
+            match ty {
+                Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => c.if_icmpeq(cont),
+                Ty::Long => { c.lcmp(); c.ifeq(cont); }
+                Ty::Double => { c.dcmpg(); c.ifeq(cont); }
+                Ty::Float => { c.fcmpg(); c.ifeq(cont); }
+                Ty::Array(_) => {
+                    let m = cw.methodref("java/util/Arrays", "equals", "([Ljava/lang/Object;[Ljava/lang/Object;)Z");
+                    c.invokestatic(m, 2, 1);
+                    c.ifne(cont);
+                }
+                _ => {
+                    let m = cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+                    c.invokestatic(m, 2, 1);
+                    c.ifne(cont);
+                }
+            }
+            c.push_int(0, &mut cw);
+            c.ireturn();
+            c.bind(cont);
+        }
+        c.push_int(1, &mut cw);
+        c.ireturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, "equals", "(Ljava/lang/Object;)Z", &c);
+    }
+    // hashCode(): Σ (127 * name.hashCode()) ^ value.hashCode().
+    {
+        let mut c = CodeBuilder::new(1);
+        c.push_int(0, &mut cw);
+        for (name, ty) in members {
+            c.push_string(name, &mut cw);
+            let sh = cw.methodref("java/lang/String", "hashCode", "()I");
+            c.invokevirtual(sh, 0, 1);
+            c.push_int(127, &mut cw);
+            c.imul();
+            if let Ty::Array(_) = ty {
+                c.aload(0);
+                let f = cw.fieldref(impl_internal, name, &ty.descriptor());
+                c.getfield(f, slot_words(*ty) as i32);
+                let m = cw.methodref("java/util/Arrays", "hashCode", "([Ljava/lang/Object;)I");
+                c.invokestatic(m, 1, 1);
+            } else {
+                emit_hash_of(&mut cw, &mut c, impl_internal, name, *ty);
+            }
+            c.ixor();
+            c.iadd();
+        }
+        c.ireturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, "hashCode", "()I", &c);
+    }
+    // toString(): `@fqname(m1=v1, m2=v2, …)`.
+    {
+        let mut c = CodeBuilder::new(1);
+        let sb = cw.class_ref("java/lang/StringBuilder");
+        c.new_obj(sb);
+        c.dup();
+        let sbinit = cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+        c.invokespecial(sbinit, 0, 0);
+        let app_s = cw.methodref("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
+        let app_o = cw.methodref("java/lang/StringBuilder", "append", "(Ljava/lang/Object;)Ljava/lang/StringBuilder;");
+        c.push_string(&format!("@{ann_fqname}("), &mut cw);
+        c.invokevirtual(app_s, 1, 1);
+        for (i, (name, ty)) in members.iter().enumerate() {
+            let prefix = if i == 0 { format!("{name}=") } else { format!(", {name}=") };
+            c.push_string(&prefix, &mut cw);
+            c.invokevirtual(app_s, 1, 1);
+            c.aload(0);
+            let f = cw.fieldref(impl_internal, name, &ty.descriptor());
+            c.getfield(f, slot_words(*ty) as i32);
+            match ty {
+                Ty::Array(_) => {
+                    let m = cw.methodref("java/util/Arrays", "toString", "([Ljava/lang/Object;)Ljava/lang/String;");
+                    c.invokestatic(m, 1, 1);
+                    c.invokevirtual(app_s, 1, 1);
+                }
+                t if t.is_primitive() => {
+                    let (wrap, vof, _, _) = box_wrapper(*t).unwrap();
+                    let m = cw.methodref(wrap, "valueOf", vof);
+                    c.invokestatic(m, slot_words(*ty) as i32, 1);
+                    c.invokevirtual(app_o, 1, 1);
+                }
+                _ => { c.invokevirtual(app_o, 1, 1); }
+            }
+        }
+        c.push_string(")", &mut cw);
+        c.invokevirtual(app_s, 1, 1);
+        let ts = cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+        c.invokevirtual(ts, 0, 1);
+        c.areturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, "toString", "()Ljava/lang/String;", &c);
+    }
+    // annotationType(): the annotation interface's `Class`.
+    {
+        let mut c = CodeBuilder::new(1);
+        c.ldc_class(ann_internal, &mut cw);
+        c.areturn();
+        c.link();
+        cw.add_method(ACC_PUBLIC | ACC_FINAL, "annotationType", "()Ljava/lang/Class;", &c);
+    }
+    cw.finish()
 }
 
 /// Emit `hash(this.<field>)` onto the stack as an int, matching kotlinc's per-type hashing.
@@ -3161,6 +3379,15 @@ impl<'a> MethodEmitter<'a> {
                         code.invokevirtual(m, 0, rw);
                         return;
                     }
+                    // Annotation member read `a.x` → `invokeinterface A.x()` (the accessor is the
+                    // member name itself, not a `getX`).
+                    if self.syms.class_by_internal(internal).map_or(false, |c| c.is_annotation) {
+                        let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
+                        self.emit_expr(receiver, code, cw);
+                        let m = cw.interface_methodref(internal, &name, &method_descriptor(&[], pty));
+                        code.invokeinterface(m, 0, slot_words(pty) as i32);
+                        return;
+                    }
                     // Property read on a class value: `p.prop` → invokevirtual get<Prop>().
                     // For `lateinit` properties the null check is inside the getter itself.
                     let pty = self.syms.prop_of(internal, &name).map(|(t, _)| t).unwrap_or(Ty::Error);
@@ -4140,6 +4367,28 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
         }
+        // `Object` methods on an annotation instance (`x.hashCode()`/`toString()`/`equals(y)`) —
+        // dispatched virtually to the annotation impl's JLS versions. Scoped to annotation receivers
+        // to match resolution (a broad rule would intercept null-safe `toString` paths elsewhere).
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            let rt = self.info.ty(receiver);
+            let obj_method = matches!((name.as_str(), args.len()), ("hashCode", 0) | ("toString", 0) | ("equals", 1));
+            let is_ann_recv = rt.obj_internal().map_or(false, |i| self.syms.classes.values().any(|cs| cs.internal == i && cs.is_annotation));
+            if is_ann_recv && obj_method {
+                self.emit_expr(receiver, code, cw);
+                let (desc, argw): (&str, i32) = match name.as_str() {
+                    "hashCode" => ("()I", 0),
+                    "toString" => ("()Ljava/lang/String;", 0),
+                    _ => {
+                        self.emit_expr_as(args[0], Ty::obj("java/lang/Object"), code, cw);
+                        ("(Ljava/lang/Object;)Z", 1)
+                    }
+                };
+                let m = cw.methodref("java/lang/Object", &name, desc);
+                code.invokevirtual(m, argw, 1);
+                return;
+            }
+        }
         // Java static call: ClassName.method(args) resolved via the classpath.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if let Expr::Name(cls) = self.file.expr(receiver).clone() {
@@ -4383,8 +4632,18 @@ impl<'a> MethodEmitter<'a> {
             // Constructor call: `ClassName(args)` → new + dup + invokespecial <init>.
             Expr::Name(fname) if !self.slots.contains_key(&fname) && self.syms.classes.contains_key(&fname) => {
                 let cls = self.syms.classes.get(&fname).unwrap();
-                let internal = cls.internal.clone();
-                let ctor_tys: Vec<Ty> = cls.ctor_params.clone();
+                // Annotation instance `A(args)` → construct the synthetic `$annotationImpl$A$0`
+                // (emitted once), whose ctor takes the members in order.
+                let (internal, ctor_tys) = if cls.is_annotation {
+                    let ann_internal = cls.internal.clone();
+                    let members: Vec<(String, Ty)> = cls.props.iter().map(|(n, t, _)| (n.clone(), *t)).collect();
+                    let ann_simple = ann_internal.rsplit('/').next().unwrap_or(&ann_internal).to_string();
+                    let impl_internal = annotation_impl_name(&self.file_facade, &ann_simple);
+                    ensure_annotation_impl(&impl_internal, &ann_internal, &members);
+                    (impl_internal, members.iter().map(|(_, t)| *t).collect::<Vec<_>>())
+                } else {
+                    (cls.internal.clone(), cls.ctor_params.clone())
+                };
                 let class_idx = cw.class_ref(&internal);
                 // If an argument branches (frames), the `new`/`dup` references underneath aren't
                 // recorded by those frames → VerifyError. Spill the args to locals first (evaluated

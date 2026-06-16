@@ -1508,7 +1508,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   lands, `is_value` skips cleanly at resolve, preserving the **0-FAIL** invariant. Full `Some` spec
   captured from kotlinc 2.4.0 for the real implementation.
 
-- ◐ **Instantiable annotations — groundwork only** (the literal first failing single-file box test,
+- ✅ **Instantiable annotations — implemented** (the literal first failing single-file box test,
+  `annotations/instances/annotationAnnotationParam.kt`, now passes). An `annotation class A(val t: T)`
+  emits as an interface `extends java/lang/annotation/Annotation` with an accessor per member; an
+  instance `A("a")` constructs a synthetic `<facade>$annotationImpl$A$0` class (emitted once per type)
+  implementing the interface with JLS member-wise `equals`/`hashCode` (`Σ 127·name.hashCode() ^
+  value.hashCode()`, arrays via `Arrays.equals`/`hashCode`), `toString`, and `annotationType()`.
+  Member reads `a.x` lower to `invokeinterface A.x()`; `hashCode`/`equals`/`toString` on an annotation
+  receiver dispatch virtually. Both narrowly scoped to annotation receivers so null-safe paths
+  elsewhere are untouched. Arrays-of-reference + nested annotations supported; array-of-primitive
+  members skip. Production drop-in: **438 → 442 box()=OK, still 0 FAIL**.
+- ◐ **Instantiable annotations — earlier groundwork** (the literal first failing single-file box test,
   `annotations/instances/annotationAnnotationParam.kt`: `A("a")` constructs an annotation instance
   with JLS member-wise equality). kotlinc 2.4.0 emits the annotation as an interface extending
   `java/lang/annotation/Annotation` plus a synthetic `<facade>$annotationImpl$A$0` class with
