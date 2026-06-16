@@ -479,7 +479,16 @@ pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
                             // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
                             if let FunBody::Expr(e) = &f.body {
                                 let t = infer_lit_ty(file, *e);
-                                if t != Ty::Error { t } else { Ty::Unit }
+                                if t != Ty::Error {
+                                    t
+                                } else if let Expr::Name(n) = file.expr(*e) {
+                                    // Body is a bare parameter name (`fun f(x: T) = x`): infer T.
+                                    f.params.iter().find(|p| &p.name == n)
+                                        .map(|p| ty_of_ref(&p.ty, &class_names, &tp, diags))
+                                        .unwrap_or(Ty::Unit)
+                                } else {
+                                    Ty::Unit
+                                }
                             } else {
                                 Ty::Unit
                             }
@@ -1425,7 +1434,7 @@ impl<'a> Checker<'a> {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
                 } else if let Some(&last) = stmts.last() {
-                    matches!(self.file.stmt(last), Stmt::Return(_))
+                    matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break | Stmt::Continue)
                 } else {
                     false
                 }
@@ -1636,6 +1645,14 @@ impl<'a> Checker<'a> {
         // An `Int` (typically a constant) is assignable to `Byte`/`Short` (Kotlin narrows integer
         // literals); codegen emits `i2b`/`i2s`. `Byte`/`Short` are interchangeable with `Int` here.
         if matches!(expected, Ty::Byte | Ty::Short) && matches!(actual, Ty::Int | Ty::Byte | Ty::Short) {
+            return;
+        }
+        // Int/Byte/Short/Char are assignable to Long (integer widening); codegen emits i2l.
+        if expected == Ty::Long && matches!(actual, Ty::Int | Ty::Byte | Ty::Short | Ty::Char) {
+            return;
+        }
+        // Int/Byte/Short/Char/Long are assignable to Float/Double (widening); codegen emits i2f etc.
+        if matches!(expected, Ty::Float | Ty::Double) && matches!(actual, Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float) {
             return;
         }
         // Any reference type is assignable to `Any`/`Object` (e.g. an erased generic parameter).
@@ -1944,7 +1961,19 @@ impl<'a> Checker<'a> {
                 }
                 let t = match trailing {
                     Some(te) => self.expr(te),
-                    None => Ty::Unit,
+                    None => {
+                        // A block whose last statement always transfers control (break/continue/return)
+                        // has type Nothing — it never produces a value or falls through.
+                        if let Some(&last) = stmts.last() {
+                            if matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break | Stmt::Continue) {
+                                Ty::Nothing
+                            } else {
+                                Ty::Unit
+                            }
+                        } else {
+                            Ty::Unit
+                        }
+                    }
                 };
                 self.pop_scope();
                 t
@@ -2618,6 +2647,15 @@ impl<'a> Checker<'a> {
         }
         if b == Ty::Null && a.is_reference() {
             return a;
+        }
+        // `Unit` joins with `null` (or any other type in a discard context) as Unit.
+        // This handles `if (cond) unitExpr else null` used as a statement.
+        if a == Ty::Unit || b == Ty::Unit {
+            return Ty::Unit;
+        }
+        // Numeric widening: Int is joinable with Long (result is Long).
+        if matches!((a, b), (Ty::Int | Ty::Long, Ty::Int | Ty::Long)) {
+            return Ty::Long;
         }
         self.diags.error(span, format!("incompatible if branches: '{}' and '{}'", a.name(), b.name()));
         Ty::Error
