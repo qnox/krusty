@@ -1242,6 +1242,12 @@ impl<'a> Parser<'a> {
             }
             return self.parse_stmt();
         }
+        // `lateinit var x: T` local — consume the modifier; the deferred-`var` path below handles
+        // the (no-initializer) declaration, defaulting the backing slot to `null`.
+        if self.at(TokenKind::Ident) && self.text() == "lateinit"
+            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwVar) {
+            self.bump(); // 'lateinit'
+        }
         let start = self.tok().span;
         match self.kind() {
             TokenKind::KwVal | TokenKind::KwVar => {

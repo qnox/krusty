@@ -1082,6 +1082,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Restricted to `var` (a `val` deferred-init needs assign-once tracking krusty lacks → still rejected).
 - ✅ Full suite 182 green. Box conformance **372 OK / 0 FAIL** (+2).
 
+## Phase 87 — `lateinit var` local variables  ✅
+- ✅ A `lateinit var x: T` local consumes the modifier; the deferred-`var` path (Phase 86) handles the
+  no-initializer declaration, defaulting the slot to `null`. Was "unresolved reference: lateinit".
+- ✅ Full suite 182 green. Box conformance **373 OK / 0 FAIL** (+1).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
