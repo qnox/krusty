@@ -1,18 +1,27 @@
 //! AST → `krusty-ir` lowering for the core language.
 //!
 //! Runs after the front end (parse + type-check). Produces a backend-agnostic [`IrFile`] that any
-//! backend (JVM, JS) lowers to its target — proving the FE/BE boundary is real. Only the core
-//! subset is lowered today (top-level functions: const/param/local, primitive arithmetic &
-//! comparison, calls to top-level functions, `if`/`when`, `return`, blocks, local `val`/`var`).
-//! Anything outside the subset makes lowering return `None`, so the caller keeps using the direct
-//! JVM emitter for those files — the IR path grows one construct at a time, each conformance-checked.
+//! backend (JVM, JS) lowers to its target — proving the FE/BE boundary is real. Covers the core
+//! subset: top-level functions, simple classes (a primary constructor of `val`/`var` properties +
+//! instance methods reading those fields), const/param/local, primitive arithmetic & comparison,
+//! calls (local + stdlib intrinsics), construction, field/method access, `if`/`when`, `while`,
+//! `return`, blocks, string templates. Anything outside the subset makes lowering return `None`, so
+//! the caller keeps using the direct JVM emitter — the IR path grows one construct at a time.
 
 use std::collections::HashMap;
 
-use crate::ast::{self, BinOp, Expr, ExprId as AstExprId, FunBody, Stmt};
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrFunction, IrType};
+use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
+use crate::ir::{Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType};
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
+
+struct ClassInfo {
+    id: ClassId,
+    internal: String,
+    fields: Vec<(String, Ty)>,
+    /// method name → (index into the class's `methods`, FunId, return Ty).
+    methods: HashMap<String, (u32, u32, Ty)>,
+}
 
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
 pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Option<IrFile> {
@@ -21,54 +30,118 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         info,
         ir: IrFile { package: file.package.clone(), ..Default::default() },
         fun_ids: HashMap::new(),
+        classes: HashMap::new(),
         scope: Vec::new(),
         next_value: 0,
+        cur_class: None,
     };
-    // Only files that are *entirely* top-level functions (no classes/properties) take the IR path
-    // today — keeps the slice honest and the fallback obvious.
+
+    // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
-            ast::Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
+            Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
+            Decl::Class(c) if is_simple_class(c) => {}
             _ => return None,
         }
     }
-    // Pass 1: assign a FunId to each top-level function (so calls can resolve to it).
+
+    // Pass 1a: register classes (id, fields) and reserve method FunIds.
     for &d in &file.decls {
-        if let ast::Decl::Fun(f) = file.decl(d) {
+        if let Decl::Class(c) = file.decl(d) {
+            let internal = class_internal(file, &c.name);
+            let fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
+                .map(|p| (p.name.clone(), ty_of(syms, &p.ty))).collect();
+            let class_ty = IrType::Class { fq_name: internal.clone(), type_args: vec![], nullable: false };
+            let id = lo.ir.add_class(IrClass {
+                fq_name: internal.clone(),
+                supertypes: vec![],
+                fields: fields.iter().map(|(n, t)| (n.clone(), ty_to_ir(*t))).collect(),
+                methods: vec![],
+                is_interface: false,
+            });
+            let mut methods = HashMap::new();
+            let mut method_fids = Vec::new();
+            for (mi, m) in c.methods.iter().enumerate() {
+                let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
+                let ret = sig.ret;
+                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let fid = lo.ir.add_fun(IrFunction {
+                    name: m.name.clone(),
+                    params,
+                    ret: ty_to_ir(ret),
+                    body: None,
+                    is_static: false,
+                    dispatch_receiver: Some(internal.clone()),
+                });
+                methods.insert(m.name.clone(), (mi as u32, fid, ret));
+                method_fids.push(fid);
+            }
+            lo.ir.classes[id as usize].methods = method_fids;
+            let _ = class_ty;
+            lo.classes.insert(internal.clone(), ClassInfo { id, internal, fields, methods });
+        }
+    }
+    // Pass 1b: register top-level functions.
+    for &d in &file.decls {
+        if let Decl::Fun(f) = file.decl(d) {
             let sig = syms.funs.get(&f.name)?;
             let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
             let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
-            let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true });
+            let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None });
             lo.fun_ids.insert(f.name.clone(), id);
         }
     }
-    // Pass 2: lower each body.
-    let mut idx = 0u32;
+
+    // Pass 2: lower bodies.
     for &d in &file.decls {
-        if let ast::Decl::Fun(f) = file.decl(d) {
-            let fid = idx;
-            idx += 1;
-            lo.scope.clear();
-            lo.next_value = 0;
-            let sig = syms.funs.get(&f.name)?;
-            for (p, t) in f.params.iter().zip(&sig.params) {
-                let v = lo.fresh_value();
-                lo.scope.push((p.name.clone(), v, *t));
-            }
-            let ret_ty = lo.ir.functions[fid as usize].ret.clone();
-            let body = match &f.body {
-                FunBody::Expr(e) => {
-                    let ve = lo.expr(*e)?;
-                    let ret = lo.ir.add_expr(IrExpr::Return(if ret_ty == IrType::Unit { None } else { Some(ve) }));
-                    lo.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None })
+        match file.decl(d) {
+            Decl::Fun(f) => {
+                let fid = lo.fun_ids[&f.name];
+                lo.scope.clear();
+                lo.next_value = 0;
+                lo.cur_class = None;
+                let sig = syms.funs.get(&f.name)?;
+                for (p, t) in f.params.iter().zip(&sig.params) {
+                    let v = lo.fresh_value();
+                    lo.scope.push((p.name.clone(), v, *t));
                 }
-                FunBody::Block(b) => lo.block_as_body(*b, &ret_ty)?,
-                FunBody::None => return None,
-            };
-            lo.ir.functions[fid as usize].body = Some(body);
+                let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+                lo.lower_body(&f.body, &ret_ty, fid)?;
+            }
+            Decl::Class(c) => {
+                let internal = class_internal(file, &c.name);
+                for m in &c.methods {
+                    let (_, fid, _) = lo.classes[&internal].methods[&m.name];
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    // `this` is value 0.
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
+                    for (p, t) in m.params.iter().zip(&sig.params) {
+                        let v = lo.fresh_value();
+                        lo.scope.push((p.name.clone(), v, *t));
+                    }
+                    let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+                    lo.lower_body(&m.body, &ret_ty, fid)?;
+                }
+            }
+            _ => {}
         }
     }
     Some(lo.ir)
+}
+
+/// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
+/// class/interfaces, no body properties, no companion/secondary/init, and only expr-body methods.
+fn is_simple_class(c: &ast::ClassDecl) -> bool {
+    !c.is_data && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
+        && c.base_class.is_none() && c.supertypes.is_empty()
+        && c.body_props.is_empty() && c.companion_methods.is_empty() && c.secondary_ctors.is_empty()
+        && c.init_order.is_empty()
+        && c.props.iter().all(|p| p.is_property)
+        && c.methods.iter().all(|m| m.receiver.is_none() && matches!(m.body, FunBody::Expr(_)))
 }
 
 struct Lower<'a> {
@@ -76,9 +149,10 @@ struct Lower<'a> {
     info: &'a TypeInfo,
     ir: IrFile,
     fun_ids: HashMap<String, u32>,
-    /// In-scope values: (name, value index, Kotlin type). A stack used as block scopes.
+    classes: HashMap<String, ClassInfo>,
     scope: Vec<(String, u32, Ty)>,
     next_value: u32,
+    cur_class: Option<String>,
 }
 
 impl<'a> Lower<'a> {
@@ -92,7 +166,24 @@ impl<'a> Lower<'a> {
         self.scope.iter().rev().find(|(n, _, _)| n == name).map(|(_, v, t)| (*v, *t))
     }
 
-    /// Lower a `{ … }` block used as a function body, ensuring it ends in a return.
+    fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
+        ty.obj_internal().and_then(|i| self.classes.get(i))
+    }
+
+    fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
+        let b = match body {
+            FunBody::Expr(e) => {
+                let ve = self.expr(*e)?;
+                let ret = self.ir.add_expr(IrExpr::Return(if *ret_ty == IrType::Unit { None } else { Some(ve) }));
+                self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None })
+            }
+            FunBody::Block(blk) => self.block_as_body(*blk, ret_ty)?,
+            FunBody::None => return None,
+        };
+        self.ir.functions[fid as usize].body = Some(b);
+        Some(())
+    }
+
     fn block_as_body(&mut self, block: AstExprId, ret_ty: &IrType) -> Option<u32> {
         let Expr::Block { stmts, trailing } = self.afile.expr(block) else { return None };
         let depth = self.scope.len();
@@ -120,7 +211,7 @@ impl<'a> Lower<'a> {
             }
             Stmt::Local { name, init, ty, .. } => {
                 let it = self.expr(init)?;
-                let kty = ty.as_ref().map(|r| self.info_ty_of_ref(r)).unwrap_or_else(|| self.info.ty(init));
+                let kty = ty.as_ref().map(|r| Ty::from_name(&r.name).unwrap_or(Ty::Error)).unwrap_or_else(|| self.info.ty(init));
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
@@ -132,7 +223,6 @@ impl<'a> Lower<'a> {
             }
             Stmt::While { cond, body } => {
                 let c = self.expr(cond)?;
-                // The body is a `Block` of statements (no trailing value, in the core subset).
                 let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { return None };
                 let depth = self.scope.len();
                 let mut out = Vec::new();
@@ -154,20 +244,31 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
             Expr::Name(n) => {
-                let (v, _) = self.lookup(&n)?;
-                self.ir.add_expr(IrExpr::GetValue(v))
+                if let Some((v, _)) = self.lookup(&n) {
+                    self.ir.add_expr(IrExpr::GetValue(v))
+                } else {
+                    // Unqualified field of the enclosing class (`this.<field>`).
+                    let (this_v, _) = self.lookup("this")?;
+                    let ci = self.cur_class.as_ref().and_then(|c| self.classes.get(c))?;
+                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == n)? as u32;
+                    let class = ci.id;
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                }
+            }
+            Expr::Member { receiver, name } => {
+                let rt = self.info.ty(receiver);
+                let ci = self.class_of(rt)?;
+                let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
+                let class = ci.id;
+                let recv = self.expr(receiver)?;
+                self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
             }
             Expr::Binary { op, lhs, rhs } => {
-                // `+` where either operand is `String` is `String.plus` (a stdlib intrinsic), not a
-                // primitive numeric add — lower it to a `Call` to the intrinsic symbol.
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Intrinsic("kotlin/String.plus".to_string()),
-                        dispatch_receiver: Some(l),
-                        args: vec![r],
-                    })
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
                 } else {
                     let irop = bin_to_ir(op)?;
                     let l = self.expr(lhs)?;
@@ -179,25 +280,15 @@ impl<'a> Lower<'a> {
                 let c = self.expr(cond)?;
                 let t = self.expr(then_branch)?;
                 let branches = match else_branch {
-                    Some(els) => {
-                        let e2 = self.expr(els)?;
-                        vec![(Some(c), t), (None, e2)]
-                    }
+                    Some(els) => { let e2 = self.expr(els)?; vec![(Some(c), t), (None, e2)] }
                     None => vec![(Some(c), t)],
                 };
                 self.ir.add_expr(IrExpr::When { branches })
             }
-            // String template `"a${x}b"` → fold the parts with the `String.plus` intrinsic. Each
-            // backend realizes the concatenation (and any to-string conversion) from its stdlib.
             Expr::Template(parts) => {
-                use crate::ast::TemplatePart;
                 let mut iter = parts.iter();
-                // Seed with the first part (a literal seeds directly; otherwise start from "").
                 let mut acc = match iter.clone().next() {
-                    Some(TemplatePart::Str(s)) => {
-                        iter.next();
-                        self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
-                    }
+                    Some(TemplatePart::Str(s)) => { iter.next(); self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))) }
                     _ => self.ir.add_expr(IrExpr::Const(IrConst::String(String::new()))),
                 };
                 for part in iter {
@@ -205,34 +296,57 @@ impl<'a> Lower<'a> {
                         TemplatePart::Str(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))),
                         TemplatePart::Expr(e) => self.expr(*e)?,
                     };
-                    acc = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Intrinsic("kotlin/String.plus".to_string()),
-                        dispatch_receiver: Some(acc),
-                        args: vec![rhs],
-                    });
+                    acc = self.ir.add_expr(IrExpr::Call { callee: Callee::Intrinsic("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![rhs] });
                 }
                 acc
             }
-            Expr::Call { callee, args } => {
-                let Expr::Name(fname) = self.afile.expr(callee).clone() else { return None };
-                let fid = *self.fun_ids.get(&fname)?;
-                let mut a = Vec::new();
-                for arg in args {
-                    a.push(self.expr(arg)?);
+            Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
+                // Local top-level function, or constructor `C(args)`.
+                Expr::Name(fname) => {
+                    if let Some(&fid) = self.fun_ids.get(&fname) {
+                        let mut a = Vec::new();
+                        for arg in args { a.push(self.expr(arg)?); }
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
+                    } else {
+                        // Constructor: the call's result type is the class.
+                        let ci = self.class_of(self.info.ty(e))?;
+                        let class = ci.id;
+                        let mut a = Vec::new();
+                        for arg in args { a.push(self.expr(arg)?); }
+                        self.ir.add_expr(IrExpr::New { class, args: a })
+                    }
                 }
-                self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
-            }
+                // Instance method call `recv.m(args)`.
+                Expr::Member { receiver, name } => {
+                    let rt = self.info.ty(receiver);
+                    let ci = self.class_of(rt)?;
+                    let (index, _, _) = *ci.methods.get(&name)?;
+                    let class = ci.id;
+                    let recv = self.expr(receiver)?;
+                    let mut a = Vec::new();
+                    for arg in args { a.push(self.expr(arg)?); }
+                    self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a })
+                }
+                _ => return None,
+            },
             _ => return None,
         })
     }
+}
 
-    fn info_ty_of_ref(&self, r: &ast::TypeRef) -> Ty {
-        Ty::from_name(&r.name).unwrap_or(Ty::Error)
+fn class_internal(file: &ast::File, name: &str) -> String {
+    let mangled = name.replace('.', "$");
+    match &file.package {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), mangled),
+        _ => mangled,
     }
 }
 
-/// Map a krusty `Ty` to a backend-agnostic `IrType` (a Kotlin FqName). JVM descriptors are *not*
-/// produced here — each backend maps the FqName itself.
+fn ty_of(_syms: &SymbolTable, r: &ast::TypeRef) -> Ty {
+    Ty::from_name(&r.name).unwrap_or(Ty::Error)
+}
+
+/// Map a krusty `Ty` to a backend-agnostic `IrType` (a Kotlin FqName).
 fn ty_to_ir(t: Ty) -> IrType {
     let fq = match t {
         Ty::Int => "kotlin/Int",
@@ -246,6 +360,7 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::String => "kotlin/String",
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
+        Ty::Obj(n) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
         _ => return IrType::Error,
     };
     IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
