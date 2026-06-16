@@ -1345,6 +1345,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   back-edge with `StackMapTable` frames, the JS backend a `while (..) { .. }`. Verified on
   `java -Xverify:all` AND `node` (`sumTo(4) == 10`). 193 unit tests green, JS box 7/7, 0 FAIL.
 
+## Phase 110 — Classes in the IR (both backends)  ✅
+- ✅ The IR now models user types: `IrClass` (fields + instance methods), and the nodes
+  `GetField`/`New`/`MethodCall` (structural, not per-intrinsic). `ir_lower` lowers a *simple* class
+  (primary ctor of `val`/`var` props, expr-body instance methods, no inheritance/body-props) plus
+  construction, field read (`this.x`/unqualified/`p.x`), and method calls.
+- ✅ JVM backend emits a `.class` per `IrClass` (public fields, `<init>` storing each, instance
+  methods with `this` in slot 0) via `emit_all`; JS backend emits a `class { constructor; methods }`
+  with `this`. Same IR, both targets.
+- ✅ TDD: `tests/ir_pipeline_e2e.rs` constructs `Point(3,4)`, reads `p.x`, calls `p.sum()`/`p.shifted(10)`
+  — on `java -Xverify:all` AND `node`. JS box conformance **7 → 12 IR-lowered / 12 OK / 0 FAIL**.
+- 🐞 Fixed an IR-emit frame bug: a local's slot was claimed in frames recorded *inside* its branchy
+  initializer (verifier saw `top`); now the slot is allocated after the initializer is emitted.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

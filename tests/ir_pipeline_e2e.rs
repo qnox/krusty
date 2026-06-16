@@ -13,6 +13,10 @@ use krusty::resolve::{check_file, collect_signatures};
 use krusty::ir_lower::lower_file;
 
 const SRC: &str = r#"
+class Point(val x: Int, val y: Int) {
+    fun sum(): Int = x + y
+    fun shifted(d: Int): Int = x + y + d
+}
 fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
 fun sumTo(n: Int): Int {
@@ -26,8 +30,10 @@ fun sumTo(n: Int): Int {
 }
 fun box(): String {
     val s = add(2, 3)
+    val p = Point(3, 4)
     val msg = "v=$s!"                      // string template → String.plus intrinsics
-    return if (s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10) "OK" else "no"
+    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17
+    return if (good) "OK" else "no"
 }
 "#;
 
@@ -47,11 +53,13 @@ fn ir_runs_on_jvm() {
     let (javac, java) = (format!("{jh}/bin/javac"), format!("{jh}/bin/java"));
     if !std::path::Path::new(&javac).exists() { return; }
     let ir = lower();
-    let bytes = krusty::jvm::ir_emit::emit_file(&ir, "IrKt");
+    let classes = krusty::jvm::ir_emit::emit_all(&ir, "IrKt");
     let dir = std::env::temp_dir().join(format!("krusty_ir_jvm_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("IrKt.class"), &bytes).unwrap();
+    for (name, bytes) in &classes {
+        fs::write(dir.join(format!("{name}.class")), bytes).unwrap();
+    }
     let main = "public class M { public static void main(String[] a) { System.out.println(IrKt.box()); } }";
     fs::write(dir.join("M.java"), main).unwrap();
     let jc = Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap();

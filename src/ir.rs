@@ -97,6 +97,12 @@ pub enum IrExpr {
     /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
     /// ordinary `Call` to a `Callee::Intrinsic` symbol the backend maps; there is no per-intrinsic node.
     PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
+    /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
+    GetField { receiver: ExprId, class: ClassId, index: u32 },
+    /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
+    New { class: ClassId, args: Vec<ExprId> },
+    /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`.
+    MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<ExprId> },
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
@@ -128,14 +134,20 @@ pub struct IrFunction {
     /// The body expression (typically an `IrBlock`), or `None` for abstract/external.
     pub body: Option<ExprId>,
     pub is_static: bool,
+    /// `Some(class fq_name)` for an instance method — `this` is value index 0, params follow.
+    pub dispatch_receiver: Option<String>,
 }
 
-/// A class/interface/object declaration (`IrClass`).
+/// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
+/// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
     pub fq_name: String,
     pub supertypes: Vec<IrType>,
-    pub functions: Vec<FunId>,
+    /// Instance fields `(name, type)`, also the constructor parameters in order.
+    pub fields: Vec<(String, IrType)>,
+    /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
+    pub methods: Vec<FunId>,
     pub is_interface: bool,
 }
 
@@ -186,6 +198,7 @@ mod tests {
             ret: IrType::Class { fq_name: "kotlin/Int".to_string(), type_args: vec![], nullable: false },
             body: Some(body),
             is_static: true,
+            dispatch_receiver: None,
         });
         assert_eq!(f.functions[fun as usize].name, "answer");
         // The return type is a Kotlin FqName, not a JVM descriptor — the backend maps it.
