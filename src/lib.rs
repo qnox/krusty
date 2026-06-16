@@ -14,4 +14,5 @@ pub mod parser;
 pub mod types;
 pub mod resolve;
 pub mod metadata;
+pub mod backend;
 pub mod jvm;

@@ -6,12 +6,11 @@ use std::io::Write;
 use std::path::Path;
 
 use krusty::cli;
-use krusty::jvm::emit::{emit_class, emit_file, file_class_name};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::jvm::classpath::Classpath;
-use krusty::resolve::{check_file, collect_signatures_with_cp};
+use krusty::resolve::collect_signatures_with_cp;
 
 fn main() {
     let opts = cli::parse(std::env::args().skip(1));
@@ -50,51 +49,9 @@ fn main() {
     let cp = Classpath::new(opts.classpath.clone());
     let syms = collect_signatures_with_cp(&files, cp, &mut diags);
 
-    // Per-file: typecheck → emit → buffer output. Only one file's codegen state is live at a time;
-    // emitted class bytes are small, so buffering them (to write a dir or jar at the end) is cheap.
-    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new(); // (relative path, bytes)
-    let mut module_packages: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for (i, file) in files.iter().enumerate() {
-        let info = check_file(file, &syms, &mut diags);
-        if diags.has_errors() {
-            continue; // collect all diagnostics before bailing
-        }
-
-        // Each top-level `class` becomes its own `.class` file.
-        let facade_name = file_class_name(&stems[i], file.package.as_deref());
-        for &d in &file.decls {
-            if let krusty::ast::Decl::Class(c) = file.decl(d) {
-                let internal = match file.package.as_deref() {
-                    Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
-                    _ => c.name.clone(),
-                };
-                let (bytes, extra) = emit_class(c, file, &info, &internal, &facade_name, &syms, &mut diags);
-                outputs.push((format!("{internal}.class"), bytes));
-                for (name, eb) in extra {
-                    outputs.push((format!("{name}.class"), eb));
-                }
-            }
-        }
-
-        // The file facade (`<File>Kt`) is emitted only if the file has top-level functions.
-        let has_facade_members = file
-            .decls
-            .iter()
-            .any(|&d| matches!(file.decl(d), krusty::ast::Decl::Fun(_) | krusty::ast::Decl::Property(_)));
-        if has_facade_members {
-            let internal = file_class_name(&stems[i], file.package.as_deref());
-            let (bytes, extra) = emit_file(file, &info, &syms, &internal, &mut diags);
-            if !diags.has_errors() {
-                let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
-                module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
-                outputs.push((format!("{internal}.class"), bytes));
-                for (name, eb) in extra {
-                    outputs.push((format!("{name}.class"), eb));
-                }
-            }
-        }
-        // `info` (per-file typecheck state) drops here, before the next file.
-    }
+    // Common pipeline: front-end type-check each file, then lower through the selected backend
+    // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.
+    let outputs = krusty::backend::compile(&files, &stems, &syms, &krusty::jvm::JvmBackend, &opts.module_name, &mut diags);
 
     if diags.has_errors() {
         for (path, src) in opts.sources.iter().zip(&sources) {
@@ -102,14 +59,6 @@ fn main() {
         }
         eprintln!("krusty: {} error(s)", diags.diags.len());
         std::process::exit(1);
-    }
-
-    // META-INF/<module>.kotlin_module — maps packages to their file-facade classes so Kotlin
-    // consumers can resolve top-level declarations from the compiled module.
-    if !module_packages.is_empty() {
-        let packages: Vec<(String, Vec<String>)> = module_packages.into_iter().collect();
-        let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
-        outputs.push((format!("META-INF/{}.kotlin_module", opts.module_name), module_bytes));
     }
 
     let emitted = outputs.iter().filter(|(p, _)| p.ends_with(".class")).count();

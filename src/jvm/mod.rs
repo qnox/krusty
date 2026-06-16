@@ -5,3 +5,6 @@ pub mod classpath;
 pub mod jvm_class_map;
 pub mod classfile;
 pub mod emit;
+pub mod backend;
+
+pub use backend::JvmBackend;
