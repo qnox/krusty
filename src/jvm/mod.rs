@@ -2,3 +2,4 @@
 
 pub mod classreader;
 pub mod classpath;
+pub mod jvm_class_map;

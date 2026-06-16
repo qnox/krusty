@@ -11,7 +11,9 @@ use krusty::codegen::emit::{emit_class, emit_file};
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+mod common;
 
 const SRC: &str = r#"
 class Service {
@@ -46,11 +48,17 @@ fn lateinit_run() {
         return;
     }
 
+    // `RuntimeException` (caught below) is a stdlib typealias, resolved from the stdlib on the
+    // classpath — exactly as a drop-in `kotlinc` user would supply it via `-classpath`.
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping lateinit_e2e: no kotlin-stdlib jar found in caches");
+        return;
+    };
     let mut d = DiagSink::new();
     let toks = lex(SRC, &mut d);
     let file = parse(SRC, &toks, &mut d);
     let files = vec![file];
-    let syms = collect_signatures(&files, &mut d);
+    let syms = collect_signatures_with_cp(&files, krusty::jvm::classpath::Classpath::new(vec![stdlib]), &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

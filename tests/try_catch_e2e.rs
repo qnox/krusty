@@ -11,14 +11,16 @@ use krusty::codegen::emit::emit_file;
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+mod common;
 
 fn compile(src: &str, internal: &str) -> (Vec<u8>, Vec<String>) {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
     let files = vec![file];
-    let syms = collect_signatures(&files, &mut d);
+    let syms = collect_signatures_with_cp(&files, common::stdlib_classpath(), &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     let (bytes, _) = emit_file(&files[0], &info, &syms, internal, &mut d);
     (bytes, d.diags.iter().map(|x| x.msg.clone()).collect())

@@ -1716,10 +1716,9 @@ impl<'a> MethodEmitter<'a> {
     /// The internal name for a `catch` clause's exception type (a JDK exception / import / declared
     /// class) — mirrors the resolver's `catch_internal`.
     fn catch_internal(&self, name: &str) -> String {
-        crate::resolve::builtin_exception(name)
-            .map(|s| s.to_string())
-            .or_else(|| self.imports.get(name).cloned())
+        self.imports.get(name).cloned()
             .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
+            .or_else(|| self.syms.class_names.get(name).cloned())
             .unwrap_or_else(|| "java/lang/Throwable".to_string())
     }
 
@@ -4129,14 +4128,16 @@ impl<'a> MethodEmitter<'a> {
                 let m = cw.methodref("java/lang/StringBuilder", "<init>", desc);
                 code.invokespecial(m, aw, 0);
             }
-            // A common JDK exception by simple name (`RuntimeException("msg")`): new + dup + (msg) +
-            // invokespecial <init>()V or <init>(String)V.
+            // An exception type by simple name (`RuntimeException("msg")`): new + dup + (msg) +
+            // invokespecial <init>()V or <init>(String)V. The type is resolved from the classpath
+            // (`class_names`: stdlib alias / mapped `Throwable`), recognised as throwable-shaped.
             Expr::Name(fname)
                 if !self.slots.contains_key(&fname)
                     && !self.syms.funs.contains_key(&fname)
-                    && crate::resolve::builtin_exception(&fname).is_some() =>
+                    && self.syms.class_names.get(&fname).is_some_and(|i| crate::jvm::jvm_class_map::is_throwable_internal(i)) =>
             {
-                let internal = crate::resolve::builtin_exception(&fname).unwrap();
+                let internal = self.syms.class_names.get(&fname).unwrap().clone();
+                let internal = internal.as_str();
                 let class_idx = cw.class_ref(internal);
                 code.new_obj(class_idx);
                 code.dup();

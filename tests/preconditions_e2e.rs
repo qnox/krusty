@@ -10,14 +10,18 @@ use krusty::codegen::emit::emit_file;
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+mod common;
 
 fn compile(src: &str, internal: &str) -> (Vec<u8>, Vec<String>) {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let file = parse(src, &toks, &mut d);
     let files = vec![file];
-    let syms = collect_signatures(&files, &mut d);
+    // Precondition intrinsics throw stdlib exceptions (IllegalArgumentException, …) caught here —
+    // those types resolve from the stdlib on the classpath, as a drop-in `kotlinc` user provides.
+    let syms = collect_signatures_with_cp(&files, common::stdlib_classpath(), &mut d);
     let info = check_file(&files[0], &syms, &mut d);
     let (bytes, _) = emit_file(&files[0], &info, &syms, internal, &mut d);
     (bytes, d.diags.iter().map(|x| x.msg.clone()).collect())
@@ -60,6 +64,10 @@ fn preconditions_run() {
     let javac = format!("{java_home}/bin/javac");
     let java = format!("{java_home}/bin/java");
     if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    if common::stdlib_jar().is_none() {
+        eprintln!("skipping preconditions_e2e: no kotlin-stdlib jar found in caches");
         return;
     }
     let (bytes, errs) = compile(SRC, "PreKt");

@@ -36,6 +36,8 @@ use krusty::parser::parse;
 use krusty::jvm::classpath::Classpath;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 
+mod common;
+
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
 import java.io.*;
@@ -141,7 +143,7 @@ static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
 /// Returns None if compilation fails (unsupported feature).
-fn compile_source(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
+fn compile_source(src: &str, stem: &str, stdlib_jar: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
@@ -153,12 +155,9 @@ fn compile_source(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
         return None;
     }
     let t2 = std::time::Instant::now();
-    let stdlib_paths: Vec<std::path::PathBuf> = std::env::var("KRUSTY_KOTLIN_STDLIB")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|s| vec![std::path::PathBuf::from(s)])
-        .unwrap_or_default();
-    let cp = Classpath::new(stdlib_paths);
+    // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
+    // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
+    let cp = Classpath::new(stdlib_jar.map(|p| vec![p.to_path_buf()]).unwrap_or_default());
     let syms = collect_signatures_with_cp(&files, cp, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
@@ -371,7 +370,10 @@ fn kotlin_codegen_box_conformance() {
         return;
     };
     let java = format!("{java_home}/bin/java");
-    let stdlib = env("KRUSTY_KOTLIN_STDLIB").unwrap_or_default();
+    // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
+    // compile time and on the JVM at runtime. No bespoke env var.
+    let stdlib_jar = common::stdlib_jar();
+    let stdlib = stdlib_jar.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let limit: usize = env("KRUSTY_BOX_LIMIT").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
 
     let mut files = Vec::new();
@@ -432,10 +434,13 @@ fn kotlin_codegen_box_conformance() {
                 return (file.clone(), TestResult::Skip);
             }
 
-            // In-process compilation.
+            // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
+            // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
             let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File").to_string();
+            let with_stdlib = src.contains("// WITH_STDLIB") || src.contains("// WITH_RUNTIME");
+            let compile_cp = if with_stdlib { stdlib_jar.as_deref() } else { None };
             let t0 = std::time::Instant::now();
-            let classes = match compile_source(&src, &stem) {
+            let classes = match compile_source(&src, &stem, compile_cp) {
                 Some(c) => c,
                 None => return (file.clone(), TestResult::Skip),
             };

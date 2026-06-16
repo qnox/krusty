@@ -881,6 +881,47 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   loop, on the JVM; non-`componentN` type rejection). Full suite 178 green. `for ((a, b) in …)`
   destructuring loops (often over stdlib `withIndex()`/collections) remain a follow-up.
 
+## Phase 72 — Stdlib/built-in type resolution via the classpath (no hardcoded lists)  ✅
+- ✅ **Removed the hardcoded `builtin_exception` table.** Exception types now resolve from the
+  classpath like any other: `Exception`/`RuntimeException`/`IllegalStateException`/… are kotlin
+  **typealiases** read from `*TypeAliasesKt` `@Metadata` (`classpath::scan_types`), and `Throwable`
+  is a built-in mapped type (below). A throwable is recognised structurally
+  (`jvm::jvm_class_map::is_throwable_internal`: `…Exception`/`…Error`/`java/lang/Throwable`) only to
+  admit the no-arg / single-`String` constructor shapes; the *type* comes from the classpath.
+- ✅ **Fixed the type-alias expansion bug.** Classpath-seeded aliases carry a JVM **internal** target
+  (`java/lang/Exception`, with `/`); the expansion loop only handled simple/primitive/dotted targets,
+  so scanned aliases never reached `class_names`. Added the `/`-internal branch — now `class MyEx :
+  Exception(m)` emits `extends java/lang/Exception` (verified via `javap`), not a bare name.
+- ✅ **Ported `JavaToKotlinClassMap`** (`jvm/jvm_class_map.rs`, with a source back-reference to
+  `core/compiler.common.jvm/.../JavaToKotlinClassMap.kt`) — the canonical built-in mapped types
+  (`Any`, `String`, `CharSequence`, `Throwable`, `Cloneable`, `Number`, `Comparable`, `Enum`,
+  `Annotation`, and the collection read-only/mutable pairs `List`/`MutableList`→`java/util/List`, …).
+  These are intrinsic (not stdlib `.class` files), so they seed `class_names` unconditionally. This
+  resolves `class D : Comparable<D>` → `implements java/lang/Comparable` with no JDK on the classpath.
+- ✅ **Reject unresolved supertypes.** A class whose base/interface supertype resolves to none of
+  {user class, classpath class, alias, mapped built-in} is rejected (skipped) instead of emitting a
+  bare default-package name that would `NoClassDefFound` at load.
+- ✅ `SymbolTable` now carries the alias/built-in-expanded `class_names` (simple name → JVM internal
+  name) as the single source of truth; `resolve.rs` consults it and defers JVM-class knowledge to
+  the `jvm` module.
+- ✅ **Drop-in classpath, no env hack.** Removed `KRUSTY_KOTLIN_STDLIB`. The conformance harness and
+  the exception-using e2e tests locate a real kotlin-stdlib jar from the local caches
+  (`tests/common::stdlib_jar`) and pass it via `-classpath`; the harness supplies it **only for
+  `// WITH_STDLIB` tests**, matching the Kotlin test directive.
+- ✅ **Classpath resolution is visibility-aware.** Reading the real stdlib exposed that krusty
+  resolved calls to *non-public* members — multifile-facade **part** classes
+  (`StringsKt__StringBuilderJVMKt`) and **private** overloads (`ConsoleKt.println(int)`, which was
+  mis-indexed as an extension and shadowed a user's own `T.println()`), causing `IllegalAccessError`
+  at runtime. `ClassInfo` now carries the class access flags; `index_class_bytes`,
+  `resolve_java_static`, and `resolve_java_instance` require a **public method on a public class** —
+  otherwise the call stays unresolved (rejected), never miscompiled.
+- ✅ TDD: full suite 178 green. Box conformance with `// WITH_STDLIB` respected: **365 compiled /
+  356 box()=OK / 9 FAIL**. The 9 are pre-existing miscompiles from the undocumented post-63 work
+  (secondary constructors ×3, `inline class`, `sealed` delegating ctor, devirtualization, inc/dec
+  with two receivers, two VerifyErrors) — orthogonal to this phase, and the next correctness target.
+  This phase **fixed** the 4 `java.lang` supertype cases and all stdlib-visibility miscompiles, and
+  introduced none.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
