@@ -1058,6 +1058,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Full suite 182 green. **Box conformance 367 OK / 0 FAIL** — invariant held across the type-model
   change. Foundation for general lambdas / higher-order functions.
 
+## Phase 83 — Typed lambda parameters `{ x: Int -> ... }`  ✅
+- ✅ `parse_lambda` now accepts a typed single parameter `{ x: Type -> body }` (the type is parsed
+  and discarded; the parameter's type comes from the declared function type via
+  `check_lambda_with_types`, Phase 82). Was a parse error ("expected an expression").
+- ✅ Full suite 182 green. Box conformance **369 OK / 0 FAIL** (+2).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
