@@ -7,7 +7,7 @@ use std::fs;
 use std::process::Command;
 
 use krusty::ast::Decl;
-use krusty::codegen::emit::emit_class;
+use krusty::jvm::emit::emit_class;
 use krusty::diag::DiagSink;
 use krusty::jvm::classreader::parse_class;
 use krusty::lexer::lex;
@@ -45,10 +45,10 @@ fn class_shape_matches_expected_abi() {
     // Backing fields: x is final, y is not (var).
     let x = ci.fields.iter().find(|f| f.name == "x").expect("field x");
     assert_eq!(x.descriptor, "I");
-    assert!(x.access & krusty::codegen::classfile::ACC_FINAL != 0, "val backing field must be final");
+    assert!(x.access & krusty::jvm::classfile::ACC_FINAL != 0, "val backing field must be final");
     let y = ci.fields.iter().find(|f| f.name == "y").expect("field y");
     assert_eq!(y.descriptor, "Ljava/lang/String;");
-    assert!(y.access & krusty::codegen::classfile::ACC_FINAL == 0, "var backing field must not be final");
+    assert!(y.access & krusty::jvm::classfile::ACC_FINAL == 0, "var backing field must not be final");
 
     // Constructor + accessors.
     assert!(ci.method("<init>", "(ILjava/lang/String;)V").is_some(), "primary constructor");

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::codegen::classfile::*;
+use crate::jvm::classfile::*;
 use crate::diag::DiagSink;
 use crate::resolve::{import_map, resolve_java_static, SymbolTable, TypeInfo};
 use crate::types::Ty;
@@ -800,7 +800,7 @@ pub fn emit_class(
                 // Stack: {value (maybe null)}. dup then test — at `ok` the stack is {value}.
                 g.dup();
                 let ok = g.new_label();
-                use crate::codegen::classfile::VerifType;
+                use crate::jvm::classfile::VerifType;
                 let class_cidx = cw.class_ref(internal_name);
                 let vt = match ty {
                     Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
@@ -1067,7 +1067,7 @@ fn emit_data_members(
 
     // copy$default(self, props..., mask:int, marker:Object) -> Self — synthetic default-applier.
     if !user_methods.contains("copy") {
-        use crate::codegen::classfile::VerifType as VT;
+        use crate::jvm::classfile::VerifType as VT;
         let mask_slot = 1 + total_words;
         let total_locals = mask_slot + 2; // mask + marker
         let mut c = CodeBuilder::new(total_locals);
@@ -1179,7 +1179,7 @@ fn emit_data_members(
 
     // equals(Object): identity, instanceof, then per-property comparison.
     if !user_methods.contains("equals") && !parent_final.contains("equals") {
-        use crate::codegen::classfile::VerifType as VT;
+        use crate::jvm::classfile::VerifType as VT;
         let mut c = CodeBuilder::new(3); // this=0, other=1; cast_other=2
         let cidx = cw.class_ref(internal);
         // Frame used at `ne` and `is_inst` targets: [this, other_as_Object].
@@ -1353,7 +1353,7 @@ struct MethodEmitter<'a> {
     /// reachable unqualified (`MAX` → `getstatic`, `create(…)` → `invokestatic`).
     companion_of: Option<String>,
     /// Enclosing loops' `(continue_target, break_target)` labels for `continue`/`break`.
-    loop_labels: Vec<(crate::codegen::classfile::Label, crate::codegen::classfile::Label)>,
+    loop_labels: Vec<(crate::jvm::classfile::Label, crate::jvm::classfile::Label)>,
     /// Implicit receiver for an inlined `run`/`with`/`apply` body: `(slot, class internal)`. When set,
     /// `this` and unqualified member access target this slot/class instead of `this` (slot 0).
     recv: Option<(u16, String)>,
@@ -1451,8 +1451,8 @@ impl<'a> MethodEmitter<'a> {
 
     /// Build the verification-type locals list for the current `self.slots` state.
     /// Used to record StackMapTable frames. Slot 0 for instance methods = `this`.
-    fn make_verif_locals(&self, cw: &mut ClassWriter) -> Vec<crate::codegen::classfile::VerifType> {
-        use crate::codegen::classfile::VerifType;
+    fn make_verif_locals(&self, cw: &mut ClassWriter) -> Vec<crate::jvm::classfile::VerifType> {
+        use crate::jvm::classfile::VerifType;
         let max = self.next_slot as usize;
         if max == 0 { return Vec::new(); }
 
@@ -1500,15 +1500,15 @@ impl<'a> MethodEmitter<'a> {
 
     /// Record a StackMapTable frame for `label` with empty operand stack (first call wins).
     /// Always registers; StackMapTable is emitted for any method that has branch targets.
-    fn rec(&self, label: crate::codegen::classfile::Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    fn rec(&self, label: crate::jvm::classfile::Label, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let locals = self.make_verif_locals(cw);
         code.add_frame_if_new(label, locals, vec![]);
     }
 
     /// Record a StackMapTable frame for `label` with a single item on the operand stack.
     /// Used for exception-handler entry points (JVM places the caught exception on the stack).
-    fn rec_s(&self, label: crate::codegen::classfile::Label, stack_ty: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
-        use crate::codegen::classfile::VerifType;
+    fn rec_s(&self, label: crate::jvm::classfile::Label, stack_ty: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        use crate::jvm::classfile::VerifType;
         let locals = self.make_verif_locals(cw);
         let stack_item = match stack_ty {
             Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => VerifType::Integer,
@@ -1788,16 +1788,16 @@ impl<'a> MethodEmitter<'a> {
         let handler_locals = self.make_verif_locals(cw);
         // Pre-register `after`: try-body locals are out of scope at the convergence point.
         code.add_frame_if_new(after, handler_locals.clone(), vec![]);
-        let catch_handler_labels: Vec<(crate::codegen::classfile::Label, String)> = catches.iter().map(|c| {
-            use crate::codegen::classfile::VerifType;
+        let catch_handler_labels: Vec<(crate::jvm::classfile::Label, String)> = catches.iter().map(|c| {
+            use crate::jvm::classfile::VerifType;
             let internal = self.catch_internal(&c.ty.name);
             let handler = code.new_label();
             let vt = VerifType::Object(cw.class_ref(&internal));
             code.add_frame_if_new(handler, handler_locals.clone(), vec![vt]);
             (handler, internal)
         }).collect();
-        let fin_label: Option<crate::codegen::classfile::Label> = if finally.is_some() {
-            use crate::codegen::classfile::VerifType;
+        let fin_label: Option<crate::jvm::classfile::Label> = if finally.is_some() {
+            use crate::jvm::classfile::VerifType;
             let l = code.new_label();
             let vt = VerifType::Object(cw.class_ref("java/lang/Throwable"));
             code.add_frame_if_new(l, handler_locals.clone(), vec![vt]);

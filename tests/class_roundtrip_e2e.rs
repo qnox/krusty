@@ -9,7 +9,7 @@ use std::fs;
 use std::process::Command;
 
 use krusty::ast::Decl;
-use krusty::codegen::emit::emit_class;
+use krusty::jvm::emit::emit_class;
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;

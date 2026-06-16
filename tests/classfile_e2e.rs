@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::Command;
 
-use krusty::codegen::classfile::*;
+use krusty::jvm::classfile::*;
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("-version").output().is_ok()

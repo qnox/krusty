@@ -7,7 +7,7 @@
 use std::fs;
 use std::process::Command;
 
-use krusty::codegen::emit::emit_file;
+use krusty::jvm::emit::emit_file;
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
