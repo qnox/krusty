@@ -101,6 +101,9 @@ pub enum TemplatePart {
 pub enum Stmt {
     /// `val`/`var name (: type)? = init`
     Local { is_var: bool, name: String, ty: Option<TypeRef>, init: ExprId },
+    /// `val (a, b, …) = init` — destructuring; each entry binds `init.componentN()`.
+    /// An entry named `_` is skipped (no binding, no `componentN` call), per Kotlin.
+    Destructure { entries: Vec<(String, bool)>, init: ExprId },
     /// `name = value`
     Assign { name: String, value: ExprId },
     /// `receiver.name = value` — write a (mutable) property via its setter.
@@ -583,6 +586,12 @@ impl File {
         match self.stmt(id) {
             Stmt::Local { is_var, name, init, .. } => {
                 out.push_str(&format!("({} {name} ", if *is_var { "var" } else { "val" }));
+                self.write_expr(*init, out);
+                out.push(')');
+            }
+            Stmt::Destructure { entries, init } => {
+                let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+                out.push_str(&format!("(destructure ({}) ", names.join(" ")));
                 self.write_expr(*init, out);
                 out.push(')');
             }

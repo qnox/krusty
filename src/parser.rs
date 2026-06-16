@@ -1196,6 +1196,24 @@ impl<'a> Parser<'a> {
             TokenKind::KwVal | TokenKind::KwVar => {
                 let is_var = self.at(TokenKind::KwVar);
                 self.bump();
+                // Destructuring declaration: `val (a, b, …) = init`.
+                if self.at(TokenKind::LParen) {
+                    self.bump();
+                    let mut entries = Vec::new();
+                    loop {
+                        let n = self.ident_or_error("variable name");
+                        // A per-entry type annotation (`val (a: Int, b) = …`) is tolerated, ignored.
+                        if self.eat(TokenKind::Colon) { let _ = self.parse_type(); }
+                        entries.push((n, is_var));
+                        if !self.eat(TokenKind::Comma) { break; }
+                        if self.at(TokenKind::RParen) { break; } // trailing comma
+                    }
+                    self.expect(TokenKind::RParen, "')'");
+                    self.expect(TokenKind::Eq, "'='");
+                    self.skip_newlines();
+                    let init = self.parse_expr();
+                    return self.finish_stmt(Stmt::Destructure { entries, init }, start);
+                }
                 let name = self.ident_or_error("variable name");
                 let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
                 self.expect(TokenKind::Eq, "'='");
