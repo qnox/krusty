@@ -103,6 +103,10 @@ pub enum IrExpr {
     GetField { receiver: ExprId, class: ClassId, index: u32 },
     /// Write an instance field (`IrSetField`): `receiver.<fields[index]> = value` (statement).
     SetField { receiver: ExprId, class: ClassId, index: u32, value: ExprId },
+    /// Read a top-level (module) property — `statics[index]`, a static field on the file facade.
+    GetStatic(u32),
+    /// Write a top-level (module) property — `statics[index] = value` (statement).
+    SetStatic { index: u32, value: ExprId },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
     New { class: ClassId, args: Vec<ExprId> },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`.
@@ -163,12 +167,23 @@ pub struct IrClass {
     pub is_interface: bool,
 }
 
+/// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.
+#[derive(Clone, Debug)]
+pub struct IrStatic {
+    pub name: String,
+    pub ty: IrType,
+    /// The initializer expression (run in `<clinit>` in declaration order).
+    pub init: ExprId,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
     pub package: Option<String>,
     pub functions: Vec<IrFunction>,
     pub classes: Vec<IrClass>,
+    /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
+    pub statics: Vec<IrStatic>,
     pub exprs: Vec<IrExpr>,
 }
 

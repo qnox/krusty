@@ -38,6 +38,11 @@ pub fn emit_file(ir: &IrFile) -> String {
         }
         out.push_str("}\n");
     }
+    // Top-level properties: module-level `let`s initialized in declaration order (after classes,
+    // which a `new`-using initializer may reference; before functions, which JS hoists).
+    for s in &ir.statics {
+        out.push_str(&format!("let {} = {};\n", s.name, emit_expr(ir, s.init, false)));
+    }
     for (i, f) in ir.functions.iter().enumerate() {
         if f.dispatch_receiver.is_some() {
             continue; // emitted as a class method above
@@ -109,6 +114,10 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             let name = &ir.classes[*class as usize].fields[*index as usize].0;
             out.push_str(&format!("{}.{} = {};\n", emit_expr(ir, *receiver, inst), name, emit_expr(ir, *value, inst)));
         }
+        IrExpr::SetStatic { index, value } => {
+            indent(depth, out);
+            out.push_str(&format!("{} = {};\n", ir.statics[*index as usize].name, emit_expr(ir, *value, inst)));
+        }
         IrExpr::While { cond, body } => {
             indent(depth, out);
             out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond, inst)));
@@ -151,6 +160,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             IrConst::Null => "null".to_string(),
         },
         IrExpr::GetValue(i) => val_name(*i, inst),
+        IrExpr::GetStatic(i) => ir.statics[*i as usize].name.clone(),
         IrExpr::GetField { receiver, class, index } => {
             let name = &ir.classes[*class as usize].fields[*index as usize].0;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)

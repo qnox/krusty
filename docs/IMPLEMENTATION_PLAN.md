@@ -1476,6 +1476,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   on `Object`). IR→JVM corpus **31/31 run-verified OK, 0 FAIL** (was 21); JS 26 OK; lower count
   22→32. e2e: a `Counter` with a body-prop initializer + `init` block runs `OK` on java and node.
 
+- ✅ **Top-level (module) properties** in the IR. New IR concept `IrStatic` (`IrFile.statics`) plus
+  `IrExpr::GetStatic`/`SetStatic` — a top-level `val`/`var` is a `public static` field on the file
+  facade, initialized in `<clinit>` in declaration order; reads/writes are `getstatic`/`putstatic`
+  (JVM) or a module-level `let`/assignment (JS). Unqualified name resolution gained a statics tier
+  between locals and `this`-fields. Also hardened `lower_arg`: a primitive→different-primitive
+  coercion (`Int` → `Long`, not yet modeled) now **bails** so the file falls back to the direct
+  emitter instead of miscompiling. IR→JVM corpus **34/34 run-verified OK, 0 FAIL**; JS 29 OK; lower
+  count 32→35. e2e: a top-level `val` + mutated `var` run `OK` on java and node.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

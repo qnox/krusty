@@ -35,6 +35,9 @@ class Counter(val start: Int) {
     }
     fun get(): Int = total
 }
+val GREETING: String = "O" + "K"   // top-level val → static field, init in <clinit>
+var counter: Int = 10              // top-level var, mutated below
+fun bump(): Int { counter = counter + 5; return counter }
 fun add(a: Int, b: Int): Int = a + b
 fun max(a: Int, b: Int): Int = if (a > b) a else b
 fun sumTo(n: Int): Int {
@@ -50,7 +53,7 @@ fun box(): String {
     val s = add(2, 3)
     val p = Point(3, 4)
     val msg = "v=$s!"                      // string template → String.plus intrinsics
-    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17 && p.scaled(3) == 21 && Counter(5).get() == 15
+    val good = s == 5 && max(7, 4) == 7 && msg == "v=5!" && sumTo(4) == 10 && p.x == 3 && p.sum() == 7 && p.shifted(10) == 17 && p.scaled(3) == 21 && Counter(5).get() == 15 && GREETING == "OK" && bump() == 15 && counter == 15
     return if (good) "OK" else "no"
 }
 "#;
