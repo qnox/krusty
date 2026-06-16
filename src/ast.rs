@@ -234,6 +234,9 @@ pub struct ClassDecl {
     pub init_order: Vec<ClassInit>,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
+    /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
+    /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
+    pub is_value: bool,
     /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
     pub is_object: bool,
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
