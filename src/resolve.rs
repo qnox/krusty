@@ -56,6 +56,8 @@ pub struct ClassSig {
     pub interfaces: Vec<String>,
     /// Internal name of the base class (`: Base(..)`), if any.
     pub super_internal: Option<String>,
+    /// `annotation class` — emitted as an interface; instantiation builds a synthetic impl class.
+    pub is_annotation: bool,
 }
 
 impl ClassSig {
@@ -712,7 +714,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                         .collect();
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation },
                     );
                 }
                 Decl::Property(p) => {
@@ -1211,11 +1213,17 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 if cl.is_value {
                     c.diags.error(cl.span, "krusty: value/inline classes are not supported".to_string());
                 }
-                // `annotation class` instances (`A("x")`) need the synthetic `$annotationImpl$` class
-                // with JLS member-wise equals/hashCode; a normal class gives identity equals (FAIL).
-                // Skip until the impl-class synthesis lands (groundwork: `is_annotation` flag + parser).
+                // Annotation impls support reference/primitive members and arrays of references; an
+                // array-of-primitive member needs a different `Arrays.equals`/`hashCode` overload —
+                // skip until that lands rather than miscompile.
                 if cl.is_annotation {
-                    c.diags.error(cl.span, "krusty: annotation-class instances are not supported".to_string());
+                    for p in &cl.props {
+                        if let Ty::Array(elem) = c.resolve_ty(&p.ty) {
+                            if elem.is_primitive() {
+                                c.diags.error(cl.span, "krusty: annotation with a primitive-array member is not supported".to_string());
+                            }
+                        }
+                    }
                 }
                 // Class type parameters are in scope for all members.
                 c.tparams = cl.type_params.iter().cloned().collect();
@@ -2875,6 +2883,18 @@ impl<'a> Checker<'a> {
                         let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
                         self.ext_calls.insert(call, ("$local".to_string(), name.clone(), desc));
                         return sig.ret;
+                    }
+                }
+                // `hashCode`/`toString`/`equals` on an annotation instance are inherited from `Object`
+                // (the annotation impl provides JLS versions). Narrowly scoped to annotation receivers
+                // so we don't enable these on arbitrary references (which can hide null/ semantics bugs).
+                let is_ann_recv = rt.obj_internal().map_or(false, |i| self.syms.classes.values().any(|cs| cs.internal == i && cs.is_annotation));
+                if is_ann_recv {
+                    match (name.as_str(), arg_tys.len()) {
+                        ("hashCode", 0) => return Ty::Int,
+                        ("toString", 0) => return Ty::String,
+                        ("equals", 1) => return Ty::Boolean,
+                        _ => {}
                     }
                 }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));

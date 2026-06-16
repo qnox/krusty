@@ -718,6 +718,11 @@ impl CodeBuilder {
         let i = cw.const_string(s);
         self.ldc(i);
     }
+    /// `ldc <class>` — push a `Class` constant (e.g. `A.class`).
+    pub fn ldc_class(&mut self, internal: &str, cw: &mut ClassWriter) {
+        let i = cw.class_ref(internal);
+        self.ldc(i);
+    }
     fn ldc(&mut self, idx: u16) {
         if idx <= 255 {
             self.op_u1(0x12, idx as u8, 1); // ldc
