@@ -1137,11 +1137,20 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
         self.skip_newlines();
-        // Optional single parameter: `it -> …` / `x -> …`.
-        let param = if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Arrow) {
+        // Optional single parameter: `it -> …`, `x -> …`, or typed `x: Type -> …` (type discarded;
+        // the parameter's type comes from the declared function type via `check_lambda_with_types`).
+        let next_kind = self.t.get(self.i + 1).map(|t| t.kind);
+        let param = if self.at(TokenKind::Ident) && next_kind == Some(TokenKind::Arrow) {
             let n = self.text().to_string();
             self.bump(); // name
             self.bump(); // '->'
+            Some(n)
+        } else if self.at(TokenKind::Ident) && next_kind == Some(TokenKind::Colon) {
+            let n = self.text().to_string();
+            self.bump(); // name
+            self.bump(); // ':'
+            let _ = self.parse_type();
+            self.expect(TokenKind::Arrow, "'->'");
             Some(n)
         } else {
             None
