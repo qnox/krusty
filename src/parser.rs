@@ -112,6 +112,16 @@ impl<'a> Parser<'a> {
                         self.bump();
                     }
                 }
+                // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
+                TokenKind::KwFun
+                    if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text(self.src) == "interface") =>
+                {
+                    self.bump(); // 'fun'
+                    let mut d = self.parse_interface();
+                    d.is_fun_interface = true;
+                    let id = self.file.add_decl(Decl::Class(d));
+                    self.file.decls.push(id);
+                }
                 TokenKind::KwFun => {
                     let d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
                     let id = self.file.add_decl(Decl::Fun(d));
@@ -517,7 +527,7 @@ impl<'a> Parser<'a> {
             is_enum: true,
             enum_entries: entries,
             enum_entry_args: entry_args,
-            is_interface: false,
+            is_interface: false, is_fun_interface: false,
             is_open: false,
             is_abstract: false,
             is_sealed: false,
@@ -825,7 +835,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -935,7 +945,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_open: false, is_abstract: false, is_sealed: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
@@ -996,7 +1006,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {
