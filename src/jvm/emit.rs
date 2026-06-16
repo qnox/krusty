@@ -4245,9 +4245,13 @@ impl<'a> MethodEmitter<'a> {
                     }
                 } else if args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
                     // `IntArray(n) { i -> elem }` — allocate then fill via a counted loop. The lambda
-                    // is inlined (its parameter bound to the index). The element value is evaluated
-                    // into a temp first so a branchy body runs on an empty stack (no array/index
-                    // underneath the frames).
+                    // is inlined (its parameter bound to the index). All loop temps (n/arr/i/value
+                    // and any the body allocates) are scoped to the loop: their slots are released
+                    // once the array is on the operand stack, so they can't pollute later
+                    // StackMapTable frames. (A branchy body's result temp is written only *inside*
+                    // the loop, so it must not appear as initialized in frames after the loop — if
+                    // the loop runs zero times the verifier sees it as `top`.)
+                    let temp_base = self.next_slot;
                     let arr_ty = Ty::array(elem);
                     self.emit_expr_as(args[0], Ty::Int, code, cw);
                     let n_slot = self.alloc_temp(Ty::Int);
@@ -4294,6 +4298,11 @@ impl<'a> MethodEmitter<'a> {
                     self.rec(end, code, cw);
                     code.bind(end);
                     load_local(arr_ty, arr_slot, code);
+                    // Release loop temps: the array is now on the stack, nothing below needs them.
+                    // Leaving them in `self.slots` would make later frames claim slots the verifier
+                    // considers `top` on the zero-iteration path.
+                    self.next_slot = temp_base;
+                    self.slots.retain(|_, &mut (slot, _)| slot < temp_base);
                 } else {
                     // Size constructor `IntArray(n)` — allocate a zero-filled array of length `n`.
                     self.emit_expr_as(args[0], Ty::Int, code, cw);

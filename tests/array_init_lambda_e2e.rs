@@ -26,10 +26,10 @@ const SRC: &str = r#"
 fun box(): String {
     val a = IntArray(4) { it * 2 }                 // [0,2,4,6]
     val b = CharArray(3) { 'x' }
-    val c = IntArray(3) { it + 1 }                 // [1,2,3]
+    val c = IntArray(3) { if (it == 1) 10 else it } // branchy body: [0,10,2]
     var s = 0
     for (x in a) s += x
-    return if (s == 12 && b[1] == 'x' && a[3] == 6 && c[2] == 3) "OK" else "no s=$s"
+    return if (s == 12 && b[1] == 'x' && a[3] == 6 && c[1] == 10 && c[2] == 2) "OK" else "no s=$s"
 }
 "#;
 

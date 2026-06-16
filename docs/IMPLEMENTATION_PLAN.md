@@ -1142,14 +1142,23 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   types the lambda parameter (the index) as `Int` and inlines the body into a counted fill loop.
 - ✅ TDD: `tests/array_init_lambda_e2e.rs` (Int/Char arrays on the JVM). Box conformance held.
 
-## Phase 95 — Frame-safe guard: reject branchy array-init bodies  ✅
-- ⚠️ Phase 94's inline fill loop computes its own `StackMapTable` frames. A *branching* body
-  (`if`/`when`/`try`/elvis/safe-call) introduces merge frames the inline loop mishandles —
-  `IntArray(3) { if (it==1) 10 else it }` produced a `VerifyError` ("locals[N] top vs integer").
-- ✅ Fix: `expr_branches()` in `resolve.rs`; `check_array_builtin` rejects a branchy init body
-  (falls through to the unsupported path — **never miscompile**). Simple bodies (`it`, `it*2`,
-  constants) keep working. A proper fix lives in the `ast → krusty-ir` loop-lowering pass.
-- ✅ TDD: e2e uses a non-branchy body. Full suite green. Box conformance **376 OK / 0 FAIL**.
+## Phase 95 — Frame-safe guard: reject branchy array-init bodies  ↩︎ superseded by 96
+- Interim guard (`expr_branches` rejecting branchy init bodies) — replaced by the real fix below.
+
+## Phase 96 — Branchy array-init bodies: scope the loop temps  ✅
+- ⚠️ Root cause of Phase 94's `VerifyError`: the inline fill loop's temps (the value temp **and**
+  any temp a branchy body allocates, e.g. an `if`'s result slot) leaked into `self.slots` *after*
+  the loop. A branchy body's result temp is written only **inside** the loop, so on the
+  zero-iteration path the verifier sees that slot as `top` — but later `StackMapTable` frames
+  (e.g. a subsequent `return if …`) still reported it `Integer`, hence "locals[N] top vs integer".
+- 🔑 Why array-init differed from normal lambdas/functions: a normal branchy body emits
+  **straight-line**, so its result-temp `istore` dominates all later code and stays consistent.
+  *Inlining* the body into a loop breaks that domination — the same hazard as tailrec inlining.
+- ✅ Fix (`src/jvm/emit.rs`): snapshot `next_slot` before the loop; once the array is on the
+  operand stack, release every slot the loop allocated (`next_slot = base; slots.retain(< base)`)
+  so no dead loop temp pollutes later frames. No checker guard — branchy bodies compile correctly.
+- ✅ TDD: `tests/array_init_lambda_e2e.rs` restored to a branchy body (`if (it==1) 10 else it`),
+  verified with `-Xverify:all` on the JVM. Full suite **184 green**. Box conformance **376 OK / 0 FAIL**.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
