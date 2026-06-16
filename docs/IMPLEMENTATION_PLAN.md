@@ -1494,6 +1494,20 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   emitter never miscompiles, it is just narrow). This is the metric the drop-in goal is measured by;
   the IR path (34/34) is the future production backend catching up to it.
 
+- ✅ **Reference-compiler correction.** The corpus (`~/external-projects/kotlin`) was switched to the
+  **2.4.0** release branch and the differential oracle to **kotlinc 2.4.0** (downloaded; runs on Java
+  25). The previous `/tmp/kdist` kotlinc was **1.9.24** — wrong version vs the corpus AND it crashes
+  on Java 25 (`IllegalArgumentException: 25.0.3`). Re-baselined the production drop-in path on the
+  2.4.0 corpus: **438 box()=OK / 7352 scanned, 0 FAIL**.
+- ◐ **Value/inline classes — groundwork only.** Added `ClassDecl.is_value` and parser plumbing for
+  `@JvmInline value class`; the parser no longer hard-errors. But compiling a value class as an
+  ordinary final class is **unsound** — verified 2 box FAILs (inline-class equality
+  `NZ2(NZ1(null))` and an unbox/cast `C("OK").foo`). True support needs kotlinc's unboxed
+  `box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0` members **plus use-site name mangling**
+  (a function taking a value class takes the underlying type under a `name-<hash>` symbol). Until that
+  lands, `is_value` skips cleanly at resolve, preserving the **0-FAIL** invariant. Full `Some` spec
+  captured from kotlinc 2.4.0 for the real implementation.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
