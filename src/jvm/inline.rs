@@ -334,6 +334,104 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
     out
 }
 
+/// If `op` is a one-byte-indexed local load/store (`iload`/`astore`/…), its canonical `*_N`-form base
+/// opcode (`iload`→`iload_0`), used to pick the compact form when the shifted index is 0..=3.
+fn n_form_base(op: u8) -> Option<u8> {
+    Some(match op {
+        0x15 => 0x1a, // iload
+        0x16 => 0x1e, // lload
+        0x17 => 0x22, // fload
+        0x18 => 0x26, // dload
+        0x19 => 0x2a, // aload
+        0x36 => 0x3b, // istore
+        0x37 => 0x3f, // lstore
+        0x38 => 0x43, // fstore
+        0x39 => 0x47, // dstore
+        0x3a => 0x4b, // astore
+        _ => return None,
+    })
+}
+
+/// Decode a `*_N` load/store opcode to its `(indexed base opcode, local index)` — `iload_2` →
+/// `(iload, 2)`. `None` for any other opcode.
+fn decode_n_form(op: u8) -> Option<(u8, u16)> {
+    let (base, n_base) = match op {
+        0x1a..=0x1d => (0x15, 0x1a),
+        0x1e..=0x21 => (0x16, 0x1e),
+        0x22..=0x25 => (0x17, 0x22),
+        0x26..=0x29 => (0x18, 0x26),
+        0x2a..=0x2d => (0x19, 0x2a),
+        0x3b..=0x3e => (0x36, 0x3b),
+        0x3f..=0x42 => (0x37, 0x3f),
+        0x43..=0x46 => (0x38, 0x43),
+        0x47..=0x4a => (0x39, 0x47),
+        0x4b..=0x4e => (0x3a, 0x4b),
+        _ => return None,
+    };
+    Some((base, (op - n_base) as u16))
+}
+
+/// Build the most compact load/store instruction for `(indexed base opcode, index)`: a `*_N` form for
+/// 0..=3, a one-byte-indexed form for 4..=255, else a `wide` form.
+fn local_load_store(base_op: u8, idx: u16) -> Insn {
+    if idx <= 3 {
+        if let Some(nb) = n_form_base(base_op) {
+            return Insn::Plain { op: nb + idx as u8, operands: vec![] };
+        }
+    }
+    if idx <= 0xff {
+        Insn::Plain { op: base_op, operands: vec![idx as u8] }
+    } else {
+        Insn::Plain { op: 0xc4, operands: vec![base_op, (idx >> 8) as u8, idx as u8] }
+    }
+}
+
+/// Add `base` to every local-variable index in the body (load/store in all forms, `iinc`, `ret`, and
+/// their `wide` variants), re-selecting the compact encoding. Relocating an inline body's locals into
+/// the caller's frame is a prerequisite for splicing — the body then occupies `base..base+max_locals`.
+pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
+    for insn in insns.iter_mut() {
+        let Insn::Plain { op, operands } = insn else { continue };
+        let op = *op;
+        if let Some((base_op, idx)) = decode_n_form(op) {
+            *insn = local_load_store(base_op, idx + base);
+        } else if matches!(op, 0x15..=0x19 | 0x36..=0x3a) {
+            // One-byte-indexed load/store.
+            let idx = *operands.first()? as u16 + base;
+            *insn = local_load_store(op, idx);
+        } else if op == 0xa9 {
+            // ret <index>.
+            let idx = *operands.first()? as u16 + base;
+            *insn = if idx <= 0xff {
+                Insn::Plain { op: 0xa9, operands: vec![idx as u8] }
+            } else {
+                Insn::Plain { op: 0xc4, operands: vec![0xa9, (idx >> 8) as u8, idx as u8] }
+            };
+        } else if op == 0x84 {
+            // iinc <index> <const>.
+            let idx = *operands.first()? as u16 + base;
+            let c = operands[1];
+            *insn = if idx <= 0xff {
+                Insn::Plain { op: 0x84, operands: vec![idx as u8, c] }
+            } else {
+                // wide iinc: 2-byte index + sign-extended 2-byte const.
+                let chi = if (c as i8) < 0 { 0xff } else { 0 };
+                Insn::Plain { op: 0xc4, operands: vec![0x84, (idx >> 8) as u8, idx as u8, chi, c] }
+            };
+        } else if op == 0xc4 {
+            // wide <sub-op> <index:2> [<const:2> for iinc].
+            let sub = *operands.first()?;
+            let idx = ((operands[1] as u16) << 8 | operands[2] as u16) + base;
+            if sub == 0x84 {
+                *insn = Insn::Plain { op: 0xc4, operands: vec![0x84, (idx >> 8) as u8, idx as u8, operands[3], operands[4]] };
+            } else {
+                *insn = local_load_store(sub, idx);
+            }
+        }
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +482,25 @@ mod tests {
         let expected = cw.methodref("Foo", "bar", "()V");
         assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected, "index points at target methodref");
         assert_eq!(out[3], 0xb1, "return opcode unchanged");
+    }
+
+    #[test]
+    fn shift_locals_zero_is_identity_and_shift_works() {
+        // iload_1; istore_2; iinc 1, 1; return  (javac-style compact forms).
+        let code = [0x1b, 0x3d, 0x84, 0x01, 0x01, 0xb1];
+        let mut insns = disassemble(&code).unwrap();
+        shift_locals(&mut insns, 0).unwrap();
+        assert_eq!(assemble(&insns), code, "shift by 0 is identity");
+
+        let mut s = disassemble(&code).unwrap();
+        shift_locals(&mut s, 4).unwrap();
+        // iload_1 → iload 5 (0x15 5), istore_2 → istore 6 (0x36 6), iinc 1→5.
+        assert_eq!(assemble(&s), [0x15, 0x05, 0x36, 0x06, 0x84, 0x05, 0x01, 0xb1]);
+
+        // Shifting past 3 must promote _N forms to indexed (size grows; assemble relays out).
+        let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
+        shift_locals(&mut t, 10).unwrap();
+        assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
     }
 
     #[test]
