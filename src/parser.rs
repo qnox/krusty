@@ -1945,6 +1945,28 @@ impl<'a> Parser<'a> {
             return self.parse_try();
         }
         match self.kind() {
+            // Collection-literal `[a, b, …]` (annotation arguments / defaults) → `arrayOf(a, b, …)`;
+            // `[]` → `emptyArray()`. Reuses the array-builtin resolution + (target-typed) codegen.
+            TokenKind::LBracket => {
+                self.bump(); // '['
+                self.skip_newlines();
+                let mut args = Vec::new();
+                while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                    args.push(self.parse_expr());
+                    self.skip_newlines();
+                    if self.at(TokenKind::Comma) {
+                        self.bump();
+                        self.skip_newlines();
+                    } else {
+                        break;
+                    }
+                }
+                let end = self.tok().span;
+                self.expect(TokenKind::RBracket, "']'");
+                let fname = if args.is_empty() { "emptyArray" } else { "arrayOf" };
+                let callee = self.file.add_expr(Expr::Name(fname.to_string()), span);
+                self.file.add_expr(Expr::Call { callee, args }, Span::new(span.lo, end.hi))
+            }
             TokenKind::IntLit => {
                 let v = parse_int_literal(self.text());
                 self.bump();
