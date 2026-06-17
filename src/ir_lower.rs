@@ -609,6 +609,43 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
     }
 
+    fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
+        self.afile.decls.iter().find_map(|&d| match self.afile.decl(d) {
+            Decl::Fun(f) if f.name == name => Some(f),
+            _ => None,
+        })
+    }
+
+    /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
+    /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
+    /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
+    fn lower_args_defaulted(&mut self, call: AstExprId, ast_params: &[ast::Param], args: &[AstExprId], ir_params: &[IrType]) -> Option<Vec<u32>> {
+        if args.len() > ir_params.len() {
+            return None;
+        }
+        // Named arguments are reordered by the checker but the IR sees them in source order — the
+        // positional `args[k] → param[k]` mapping below is only valid when none are named. (A fully
+        // positional call still works.)
+        if args.len() < ir_params.len()
+            && self.afile.call_arg_names.get(&call.0).map_or(false, |n| n.iter().any(|x| x.is_some()))
+        {
+            return None;
+        }
+        let mut a = Vec::new();
+        for (k, pt) in ir_params.iter().enumerate() {
+            if k < args.len() {
+                a.push(self.lower_arg(args[k], pt)?);
+            } else {
+                let def = ast_params.get(k)?.default?;
+                if !is_const_literal(self.afile, def) {
+                    return None;
+                }
+                a.push(self.lower_arg(def, pt)?);
+            }
+        }
+        Some(a)
+    }
+
     /// The receiver's class type for member access. The checker types a bare `object` name as
     /// `Error` (it's only a qualifier), so map an object-name receiver to its object type; otherwise
     /// use the checker's inferred type.
@@ -1184,16 +1221,9 @@ impl<'a> Lower<'a> {
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         let params = self.ir.functions[fid as usize].params.clone();
-                        // Default/omitted arguments aren't modeled — an arg count below the param
-                        // count would push too few values for the method descriptor (stack underflow).
-                        if args.len() != params.len() {
-                            return None;
-                        }
-                        let mut a = Vec::new();
-                        for (k, arg) in args.iter().enumerate() {
-                            let target = params.get(k).cloned().unwrap_or(IrType::Error);
-                            a.push(self.lower_arg(*arg, &target)?);
-                        }
+                        // Omitted trailing args are filled from constant-literal defaults.
+                        let ast_params = self.top_fun_decl(&fname).map(|f| f.params.clone()).unwrap_or_default();
+                        let a = self.lower_args_defaulted(e, &ast_params, &args, &params)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
                     } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
@@ -1294,6 +1324,13 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
         Expr::Unary { op: ast::UnOp::Not, .. } => true,
         _ => false,
     }
+}
+
+/// Is `e` a compile-time constant literal (an argument-default krusty can inline at the call site)?
+fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
+    matches!(file.expr(e),
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::StringLit(_) | Expr::NullLit)
 }
 
 /// Best-effort: is the literal/operand a primitive (so `==` would use a numeric branch, not
