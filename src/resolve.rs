@@ -3727,8 +3727,13 @@ impl<'a> Checker<'a> {
                     Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
                     Ty::String => Ty::Char, // iterating a String yields its chars
                     Ty::Error => Ty::Error,
+                    // A collection/range value with an `iterator()` — the iterator protocol. The
+                    // element is its generic argument (`List<Int>` → `Int`), erased `Any` if absent.
+                    Ty::Obj(internal, args) if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[]).is_some() => {
+                        args.first().copied().unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                    }
                     _ => {
-                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays and String)", it.name()));
+                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
                         Ty::Error
                     }
                 };

@@ -154,6 +154,9 @@ pub fn resolve_instance(lib: &dyn LibrarySet, internal: &str, name: &str, args: 
     if !lib.resolve_type(internal)?.is_public {
         return None;
     }
+    // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
+    // so a reference argument matches against an `Any` parameter — try the exact args, then widened.
+    let widened: Vec<Ty> = args.iter().map(|t| if t.is_reference() { Ty::obj("kotlin/Any") } else { *t }).collect();
     let mut seen = std::collections::HashSet::new();
     let mut q = std::collections::VecDeque::new();
     q.push_back(internal.to_string());
@@ -162,7 +165,7 @@ pub fn resolve_instance(lib: &dyn LibrarySet, internal: &str, name: &str, args: 
             continue;
         }
         let Some(t) = lib.resolve_type(&cur) else { continue };
-        if let Some(m) = t.instance_member(name, args) {
+        if let Some(m) = t.instance_member(name, args).or_else(|| t.instance_member(name, &widened)) {
             return Some(m.clone());
         }
         q.extend(t.supertypes);
