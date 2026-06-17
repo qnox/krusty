@@ -1676,7 +1676,20 @@ impl<'a> Checker<'a> {
     /// file rather than emit a `ClassFormatError`-inducing duplicate method.
     fn erased_sig_key(&self, f: &FunDecl) -> String {
         let (params, _) = self.erased_param_ret(f);
-        format!("{}({})", f.name, params)
+        // An extension function's receiver is its first JVM parameter — part of the signature, so
+        // `Int.foo()` and `String.foo()` don't collide.
+        let recv = f.receiver.as_ref().map(|r| {
+            if let Some(t) = Ty::from_name(&r.name) {
+                t.descriptor()
+            } else if let Some(cs) = self.syms.classes.get(&r.name) {
+                Ty::obj(&cs.internal).descriptor()
+            } else {
+                // Unresolved (type parameter / unknown) — keep the name so distinct receivers get
+                // distinct keys (don't collapse to a single `Object` and hide a real JVM collision).
+                format!("L{};", r.name)
+            }
+        }).unwrap_or_default();
+        format!("{}({}{})", f.name, recv, params)
     }
 
     /// The erased JVM parameter descriptors (concatenated) and return descriptor of a function,
@@ -1775,6 +1788,10 @@ impl<'a> Checker<'a> {
                     f.span,
                     format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
                 );
+            } else if f.receiver.is_some() {
+                // Extension functions dispatch by (receiver, name) via `ext_funs` — same-named
+                // extensions on different receivers don't clash; only an exact-signature dup (the
+                // `seen` check above) does.
             } else {
                 match by_name.entry(f.name.clone()) {
                     std::collections::hash_map::Entry::Occupied(e) if e.get() != &key => {

@@ -2036,6 +2036,20 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   the **2.4.0 dist stdlib** via `dist_jar`, not the gradle 2.0.21 jar — only my ad-hoc smoke commands
   had used 2.0.21.)
 
+- ✅ **Phase 187 — top-level extension functions** (313 → 315 box()=OK, 0 FAIL). The checker already
+  resolved extension calls and bound `this`; only the backend was missing. `fun Recv.name(…)` now lowers
+  to a static method whose first parameter is the receiver (Kotlin's strategy), keyed by
+  `(receiver descriptor, name)` in a new `Lower.ext_fun_ids` (separate from `fun_ids` since `Int.foo` and
+  `String.foo` share a name). A call `recv.name(args)` → a static call with the receiver prepended; the
+  body binds `this` to parameter 0. Fixes to support it: the overload-clash check now includes the
+  extension receiver in the JVM signature key (so `Int.foo`/`String.foo` don't collide) and exempts
+  extensions from the by-name "can't dispatch overloads" gate (they dispatch by receiver). A user
+  `operator fun T.plus(…)` (etc.) extension now overrides the builtin operator in the `Binary` lowering
+  (fixes `kt889`). A receiver that doesn't resolve to a concrete type (a generic `T.foo()`) bails rather
+  than guessing `Object`. `tests/extension_fun_e2e.rs`. This is the foundation for resolving stdlib
+  extension functions (`kotlin.ranges.until`/`downTo`/`step`) by symbol — the proper, non-hardcoded path
+  to range support.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

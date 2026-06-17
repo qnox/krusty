@@ -33,6 +33,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         syms,
         ir: IrFile { package: file.package.clone(), ..Default::default() },
         fun_ids: HashMap::new(),
+        ext_fun_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
         scope: Vec::new(),
@@ -48,7 +49,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
+            Decl::Fun(f) if !f.is_inline => {} // top-level function or extension function
             Decl::Class(c) if is_simple_class(c) => {}
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
@@ -247,15 +248,33 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
         }
     }
-    // Pass 1b: register top-level functions.
+    // Pass 1b: register top-level functions and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            let sig = syms.funs.get(&f.name)?;
-            let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
-            let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
-            let param_checks = param_checks_for(f, &sig.params);
-            let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks });
-            lo.fun_ids.insert(f.name.clone(), id);
+            if let Some(recv_ref) = &f.receiver {
+                // Extension function `fun Recv.name(…)` → a static method whose first parameter is the
+                // receiver (Kotlin's compilation strategy). Keyed by (receiver descriptor, name). A
+                // receiver that doesn't resolve to a concrete type (a generic `T.foo()`) isn't modeled —
+                // bail rather than guess `Object`.
+                let recv_ty = ty_of(file, recv_ref);
+                if recv_ty == Ty::Error {
+                    return None;
+                }
+                let recv_desc = recv_ty.descriptor();
+                let sig = syms.ext_funs.get(&(recv_desc.clone(), f.name.clone()))?;
+                let mut params = vec![ty_to_ir(recv_ty)];
+                params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
+                let ret = ty_to_ir(sig.ret);
+                let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks: vec![] });
+                lo.ext_fun_ids.insert((recv_desc, f.name.clone()), id);
+            } else {
+                let sig = syms.funs.get(&f.name)?;
+                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
+                let param_checks = param_checks_for(f, &sig.params);
+                let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks });
+                lo.fun_ids.insert(f.name.clone(), id);
+            }
         }
     }
     // Pass 1c: assign top-level-property indices (initializers lowered in pass 2). Registered before
@@ -281,13 +300,22 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     for &d in &file.decls {
         match file.decl(d) {
             Decl::Fun(f) => {
-                let fid = lo.fun_ids[&f.name];
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
                 lo.lambda_seq = 0;
-                let sig = syms.funs.get(&f.name)?;
+                let (fid, sig) = if let Some(recv_ref) = &f.receiver {
+                    // Extension body: `this` is the receiver (parameter 0), then the declared params.
+                    let recv_ty = ty_of(file, recv_ref);
+                    let recv_desc = recv_ty.descriptor();
+                    let fid = lo.ext_fun_ids[&(recv_desc.clone(), f.name.clone())];
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, recv_ty));
+                    (fid, syms.ext_funs.get(&(recv_desc, f.name.clone()))?)
+                } else {
+                    (lo.fun_ids[&f.name], syms.funs.get(&f.name)?)
+                };
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
                     lo.scope.push((p.name.clone(), v, *t));
@@ -661,6 +689,9 @@ struct Lower<'a> {
     syms: &'a SymbolTable,
     ir: IrFile,
     fun_ids: HashMap<String, u32>,
+    /// Top-level extension functions, keyed by `(receiver type descriptor, name)` — separate from
+    /// `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by receiver.
+    ext_fun_ids: HashMap<(String, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
     statics: HashMap<String, (u32, Ty)>,
@@ -1707,6 +1738,22 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
+                // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
+                let op_name = match op {
+                    BinOp::Add => Some("plus"), BinOp::Sub => Some("minus"), BinOp::Mul => Some("times"),
+                    BinOp::Div => Some("div"), BinOp::Rem => Some("rem"), _ => None,
+                };
+                if let Some(opn) = op_name {
+                    let recv_desc = self.recv_ty(lhs).descriptor();
+                    if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, opn.to_string())) {
+                        let params = self.ir.functions[fid as usize].params.clone();
+                        if params.len() == 2 {
+                            let l = self.lower_arg(lhs, &params[0])?;
+                            let r = self.lower_arg(rhs, &params[1])?;
+                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![l, r] }));
+                        }
+                    }
+                }
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
@@ -2028,6 +2075,22 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // A top-level extension function `recv.name(args)` → a static call whose first
+                    // argument is the receiver (matching how the extension was registered/emitted).
+                    {
+                        let recv_desc = self.recv_ty(receiver).descriptor();
+                        if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, name.clone())) {
+                            let params = self.ir.functions[fid as usize].params.clone();
+                            if params.len() == args.len() + 1 {
+                                let recv = self.lower_arg(receiver, &params[0])?;
+                                let mut a = vec![recv];
+                                for (arg, pt) in args.iter().zip(&params[1..]) {
+                                    a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                            }
+                        }
+                    }
                     // Primitive numeric/`Char` conversions (`n.toLong()`, `c.toInt()`, `i.toChar()`, …)
                     // are coercions — the backend emits the `i2l`/`l2i`/`i2c`/… opcode.
                     {
