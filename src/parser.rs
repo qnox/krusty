@@ -123,6 +123,11 @@ impl<'a> Parser<'a> {
                     self.file.decls.push(id);
                 }
                 TokenKind::KwFun => {
+                    // `suspend` needs a coroutine state machine (Continuation) krusty doesn't emit;
+                    // compiling it as a plain function is unsound — reject so the file skips.
+                    if mods.iter().any(|m| m == "suspend") {
+                        self.diags.error(self.tok().span, "krusty: suspend functions are not supported");
+                    }
                     let d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);

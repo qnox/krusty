@@ -1624,6 +1624,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Net **480 → 485 box()=OK, 0 FAIL**. (Nested-try frames + lateinit-local throw are now logged
   follow-up bugs.)
 
+- ✅ **General method references** `obj::m` (bound, captures the receiver) / `Type::m` (unbound, the
+  receiver is the first parameter), on user-class methods — extends the `FunctionN` scaffold:
+  `emit_method_ref` casts the receiver to the class, unboxes args, `invokevirtual`/`invokeinterface`,
+  boxes the result. Guards for the 2 exposed FAILs: an **object** receiver (`O::m`, bound to the
+  singleton — not modeled) is skipped; **`suspend` functions** are now **rejected** (krusty emits no
+  coroutine `Continuation` state machine, so compiling them as plain functions is unsound — this also
+  fixed a callable-ref-equality FAIL). Net **485 → 491 box()=OK, 0 FAIL** (+6; suspend rejection
+  dropped 2 previously-lucky unsound passes).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
