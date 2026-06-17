@@ -133,6 +133,9 @@ pub enum IrExpr {
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
+    /// An array built from explicit element values (`newarray`/`anewarray` + element stores) — used to
+    /// pack `vararg` call arguments. `elem` is the element type.
+    ArrayOf { elem: IrType, elements: Vec<ExprId> },
     /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when
     /// used as a statement). Each catch binds the exception to a value index and runs its body. A
     /// `finally` block runs on every exit (normal, each catch, and an uncaught exception via a

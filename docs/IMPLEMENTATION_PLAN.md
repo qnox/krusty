@@ -1924,6 +1924,13 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   loop-depth-aware so a loop-local `break` is fine), and a nested `try` inside the `finally` is rejected
   by the checker (it would be emitted multiple times). `tests/finally_e2e.rs`.
 
+- ✅ **Phase 176 — `vararg` + array `for`-iteration** (263 → 264 box()=OK, 0 FAIL). A `vararg`
+  parameter's JVM type is the array; the call site packs the trailing arguments into a fresh array via
+  the new `IrExpr::ArrayOf { elem, elements }` (`newarray`/`anewarray` + per-element `dup`/index/store)
+  and passes it (matching kotlinc). Spread (`*arr`) and a branchy element are skipped. `for (x in arr)`
+  over an array now lowers to an index loop (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, with
+  the array/size hoisted) — the complement that consumes a vararg array. `tests/vararg_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

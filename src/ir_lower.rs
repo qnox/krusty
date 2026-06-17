@@ -1084,6 +1084,50 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
             }
+            // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
+            Stmt::ForEach { name, iterable, body } => {
+                let it_ty = self.info.ty(iterable);
+                let elem = it_ty.array_elem()?; // only array iteration is modeled
+                let depth = self.scope.len();
+                // Evaluate the array once into a temp.
+                let arr_v = self.fresh_value();
+                let arr_val = self.expr(iterable)?;
+                let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: ty_to_ir(it_ty), init: Some(arr_val) });
+                // i = 0
+                let i_v = self.fresh_value();
+                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(zero) });
+                // n = arr.size (hoisted)
+                let n_v = self.fresh_value();
+                let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
+                let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(size) });
+                // condition: i < n
+                let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
+                // loop var `x = arr[i]`, bound for the body
+                let x_v = self.fresh_value();
+                self.scope.push((name.clone(), x_v, elem));
+                let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
+                let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
+                let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
+                let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
+                let mut out = vec![var_x];
+                for s in stmts {
+                    out.push(self.stmt(s)?);
+                }
+                let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
+                out.push(self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc }));
+                let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody });
+                self.scope.truncate(depth);
+                Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
+            }
             _ => None,
         }
     }
@@ -1528,6 +1572,31 @@ impl<'a> Lower<'a> {
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
+                        // A `vararg` function: pack the trailing arguments into a fresh array for the
+                        // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
+                        if let Some(sig) = self.syms.funs.get(&fname).filter(|s| s.vararg).cloned() {
+                            let params = self.ir.functions[fid as usize].params.clone();
+                            let fixed = params.len() - 1;
+                            if args.len() < fixed {
+                                return None;
+                            }
+                            let elem_ty = sig.params[fixed].array_elem()?;
+                            let elem_ir = ty_to_ir(elem_ty);
+                            let mut a = Vec::new();
+                            for (i, &arg) in args.iter().take(fixed).enumerate() {
+                                a.push(self.lower_arg(arg, &params[i])?);
+                            }
+                            let mut elements = Vec::new();
+                            for &arg in &args[fixed..] {
+                                if is_branchy(self.afile, arg) {
+                                    return None;
+                                }
+                                elements.push(self.lower_arg(arg, &elem_ir)?);
+                            }
+                            let arr = self.ir.add_expr(IrExpr::ArrayOf { elem: elem_ir, elements });
+                            a.push(arr);
+                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                        }
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Omitted trailing args are filled from constant-literal defaults.
                         let meta: Vec<(String, Option<AstExprId>)> = self.top_fun_decl(&fname)
