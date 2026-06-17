@@ -1798,6 +1798,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   delegates to the impl (deduped against the base-class bridges). Still out: interface **default
   methods** (need a `DefaultImpls` class) and interface **properties** (abstract getters).
 
+- ✅ **Phase 163 — abstract classes + unqualified `this.method()`** (191 → 214 box()=OK, 0 FAIL). An
+  `abstract class` is now accepted: its abstract methods (no body) are declared `ACC_ABSTRACT` (the
+  class gets `ACC_ABSTRACT`, non-`final`), concrete methods emit normally, and subclasses extend it via
+  the existing inheritance path. Also added unqualified instance-method calls inside a class body
+  (`foo()` → `this.foo()`, resolving through the superclass chain) — a common gap that this unblocked
+  broadly. Fixed a data-class corner: a data class no longer synthesizes `equals`/`hashCode`/`toString`
+  when a superclass already declares it (e.g. a base's `final override fun toString()`), inheriting it
+  instead of regenerating.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

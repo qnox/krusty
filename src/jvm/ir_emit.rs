@@ -73,10 +73,14 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         return emit_interface_class(ir, c);
     }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
-    // A class that is extended must not be `final` (else the subclass fails verification).
-    if ir.classes.iter().any(|o| o.superclass == c.fq_name) {
-        cw.set_access(0x0001 | 0x0020); // PUBLIC | SUPER
-    }
+    // Access: an extended or abstract class must not be `final`; a class with an abstract method
+    // (body `None`) is `ACC_ABSTRACT`.
+    let extended = ir.classes.iter().any(|o| o.superclass == c.fq_name);
+    let has_abstract = c.methods.iter().any(|&fid| ir.functions[fid as usize].body.is_none());
+    let mut access = 0x0001 | 0x0020; // PUBLIC | SUPER
+    if !extended && !has_abstract { access |= 0x0010; } // FINAL
+    if has_abstract { access |= 0x0400; } // ABSTRACT
+    cw.set_access(access);
     for itf in &c.interfaces {
         cw.add_interface(itf);
     }
@@ -142,10 +146,15 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     ctor.ensure_locals(max_slot);
     ctor.link();
     cw.add_method(0x0001, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
-    // Instance methods.
+    // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
     for &fid in &c.methods {
-        if ir.functions[fid as usize].body.is_some() {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, true);
+        } else {
+            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            let ret = ir_ty_to_jvm(&f.ret);
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ret));
         }
     }
     emit_bridges(c, &mut cw);
