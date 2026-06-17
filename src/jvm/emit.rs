@@ -4792,14 +4792,29 @@ impl<'a> MethodEmitter<'a> {
                     && crate::resolve::resolve_stringbuilder_instance(&name, &args.iter().map(|a| self.info.ty(*a)).collect::<Vec<_>>()).is_some() =>
             {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
-                let (desc, ret) = crate::resolve::resolve_stringbuilder_instance(&name, &arg_tys).unwrap();
-                self.emit_expr(receiver, code, cw);
-                for a in args {
-                    self.emit_expr(*a, code, cw);
+                if name == "appendLine" {
+                    // Kotlin extension: `sb.appendLine(x)` → `sb.append(x).append('\n')`.
+                    self.emit_expr(receiver, code, cw);
+                    if let Some(&a) = args.first() {
+                        let at = self.info.ty(a);
+                        let (adesc, _) = sb_append(at);
+                        self.emit_expr(a, code, cw);
+                        let m = cw.methodref("java/lang/StringBuilder", "append", adesc);
+                        code.invokevirtual(m, slot_words(at) as i32, 1);
+                    }
+                    code.push_int('\n' as i32, cw);
+                    let mc = cw.methodref("java/lang/StringBuilder", "append", "(C)Ljava/lang/StringBuilder;");
+                    code.invokevirtual(mc, 1, 1);
+                } else {
+                    let (desc, ret) = crate::resolve::resolve_stringbuilder_instance(&name, &arg_tys).unwrap();
+                    self.emit_expr(receiver, code, cw);
+                    for a in args {
+                        self.emit_expr(*a, code, cw);
+                    }
+                    let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    let m = cw.methodref("java/lang/StringBuilder", &name, &desc);
+                    code.invokevirtual(m, arg_words, slot_words(ret) as i32);
                 }
-                let arg_words: i32 = arg_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = cw.methodref("java/lang/StringBuilder", &name, &desc);
-                code.invokevirtual(m, arg_words, slot_words(ret) as i32);
             }
             // Instance method call on a class value: `p.method(args)` (own or inherited).
             Expr::Member { receiver, name }

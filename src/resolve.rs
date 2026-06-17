@@ -319,6 +319,8 @@ pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<(S
             };
             (format!("({argdesc})Ljava/lang/StringBuilder;"), sb)
         }
+        // `appendLine(x)` / `appendLine()` (Kotlin extension) — emitted as append(x) + append('\n').
+        ("appendLine", [_] | []) => ("()Ljava/lang/StringBuilder;".to_string(), sb),
         _ => return None,
     })
 }
@@ -892,6 +894,38 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
         Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
         Stmt::Expr(e) => r(*e),
         Stmt::LocalFun(_) => false,
+    }
+}
+
+/// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
+/// a StackMapTable frame bug in codegen).
+fn expr_has_try(file: &File, e: ExprId) -> bool {
+    let r = |x: ExprId| expr_has_try(file, x);
+    match file.expr(e) {
+        Expr::Try { .. } => true,
+        Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
+        | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
+        | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
+        Expr::Member { receiver, .. } => r(*receiver),
+        Expr::Index { array, index } => r(*array) || r(*index),
+        Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
+        Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
+        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
+        Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
+        Expr::Block { stmts, trailing } => stmts.iter().any(|&s| stmt_has_try(file, s)) || trailing.map_or(false, |t| r(t)),
+        Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
+    }
+}
+
+fn stmt_has_try(file: &File, s: StmtId) -> bool {
+    match file.stmt(s) {
+        Stmt::Expr(e) => expr_has_try(file, *e),
+        Stmt::Return(Some(e)) => expr_has_try(file, *e),
+        Stmt::Local { init, .. } => expr_has_try(file, *init),
+        _ => false,
     }
 }
 
@@ -2077,6 +2111,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Try { body, catches, finally } => {
+                // Nested try/catch trips a StackMapTable frame bug in codegen — skip rather than
+                // emit a VerifyError.
+                if expr_has_try(self.file, body) || catches.iter().any(|c| expr_has_try(self.file, c.body)) {
+                    self.diags.error(self.span(e), "krusty: nested try/catch is not supported".to_string());
+                }
                 let bt = self.expr(body);
                 if let Some(f) = finally {
                     self.expr(f); // finally runs for effect; its value is discarded
