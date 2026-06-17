@@ -6,7 +6,7 @@ mod common;
 
 use krusty::jvm::classfile::ClassWriter;
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::inline::{assemble, disassemble, splice, Insn};
+use krusty::jvm::inline::{assemble, disassemble, is_reified_inline, splice, Insn};
 
 #[test]
 fn splices_real_empty_array_body() {
@@ -23,6 +23,8 @@ fn splices_real_empty_array_body() {
     // The raw body must contain the reified marker call we expect to eliminate.
     let pre = disassemble(&body.code).expect("disassemble raw body");
     assert!(pre.iter().any(|i| matches!(i, Insn::Plain { op: 0xb8, .. })), "raw body invokes the marker");
+    // Recognition gate: emptyArray is a reified-inline function (must be inlined, not called).
+    assert!(is_reified_inline(&body), "emptyArray recognized as reified-inline by its body");
 
     let mut cw = ClassWriter::new("Caller", "java/lang/Object");
     let mut tm = std::collections::HashMap::new();

@@ -554,6 +554,17 @@ pub fn redirect_returns(insns: &mut [Insn]) {
     }
 }
 
+/// Whether a method body is a **reified `inline`** function — its bytecode calls
+/// `Intrinsics.reifiedOperationMarker`, which the compiler must inline away (a direct call to such a
+/// method throws `UnsupportedOperationException` at runtime). This recognizes the must-inline case
+/// from the body alone, without parsing the `@Metadata` inline flag.
+pub fn is_reified_inline(body: &MethodCode) -> bool {
+    let Some(insns) = disassemble(&body.code) else { return false };
+    insns.iter().any(|i| matches!(i, Insn::Plain { op: 0xb8, operands } if operands.len() == 2
+        && methodref_target(&body.source_cp, (operands[0] as u16) << 8 | operands[1] as u16)
+            == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker"))))
+}
+
 /// Per-parameter `(local slot, store-base opcode)` for a method descriptor, slots starting at `base`
 /// (`long`/`double` take two). Used to bind the on-stack call arguments into the inline body's frame.
 fn param_store_ops(descriptor: &str, base: u16) -> Option<Vec<(u16, u8)>> {
@@ -687,6 +698,13 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    #[test]
+    fn is_reified_inline_negative() {
+        // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
+        let body = MethodCode { max_stack: 1, max_locals: 0, code: vec![0x04, 0xac], source_cp: vec![C::Other] };
+        assert!(!is_reified_inline(&body));
     }
 
     #[test]
