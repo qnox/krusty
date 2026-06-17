@@ -1298,8 +1298,12 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
             Ty::from_name(prim).unwrap_or(Ty::Error)
-        } else {
+        } else if r.targs.is_empty() {
             Ty::obj(internal)
+        } else {
+            // Generic instantiation `C<A, …>` — carry the resolved arguments (erased in descriptors).
+            let args: Vec<Ty> = r.targs.iter().map(|a| ty_of_ref(a, classes, tparams, diags)).collect();
+            Ty::obj_args(internal, &args)
         }
     } else {
         diags.error(r.span, format!("unresolved reference: {}", r.name));
@@ -1671,6 +1675,18 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Build a class reference type, carrying any generic arguments from the syntactic type
+    /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
+    /// descriptors but let the front end recover member/element types.
+    fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
+        if r.targs.is_empty() {
+            Ty::obj(internal)
+        } else {
+            let args: Vec<Ty> = r.targs.iter().map(|a| self.resolve_ty(a)).collect();
+            Ty::obj_args(internal, &args)
+        }
+    }
+
     /// Resolve a syntactic type to a `Ty`, including declared class types (→ `Ty::Obj`).
     /// Nullability doesn't change the `Ty` for reference types (same JVM descriptor), but a nullable
     /// *primitive* (`Char?`, `Int?`, …) would need boxing — rejected (the file is skipped).
@@ -1700,15 +1716,16 @@ impl<'a> Checker<'a> {
         } else if self.tparams.contains(&r.name) {
             Ty::obj("java/lang/Object") // erased generic type parameter
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            Ty::obj(&cs.internal)
-        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
+            let internal = cs.internal.clone();
+            self.obj_with_targs(&internal, r)
+        } else if let Some(internal) = self.syms.class_names.get(&r.name).cloned() {
             // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
             // type aliases — the *same* map emit resolves against, so the checker and codegen agree
             // (otherwise a leniently-`Error` type here becomes a real `Obj` in emit → VerifyError).
             // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
             match internal.strip_prefix("__ty/") {
                 Some(prim) => Ty::from_name(prim).unwrap_or(Ty::Error),
-                None => Ty::obj(internal),
+                None => self.obj_with_targs(&internal, r),
             }
         } else {
             Ty::Error
