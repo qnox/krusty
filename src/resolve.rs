@@ -2061,6 +2061,14 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // Known classpath supertypes of `String` (`String : CharSequence, Comparable, Serializable`).
+        if actual == Ty::String {
+            if let Some(ei) = expected.obj_internal() {
+                if matches!(ei, "java/lang/CharSequence" | "java/lang/Comparable" | "java/io/Serializable") {
+                    return;
+                }
+            }
+        }
         if expected != actual {
             let _ = ctx;
             self.diags.error(span, format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name()));
