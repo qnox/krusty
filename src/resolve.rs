@@ -2915,17 +2915,9 @@ impl<'a> Checker<'a> {
                 self.diags.error(span, "krusty: Array(n) {…} with an array element is not supported".to_string());
                 return Some(Ty::Error);
             }
-            let ref_elem = match elem {
-                Ty::Int => Ty::obj("java/lang/Integer"),
-                Ty::Long => Ty::obj("java/lang/Long"),
-                Ty::Double => Ty::obj("java/lang/Double"),
-                Ty::Float => Ty::obj("java/lang/Float"),
-                Ty::Boolean => Ty::obj("java/lang/Boolean"),
-                Ty::Char => Ty::obj("java/lang/Character"),
-                Ty::Byte => Ty::obj("java/lang/Byte"),
-                Ty::Short => Ty::obj("java/lang/Short"),
-                e => e,
-            };
+            // A primitive element boxes to its wrapper reference type — the boxing policy (and the
+            // JVM wrapper names) belong to the backend.
+            let ref_elem = crate::jvm::jvm_class_map::wrapper_internal(elem).map_or(elem, Ty::obj);
             return Some(Ty::array(ref_elem));
         }
         None
