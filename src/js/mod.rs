@@ -207,6 +207,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}({})", name, a.join(", "))
             }
+            // A resolved JVM static call has no JS equivalent — emit the receiver-first form by name.
+            Callee::Static { name, .. } => {
+                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
+                format!("{}({})", name, a.join(", "))
+            }
             Callee::External(fq) => match fq.as_str() {
                 "kotlin/String.plus" => {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
