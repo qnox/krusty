@@ -1219,6 +1219,20 @@ pub struct TypeInfo {
     /// `call_expr_id → (owner_internal, jvm_method_name, jvm_descriptor)`.
     /// Emitter emits `invokestatic owner.name descriptor` (receiver is the first arg).
     pub ext_calls: HashMap<ExprId, (String, String, String)>,
+    /// Synthetic bridge methods a class must emit so a supertype's erased call dispatches to the
+    /// class's concrete override (`class_internal → [bridge]`).
+    pub bridges: HashMap<String, Vec<BridgeSpec>>,
+}
+
+/// A bridge method: erased signature (the supertype's descriptor, what callers invoke) delegating to
+/// the class's concrete method (`name(concrete_params)concrete_ret`).
+#[derive(Clone, Debug)]
+pub struct BridgeSpec {
+    pub name: String,
+    pub erased_params: Vec<Ty>,
+    pub erased_ret: Ty,
+    pub concrete_params: Vec<Ty>,
+    pub concrete_ret: Ty,
 }
 
 impl TypeInfo {
@@ -1257,6 +1271,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_call_map: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
+        bridges: HashMap::new(),
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -1481,7 +1496,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
-    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls }
+    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls, bridges: c.bridges }
 }
 
 struct Checker<'a> {
@@ -1511,6 +1526,7 @@ struct Checker<'a> {
     local_call_map: HashMap<ExprId, StmtId>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
+    bridges: HashMap<String, Vec<BridgeSpec>>,
 }
 
 impl<'a> Checker<'a> {
@@ -1633,25 +1649,38 @@ impl<'a> Checker<'a> {
     /// skipped rather than throwing `AbstractMethodError` at runtime.
     fn check_no_bridge_needed(&mut self, internal: &str, span: Span) {
         let supers = self.syms.supertype_methods(internal);
+        let obj = Ty::obj("java/lang/Object");
         for (name, ssig) in &supers {
             let Some(impl_sig) = self.syms.method_of(internal, name) else { continue };
             let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
             let ip: String = impl_sig.params.iter().map(|t| t.descriptor()).collect();
-            if sp != ip {
-                // Parameter erasure mismatch: the class has 'name(ConcreteType)' but the
-                // supertype exposes 'name(Object)' at the erased JVM level. A bridge method
-                // that downcasts and delegates is required but not yet supported.
-                self.diags.error(
-                    span,
-                    format!("krusty: method '{name}' needs a bridge method (generic parameter override is not supported)"),
-                );
+            let params_differ = sp != ip;
+            let ret_differs = ssig.ret.descriptor() != impl_sig.ret.descriptor();
+            // Each erased param must either equal the concrete one (passes through) or be `Object`
+            // (the generic-erasure case — the bridge checkcasts a reference or unboxes a primitive).
+            // A non-`Object` erased param that differs means `method_of` resolved the wrong overload.
+            let params_bridgeable = ssig.params.len() == impl_sig.params.len()
+                && ssig.params.iter().zip(&impl_sig.params).all(|(e, c)| e == c || *e == obj);
+            if (params_differ || ret_differs)
+                && params_bridgeable
+                // A differing *return* that is primitive would need boxing in the bridge — skip.
+                && !(ret_differs && impl_sig.ret.is_primitive())
+            {
+                // Record a synthetic bridge `name(erased)` that downcasts its args and delegates to
+                // the concrete `name(impl)`. (Primitive params would need (un)boxing in the bridge —
+                // left out of this pass.)
+                self.bridges.entry(internal.to_string()).or_default().push(BridgeSpec {
+                    name: name.clone(),
+                    erased_params: ssig.params.clone(),
+                    erased_ret: ssig.ret,
+                    concrete_params: impl_sig.params.clone(),
+                    concrete_ret: impl_sig.ret,
+                });
+            } else if params_differ {
+                self.diags.error(span, format!("krusty: method '{name}' needs a bridge method (generic parameter override is not supported)"));
                 return;
-            }
-            if ssig.ret.descriptor() != impl_sig.ret.descriptor() {
-                self.diags.error(
-                    span,
-                    format!("krusty: method '{name}' needs a bridge method (covariant/generic return override is not supported)"),
-                );
+            } else if ret_differs {
+                self.diags.error(span, format!("krusty: method '{name}' needs a bridge method (covariant/generic return override is not supported)"));
                 return;
             }
         }

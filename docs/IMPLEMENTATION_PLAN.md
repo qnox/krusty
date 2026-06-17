@@ -1638,6 +1638,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `invokespecial <init>`. Completes the callable-reference family (top-level fun, bound/unbound
   method, constructor). Production drop-in: **491 → 493 box()=OK, 0 FAIL**.
 
+- ✅ **Bridge methods** (the dominant leverage lever — ~83 blocked files). When a class's concrete
+  override has a different erased signature than a supertype method, the checker now **records** a
+  `BridgeSpec` (in `TypeInfo.bridges`) instead of rejecting; `emit_bridges` emits a synthetic
+  `ACC_BRIDGE|ACC_SYNTHETIC` method with the erased descriptor that, per parameter, **checkcasts** a
+  reference / **unboxes** a primitive / passes through, then `invokevirtual`s the concrete method.
+  Edge cases handled to hold 0-FAIL: a bridge whose signature duplicates an existing method is skipped
+  (`ClassWriter::has_method`); a **void** return uses `return` not `areturn`; a bridge is only recorded
+  when each erased param is `Object` or equals the concrete (else `method_of` picked a wrong overload —
+  e.g. the `format` diamond); a differing primitive return is left out. Production drop-in: **493 →
+  526 box()=OK, 0 FAIL** (+33, the biggest single-phase gain).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
