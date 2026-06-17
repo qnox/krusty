@@ -1234,6 +1234,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
+        expr_depth: 0,
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -1489,6 +1490,9 @@ struct Checker<'a> {
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
+    /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
+    /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
+    expr_depth: u32,
 }
 
 impl<'a> Checker<'a> {
@@ -2099,6 +2103,19 @@ impl<'a> Checker<'a> {
     }
 
     fn expr(&mut self, e: ExprId) -> Ty {
+        // Guard against a stack overflow on a pathologically deep expression: past the limit the
+        // expression types as `Error` (the file is skipped, never crashed).
+        self.expr_depth += 1;
+        if self.expr_depth > 500 {
+            self.expr_depth -= 1;
+            return self.set(e, Ty::Error);
+        }
+        let t = self.expr_inner(e);
+        self.expr_depth -= 1;
+        t
+    }
+
+    fn expr_inner(&mut self, e: ExprId) -> Ty {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
