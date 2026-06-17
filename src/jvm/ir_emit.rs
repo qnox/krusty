@@ -452,6 +452,20 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
         e.next_slot += slot_words(*t);
     }
     let mut code = CodeBuilder::new(e.next_slot);
+    // kotlinc guards each non-null reference parameter of a visible function with
+    // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
+    let param_checks = f.param_checks.clone();
+    for (i, check) in param_checks.iter().enumerate() {
+        if let Some(name) = check {
+            let vi = i as u32 + if instance { 1 } else { 0 };
+            if let Some(&(slot, _)) = e.slots.get(&vi) {
+                code.aload(slot);
+                code.push_string(name, e.cw);
+                let m = e.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNullParameter", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                code.invokestatic(m, 2, 0);
+            }
+        }
+    }
     e.emit(body, &mut code);
     if ret == Ty::Unit {
         code.ret_void();

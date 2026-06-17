@@ -115,6 +115,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
                 let ret = sig.ret;
                 let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let param_checks = param_checks_for(m, &sig.params);
                 let fid = lo.ir.add_fun(IrFunction {
                     name: m.name.clone(),
                     params,
@@ -122,6 +123,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     body: None,
                     is_static: false,
                     dispatch_receiver: Some(internal.clone()),
+                    param_checks,
                 });
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
@@ -143,7 +145,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let sig = syms.funs.get(&f.name)?;
             let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
             let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
-            let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None });
+            let param_checks = param_checks_for(f, &sig.params);
+            let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks });
             lo.fun_ids.insert(f.name.clone(), id);
         }
     }
@@ -563,6 +566,7 @@ impl<'a> Lower<'a> {
             body: Some(block),
             is_static: true,
             dispatch_receiver: None,
+            param_checks: Vec::new(),
         });
         Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }))
     }
@@ -583,6 +587,7 @@ impl<'a> Lower<'a> {
         let fid = self.ir.add_fun(IrFunction {
             name: name.to_string(), params, ret: ty_to_ir(ret), body: Some(body),
             is_static: false, dispatch_receiver: Some(internal.to_string()),
+            param_checks: Vec::new(),
         });
         let idx = self.ir.classes[class_id as usize].methods.len() as u32;
         self.ir.classes[class_id as usize].methods.push(fid);
@@ -1664,6 +1669,25 @@ fn ty_to_ir(t: Ty) -> IrType {
         _ => return IrType::Error,
     };
     IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
+}
+
+/// Per-parameter `Some(name)` when a non-null assertion (`Intrinsics.checkNotNullParameter`) should
+/// guard it: a non-null reference parameter of a visible (non-`private`) function — matching kotlinc.
+/// Primitives, nullable params (`String?`), and generic type parameters (`T`, which may be nullable)
+/// are skipped. Conservative: when the parameter lists don't line up (e.g. an extension receiver
+/// shifts them) no guards are emitted.
+fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
+    if f.is_private || f.receiver.is_some() || f.params.len() != param_tys.len() {
+        return vec![None; param_tys.len()];
+    }
+    f.params.iter().zip(param_tys).map(|(p, ty)| {
+        let is_type_param = f.type_params.contains(&p.ty.name);
+        if !p.ty.nullable && !is_type_param && ty.is_reference() {
+            Some(p.name.clone())
+        } else {
+            None
+        }
+    }).collect()
 }
 
 /// Split the parameter section of a JVM method descriptor (`(Ljava/lang/String;I)V`) into the
