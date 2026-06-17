@@ -1,9 +1,9 @@
 //! The JVM implementation of the [`LibrarySet`] abstraction: resolves symbols from a `.class`-jar
 //! classpath (the bytecode target). All classpath reads, JVM method-descriptor parsing, and
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
-//! only Kotlin-level `Ty`s and opaque descriptor strings through the trait.
+//! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
-use crate::libraries::{LibrarySet, LibrarySeed};
+use crate::libraries::{LibrarySet, LibrarySeed, LibraryType, LibraryMember, LibraryCallable};
 use crate::types::Ty;
 use super::classpath::Classpath;
 use super::jvm_class_map::{to_kotlin_internal, to_jvm_internal, kotlin_builtin_to_jvm, BUILTIN_MAPPED_NAMES};
@@ -35,6 +35,37 @@ pub fn desc_to_ty(d: &str) -> Ty {
         s if s.starts_with('L') && s.ends_with(';') => Ty::obj(to_kotlin_internal(&s[1..s.len() - 1])),
         _ => Ty::Error,
     }
+}
+
+/// Split one JVM field descriptor off the front of `s`, returning `(descriptor, rest)`.
+fn split_one(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i] == b'[' {
+        i += 1;
+    }
+    if i >= b.len() {
+        return None;
+    }
+    match b[i] {
+        b'L' => {
+            let end = s[i..].find(';')? + i + 1;
+            Some((&s[..end], &s[end..]))
+        }
+        _ => Some((&s[..i + 1], &s[i + 1..])),
+    }
+}
+
+/// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
+fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
+    let close = desc.find(')').unwrap_or(0);
+    let mut rest = &desc[1..close];
+    let mut params = Vec::new();
+    while let Some((one, tail)) = split_one(rest) {
+        params.push(desc_to_ty(one));
+        rest = tail;
+    }
+    (params, desc_to_ty(&desc[close + 1..]))
 }
 
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
@@ -81,116 +112,64 @@ impl LibrarySet for JvmLibraries {
         LibrarySeed { class_names, type_aliases: idx.type_aliases.clone() }
     }
 
-    fn annotation_members(&self, internal: &str) -> Option<Vec<(String, Ty)>> {
+    fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let ci = self.cp.find(internal)?;
-        if ci.access & 0x2000 == 0 {
-            return None; // not ACC_ANNOTATION
-        }
+        let mut constructors = Vec::new();
         let mut members = Vec::new();
+        let mut companion = Vec::new();
         for m in &ci.methods {
-            if m.descriptor.starts_with("()") {
-                let ty = desc_to_ty(&m.descriptor[2..]);
-                if ty == Ty::Error {
-                    return None; // a member type we can't model — skip the whole annotation
-                }
-                members.push((m.name.clone(), ty));
-            }
-        }
-        Some(members)
-    }
-
-    fn resolve_static(&self, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
-        let ci = self.cp.find(internal)?;
-        // Only a public method on a public class is callable from generated code.
-        if !ci.is_public() {
-            return None;
-        }
-        let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-        let prefix = format!("({params})");
-        let m = ci.methods.iter().find(|m| m.name == method && m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix))?;
-        let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
-        Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
-    }
-
-    fn resolve_instance(&self, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
-        // The receiver's static type must be public; the method may be inherited from a (possibly
-        // non-public) superclass/interface — walk the chain as the JVM does for invokevirtual.
-        if !self.cp.find(internal)?.is_public() {
-            return None;
-        }
-        let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-        let prefix = format!("({params})");
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back(internal.to_string());
-        while let Some(name) = q.pop_front() {
-            if !seen.insert(name.clone()) {
+            // Only public members are callable from generated code.
+            if !m.is_public() {
                 continue;
             }
-            let Some(ci) = self.cp.find(&name) else { continue };
-            if let Some(m) = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix)) {
-                let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
-                return Some((m.descriptor.clone(), desc_to_ty(&ret)));
-            }
-            for i in &ci.interfaces {
-                q.push_back(i.clone());
-            }
-            if let Some(s) = &ci.super_class {
-                q.push_back(s.clone());
+            let (params, ret) = parse_method_desc(&m.descriptor);
+            let member = LibraryMember { name: m.name.clone(), params, ret, descriptor: m.descriptor.clone() };
+            if m.name == "<init>" {
+                constructors.push(member);
+            } else if m.is_static() {
+                // A Kotlin companion member compiles to a JVM static on the class.
+                companion.push(member);
+            } else {
+                members.push(member);
             }
         }
-        None
+        // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
+        // shapes when the classpath reader can't surface the jimage constructor descriptors.
+        if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
+            constructors.push(LibraryMember { name: "<init>".into(), params: vec![], ret: Ty::Unit, descriptor: "()V".into() });
+            constructors.push(LibraryMember { name: "<init>".into(), params: vec![Ty::String], ret: Ty::Unit, descriptor: format!("({})V", Ty::String.descriptor()) });
+        }
+        let mut supertypes = ci.interfaces.clone();
+        if let Some(s) = &ci.super_class {
+            supertypes.push(s.clone());
+        }
+        Some(LibraryType {
+            is_public: ci.is_public(),
+            is_interface: ci.is_interface(),
+            is_annotation: ci.access & 0x2000 != 0,
+            supertypes,
+            constructors,
+            members,
+            companion,
+        })
     }
 
-    fn resolve_ctor(&self, internal: &str, arg_tys: &[Ty]) -> Option<String> {
-        let ci = self.cp.find(internal)?;
-        let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-        let exact = format!("({params})V");
-        if let Some(m) = ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == exact) {
-            return Some(m.descriptor.clone());
-        }
-        // Widening fallback: replace each reference-type arg with Object (e.g. String → Object).
-        // Needed because e.g. AssertionError has no public (String) ctor, only public (Object).
-        let widened: String = arg_tys.iter().map(|t| match t {
-            Ty::String | Ty::Obj(..) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => Ty::obj("kotlin/Any").descriptor(),
-            _ => t.descriptor(),
-        }).collect();
-        let widened_exact = format!("({widened})V");
-        if let Some(m) = ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == widened_exact) {
-            return Some(m.descriptor.clone());
-        }
-        // Every JDK `Throwable` has a no-arg and a single-message constructor; accept those two
-        // shapes even when the classpath reader can't see the jimage constructor descriptors.
-        if super::jvm_class_map::is_throwable_internal(internal) {
-            return match arg_tys {
-                [] => Some("()V".to_string()),
-                [Ty::String] => Some(format!("({})V", Ty::String.descriptor())),
-                _ => None,
-            };
-        }
-        None
-    }
-
-    fn resolve_extension(&self, receiver: Ty, method: &str, arg_tys: &[Ty]) -> Option<(String, String, String, Ty)> {
-        let rest_params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
+    fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty]) -> Option<LibraryCallable> {
+        // Top-level (receiver-less) functions are not resolved from the classpath yet — only
+        // extensions, whose declared receiver is the callable's first parameter.
+        let receiver = receiver?;
+        let rest_params: String = args.iter().map(|t| t.descriptor()).collect();
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension).
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
             let full_prefix = format!("({recv_desc}{rest_params})");
-            for c in self.cp.find_extensions(&recv_desc, method) {
+            for c in self.cp.find_extensions(&recv_desc, name) {
                 if c.descriptor.starts_with(&full_prefix) {
-                    return Some((c.owner.clone(), c.name.clone(), c.descriptor.clone(), desc_to_ty(&c.ret_desc)));
+                    let (params, ret) = parse_method_desc(&c.descriptor);
+                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret, descriptor: c.descriptor.clone() });
                 }
             }
         }
         None
-    }
-
-    fn desc_to_ty(&self, desc: &str) -> Ty {
-        desc_to_ty(desc)
-    }
-
-    fn is_interface(&self, internal: &str) -> bool {
-        self.cp.find(internal).map_or(false, |c| c.is_interface())
     }
 }

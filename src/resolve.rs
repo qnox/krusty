@@ -2293,7 +2293,7 @@ impl<'a> Checker<'a> {
                             resolve_string_instance(&name, &arg_tys).unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = rt {
                             self.lookup_method(internal, &name).map(|s| s.ret)
-                                .or_else(|| self.syms.libraries.resolve_instance(internal, &name, &arg_tys).map(|(_, r)| r))
+                                .or_else(|| crate::libraries::resolve_instance(&*self.syms.libraries, internal, &name, &arg_tys).map(|m| m.ret))
                                 .unwrap_or(Ty::Error)
                         } else {
                             Ty::Error
@@ -2957,7 +2957,7 @@ impl<'a> Checker<'a> {
                 if let Expr::Name(root) = self.file.expr(receiver).clone() {
                     if self.lookup(&root).is_none() {
                         if let Some(internal) = qualified_path(self.file, callee) {
-                            if let Some(members) = self.syms.libraries.annotation_members(&internal) {
+                            if let Some(members) = self.syms.libraries.resolve_type(&internal).and_then(|t| t.annotation_members()) {
                                 for (i, a) in args.iter().enumerate() {
                                     let at = self.expr(*a);
                                     if let Some((_, pt)) = members.get(i) {
@@ -3079,8 +3079,8 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                            return match self.syms.libraries.resolve_static(&internal, &name, &arg_tys) {
-                                Some((_, _, ret)) => ret,
+                            return match crate::libraries::resolve_companion(&*self.syms.libraries, &internal, &name, &arg_tys) {
+                                Some(m) => m.ret,
                                 None => {
                                     self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
                                     Ty::Error
@@ -3162,7 +3162,7 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some((_, ret)) = self.syms.libraries.resolve_instance(internal, &name, &arg_tys) {
+                    if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, &name, &arg_tys) { let ret = m.ret;
                         return ret;
                     }
                 }
@@ -3223,9 +3223,9 @@ impl<'a> Checker<'a> {
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
-                if let Some((owner, jvm_name, desc, ret)) = self.syms.libraries.resolve_extension(rt, &name, &arg_tys) {
-                    self.ext_calls.insert(call, (owner, jvm_name, desc));
-                    return ret;
+                if let Some(c) = self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys) {
+                    self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
+                    return c.ret;
                 }
                 // User-defined extension function in this file (invokestatic on the file facade).
                 {
@@ -3395,7 +3395,7 @@ impl<'a> Checker<'a> {
                     }
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
                     if let Some(internal) = self.imports.get(&fname).cloned() {
-                        if self.syms.libraries.resolve_ctor(&internal, &arg_tys).is_some() {
+                        if crate::libraries::resolve_constructor(&*self.syms.libraries, &internal, &arg_tys).is_some() {
                             return Ty::obj(&internal);
                         }
                     }
@@ -3404,7 +3404,7 @@ impl<'a> Checker<'a> {
                     // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if self.syms.libraries.resolve_ctor(&internal, &arg_tys).is_some() {
+                        if crate::libraries::resolve_constructor(&*self.syms.libraries, &internal, &arg_tys).is_some() {
                             return Ty::obj(&internal);
                         }
                     }
