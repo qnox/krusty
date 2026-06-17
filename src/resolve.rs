@@ -2212,6 +2212,11 @@ impl<'a> Checker<'a> {
             Expr::Elvis { lhs, rhs } => {
                 let lt = self.expr(lhs);
                 let rt = self.expr(rhs);
+                // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
+                // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
+                if rt == Ty::Unit {
+                    self.diags.error(self.span(e), "krusty: elvis with a Unit right-hand side is not supported".to_string());
+                }
                 if lt == Ty::Null {
                     rt
                 } else if rt == Ty::Null {
@@ -3181,6 +3186,17 @@ impl<'a> Checker<'a> {
                       if params.is_empty() {
                         let rt = self.expr(args[0]);
                         return self.check_with_receiver(rt, body, self.span(args[1]));
+                      }
+                    }
+                }
+                // Standalone `run { … }` — runs the (no-param) lambda body inline, yielding its value.
+                if fname == "run" && args.len() == 1 && !self.syms.funs.contains_key(&fname) {
+                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                      if params.is_empty() {
+                        self.push_scope();
+                        let bt = self.expr(body);
+                        self.pop_scope();
+                        return bt;
                       }
                     }
                 }

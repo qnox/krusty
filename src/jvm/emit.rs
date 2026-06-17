@@ -4816,6 +4816,15 @@ impl<'a> MethodEmitter<'a> {
                     }
                 }
             }
+            // Standalone `run { … }` — inline the (no-param) lambda body.
+            if fname == "run" && args.len() == 1 && !self.syms.funs.contains_key(&fname) {
+                if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                    if params.is_empty() {
+                        self.emit_expr(body, code, cw);
+                        return;
+                    }
+                }
+            }
         }
         // `super.method(args)` → aload 0; args; invokespecial Super.method (non-virtual dispatch).
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
