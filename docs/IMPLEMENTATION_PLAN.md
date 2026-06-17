@@ -1892,6 +1892,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   construction broadly (+9 — the largest single-phase jump since interfaces). Constructors whose
   descriptors live only in the JDK jimage (e.g. `StringBuilder()`) still bail. `tests/throw_e2e.rs`.
 
+- ✅ **Phase 173 — try/catch + `throw`-exposed fixes** (245 → 256 box()=OK, 0 FAIL). `IrExpr::Try`
+  (no `finally`) stores the body value (and each catch value) into a result temp and loads it at the
+  merge — mirroring kotlinc; each catch is an exception-table handler with a frame carrying the caught
+  exception on the stack and the pre-`try` locals. Enabling it surfaced four latent bugs, all fixed:
+  (a) `String.plus` didn't spill a branchy operand (`"O" + try`), so the `StringBuilder` was live across
+  its merge frames; (b) a diverging body/catch (`throw`) still emitted a dead value `store`;
+  (c) a class with a diverging `init { throw … }` emitted a dead trailing `return` in `<init>`;
+  (d) `as T` to a non-null reference type didn't null-check, so it passed `null` — now emits
+  `Intrinsics.checkNotNull(value, "null cannot be cast to non-null type …")` then `checkcast`
+  (`IrTypeOp::CastNonNull`, matching kotlinc). Also added constant-folding of a literal-boolean `if`
+  condition (`if (false) { … }`) — emit only the taken branch, like kotlinc's dead-code elimination.
+  try in a property initializer is skipped (ctor frame context). `tests/try_catch_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
