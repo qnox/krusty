@@ -193,12 +193,4 @@ impl LibrarySet for JvmLibraries {
     fn is_interface(&self, internal: &str) -> bool {
         self.cp.find(internal).map_or(false, |c| c.is_interface())
     }
-
-    fn is_throwable(&self, internal: &str) -> bool {
-        super::jvm_class_map::is_throwable_internal(internal)
-    }
-
-    fn boxed_type(&self, prim: Ty) -> Option<Ty> {
-        super::jvm_class_map::wrapper_internal(prim).map(Ty::obj)
-    }
 }

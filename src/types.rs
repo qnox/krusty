@@ -127,10 +127,13 @@ impl Ty {
         Ty::Array(intern_ty(elem))
     }
 
-    /// The element type if this is an array.
+    /// The element type if this is an array — a primitive specialized array (`IntArray` → `Int`) or a
+    /// Kotlin `Array<T>` carried as `Obj("kotlin/Array", [T])` (its *logical* element, e.g. `Int` for
+    /// `Array<Int>`; the wrapper boxing is the backend's concern, not the type's).
     pub fn array_elem(self) -> Option<Ty> {
         match self {
             Ty::Array(e) => Some(*e),
+            Ty::Obj("kotlin/Array", args) => args.first().copied(),
             _ => None,
         }
     }

@@ -2759,10 +2759,15 @@ impl<'a> Checker<'a> {
                 self.diags.error(span, "krusty: Array(n) {…} with an array element is not supported".to_string());
                 return Some(Ty::Error);
             }
-            // A primitive element boxes to its wrapper reference type — the boxing policy is the
-            // target's, so it comes through the library-set abstraction.
-            let ref_elem = self.syms.libraries.boxed_type(elem).unwrap_or(elem);
-            return Some(Ty::array(ref_elem));
+            // `Array(n) { … }` is the reference `Array<T>`, distinct from a primitive array. A
+            // reference element keeps the existing `Ty::Array` reference representation; a primitive
+            // element is the logical `Array<Int>` (`Obj("kotlin/Array", [Int])`) — NOT boxed here, so
+            // element reads type as `Int`. The backend boxes to `Integer[]` when it lays out the array.
+            return Some(if elem.is_primitive() {
+                Ty::obj_args("kotlin/Array", &[elem])
+            } else {
+                Ty::array(elem)
+            });
         }
         None
     }
@@ -3394,12 +3399,12 @@ impl<'a> Checker<'a> {
                             return Ty::obj(&internal);
                         }
                     }
-                    // An exception type by simple name (`throw RuntimeException("msg")`): resolved
-                    // from the classpath (stdlib `TypeAliasesKt` alias / mapped `Throwable`), not a
-                    // hardcoded list. Every JDK `Throwable` has both a no-arg and a single-`String`
-                    // constructor, so those two arg shapes are accepted for a throwable-shaped type.
+                    // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
+                    // type with no explicit import): ask the library to resolve the constructor. The
+                    // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
+                    // JVM jimage can't surface) — the resolver no longer special-cases throwables.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if self.syms.libraries.is_throwable(&internal) && matches!(arg_tys.as_slice(), [] | [Ty::String]) {
+                        if self.syms.libraries.resolve_ctor(&internal, &arg_tys).is_some() {
                             return Ty::obj(&internal);
                         }
                     }

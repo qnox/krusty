@@ -2463,6 +2463,13 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::String => "kotlin/String",
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
+        // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
+        // primitive `T` when it lays out the array; the front end keeps the logical element).
+        Ty::Obj("kotlin/Array", args) => return IrType::Class {
+            fq_name: "kotlin/Array".to_string(),
+            type_args: args.iter().map(|t| ty_to_ir(*t)).collect(),
+            nullable: false,
+        },
         Ty::Obj(n, _) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
         // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
         // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
