@@ -203,13 +203,16 @@ impl<'a> Lexer<'a> {
             self.i += 1; // `1.5f` / `1f` — a Float literal
             TokenKind::FloatLit
         } else if self.peek() == b'u' || self.peek() == b'U' {
-            self.i += 1; // `1u`, `42U` — unsigned int literal (treat as plain int)
+            // `1u`/`42U`/`1uL` — unsigned literal. krusty does not model unsigned types (`UInt`,
+            // `ULong` are inline value classes with distinct semantics); treating them as plain
+            // int/long would miscompile (`%`, comparisons, ABI). Reject so the file is skipped,
+            // never silently miscompiled.
+            self.i += 1;
             if self.peek() == b'L' || self.peek() == b'l' {
-                self.i += 1; // `1uL` — unsigned long (treat as plain long)
-                TokenKind::LongLit
-            } else {
-                TokenKind::IntLit
+                self.i += 1;
             }
+            self.diags.error(Span::new(lo, self.i as u32), "krusty: unsigned types are not supported".to_string());
+            TokenKind::IntLit
         } else if self.peek() == b'L' && !is_double {
             self.i += 1;
             TokenKind::LongLit
