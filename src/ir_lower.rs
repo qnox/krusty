@@ -1035,6 +1035,16 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
             Expr::NullLit => self.ir.add_expr(IrExpr::Const(IrConst::Null)),
+            // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
+            // and yields the value; on a (non-null) primitive it is a no-op.
+            Expr::NotNull { operand } => {
+                let v = self.expr(operand)?;
+                if self.info.ty(operand).is_reference() {
+                    self.ir.add_expr(IrExpr::NotNullAssert { operand: v })
+                } else {
+                    v
+                }
+            }
             // `r?.m(args)` / `r?.p` → `{ val t = r; if (t != null) t.m(args)/t.p else null }`.
             Expr::SafeCall { receiver, name, args } => {
                 let rty = self.info.ty(receiver);

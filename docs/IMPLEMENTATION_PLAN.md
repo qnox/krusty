@@ -1878,6 +1878,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   enforced inside `emit_all` (now returning `Option`, `None` when unrepresentable), so no emission path
   (backend or conformance harness) can bypass it.
 
+- ✅ **Phase 171 — not-null assertion `x!!`** (235 → 236 box()=OK, 0 FAIL). `IrExpr::NotNullAssert`
+  emits `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` (the value stays on the stack,
+  the duplicate is consumed by the null check) — matching kotlinc. On a non-null primitive operand `!!`
+  is a no-op. `tests/not_null_assert_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
