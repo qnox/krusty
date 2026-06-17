@@ -235,6 +235,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     continue;
                 }
                 for m in &c.methods {
+                    // An abstract method has no body — leave its `IrFunction.body` as `None`.
+                    if matches!(m.body, FunBody::None) {
+                        continue;
+                    }
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
                     lo.scope.clear();
                     lo.next_value = 0;
@@ -372,15 +376,17 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // (checked at registration); interface supertypes are not yet supported.
     // Interface supertypes (`class C : I`) are allowed when each is a file interface (checked at
     // registration); a base class is allowed when it's a simple/open file class.
-    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract
+    // `abstract class` is allowed: its abstract methods (no body) are emitted as `ACC_ABSTRACT`,
+    // concrete methods normally. `value`/inline classes need unboxing and are excluded.
+    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
         && c.body_props.iter().all(is_plain_body_prop)
-        // Methods may be expr- OR block-bodied — both route through the same `lower_body` as
-        // top-level funs (a block-body method is no different from a block-body top-level fun).
-        && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+        // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
+        // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
+        && c.methods.iter().all(|m| m.receiver.is_none())
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
@@ -435,6 +441,13 @@ impl<'a> Lower<'a> {
     fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32) {
         if self.classes.get(internal).map_or(false, |ci| ci.methods.contains_key(name)) {
             return; // a user-defined override exists — don't synthesize over it
+        }
+        // Don't synthesize a member a superclass already provides (e.g. a `final override fun
+        // toString()` on a base class — a data class inherits it instead of regenerating).
+        if let Some(s) = self.classes.get(internal).and_then(|ci| ci.super_internal.clone()) {
+            if self.resolve_method(&s, name).is_some() {
+                return;
+            }
         }
         let fid = self.ir.add_fun(IrFunction {
             name: name.to_string(), params, ret: ty_to_ir(ret), body: Some(body),
@@ -1150,6 +1163,18 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(*arg, &target)?);
                         }
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
+                    } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
+                        // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
+                        let params = self.ir.functions[mfid as usize].params.clone();
+                        if args.len() != params.len() {
+                            return None;
+                        }
+                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, pt)?);
+                        }
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a })
                     } else {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
