@@ -158,6 +158,182 @@ pub fn relocate_code(code: &[u8], src_cp: &[C], cw: &mut ClassWriter) -> Option<
     Some(out)
 }
 
+/// A decoded instruction with branch targets resolved to *instruction indices*, not byte offsets —
+/// so transforms that change an instruction's size (local remap, `ldc`→`ldc_w`) don't invalidate
+/// jump targets: the assembler recomputes every offset from the final layout.
+#[derive(Clone, Debug)]
+pub enum Insn {
+    /// Opcode + verbatim operand bytes (the operands carry no branch offset).
+    Plain { op: u8, operands: Vec<u8> },
+    /// A 2-byte-offset conditional/`goto`/`jsr` branch to instruction `target`.
+    Branch { op: u8, target: usize },
+    /// A 4-byte-offset `goto_w`/`jsr_w`.
+    BranchW { op: u8, target: usize },
+    TableSwitch { default: usize, low: i32, targets: Vec<usize> },
+    LookupSwitch { default: usize, pairs: Vec<(i32, usize)> },
+}
+
+/// Decode a method body into [`Insn`]s with branch targets as instruction indices. `None` on
+/// malformed/truncated bytecode or a branch into the middle of an instruction.
+pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
+    // Pass 1: decode each instruction, keeping branch targets as absolute byte offsets.
+    let mut offsets: Vec<usize> = Vec::new(); // insn index → byte offset
+    let mut insns: Vec<Insn> = Vec::new();
+    let mut pc = 0;
+    while pc < code.len() {
+        let op = code[pc];
+        let len = instruction_len(code, pc)?;
+        let insn = match op {
+            0x99..=0xa8 | 0xc6 | 0xc7 => {
+                let off = i16::from_be_bytes([code[pc + 1], code[pc + 2]]) as isize;
+                Insn::Branch { op, target: (pc as isize + off) as usize }
+            }
+            0xc8 | 0xc9 => {
+                let off = i32::from_be_bytes(code.get(pc + 1..pc + 5)?.try_into().ok()?) as isize;
+                Insn::BranchW { op, target: (pc as isize + off) as usize }
+            }
+            0xaa => {
+                let p = pc + 1 + (4 - ((pc + 1) % 4)) % 4;
+                let def = (pc as isize + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize) as usize;
+                let low = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?);
+                let high = i32::from_be_bytes(code.get(p + 8..p + 12)?.try_into().ok()?);
+                let n = (high - low + 1).max(0) as usize;
+                let mut targets = Vec::with_capacity(n);
+                for k in 0..n {
+                    let o = p + 12 + k * 4;
+                    targets.push((pc as isize + i32::from_be_bytes(code.get(o..o + 4)?.try_into().ok()?) as isize) as usize);
+                }
+                Insn::TableSwitch { default: def, low, targets }
+            }
+            0xab => {
+                let p = pc + 1 + (4 - ((pc + 1) % 4)) % 4;
+                let def = (pc as isize + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize) as usize;
+                let npairs = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
+                let mut pairs = Vec::with_capacity(npairs);
+                for k in 0..npairs {
+                    let o = p + 8 + k * 8;
+                    let m = i32::from_be_bytes(code.get(o..o + 4)?.try_into().ok()?);
+                    let t = (pc as isize + i32::from_be_bytes(code.get(o + 4..o + 8)?.try_into().ok()?) as isize) as usize;
+                    pairs.push((m, t));
+                }
+                Insn::LookupSwitch { default: def, pairs }
+            }
+            _ => Insn::Plain { op, operands: code[pc + 1..pc + len].to_vec() },
+        };
+        offsets.push(pc);
+        insns.push(insn);
+        pc += len;
+    }
+    // Pass 2: resolve byte-offset targets to instruction indices.
+    let idx_of = |byte: usize| offsets.binary_search(&byte).ok();
+    for insn in &mut insns {
+        match insn {
+            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target = idx_of(*target)?,
+            Insn::TableSwitch { default, targets, .. } => {
+                *default = idx_of(*default)?;
+                for t in targets {
+                    *t = idx_of(*t)?;
+                }
+            }
+            Insn::LookupSwitch { default, pairs } => {
+                *default = idx_of(*default)?;
+                for (_, t) in pairs {
+                    *t = idx_of(*t)?;
+                }
+            }
+            Insn::Plain { .. } => {}
+        }
+    }
+    Some(insns)
+}
+
+/// The encoded size of an instruction at byte offset `at` (switch padding depends on position).
+fn insn_size(insn: &Insn, at: usize) -> usize {
+    match insn {
+        Insn::Plain { operands, .. } => 1 + operands.len(),
+        Insn::Branch { .. } => 3,
+        Insn::BranchW { .. } => 5,
+        Insn::TableSwitch { targets, .. } => {
+            let pad = (4 - ((at + 1) % 4)) % 4;
+            1 + pad + 12 + targets.len() * 4
+        }
+        Insn::LookupSwitch { pairs, .. } => {
+            let pad = (4 - ((at + 1) % 4)) % 4;
+            1 + pad + 8 + pairs.len() * 8
+        }
+    }
+}
+
+/// Re-encode instructions to bytecode, computing every branch/switch offset from the final layout.
+/// Instruction-index targets make this robust to size-changing transforms. A round-trip of an
+/// untransformed body reproduces it byte-for-byte (switch padding is position-stable).
+pub fn assemble(insns: &[Insn]) -> Vec<u8> {
+    // Iterate offsets to a fixpoint: a switch's padding depends on its byte position, which depends
+    // on earlier sizes. Converges (sizes only depend on positions monotonically).
+    let mut offs = vec![0usize; insns.len() + 1];
+    loop {
+        let mut at = 0;
+        let mut changed = false;
+        for (i, insn) in insns.iter().enumerate() {
+            if offs[i] != at {
+                offs[i] = at;
+                changed = true;
+            }
+            at += insn_size(insn, at);
+        }
+        if offs[insns.len()] != at {
+            offs[insns.len()] = at;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out = Vec::with_capacity(offs[insns.len()]);
+    for (i, insn) in insns.iter().enumerate() {
+        let here = offs[i];
+        match insn {
+            Insn::Plain { op, operands } => {
+                out.push(*op);
+                out.extend_from_slice(operands);
+            }
+            Insn::Branch { op, target } => {
+                out.push(*op);
+                out.extend_from_slice(&((offs[*target] as isize - here as isize) as i16).to_be_bytes());
+            }
+            Insn::BranchW { op, target } => {
+                out.push(*op);
+                out.extend_from_slice(&((offs[*target] as isize - here as isize) as i32).to_be_bytes());
+            }
+            Insn::TableSwitch { default, low, targets } => {
+                out.push(0xaa);
+                while (out.len()) % 4 != 0 {
+                    out.push(0);
+                }
+                out.extend_from_slice(&((offs[*default] as isize - here as isize) as i32).to_be_bytes());
+                out.extend_from_slice(&low.to_be_bytes());
+                out.extend_from_slice(&(*low + targets.len() as i32 - 1).to_be_bytes());
+                for t in targets {
+                    out.extend_from_slice(&((offs[*t] as isize - here as isize) as i32).to_be_bytes());
+                }
+            }
+            Insn::LookupSwitch { default, pairs } => {
+                out.push(0xab);
+                while (out.len()) % 4 != 0 {
+                    out.push(0);
+                }
+                out.extend_from_slice(&((offs[*default] as isize - here as isize) as i32).to_be_bytes());
+                out.extend_from_slice(&(pairs.len() as i32).to_be_bytes());
+                for (m, t) in pairs {
+                    out.extend_from_slice(&m.to_be_bytes());
+                    out.extend_from_slice(&((offs[*t] as isize - here as isize) as i32).to_be_bytes());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
