@@ -1110,6 +1110,10 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
                 Ty::Error
             }
         }
+    } else if r.name == "KClass" {
+        // `KClass<*>` is modeled as `java.lang.Class` (the JVM annotation representation, and what
+        // `X::class` lowers to here). Enough for class-literal storage/identity, not full reflection.
+        Ty::obj("java/lang/Class")
     } else if tparams.contains(&r.name) {
         Ty::obj("java/lang/Object") // erased generic type parameter
     } else if let Some(internal) = classes.get(&r.name) {
@@ -2382,6 +2386,17 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::CallableRef { receiver, name } => {
+                // Class literal `UserType::class` → a `java.lang.Class`. Restricted to a declared
+                // class name: primitive `Int::class` (needs `Integer.TYPE`) and bound `obj::class`
+                // (needs `getClass()`) aren't modeled — skip them rather than emit a bad `ldc`.
+                if name == "class" {
+                    let is_user_type = matches!(receiver.map(|r| self.file.expr(r)), Some(Expr::Name(n)) if self.syms.classes.contains_key(n) && self.lookup(n).is_none());
+                    if is_user_type {
+                        return self.set(e, Ty::obj("java/lang/Class"));
+                    }
+                    self.diags.error(self.span(e), "krusty: this class-literal form is not supported".to_string());
+                    return Ty::Error;
+                }
                 // Object-method callable references (`Any::equals`, `obj::toString`). A receiver that
                 // names a value is *bound* (captures it, arity = method args); one that names a type
                 // is *unbound* (the receiver becomes the first parameter).
