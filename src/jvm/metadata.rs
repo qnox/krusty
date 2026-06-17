@@ -89,15 +89,17 @@ fn parse_jvm_signature(body: &[u8]) -> Option<(u64, u64)> {
     Some((name?, desc?))
 }
 
-/// Parse one `Function` message → `(is_inline, Option<(jvm name id, jvm desc id)>)`.
-fn parse_function(body: &[u8]) -> Option<(bool, Option<(u64, u64)>)> {
+/// Parse one `Function` message → `(is_inline, name string id, Option<(jvm name id, jvm desc id)>)`.
+fn parse_function(body: &[u8]) -> Option<(bool, u64, Option<(u64, u64)>)> {
     let mut pb = Pb { b: body, i: 0 };
     let mut flags = 0u64;
+    let mut name_id = 0u64;
     let mut sig = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (9, 0) => flags = pb.varint()?,             // flags
+            (2, 0) => name_id = pb.varint()?,           // name (name id in table)
             (100, 2) => {                                // method_signature extension
                 let n = pb.varint()? as usize;
                 let ext = pb.bytes(n)?;
@@ -106,13 +108,16 @@ fn parse_function(body: &[u8]) -> Option<(bool, Option<(u64, u64)>)> {
             (_, w) => pb.skip(w)?,
         }
     }
-    Some((flags & IS_INLINE_BIT != 0, sig))
+    Some((flags & IS_INLINE_BIT != 0, name_id, sig))
 }
 
-/// The JVM `(name, descriptor)` of every `inline` function declared in a `Package` message body,
-/// resolving string ids through `d2`.
-fn package_inline_methods(body: &[u8], d2: &[String]) -> HashSet<(String, String)> {
-    let mut out = HashSet::new();
+/// All `inline` functions declared in a `Package` body: explicit JVM `(name, descriptor)` pairs (when
+/// a `method_signature` extension is present) and the set of inline function *names* (always, from
+/// `Function.name`) — the latter catches the common inline functions (`map`, `let`, …) whose JVM
+/// signature equals the computed default, so they omit the extension.
+fn package_inline(body: &[u8], d2: &[String]) -> (HashSet<(String, String)>, HashSet<String>) {
+    let mut methods = HashSet::new();
+    let mut names = HashSet::new();
     let mut pb = Pb { b: body, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -121,9 +126,14 @@ fn package_inline_methods(body: &[u8], d2: &[String]) -> HashSet<(String, String
                 // repeated Function function = 3
                 let Some(len) = pb.varint() else { break };
                 let Some(fbody) = pb.bytes(len as usize) else { break };
-                if let Some((true, Some((ni, di)))) = parse_function(fbody) {
-                    if let (Some(n), Some(d)) = (d2.get(ni as usize), d2.get(di as usize)) {
-                        out.insert((n.clone(), d.clone()));
+                if let Some((true, name_id, sig)) = parse_function(fbody) {
+                    if let Some(n) = d2.get(name_id as usize) {
+                        names.insert(n.clone());
+                    }
+                    if let Some((ni, di)) = sig {
+                        if let (Some(n), Some(d)) = (d2.get(ni as usize), d2.get(di as usize)) {
+                            methods.insert((n.clone(), d.clone()));
+                        }
                     }
                 }
             }
@@ -134,15 +144,24 @@ fn package_inline_methods(body: &[u8], d2: &[String]) -> HashSet<(String, String
             }
         }
     }
-    out
+    (methods, names)
 }
 
-/// The JVM `(name, descriptor)` of every `inline` function in a class whose `@Metadata` carries a
-/// `Package` (a file/multifile-part facade — `kind` 2 or 5). Empty for other kinds or no metadata.
+/// The JVM `(name, descriptor)` of every `inline` function in a class with an explicit method
+/// signature in its `@Metadata`. (Common inline functions omit it — see [`inline_method_names`].)
 pub fn inline_methods(ci: &ClassInfo) -> HashSet<(String, String)> {
     if ci.kotlin_d1.is_empty() {
         return HashSet::new();
     }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    package_inline_methods(&bytes, &ci.kotlin_d2)
+    package_inline(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2).0
+}
+
+/// The Kotlin names of every `inline` function in a class's `@Metadata`. A call to a method of one of
+/// these names (in this class) is inline — descriptor-agnostic, so it catches the functions whose
+/// signature equals the default and thus carry no explicit `method_signature`.
+pub fn inline_method_names(ci: &ClassInfo) -> HashSet<String> {
+    if ci.kotlin_d1.is_empty() {
+        return HashSet::new();
+    }
+    package_inline(&decode_d1(&ci.kotlin_d1), &ci.kotlin_d2).1
 }

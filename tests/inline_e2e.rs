@@ -21,9 +21,13 @@ fn splices_real_empty_array_body() {
     // The metadata reader decodes d1 and identifies inline functions with their JVM signatures.
     if let Some(part) = cp.find("kotlin/collections/CollectionsKt___CollectionsKt") {
         let inl = krusty::jvm::metadata::inline_methods(&part);
-        assert!(!inl.is_empty(), "found inline functions in the part class metadata");
         assert!(inl.iter().all(|(n, d)| !n.is_empty() && d.starts_with('(')),
-            "each inline entry has a JVM name + descriptor");
+            "each explicit inline entry has a JVM name + descriptor");
+        // Name-based detection finds the common inline functions (which omit method_signature).
+        let names = krusty::jvm::metadata::inline_method_names(&part);
+        for f in ["map", "filter", "forEach", "sumOf"] {
+            assert!(names.contains(f), "inline function {f} recognized from metadata");
+        }
     }
     // emptyArray<T>(): T[]  — erased `()[Ljava/lang/Object;`, defined in kotlin/ArrayIntrinsicsKt.
     let Some(body) = cp.method_code("kotlin/ArrayIntrinsicsKt", "emptyArray", "()[Ljava/lang/Object;") else {
