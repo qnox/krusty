@@ -41,6 +41,13 @@ fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::s
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Process-global jimage index (name → file offset/size), keyed by the jimage path. The jimage is
+/// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
+fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
@@ -76,6 +83,10 @@ pub struct Classpath {
     cache: RefCell<HashMap<String, Option<ClassInfo>>>,
     ext: RefCell<Option<ExtIndex>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
+    /// Lazily-built index of the JDK jimage: internal class name → `(file offset, uncompressed size)`,
+    /// so JDK class bytes can be seek-read on demand (the jimage stores classes uncompressed). Shared
+    /// via `Arc` from a process-global cache so the 146 MB parse happens once.
+    jimage: RefCell<Option<(PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>)>>,
 }
 
 impl Classpath {
@@ -99,7 +110,7 @@ impl Classpath {
                 }
             })
             .collect();
-        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None) }
+        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None) }
     }
 
     pub fn empty() -> Classpath {
@@ -142,6 +153,43 @@ impl Classpath {
         idx
     }
 
+    /// Seek-read a class's bytes from the JDK jimage (uncompressed entry), via the lazily-built index.
+    fn jimage_bytes(&self, internal: &str) -> Option<Vec<u8>> {
+        self.ensure_jimage_index();
+        let guard = self.jimage.borrow();
+        let (path, index) = guard.as_ref()?;
+        let &(offset, size) = index.get(internal)?;
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = File::open(path).ok()?;
+        f.seek(SeekFrom::Start(offset)).ok()?;
+        let mut buf = vec![0u8; size];
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    }
+
+    fn ensure_jimage_index(&self) {
+        if self.jimage.borrow().is_some() {
+            return;
+        }
+        let path = self.entries.iter().find_map(|e| if let Entry::Jimage(p) = e { Some(p.clone()) } else { None });
+        let entry = match path {
+            Some(p) => {
+                let mut g = global_jimage_cache().lock().unwrap();
+                let idx = match g.get(&p) {
+                    Some(i) => i.clone(),
+                    None => {
+                        let i = std::sync::Arc::new(build_jimage_index(&p).unwrap_or_default());
+                        g.insert(p.clone(), i.clone());
+                        i
+                    }
+                };
+                (p, idx)
+            }
+            None => (PathBuf::new(), std::sync::Arc::new(HashMap::new())),
+        };
+        *self.jimage.borrow_mut() = Some(entry);
+    }
+
     pub fn find(&self, internal: &str) -> Option<ClassInfo> {
         if let Some(hit) = self.cache.borrow().get(internal) {
             return hit.clone();
@@ -152,10 +200,9 @@ impl Classpath {
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
                 Entry::Jar(j) => read_jar_entry(j, &name),
-                // Reading class bytes from the jimage (lazy member resolution for JDK types) is a
-                // follow-up: it needs jimage content extraction + decompression. For now JDK types
-                // resolve as types but their members stay unresolved (rejected, never miscompiled).
-                Entry::Jimage(_) => None,
+                // The JDK jimage stores classes uncompressed — seek-read the class via a one-time
+                // name→(offset,size) index so JDK type members (String, collections, …) resolve.
+                Entry::Jimage(_) => self.jimage_bytes(internal),
             };
             if let Some(b) = bytes {
                 if let Ok(ci) = parse_class(&b) {
@@ -442,6 +489,89 @@ fn scan_types_jar(jar: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collecti
 /// jimage location table directly — the bootclasspath equivalent of a jar's central directory.
 /// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
 /// ImageLocation. Inner classes (`A$B`) and ambiguous simple names are dropped, like any entry.
+/// Build the jimage class index: internal name → `(absolute file offset, uncompressed size)` for each
+/// uncompressed `.class` resource. Mirrors `scan_types_jimage`'s navigation but keeps content offsets.
+fn build_jimage_index(path: &Path) -> Option<HashMap<String, (u64, usize)>> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < 28 {
+        return None;
+    }
+    let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    if u32le(0) != 0xCAFE_DADA {
+        return None;
+    }
+    let table_length = u32le(16) as usize;
+    let locations_size = u32le(20) as usize;
+    let strings_size = u32le(24) as usize;
+    let header = 28;
+    let offsets = header + table_length * 4;
+    let locations = offsets + table_length * 4;
+    let strings = locations + locations_size;
+    let content = strings + strings_size;
+    if content > b.len() {
+        return None;
+    }
+    let read_str = |off: usize| -> &str {
+        if off == 0 {
+            return "";
+        }
+        let s = strings + off;
+        let mut e = s;
+        while e < b.len() && b[e] != 0 {
+            e += 1;
+        }
+        std::str::from_utf8(&b[s..e]).unwrap_or("")
+    };
+    // Decode an ImageLocation into attributes by kind: 2=PARENT, 3=BASE, 4=EXTENSION, 5=OFFSET,
+    // 6=COMPRESSED, 7=UNCOMPRESSED.
+    let decode = |mut p: usize| -> [usize; 8] {
+        let mut a = [0usize; 8];
+        while p < b.len() {
+            let byte = b[p];
+            p += 1;
+            let kind = (byte >> 3) as usize;
+            if kind == 0 {
+                break;
+            }
+            let len = ((byte & 0x7) + 1) as usize;
+            let mut v = 0usize;
+            for _ in 0..len {
+                if p >= b.len() {
+                    break;
+                }
+                v = (v << 8) | b[p] as usize;
+                p += 1;
+            }
+            if kind < 8 {
+                a[kind] = v;
+            }
+        }
+        a
+    };
+    let mut idx = HashMap::new();
+    for i in 0..table_length {
+        let lo = u32le(offsets + i * 4) as usize;
+        if lo == 0 {
+            continue;
+        }
+        let a = decode(locations + lo);
+        if read_str(a[4]) != "class" {
+            continue;
+        }
+        let parent = read_str(a[2]);
+        if parent.is_empty() {
+            continue;
+        }
+        let internal = format!("{parent}/{}", read_str(a[3]));
+        let (off, comp, unc) = (a[5], a[6], a[7]);
+        if comp != 0 {
+            continue; // compressed jimage entry — not handled (this JDK stores classes uncompressed)
+        }
+        idx.entry(internal).or_insert(((content + off) as u64, unc));
+    }
+    Some(idx)
+}
+
 fn scan_types_jimage(path: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
     let Ok(b) = std::fs::read(path) else { return };
     if b.len() < 28 { return; }
