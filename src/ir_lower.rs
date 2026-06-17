@@ -1654,7 +1654,11 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                if rt.array_elem().is_some() && name == "size" {
+                if rt == Ty::Char && name == "code" {
+                    // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM stack).
+                    let c = self.expr(receiver)?;
+                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: c, type_operand: ty_to_ir(Ty::Int) })
+                } else if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
                 } else if let Some(rci) = self.class_of(rt) {
@@ -2024,6 +2028,19 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // Primitive numeric/`Char` conversions (`n.toLong()`, `c.toInt()`, `i.toChar()`, …)
+                    // are coercions — the backend emits the `i2l`/`l2i`/`i2c`/… opcode.
+                    {
+                        let rty = self.info.ty(receiver);
+                        if matches!(rty, Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Double | Ty::Float) {
+                            if let Some(target) = crate::resolve::conversion_target(&name) {
+                                if args.is_empty() {
+                                    let r = self.expr(receiver)?;
+                                    return Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: ty_to_ir(target) }));
+                                }
+                            }
+                        }
+                    }
                     // `Int`/`Long` bitwise/shift members are stdlib functions the compiler treats as
                     // intrinsics (kotlinc maps `Int.and` → `iand`, etc.). This is an ordinary method
                     // call `a.and(b)` — `a and b` is just its infix spelling, already desugared by the
