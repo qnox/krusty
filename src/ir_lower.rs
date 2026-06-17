@@ -45,6 +45,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
             Decl::Class(c) if is_simple_class(c) => {}
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
+            Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
             Decl::Property(p) if is_plain_body_prop(p) => {}
             _ => return None,
         }
@@ -81,6 +82,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             } else {
                 super_internal.clone().unwrap_or_else(|| "java/lang/Object".to_string())
             };
+            // Implemented interfaces (`: I, J`): each must be a file interface, else bail.
+            let mut iface_internals = Vec::new();
+            for st in &c.supertypes {
+                let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface));
+                if !is_file_iface { return None; }
+                iface_internals.push(class_internal(file, st));
+            }
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 supertypes: vec![],
@@ -88,12 +96,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_param_count,
                 init_body: None,
                 methods: vec![],
-                is_interface: false,
+                is_interface: c.is_interface,
                 superclass,
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
                 bridges: Vec::new(),
+                interfaces: iface_internals,
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -194,6 +203,36 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             return None;
                         }
                     }
+                }
+                // Interface bridges: for each implemented-interface method, if the class's actual
+                // implementation (declared or inherited) has a different erased signature than the
+                // interface's, add a bridge with the interface's descriptor delegating to the impl.
+                if !c.is_interface {
+                    let cid = lo.classes[&internal].id;
+                    let ifaces = lo.ir.classes[cid as usize].interfaces.clone();
+                    let mut seen: std::collections::HashSet<String> =
+                        lo.ir.classes[cid as usize].bridges.iter()
+                            .map(|b| format!("{}{:?}{:?}", b.name, b.erased_params, b.erased_ret)).collect();
+                    for itf in &ifaces {
+                        for (mname, ifid) in lo.collect_iface_methods(itf) {
+                            if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &mname) {
+                                let ip = lo.ir.functions[ifid as usize].params.clone();
+                                let ir_ = lo.ir.functions[ifid as usize].ret.clone();
+                                let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                if (ip != cp || ir_ != cr) && seen.insert(format!("{}{:?}{:?}", mname, ip, ir_)) {
+                                    lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                        name: mname, erased_params: ip, erased_ret: ir_,
+                                        concrete_params: cp, concrete_ret: cr,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // An interface's methods are abstract — leave their bodies `None`; nothing to lower.
+                if c.is_interface {
+                    continue;
                 }
                 for m in &c.methods {
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
@@ -331,8 +370,9 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // unboxing and are excluded.
     // A base class (`: A(args)`) is allowed when `A` is itself a simple/open class in this file
     // (checked at registration); interface supertypes are not yet supported.
+    // Interface supertypes (`class C : I`) are allowed when each is a file interface (checked at
+    // registration); a base class is allowed when it's a simple/open file class.
     !c.is_value && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract
-        && c.supertypes.is_empty()
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
@@ -353,6 +393,15 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         && c.props.iter().all(|p| p.is_property)
         && c.body_props.iter().all(is_plain_body_prop)
         && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+}
+
+/// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
+/// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
+fn is_simple_interface(c: &ast::ClassDecl) -> bool {
+    c.is_interface
+        && c.companion_methods.is_empty() && c.companion_props.is_empty()
+        && c.props.is_empty() && c.body_props.is_empty()
+        && c.methods.iter().all(|m| m.receiver.is_none() && matches!(m.body, FunBody::None))
 }
 
 /// A class-body property that is a plain backing field: a normal (non-extension) `val`/`var` with an
@@ -543,6 +592,25 @@ impl<'a> Lower<'a> {
             cur = ci.super_internal.clone();
         }
         None
+    }
+
+    /// All `(method_name, FunId)` declared by an interface and its super-interfaces (transitively).
+    fn collect_iface_methods(&self, itf: &str) -> Vec<(String, u32)> {
+        let mut out = Vec::new();
+        let mut stack = vec![itf.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(i) = stack.pop() {
+            if !seen.insert(i.clone()) { continue; }
+            if let Some(ci) = self.classes.get(&i) {
+                for (name, &(_, fid, _)) in &ci.methods {
+                    out.push((name.clone(), fid));
+                }
+                for sup in self.ir.classes[ci.id as usize].interfaces.clone() {
+                    stack.push(sup);
+                }
+            }
+        }
+        out
     }
 
     /// Resolve a method by name, walking the superclass chain. Returns the *owning* class id, the

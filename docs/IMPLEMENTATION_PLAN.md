@@ -1788,6 +1788,16 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   delegating via `invokevirtual` to the concrete override. Straight-line code (no frames). Unblocks
   the `bridges/*` generic/covariant-override tests.
 
+- ✅ **Phase 162 — interfaces (+ interface bridges)** (164 → 191 box()=OK, 0 FAIL). The biggest single
+  jump. An `interface` with abstract methods emits as `ACC_PUBLIC|INTERFACE|ABSTRACT` with one
+  `public abstract` method each (no ctor/fields). A class `: I` lists `I` in its `implements`;
+  `IrClass.interfaces` carries them. Method calls through an interface-typed receiver use
+  `invokeinterface`. Interface bridges: for each implemented-interface method whose erased signature
+  differs from the class's actual implementation (declared **or inherited** — `resolve_method` walks
+  the superclass chain, so fake-override/diamond cases work), a bridge with the interface's descriptor
+  delegates to the impl (deduped against the base-class bridges). Still out: interface **default
+  methods** (need a `DefaultImpls` class) and interface **properties** (abstract getters).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
