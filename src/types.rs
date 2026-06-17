@@ -32,6 +32,23 @@ pub fn intern_ty(t: Ty) -> &'static Ty {
     leaked
 }
 
+/// Intern a generic type-argument list to a canonical `&'static [Ty]` so equal instantiations share a
+/// pointer (the derived `Eq`/`Hash` on `Ty::Obj` compares the slice by reference). Empty → `&[]`.
+pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
+    if ts.is_empty() {
+        return &[];
+    }
+    static I: OnceLock<Mutex<HashSet<&'static [Ty]>>> = OnceLock::new();
+    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = set.lock().unwrap();
+    if let Some(&v) = set.get(ts) {
+        return v;
+    }
+    let leaked: &'static [Ty] = Box::leak(ts.to_vec().into_boxed_slice());
+    set.insert(leaked);
+    leaked
+}
+
 /// A function type's signature: parameter types and return type. Interned (`intern_fnsig`) so
 /// `Ty::Fun` stays `Copy`. Lets a `Fun`-typed call recover its real return type (not erased `Object`).
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -65,8 +82,11 @@ pub enum Ty {
     Char,
     String,
     Unit,
-    /// A JVM reference type identified by its internal name (e.g. `demo/Point`).
-    Obj(&'static str),
+    /// A JVM reference type by internal name (e.g. `demo/Point`), with its generic type arguments
+    /// (`List<Int>` → `Obj("kotlin/collections/List", [Int])`). Arguments are interned (`intern_tys`)
+    /// so equal instantiations share a pointer; they erase to nothing in JVM descriptors (kotlinc's
+    /// erasure) but let the front end recover element/member types. Empty for a non-generic class.
+    Obj(&'static str, &'static [Ty]),
     /// A JVM array type with the given element type (`IntArray` → `Array(&Int)`, `Array<String>` →
     /// `Array(&String)`). Element `Ty`s are interned (`intern_ty`) so equal arrays share a pointer.
     Array(&'static Ty),
@@ -84,9 +104,22 @@ pub enum Ty {
 }
 
 impl Ty {
-    /// A class reference type from an internal name.
+    /// A class reference type from an internal name (no generic arguments).
     pub fn obj(internal: &str) -> Ty {
-        Ty::Obj(intern(internal))
+        Ty::Obj(intern(internal), &[])
+    }
+
+    /// A generic class reference type — `internal<args…>`.
+    pub fn obj_args(internal: &str, args: &[Ty]) -> Ty {
+        Ty::Obj(intern(internal), intern_tys(args))
+    }
+
+    /// The generic type arguments of a reference type (empty for non-generic / non-`Obj`).
+    pub fn type_args(self) -> &'static [Ty] {
+        match self {
+            Ty::Obj(_, args) => args,
+            _ => &[],
+        }
     }
 
     /// An array type with the given element type.
@@ -173,7 +206,7 @@ impl Ty {
             Ty::Char => "Char",
             Ty::String => "String",
             Ty::Unit => "Unit",
-            Ty::Obj(n) => n,
+            Ty::Obj(n, _) => n,
             Ty::Null => "Null",
             Ty::Nothing => "Nothing",
             Ty::Array(_) => "Array",
@@ -185,14 +218,14 @@ impl Ty {
     /// Internal name if this is a reference type.
     pub fn obj_internal(self) -> Option<&'static str> {
         match self {
-            Ty::Obj(n) => Some(n),
+            Ty::Obj(n, _) => Some(n),
             _ => None,
         }
     }
 
     /// True for JVM reference types (where `null` is a valid value).
     pub fn is_reference(self) -> bool {
-        matches!(self, Ty::String | Ty::Obj(_) | Ty::Null | Ty::Array(_) | Ty::Fun(_))
+        matches!(self, Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_))
     }
 
     pub fn is_numeric(self) -> bool {
@@ -216,7 +249,7 @@ impl Ty {
             Ty::Char => "C".into(),
             Ty::String => "Ljava/lang/String;".into(),
             Ty::Unit => "V".into(),
-            Ty::Obj(n) => format!("L{n};"),
+            Ty::Obj(n, _) => format!("L{n};"),
             Ty::Null => "Ljava/lang/Object;".into(),
             Ty::Nothing => "Ljava/lang/Object;".into(),
             Ty::Array(elem) => format!("[{}", elem.descriptor()),

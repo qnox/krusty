@@ -2270,7 +2270,7 @@ impl<'a> Lower<'a> {
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.class_of(rt).map(|ci| ci.internal.clone())
-                            .or_else(|| if let Ty::Obj(i) = rt { Some(i.to_string()) } else { None })
+                            .or_else(|| if let Ty::Obj(i, _) = rt { Some(i.to_string()) } else { None })
                             .and_then(|internal| {
                                 crate::resolve::resolve_java_instance(&self.syms.classpath, &internal, &name, &arg_tys).map(|(d, _)| {
                                     let is_iface = self.syms.classpath.find(&internal).map_or(false, |c| c.is_interface());
@@ -2449,7 +2449,7 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::String => "kotlin/String",
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
-        Ty::Obj(n) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
+        Ty::Obj(n, _) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
         // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
         // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
         Ty::Fun(s) => return IrType::Function {

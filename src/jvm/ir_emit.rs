@@ -1108,7 +1108,7 @@ impl<'a> Emitter<'a> {
                     | Ty::Byte | Ty::Short => self.unbox_to(rt, code),
                     Ty::Unit | Ty::Nothing => code.pop(),
                     Ty::String => { let ci = self.cw.class_ref("java/lang/String"); code.checkcast(ci); }
-                    Ty::Obj(internal) => { let ci = self.cw.class_ref(internal); code.checkcast(ci); }
+                    Ty::Obj(internal, _) => { let ci = self.cw.class_ref(internal); code.checkcast(ci); }
                     Ty::Array(_) => { let ci = self.cw.class_ref(&rt.descriptor()); code.checkcast(ci); }
                     _ => {}
                 }
@@ -1696,7 +1696,7 @@ impl<'a> Emitter<'a> {
             Ty::Double => VerifType::Double,
             Ty::Float => VerifType::Float,
             Ty::String => VerifType::Object(self.cw.class_ref("java/lang/String")),
-            Ty::Obj(n) => VerifType::Object(self.cw.class_ref(n)),
+            Ty::Obj(n, _) => VerifType::Object(self.cw.class_ref(n)),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
             Ty::Array(_) => VerifType::Object(self.cw.class_ref(&ty.descriptor())),
             _ => VerifType::Top,
@@ -1852,7 +1852,7 @@ fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
 fn ref_internal(t: Ty) -> String {
     match t {
         Ty::String => "java/lang/String".to_string(),
-        Ty::Obj(n) => n.to_string(),
+        Ty::Obj(n, _) => n.to_string(),
         Ty::Array(_) => t.descriptor(),
         _ => "java/lang/Object".to_string(),
     }
