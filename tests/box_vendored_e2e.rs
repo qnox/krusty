@@ -11,6 +11,8 @@ use std::process::Command;
 
 use krusty::jvm::classreader::parse_class;
 
+mod common;
+
 fn find_box_class(dir: &Path) -> Option<String> {
     let mut found = None;
     fn walk(dir: &Path, found: &mut Option<String>) {
@@ -48,6 +50,9 @@ fn vendored_kotlin_box_cases_return_ok() {
     if !Path::new(&javac).exists() {
         return;
     }
+    // Kotlin-conforming output references `kotlin/jvm/internal/Intrinsics` (areEqual,
+    // checkNotNullParameter, …), so kotlin-stdlib must be on the runtime classpath.
+    let stdlib = common::stdlib_jar().map(|p| p.to_string_lossy().into_owned());
     let krusty = env!("CARGO_BIN_EXE_krusty");
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data");
     let work = std::env::temp_dir().join(format!("krusty_vbox_{}", std::process::id()));
@@ -76,7 +81,11 @@ fn vendored_kotlin_box_cases_return_ok() {
         fs::write(out.join("M.java"), main).unwrap();
         let jc = Command::new(&javac).args(["-cp", out.to_str().unwrap(), "-d", out.to_str().unwrap()]).arg(out.join("M.java")).output().unwrap();
         assert!(jc.status.success(), "javac(Main) failed for {}: {}", kt.display(), String::from_utf8_lossy(&jc.stderr));
-        let run = Command::new(&java).args(["-Xverify:all", "-cp", out.to_str().unwrap(), "M"]).output().unwrap();
+        let run_cp = match &stdlib {
+            Some(s) => format!("{}:{}", out.to_str().unwrap(), s),
+            None => out.to_str().unwrap().to_string(),
+        };
+        let run = Command::new(&java).args(["-Xverify:all", "-cp", &run_cp, "M"]).output().unwrap();
         let returned = String::from_utf8_lossy(&run.stdout).lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").trim().to_string();
         assert!(run.status.success() && returned == "OK",
             "box() did not return OK for {}: got {:?}, stderr={}", kt.display(), returned, String::from_utf8_lossy(&run.stderr));

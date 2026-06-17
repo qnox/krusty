@@ -115,6 +115,8 @@ pub enum IrExpr {
     EnumEntry { class: ClassId, index: u32 },
     /// The singleton instance of an `object` — `getstatic <class>.INSTANCE:L<class>;`.
     ObjectInstance { class: ClassId },
+    /// The companion singleton of `outer` — `getstatic <outer>.Companion:L<companion>;`.
+    CompanionInstance { outer: ClassId, companion: ClassId },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues { class: ClassId },
     EnumValueOf { class: ClassId, arg: ExprId },
@@ -237,6 +239,12 @@ pub struct IrClass {
     /// assertion (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param.
     /// Parallel to the first `ctor_param_count` `fields`. Empty for synthesized/enum/object classes.
     pub ctor_param_checks: Vec<Option<String>>,
+    /// `true` for a synthesized `C$Companion` class: a private no-arg constructor and no own singleton
+    /// field (the `Companion` instance is held by the outer class).
+    pub is_companion: bool,
+    /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
+    /// <companion> Companion` field, initialized in this class's `<clinit>`.
+    pub companion_class: Option<String>,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

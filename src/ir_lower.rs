@@ -41,6 +41,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_fn_name: String::new(),
         lambda_seq: 0,
         cur_ret_ty: IrType::Unit,
+        companions: HashMap::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -117,6 +118,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 interfaces: iface_internals,
                 is_object: c.is_object,
                 ctor_param_checks,
+                is_companion: false,
+                companion_class: None,
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -140,6 +143,38 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
             lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods, super_internal });
+            // `companion object` with methods → a synthesized `C$Companion` class (private ctor, the
+            // companion methods as instance methods) + a `Companion` field on the outer class.
+            // Companion properties aren't modeled yet (their backing fields live on the outer class).
+            if !c.companion_methods.is_empty() && c.companion_props.is_empty() {
+                let comp_fq = format!("{internal}$Companion");
+                let comp_id = lo.ir.add_class(IrClass {
+                    fq_name: comp_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
+                    init_body: None, methods: vec![], is_interface: false,
+                    superclass: "java/lang/Object".to_string(), super_args: vec![],
+                    enum_entries: vec![], bridges: vec![], interfaces: vec![],
+                    is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
+                });
+                let csig = syms.classes.get(&c.name)?;
+                let mut cmethods = HashMap::new();
+                let mut cmethod_fids = Vec::new();
+                for (mi, m) in c.companion_methods.iter().enumerate() {
+                    let sig = csig.static_methods.get(&m.name)?;
+                    let ret = sig.ret;
+                    let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                    let param_checks = param_checks_for(m, &sig.params);
+                    let fid = lo.ir.add_fun(IrFunction {
+                        name: m.name.clone(), params, ret: ty_to_ir(ret), body: None,
+                        is_static: false, dispatch_receiver: Some(comp_fq.clone()), param_checks,
+                    });
+                    cmethods.insert(m.name.clone(), (mi as u32, fid, ret));
+                    cmethod_fids.push(fid);
+                }
+                lo.ir.classes[comp_id as usize].methods = cmethod_fids;
+                lo.ir.classes[id as usize].companion_class = Some(comp_fq.clone());
+                lo.classes.insert(comp_fq.clone(), ClassInfo { id: comp_id, internal: comp_fq.clone(), fields: vec![], methods: cmethods, super_internal: None });
+                lo.companions.insert(internal.clone(), comp_fq);
+            }
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
             // resolve and the generic method emitter handles them.
@@ -275,6 +310,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
                 }
+                // Companion method bodies — lowered on the synthesized `C$Companion` class.
+                if let Some(comp_fq) = lo.companions.get(&internal).cloned() {
+                    for m in &c.companion_methods {
+                        if matches!(m.body, FunBody::None) {
+                            continue;
+                        }
+                        let (_, fid, _) = lo.classes[&comp_fq].methods[&m.name];
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_fq.clone());
+                        lo.cur_fn_name = m.name.clone();
+                        lo.lambda_seq = 0;
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
+                        for (p, t) in m.params.iter().zip(&sig.params) {
+                            let v = lo.fresh_value();
+                            lo.scope.push((p.name.clone(), v, *t));
+                        }
+                        let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+                        lo.lower_body(&m.body, &ret_ty, fid)?;
+                    }
+                }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
                 if !c.base_args.is_empty() {
@@ -399,8 +457,10 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // registration); a base class is allowed when it's a simple/open file class.
     // `abstract class` is allowed: its abstract methods (no body) are emitted as `ACC_ABSTRACT`,
     // concrete methods normally. `value`/inline classes need unboxing and are excluded.
+    // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
+    // companion with properties (`val`/`const val`) is not yet.
     !c.is_value && !c.is_object && !c.is_enum && !c.is_interface
-        && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
+        && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
@@ -471,6 +531,8 @@ struct Lower<'a> {
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: IrType,
+    /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
+    companions: HashMap<String, String>,
 }
 
 impl<'a> Lower<'a> {
@@ -1663,6 +1725,26 @@ impl<'a> Lower<'a> {
                                     let a = self.expr(args[0])?;
                                     return Some(self.ir.add_expr(IrExpr::EnumValueOf { class: cls, arg: a }));
                                 }
+                            }
+                        }
+                    }
+                    // `C.foo(args)` — a companion-object method → `getstatic C.Companion; invokevirtual`.
+                    if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                        let internal = class_internal(self.afile, &rn);
+                        if let Some(comp_fq) = self.companions.get(&internal).cloned() {
+                            if let Some((class, index, fid, _)) = self.resolve_method(&comp_fq, &name) {
+                                let params = self.ir.functions[fid as usize].params.clone();
+                                if args.len() != params.len() {
+                                    return None;
+                                }
+                                let outer_id = self.classes[&internal].id;
+                                let comp_id = self.classes[&comp_fq].id;
+                                let recv = self.ir.add_expr(IrExpr::CompanionInstance { outer: outer_id, companion: comp_id });
+                                let mut a = Vec::new();
+                                for (arg, pt) in args.iter().zip(&params) {
+                                    a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a }));
                             }
                         }
                     }

@@ -233,6 +233,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- `companion object` (methods only): a synthesized `C$Companion` class holds the companion methods as
+  instance methods; the outer class `C` gets a `public static final Companion` field of that type, built
+  in `C`'s `<clinit>`; `C.foo()` compiles to `getstatic C.Companion; invokevirtual`. The companion
+  constructor is package-private so the outer `<clinit>` can call it (kotlinc uses a private constructor
+  plus a `DefaultConstructorMarker` synthetic — a byte-parity gap, not a behavioural one). Companion
+  properties are not yet modeled.
+- Non-null reference primary-constructor parameters are guarded with `Intrinsics.checkNotNullParameter`
+  at the start of `<init>` (before `super()`), matching kotlinc.
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader

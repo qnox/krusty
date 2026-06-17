@@ -193,9 +193,28 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     }
     ctor.ensure_locals(max_slot);
     ctor.link();
-    // An `object`'s constructor is private; a normal class's is public.
-    let ctor_access = if c.is_object { 0x0002 } else { 0x0001 };
+    // An `object`'s constructor is private; a `C$Companion`'s is package-private (so the outer class's
+    // `<clinit>` can call it without nestmate attributes); a normal class's is public.
+    let ctor_access = if c.is_object { 0x0002 } else if c.is_companion { 0x0000 } else { 0x0001 };
     cw.add_method(ctor_access, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
+    // A class with a `companion object`: a `public static final Companion` field of the companion
+    // type, constructed in this class's `<clinit>`.
+    if let Some(comp_fq) = &c.companion_class {
+        let comp_desc = format!("L{comp_fq};");
+        cw.add_field(0x0019, "Companion", &comp_desc); // PUBLIC | STATIC | FINAL
+        let mut clinit = CodeBuilder::new(0);
+        let ci = cw.class_ref(comp_fq);
+        clinit.new_obj(ci);
+        clinit.dup();
+        let init = cw.methodref(comp_fq, "<init>", "()V");
+        clinit.invokespecial(init, 0, 0);
+        let fref = cw.fieldref(&c.fq_name, "Companion", &comp_desc);
+        clinit.putstatic(fref, 1);
+        clinit.ret_void();
+        clinit.ensure_locals(0);
+        clinit.link();
+        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    }
     // A singleton `object`: a `public static final INSTANCE` built in `<clinit>`.
     if c.is_object {
         let self_desc = format!("L{};", c.fq_name);
@@ -762,6 +781,12 @@ impl<'a> Emitter<'a> {
             IrExpr::ObjectInstance { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
                 let f = self.cw.fieldref(&fq, "INSTANCE", &format!("L{fq};"));
+                code.getstatic(f, 1);
+            }
+            IrExpr::CompanionInstance { outer, companion } => {
+                let outer_fq = self.ir.classes[*outer as usize].fq_name.clone();
+                let comp_fq = self.ir.classes[*companion as usize].fq_name.clone();
+                let f = self.cw.fieldref(&outer_fq, "Companion", &format!("L{comp_fq};"));
                 code.getstatic(f, 1);
             }
             IrExpr::EnumValues { class } => {
@@ -1533,6 +1558,7 @@ impl<'a> Emitter<'a> {
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } | IrExpr::ObjectInstance { class } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
+            IrExpr::CompanionInstance { companion, .. } => Ty::obj(&self.ir.classes[*companion as usize].fq_name),
             IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {
