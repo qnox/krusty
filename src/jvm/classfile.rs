@@ -740,8 +740,13 @@ impl CodeBuilder {
         self.load(0x19, idx, 1);
     }
     fn load(&mut self, base: u8, idx: u16, words: i32) {
-        // generic form with u1 index (v0: <256 locals); wide form deferred
-        self.op_u1(base, idx as u8, words);
+        // Slots 0-3 use the compact single-byte form (`iload_0`..`aload_3` = 0x1a + (base-0x15)*4 +
+        // idx), matching kotlinc; higher slots use the generic `<op> <u1 index>` form (v0: <256 locals).
+        if idx <= 3 {
+            self.op(0x1a + (base - 0x15) * 4 + idx as u8, words);
+        } else {
+            self.op_u1(base, idx as u8, words);
+        }
     }
 
     pub fn istore(&mut self, idx: u16) {
@@ -760,7 +765,13 @@ impl CodeBuilder {
         self.store(0x3a, idx, 1);
     }
     fn store(&mut self, base: u8, idx: u16, words: i32) {
-        self.op_u1(base, idx as u8, -words);
+        // Slots 0-3 use the compact single-byte form (`istore_0`..`astore_3` = 0x3b + (base-0x36)*4 +
+        // idx), matching kotlinc; higher slots use the generic `<op> <u1 index>` form.
+        if idx <= 3 {
+            self.op(0x3b + (base - 0x36) * 4 + idx as u8, -words);
+        } else {
+            self.op_u1(base, idx as u8, -words);
+        }
         self.ensure_locals(idx + words as u16);
     }
 
