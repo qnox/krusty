@@ -176,7 +176,7 @@ impl Ty {
             "Char" => Ty::Char,
             "String" => Ty::String,
             "Unit" => Ty::Unit,
-            "Any" => Ty::obj("java/lang/Object"),
+            "Any" => Ty::obj("kotlin/Any"),
             _ => return None,
         })
     }
@@ -236,8 +236,12 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char)
     }
 
-    /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `Ljava/lang/String;`, `V`, `Lpkg/Name;`).
+    /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `String`, `V`, `Lpkg/Name;`). Reference
+    /// descriptors run the (Kotlin) internal name through the JVM name mapping, so the `java/lang/…`
+    /// realization lives in the JVM part, not here — this method is the Ty→bytecode boundary.
     pub fn descriptor(self) -> String {
+        use crate::jvm::jvm_class_map::to_jvm_internal;
+        let obj_desc = |internal: &str| format!("L{};", to_jvm_internal(internal));
         match self {
             Ty::Int => "I".into(),
             Ty::Byte => "B".into(),
@@ -247,13 +251,13 @@ impl Ty {
             Ty::Double => "D".into(),
             Ty::Boolean => "Z".into(),
             Ty::Char => "C".into(),
-            Ty::String => "Ljava/lang/String;".into(),
+            Ty::String => obj_desc("kotlin/String"),
             Ty::Unit => "V".into(),
-            Ty::Obj(n, _) => format!("L{n};"),
-            Ty::Null => "Ljava/lang/Object;".into(),
-            Ty::Nothing => "Ljava/lang/Object;".into(),
+            Ty::Obj(n, _) => obj_desc(n),
+            Ty::Null => obj_desc("kotlin/Any"),
+            Ty::Nothing => obj_desc("kotlin/Any"),
             Ty::Array(elem) => format!("[{}", elem.descriptor()),
-            Ty::Error => "Ljava/lang/Object;".into(),
+            Ty::Error => obj_desc("kotlin/Any"),
             Ty::Fun(s) => format!("Lkotlin/jvm/functions/Function{};", s.params.len()),
         }
     }

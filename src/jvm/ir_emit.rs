@@ -131,8 +131,9 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let param_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + params_words);
-    // The superclass constructor's parameter types (empty for `java/lang/Object`).
-    let super_param_tys: Vec<Ty> = if c.superclass == "java/lang/Object" {
+    // The superclass constructor's parameter types (empty for the erased top type — the front end
+    // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
+    let super_param_tys: Vec<Ty> = if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
         Vec::new()
     } else {
         ir.classes.iter().find(|sc| sc.fq_name == c.superclass)

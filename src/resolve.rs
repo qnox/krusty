@@ -263,7 +263,9 @@ pub fn desc_to_ty(d: &str) -> Ty {
             Ty::array(elem)
         }
         s if s.starts_with('L') && s.ends_with(';') => {
-            Ty::obj(&s[1..s.len() - 1])
+            // Normalize a JVM built-in name read from the classpath to its Kotlin identity
+            // (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
+            Ty::obj(crate::jvm::jvm_class_map::to_kotlin_internal(&s[1..s.len() - 1]))
         }
         _ => Ty::Error,
     }
@@ -1324,7 +1326,7 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
         // `X::class` lowers to here). Enough for class-literal storage/identity, not full reflection.
         Ty::obj("java/lang/Class")
     } else if tparams.contains(&r.name) {
-        Ty::obj("java/lang/Object") // erased generic type parameter
+        Ty::obj("kotlin/Any") // erased generic type parameter
     } else if let Some(internal) = classes.get(&r.name) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
@@ -1745,7 +1747,7 @@ impl<'a> Checker<'a> {
                 None => Ty::Error,
             }
         } else if self.tparams.contains(&r.name) {
-            Ty::obj("java/lang/Object") // erased generic type parameter
+            Ty::obj("kotlin/Any") // erased generic type parameter
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             let internal = cs.internal.clone();
             self.obj_with_targs(&internal, r)
@@ -1819,7 +1821,7 @@ impl<'a> Checker<'a> {
     /// skipped rather than throwing `AbstractMethodError` at runtime.
     fn check_no_bridge_needed(&mut self, internal: &str, span: Span) {
         let supers = self.syms.supertype_methods(internal);
-        let obj = Ty::obj("java/lang/Object");
+        let obj = Ty::obj("kotlin/Any");
         for (name, ssig) in &supers {
             let Some(impl_sig) = self.syms.method_of(internal, name) else { continue };
             let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
@@ -2000,7 +2002,7 @@ impl<'a> Checker<'a> {
         if let Some(t) = Ty::from_name(&r.name) {
             t
         } else if self.tparams.contains(&r.name) {
-            Ty::obj("java/lang/Object")
+            Ty::obj("kotlin/Any")
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
         } else {
@@ -2228,10 +2230,10 @@ impl<'a> Checker<'a> {
         // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
         // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
         // emit coercion site — not the type checker's. (`Unit` is excluded: it has no JVM value here.)
-        if expected == Ty::obj("java/lang/Object") && actual != Ty::Unit {
+        if expected == Ty::obj("kotlin/Any") && actual != Ty::Unit {
             return;
         }
-        if actual == Ty::obj("java/lang/Object") && expected != Ty::Unit {
+        if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
             return;
         }
         // A class value is assignable to an interface (supertype) it implements.
@@ -2296,11 +2298,11 @@ impl<'a> Checker<'a> {
                 if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
                     self.diags.error(self.file.expr_spans[e.0 as usize],
                         "krusty: lambda captures a mutable local variable — not supported".to_string());
-                    return Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], Ty::Unit);
+                    return Ty::fun(vec![Ty::obj("kotlin/Any"); arity as usize], Ty::Unit);
                 }
                 self.push_scope();
                 for name in &bind_names {
-                    self.declare(name, Ty::obj("java/lang/Object"), false);
+                    self.declare(name, Ty::obj("kotlin/Any"), false);
                 }
                 // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
                 // emit a backing-field read from the lambda class. Clear it so `field` inside a
@@ -2318,7 +2320,7 @@ impl<'a> Checker<'a> {
                 self.field_ty = saved_field;
                 self.pop_scope();
                 // Params unknown here (no annotation) → erased `Object`; return type comes from the body.
-                Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], bret)
+                Ty::fun(vec![Ty::obj("kotlin/Any"); arity as usize], bret)
             }
             Expr::Index { array, index } => {
                 let at = self.expr(array);
@@ -2730,7 +2732,7 @@ impl<'a> Checker<'a> {
                 // Object-method callable references (`Any::equals`, `obj::toString`). A receiver that
                 // names a value is *bound* (captures it, arity = method args); one that names a type
                 // is *unbound* (the receiver becomes the first parameter).
-                let obj = Ty::obj("java/lang/Object");
+                let obj = Ty::obj("kotlin/Any");
                 if matches!(name.as_str(), "equals" | "hashCode" | "toString") {
                     let bound = match receiver {
                         Some(r) => matches!(self.file.expr(r), Expr::Name(n) if self.lookup(n).is_some()),
@@ -2934,7 +2936,7 @@ impl<'a> Checker<'a> {
         if fname == "Array" && arg_tys.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
             let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
-            let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("java/lang/Object"));
+            let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
             // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
             // StackMapTable interaction with surrounding loops — skip rather than VerifyError.
             if matches!(elem, Ty::Array(_)) {
@@ -3045,7 +3047,7 @@ impl<'a> Checker<'a> {
             };
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
-                let pty = param_types.get(i).copied().unwrap_or(Ty::obj("java/lang/Object"));
+                let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
                 self.declare(name, pty, false);
             }
             // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
@@ -3599,7 +3601,7 @@ impl<'a> Checker<'a> {
                     }
                     // `Any()` constructs java.lang.Object (Kotlin's root type).
                     if fname == "Any" && arg_tys.is_empty() {
-                        return Ty::obj("java/lang/Object");
+                        return Ty::obj("kotlin/Any");
                     }
                 }
                 // Unqualified call to a sibling instance method: `foo()` → `this.foo()`.

@@ -90,7 +90,11 @@ impl ConstPool {
         self.intern(Const::Utf8(s.to_string()))
     }
     fn class(&mut self, internal_name: &str) -> u16 {
-        let n = self.utf8(internal_name);
+        // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
+        // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
+        // (class_ref, method/field owner, super, interfaces) funnels through here, so this single
+        // mapping keeps the rest of the compiler free of `java/lang/…` names.
+        let n = self.utf8(super::jvm_class_map::to_jvm_internal(internal_name));
         self.intern(Const::Class(n))
     }
     fn string(&mut self, s: &str) -> u16 {
