@@ -1586,6 +1586,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   469 box()=OK, 0 FAIL**. (Concludes the `annotations/instances/` high-value cluster — remaining tests
   there are narrow niches; the next big leverage is corpus-wide: inheritance, generics, enums, etc.)
 
+- ✅ **`emptyArray()`** (a common corpus-wide stdlib intrinsic). Typed as `Array<Null>` (a bottom
+  array) — assignable to any reference array in `expect_assignable` — and **materialized with the
+  target element type** in `emit_expr_as` (`val a: Array<String> = emptyArray()` → `new String[0]`,
+  so the descriptor matches and there's no `VerifyError`). A no-target use falls back to `Object[0]`.
+  This is krusty's first bit of **expected-type-directed codegen** for a general call. Production
+  drop-in: **469 → 471 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

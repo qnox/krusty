@@ -1954,6 +1954,13 @@ impl<'a> Checker<'a> {
         if actual == Ty::Null && expected.is_reference() {
             return;
         }
+        // `emptyArray()` is typed `Array<Null>` (bottom array) — assignable to any reference array;
+        // the emitter materializes it with the target's element type.
+        if let (Ty::Array(ae), Ty::Array(ee)) = (actual, expected) {
+            if *ae == Ty::Null && ee.is_reference() {
+                return;
+            }
+        }
         // An `Int` (typically a constant) is assignable to `Byte`/`Short` (Kotlin narrows integer
         // literals); codegen emits `i2b`/`i2s`. `Byte`/`Short` are interchangeable with `Int` here.
         if matches!(expected, Ty::Byte | Ty::Short) && matches!(actual, Ty::Int | Ty::Byte | Ty::Short) {
@@ -2538,6 +2545,11 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(elem, *t, self.span(args[i]), "array element");
             }
             return Some(Ty::array(elem));
+        }
+        if fname == "emptyArray" && args.is_empty() {
+            // `emptyArray<T>()` → a bottom reference array (`Array<Null>`), assignable to any reference
+            // array; the emitter materializes it with the *target* element type.
+            return Some(Ty::array(Ty::Null));
         }
         if fname == "arrayOf" {
             // The element type is the common type of the arguments; it must be a reference type

@@ -518,7 +518,7 @@ fn trim_margin(s: &str, prefix: &str) -> String {
 fn is_array_builtin(name: &str) -> bool {
     matches!(
         name,
-        "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "booleanArrayOf" | "charArrayOf"
+        "arrayOf" | "emptyArray" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "booleanArrayOf" | "charArrayOf"
     ) || Ty::primitive_array_element(name).is_some()
 }
 
@@ -2922,6 +2922,19 @@ impl<'a> MethodEmitter<'a> {
     // ---- expressions ----
     fn emit_expr_as(&mut self, e: ExprId, target: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let from = self.info.ty(e);
+        // `emptyArray()` (typed `Array<Null>`) materializes with the *target* element type so the
+        // descriptor matches (`Array<String>` → `new String[0]`, not `Object[0]`).
+        if let (Ty::Array(_), Ty::Array(telem)) = (from, target) {
+            if from.array_elem() == Some(Ty::Null) {
+                if let Expr::Call { callee, args } = self.file.expr(e) {
+                    if args.is_empty() && matches!(self.file.expr(*callee), Expr::Name(n) if n == "emptyArray" && !self.slots.contains_key(n)) {
+                        code.push_int(0, cw);
+                        self.emit_new_array(*telem, code, cw);
+                        return;
+                    }
+                }
+            }
+        }
         self.emit_expr(e, code, cw);
         if target == Ty::Unit {
             // Discard any value the expression pushed; stack must be empty for the Unit context.
@@ -4914,8 +4927,8 @@ impl<'a> MethodEmitter<'a> {
             {
                 let arr = self.info.ty(e);
                 let elem = arr.array_elem().unwrap_or(Ty::Error);
-                if fname.ends_with("Of") {
-                    // `*ArrayOf(a, b, …)` — allocate `args.len()` and store each element.
+                if fname.ends_with("Of") || fname == "emptyArray" {
+                    // `*ArrayOf(a, b, …)` / `emptyArray()` — allocate `args.len()` and store each element.
                     code.push_int(args.len() as i32, cw);
                     self.emit_new_array(elem, code, cw);
                     let (sop, swords) = array_store_op(elem);
