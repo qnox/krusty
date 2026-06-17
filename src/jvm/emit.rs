@@ -3554,6 +3554,9 @@ impl<'a> MethodEmitter<'a> {
             Expr::CallableRef { receiver: None, name } if self.syms.funs.contains_key(&name) => {
                 self.emit_topfun_ref(&name, code, cw);
             }
+            Expr::CallableRef { receiver: None, name } if self.syms.classes.contains_key(&name) => {
+                self.emit_ctor_ref(&name, code, cw);
+            }
             Expr::CallableRef { receiver: Some(r), name } => {
                 self.emit_method_ref(r, &name, code, cw);
             }
@@ -4404,6 +4407,69 @@ impl<'a> MethodEmitter<'a> {
             if ret == Ty::Unit {
                 ic.aconst_null();
             }
+            ic.areturn();
+            ic.ensure_locals(1 + arity as u16);
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "invoke", &invoke_desc, &ic);
+        }
+        ensure_function_stub(arity);
+        push_lambda_class(anon_name.clone(), acw.finish());
+
+        let ci = cw.class_ref(&anon_name);
+        code.set_needs_stackmap();
+        code.new_obj(ci);
+        code.dup();
+        let init = cw.methodref(&anon_name, "<init>", "()V");
+        code.invokespecial(init, 0, 0);
+    }
+
+    /// A constructor reference `::ClassName` → a captureless `FunctionN` whose `invoke` constructs the
+    /// class from its (unboxed) `Object` args.
+    fn emit_ctor_ref(&mut self, cname: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let cls = self.syms.classes.get(cname).cloned().unwrap();
+        let internal = cls.internal.clone();
+        let ctor_tys = cls.ctor_params.clone();
+        let arity = ctor_tys.len() as u8;
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        let iface = Ty::fun_interface(arity);
+        let anon_name = format!("{}$cnref${n}", self.class);
+        let obj = Ty::obj("java/lang/Object");
+
+        let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
+        acw.add_interface(&iface);
+        {
+            let mut ic = CodeBuilder::new(1);
+            ic.aload(0);
+            let oi = acw.methodref("java/lang/Object", "<init>", "()V");
+            ic.invokespecial(oi, 0, 0);
+            ic.ret_void();
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "<init>", "()V", &ic);
+        }
+        {
+            let invoke_desc = format!("({})Ljava/lang/Object;", "Ljava/lang/Object;".repeat(arity as usize));
+            let mut ic = CodeBuilder::new(1 + arity as u16 + 4);
+            let cci = acw.class_ref(&internal);
+            ic.new_obj(cci);
+            ic.dup();
+            for (i, pty) in ctor_tys.iter().enumerate() {
+                ic.aload(1 + i as u16);
+                if pty.is_primitive() {
+                    let (wrapper, _, unbox, unbox_desc) = box_wrapper(*pty).unwrap();
+                    let wci = acw.class_ref(wrapper);
+                    ic.checkcast(wci);
+                    let m = acw.methodref(wrapper, unbox, unbox_desc);
+                    ic.invokevirtual(m, 0, slot_words(*pty) as i32);
+                } else if *pty != obj {
+                    let pci = acw.class_ref(ref_internal(*pty));
+                    ic.checkcast(pci);
+                }
+            }
+            let pdesc: String = ctor_tys.iter().map(|t| t.descriptor()).collect();
+            let argw: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
+            let m = acw.methodref(&internal, "<init>", &format!("({pdesc})V"));
+            ic.invokespecial(m, argw, 0);
             ic.areturn();
             ic.ensure_locals(1 + arity as u16);
             ic.link();

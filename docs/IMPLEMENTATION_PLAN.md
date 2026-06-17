@@ -1633,6 +1633,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   fixed a callable-ref-equality FAIL). Net **485 → 491 box()=OK, 0 FAIL** (+6; suspend rejection
   dropped 2 previously-lucky unsound passes).
 
+- ✅ **Constructor references `::ClassName`** → `Fun(ctor_params, ClassName)`; `emit_ctor_ref`
+  synthesizes a captureless `FunctionN` whose `invoke` does `new ClassName` + unbox-args +
+  `invokespecial <init>`. Completes the callable-reference family (top-level fun, bound/unbound
+  method, constructor). Production drop-in: **491 → 493 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

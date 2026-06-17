@@ -2505,6 +2505,14 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
+                    // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
+                    if !self.syms.objects.contains(&name) {
+                        if let Some(cls) = self.syms.classes.get(&name).cloned() {
+                            if !cls.is_annotation {
+                                return self.set(e, Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal)));
+                            }
+                        }
+                    }
                 }
                 // Method references on a user class: bound `obj::m` (receiver is a value, captured →
                 // arity = method args) or unbound `Type::m` (receiver is the class → first parameter).
