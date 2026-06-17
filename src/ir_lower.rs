@@ -64,6 +64,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let ctor_fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
                 .map(|p| (p.name.clone(), ty_of(file, &p.ty))).collect();
             let ctor_param_count = ctor_fields.len() as u32;
+            // Non-null reference constructor parameters get an `Intrinsics.checkNotNullParameter` guard
+            // (kotlinc does); primitives, nullable params, and class type-parameters are skipped.
+            let ctor_param_checks: Vec<Option<String>> = c.props.iter().filter(|p| p.is_property).map(|p| {
+                let ty = ty_of(file, &p.ty);
+                let is_type_param = c.type_params.contains(&p.ty.name);
+                if !p.ty.nullable && !is_type_param && ty.is_reference() { Some(p.name.clone()) } else { None }
+            }).collect();
             let body_fields: Vec<(String, Ty)> = c.body_props.iter()
                 .map(|p| {
                     let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
@@ -109,6 +116,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object,
+                ctor_param_checks,
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
