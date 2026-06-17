@@ -65,18 +65,6 @@ pub trait LibrarySet {
     fn is_interface(&self, _internal: &str) -> bool {
         false
     }
-
-    /// Whether `internal` names a throwable type — admits the no-arg / single-message constructor
-    /// shapes every such type provides, when the library can't surface the exact constructor.
-    fn is_throwable(&self, _internal: &str) -> bool {
-        false
-    }
-
-    /// The reference type a primitive boxes to on this target (`Int` → the JVM `Integer`), or `None`
-    /// for a non-primitive. The boxing policy is target-specific, so it lives behind the abstraction.
-    fn boxed_type(&self, _prim: Ty) -> Option<Ty> {
-        None
-    }
 }
 
 /// A library set with no external libraries — compiling a self-contained source set with no classpath.
