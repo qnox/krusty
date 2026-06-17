@@ -717,6 +717,52 @@ impl<'a> Emitter<'a> {
                 }
                 self.slots = saved;
             }
+            IrExpr::Lambda { impl_fn, arity, captures } => {
+                // Non-capturing lambdas only (lowering bails otherwise).
+                debug_assert!(captures.is_empty());
+                let f = &self.ir.functions[*impl_fn as usize];
+                let impl_name = f.name.clone();
+                let impl_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+                let impl_ret = ir_ty_to_jvm(&f.ret);
+                let iface = format!("kotlin/jvm/functions/Function{arity}");
+                let impl_desc = jvm_descriptor(&impl_params, impl_ret);
+                // samMethodType: the erased `(Object,…)Object`; instantiatedMethodType: boxed actuals.
+                let sam_desc = sam_descriptor(*arity);
+                let inst_params: Vec<String> = impl_params.iter().map(|t| boxed_descriptor(*t)).collect();
+                let inst_desc = format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
+                let facade = self.facade.clone();
+                let meta = self.cw.method_handle_static(
+                    "java/lang/invoke/LambdaMetafactory", "metafactory", LMF_METAFACTORY_DESC);
+                let sam_mt = self.cw.method_type(&sam_desc);
+                let impl_mh = self.cw.method_handle_static(&facade, &impl_name, &impl_desc);
+                let inst_mt = self.cw.method_type(&inst_desc);
+                let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
+                let indy = self.cw.invoke_dynamic(bsm, "invoke", &format!("()L{iface};"));
+                code.invokedynamic(indy, 0, 1);
+            }
+            IrExpr::InvokeFunction { func, args, ret } => {
+                let n = args.len();
+                self.emit_value(*func, code);
+                for &arg in args {
+                    self.emit_value(arg, code);
+                    let at = self.value_ty(arg);
+                    self.box_prim(at, code); // box a primitive arg to its wrapper (an Object)
+                }
+                let iface = format!("kotlin/jvm/functions/Function{n}");
+                let m = self.cw.interface_methodref(&iface, "invoke", &sam_descriptor(n as u8));
+                code.invokeinterface(m, n as i32, 1);
+                // The interface returns `Object`; cast/unbox to the function's declared return type.
+                let rt = ir_ty_to_jvm(ret);
+                match rt {
+                    Ty::Int | Ty::Long | Ty::Double | Ty::Float | Ty::Boolean | Ty::Char
+                    | Ty::Byte | Ty::Short => self.unbox_to(rt, code),
+                    Ty::Unit | Ty::Nothing => code.pop(),
+                    Ty::String => { let ci = self.cw.class_ref("java/lang/String"); code.checkcast(ci); }
+                    Ty::Obj(internal) => { let ci = self.cw.class_ref(internal); code.checkcast(ci); }
+                    Ty::Array(_) => { let ci = self.cw.class_ref(&rt.descriptor()); code.checkcast(ci); }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -1196,9 +1242,53 @@ impl<'a> Emitter<'a> {
                 IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
                 _ => ir_ty_to_jvm(type_operand),
             },
+            IrExpr::Lambda { arity, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")),
+            IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             _ => Ty::Error,
         }
     }
+}
+
+/// The `LambdaMetafactory.metafactory` bootstrap-method descriptor (the standard non-altmetafactory form).
+const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;\
+Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
+Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+
+/// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
+fn jvm_descriptor(params: &[Ty], ret: Ty) -> String {
+    let mut s = String::from("(");
+    for p in params {
+        s.push_str(&p.descriptor());
+    }
+    s.push(')');
+    s.push_str(&ret.descriptor());
+    s
+}
+
+/// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
+fn sam_descriptor(arity: u8) -> String {
+    let mut s = String::from("(");
+    for _ in 0..arity {
+        s.push_str("Ljava/lang/Object;");
+    }
+    s.push_str(")Ljava/lang/Object;");
+    s
+}
+
+/// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
+fn boxed_descriptor(t: Ty) -> String {
+    match t {
+        Ty::Int => "Ljava/lang/Integer;",
+        Ty::Long => "Ljava/lang/Long;",
+        Ty::Double => "Ljava/lang/Double;",
+        Ty::Float => "Ljava/lang/Float;",
+        Ty::Boolean => "Ljava/lang/Boolean;",
+        Ty::Char => "Ljava/lang/Character;",
+        Ty::Byte => "Ljava/lang/Byte;",
+        Ty::Short => "Ljava/lang/Short;",
+        _ => return t.descriptor(),
+    }
+    .to_string()
 }
 
 /// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.

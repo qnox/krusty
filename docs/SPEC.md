@@ -177,6 +177,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not `top` — emitting a `top` there is a `VerifyError: Bad type on operand stack`. Only user-defined
   member targets are resolved; safe calls on stdlib receivers (`s?.substring(1)`) need the external-call
   path and are skipped (`tests/safe_call_e2e.rs`).
+- Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
+  `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
+  `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
+  holding the body (with the lambda's real parameter types). The `implMethod` is primitive-specialized
+  (`box$lambda$0(I)I`) while the `instantiatedMethodType` is boxed (`(Integer)Integer`), so the
+  metafactory inserts the box/unbox adapter — matching kotlinc 2.x. Calling a function value `f(args)`
+  goes through `FunctionN.invoke` (`(Object…)Object`): arguments are boxed, the result cast/unboxed to
+  the return type. Only non-capturing lambdas returning a concrete non-`Unit` type, passed to a
+  non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
+  `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
+  (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
 
 ## 8. Success criteria for the PoC
 
