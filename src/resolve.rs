@@ -1979,6 +1979,23 @@ impl<'a> Checker<'a> {
             if let Some(s) = &c.super_internal {
                 return self.obj_is_subtype(s, sup);
             }
+            return false;
+        }
+        // A classpath type (`java/util/ArrayList`): walk its supertype chain (superclass + interfaces)
+        // through the library to see if `sup` (e.g. `java/util/List`) is reachable.
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(sub.to_string());
+        while let Some(cur) = q.pop_front() {
+            if cur == sup {
+                return true;
+            }
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(t) = self.syms.libraries.resolve_type(&cur) {
+                q.extend(t.supertypes);
+            }
         }
         false
     }
