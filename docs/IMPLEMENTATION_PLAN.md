@@ -2008,6 +2008,13 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   skips rather than miscompiling. `tests/break_continue_e2e.rs`. (Follow-ups: `++`/`--` are parsed
   (`Stmt::IncDec`) but not yet lowered; labeled break/continue; value-position via operand spill.)
 
+- ✅ **Phase 184 — `++` / `--` (statement position)** (285 → 291 box()=OK, 0 FAIL). `Stmt::IncDec` was
+  parsed but never lowered (any `i++` bailed). Lowered `name++`/`name--` on a local numeric/`Char`
+  variable to `name = name ± 1` (in statement position the pre/post distinction is unobservable). The
+  checker now also accepts `Char` (`c++` → `c.inc()`). A `var` field/property target or a user
+  `operator inc`/`dec` still bails (skipped, not miscompiled). Unblocks the common `while (…) { i++ }`
+  counter idiom. (Follow-up: `++`/`--` in expression position, and on fields/properties.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

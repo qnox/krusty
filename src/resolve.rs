@@ -3646,7 +3646,7 @@ impl<'a> Checker<'a> {
                         if !is_var {
                             self.diags.error(span, "val cannot be reassigned".to_string());
                         }
-                        if !ty.is_numeric() {
+                        if !ty.is_numeric() && ty != Ty::Char {
                             self.diags.error(span, "krusty: '++'/'--' is only supported on a numeric variable".to_string());
                         }
                     }
