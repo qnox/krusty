@@ -737,17 +737,16 @@ impl<'a> Lower<'a> {
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
-        let desc = self.syms.libraries.resolve_ctor(internal, &arg_tys)?;
-        let param_descs = split_param_descriptors(&desc)?;
-        if param_descs.len() != args.len() {
+        let ctor = crate::libraries::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
+        if ctor.params.len() != args.len() {
             return None;
         }
         let mut a = Vec::new();
-        for (arg, pd) in args.iter().zip(&param_descs) {
-            let pty = ty_to_ir(self.syms.libraries.desc_to_ty(pd));
+        for (arg, pty) in args.iter().zip(&ctor.params) {
+            let pty = ty_to_ir(*pty);
             a.push(self.lower_arg(*arg, &pty)?);
         }
-        Some(self.ir.add_expr(IrExpr::NewExternal { internal: internal.to_string(), ctor_desc: desc, args: a }))
+        Some(self.ir.add_expr(IrExpr::NewExternal { internal: internal.to_string(), ctor_desc: ctor.descriptor, args: a }))
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -2286,9 +2285,9 @@ impl<'a> Lower<'a> {
                         self.class_of(rt).map(|ci| ci.internal.clone())
                             .or_else(|| if let Ty::Obj(i, _) = rt { Some(i.to_string()) } else { None })
                             .and_then(|internal| {
-                                self.syms.libraries.resolve_instance(&internal, &name, &arg_tys).map(|(d, _)| {
-                                    let is_iface = self.syms.libraries.is_interface(&internal);
-                                    (internal, d, is_iface)
+                                crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys).map(|m| {
+                                    let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                                    (internal, m.descriptor, is_iface)
                                 })
                             })
                     } {
@@ -2298,19 +2297,19 @@ impl<'a> Lower<'a> {
                             a.push(self.expr(arg)?);
                         }
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a })
-                    } else if let Some((owner, jvm_name, desc, _)) = {
-                        // A classpath-resolved extension/stdlib function `recv.name(args)` →
-                        // `invokestatic facade.name(recv, args)`. Owner + descriptor come from the
-                        // classpath (`resolve_extension`), so no stdlib name is hardcoded here.
+                    } else if let Some(c) = {
+                        // A library-resolved extension `recv.name(args)` → `invokestatic
+                        // facade.name(recv, args)`. Owner + descriptor come from the library
+                        // (`resolve_callable` with the receiver), so no stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_extension(rt, &name, &arg_tys)
+                        self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys)
                     } {
                         let recv = self.expr(receiver)?;
                         let mut a = vec![recv];
                         for &arg in &args {
                             a.push(self.expr(arg)?);
                         }
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner, name: jvm_name, descriptor: desc }, dispatch_receiver: None, args: a })
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a })
                     } else {
                         return None;
                     }
@@ -2510,31 +2509,6 @@ fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
             None
         }
     }).collect()
-}
-
-/// Split the parameter section of a JVM method descriptor (`(Ljava/lang/String;I)V`) into the
-/// individual field descriptors (`["Ljava/lang/String;", "I"]`).
-fn split_param_descriptors(desc: &str) -> Option<Vec<String>> {
-    let inner = desc.strip_prefix('(')?.split(')').next()?;
-    let b = inner.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let start = i;
-        while b[i] == b'[' {
-            i += 1;
-            if i >= b.len() { return None; }
-        }
-        if b[i] == b'L' {
-            while i < b.len() && b[i] != b';' { i += 1; }
-            i += 1; // include the ';'
-        } else {
-            i += 1; // a single-char primitive
-        }
-        if i > b.len() { return None; }
-        out.push(inner[start..i].to_string());
-    }
-    Some(out)
 }
 
 fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
