@@ -173,7 +173,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         IrExpr::MethodCall { class, index, receiver, args } => {
             let fid = ir.classes[*class as usize].methods[*index as usize];
             let name = &ir.functions[fid as usize].name;
-            let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
+            // An omitted argument (`None`) takes its default — `undefined` lets JS apply the native default.
+            let a: Vec<String> = args.iter().map(|x| x.map(|e| emit_expr(ir, e, inst)).unwrap_or_else(|| "undefined".to_string())).collect();
             format!("{}.{}({})", emit_expr(ir, *receiver, inst), name, a.join(", "))
         }
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {

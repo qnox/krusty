@@ -143,6 +143,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: Some(internal.clone()),
                     param_checks,
                 });
+                // Mark a method with default parameters now (pass 1) so a call lowered before this
+                // class's pass-2 body sees that it has defaults; the real default exprs are lowered in
+                // pass 2 and overwrite this marker. Interface defaults (kotlinc routes those through a
+                // `$DefaultImpls` class) and >31 parameters (kotlinc's multi-`int` mask) aren't modeled —
+                // leaving them unmarked makes an omitted-arg call bail, so the file is skipped, not wrong.
+                if m.params.iter().any(|p| p.default.is_some()) && !c.is_interface && m.params.len() <= 31 {
+                    lo.ir.fn_param_defaults.insert(fid, Vec::new());
+                    lo.ir.fn_param_names.insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
             }
@@ -366,10 +375,24 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // `this` is value 0.
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
+                    let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?.clone();
                     for (p, t) in m.params.iter().zip(&sig.params) {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, *t));
+                    }
+                    // Register parameter defaults (the JVM backend realizes them via the `$default`
+                    // stub). Lowered with `this` = value 0 and the params = values 1..=n — the stub's
+                    // value layout. `None` for a required parameter. Gated identically to the pass-1
+                    // marker (no interface defaults, ≤31 parameters).
+                    if m.params.iter().any(|p| p.default.is_some()) && !c.is_interface && m.params.len() <= 31 {
+                        let mut defaults = Vec::new();
+                        for (p, t) in m.params.iter().zip(&sig.params) {
+                            match p.default {
+                                Some(d) => defaults.push(Some(lo.lower_arg(d, &ty_to_ir(*t))?)),
+                                None => defaults.push(None),
+                            }
+                        }
+                        lo.ir.fn_param_defaults.insert(fid, defaults);
                     }
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
@@ -945,6 +968,8 @@ impl<'a> Lower<'a> {
                         Some(self.ir.add_expr(IrExpr::GetField { receiver: this, class: class_id, index: i as u32 }))
                     }).collect();
                     self.ir.fn_param_defaults.insert(copy_fid, defaults);
+                    // `copy`'s parameters are named after the properties — used to map named args.
+                    self.ir.fn_param_names.insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
                 }
             }
         }
@@ -1247,7 +1272,7 @@ impl<'a> Lower<'a> {
                         let pty = self.ir.functions[mfid as usize].params[0].clone();
                         let r = self.expr(receiver)?;
                         let v = self.lower_arg(value, &pty)?;
-                        return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: r, args: vec![v] }));
+                        return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: r, args: vec![Some(v)] }));
                     }
                 }
                 let (class, idx, field_ty) = {
@@ -1439,7 +1464,7 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a })
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a.into_iter().map(Some).collect() })
                     }
                     None => {
                         let (fclass, idx, _) = self.resolve_field(&internal, &name)?;
@@ -1878,7 +1903,7 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a })
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a.into_iter().map(Some).collect() })
                     } else if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| !self.classes.contains_key(*i)) {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
                         // `StringBuilder()`. The constructor descriptor comes from the classpath.
@@ -1963,27 +1988,27 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a }));
+                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() }));
                             }
                         }
                     }
-                    // A call with named or omitted arguments to a method that has parameter defaults
-                    // (data-class `copy`): build a `DefaultedCall` (the JVM backend realizes it via the
-                    // `$default` stub). Map provided args to positions; absent positions are defaulted.
+                    // A call to a method with parameter defaults, possibly with named/omitted args. Map
+                    // each provided argument to its parameter position; omitted positions stay `None` (a
+                    // call with holes). The backend fills the holes (JVM: `$default` stub + mask).
                     if let Some(internal) = self.class_of(self.recv_ty(receiver)).map(|ci| ci.internal.clone()) {
                         if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name) {
                             if self.ir.fn_param_defaults.contains_key(&fid) {
                                 let params = self.ir.functions[fid as usize].params.clone();
                                 let n = params.len();
-                                let field_names: Vec<String> = self.classes[&internal].fields.iter().take(n).map(|(nm, _)| nm.clone()).collect();
+                                let param_names = self.ir.fn_param_names.get(&fid).cloned().unwrap_or_default();
                                 let names = self.afile.call_arg_names.get(&e.0).cloned();
                                 let mut provided: Vec<Option<u32>> = vec![None; n];
                                 let mut next_pos = 0usize;
-                                let mut ok = field_names.len() == n;
+                                let mut ok = param_names.len() == n;
                                 for (ai, arg) in args.iter().enumerate() {
                                     let nm = names.as_ref().and_then(|v| v.get(ai).cloned().flatten());
                                     let pos = match nm {
-                                        Some(s) => field_names.iter().position(|f| *f == s),
+                                        Some(s) => param_names.iter().position(|f| *f == s),
                                         None => { let p = next_pos; next_pos += 1; Some(p) }
                                     };
                                     match pos {
@@ -1993,13 +2018,7 @@ impl<'a> Lower<'a> {
                                 }
                                 if ok {
                                     let recv = self.expr(receiver)?;
-                                    // All provided (possibly reordered) → a plain call in parameter
-                                    // order; any omitted → the defaulted call.
-                                    if provided.iter().all(|x| x.is_some()) {
-                                        let a: Vec<u32> = provided.into_iter().map(|x| x.unwrap()).collect();
-                                        return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a }));
-                                    }
-                                    return Some(self.ir.add_expr(IrExpr::DefaultedCall { class, method: index, receiver: recv, args: provided }));
+                                    return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: provided }));
                                 }
                             }
                         }
@@ -2019,7 +2038,7 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a })
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() })
                     } else if name == "toString" && args.is_empty() {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;

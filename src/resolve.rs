@@ -654,13 +654,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                                 } else { Ty::Unit }
                             });
                             (m.name.clone(), {
-                                let n = params.len();
                                 let lambda_param_types: Vec<Vec<Ty>> = m.params.iter().map(|p| {
                                     if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: n, param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
                             })
                         })
                         .collect();
@@ -714,13 +713,12 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                                 } else { Ty::Unit }
                             });
                             (m.name.clone(), {
-                                let n = params.len();
                                 let lambda_param_types: Vec<Vec<Ty>> = m.params.iter().map(|p| {
                                     if !p.ty.fun_params.is_empty() || p.ty.name == "<fun>" {
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: n, param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
                             })
                         })
                         .collect();
