@@ -169,6 +169,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a rem b` to a user `operator`/`infix` extension but the *dot* form `a.rem(b)` to the builtin;
   krusty can't tell them apart in the AST, so it skips when such a user extension exists
   (`tests/cases`/box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
+- Safe call `a?.b` / `a?.m(args)`: evaluates the receiver once into a temp, then yields the member
+  access (property `GetField` / method `MethodCall`) when the temp is non-`null`, else `null` — i.e.
+  `{ val t = a; if (t != null) t.b else null }`. Lowered in the front-end so every backend shares it;
+  composes with Elvis (`a?.m() ?: d`). The merge of the member arm (a reference) with the `null` arm
+  types the verification stack as the member's reference type (`null` is assignable to any reference),
+  not `top` — emitting a `top` there is a `VerifyError: Bad type on operand stack`. Only user-defined
+  member targets are resolved; safe calls on stdlib receivers (`s?.substring(1)`) need the external-call
+  path and are skipped (`tests/safe_call_e2e.rs`).
 
 ## 8. Success criteria for the PoC
 

@@ -1092,7 +1092,19 @@ impl<'a> Emitter<'a> {
         if !branches.iter().any(|(c, _)| c.is_none()) {
             return Ty::Unit;
         }
-        branches.last().map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit)
+        let last = branches.last().map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit);
+        // A `null`/`Nothing` last branch (e.g. the no-receiver arm of a safe-call `a?.b`) carries no
+        // concrete type and would verify-type the merge stack as `top`. Use a concrete branch type so
+        // the merge frame is a reference — `null` is assignable to any reference.
+        if matches!(last, Ty::Null | Ty::Nothing | Ty::Error) {
+            for (_, b) in branches {
+                let t = self.value_ty(*b);
+                if !matches!(t, Ty::Null | Ty::Nothing | Ty::Error) {
+                    return t;
+                }
+            }
+        }
+        last
     }
 
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
