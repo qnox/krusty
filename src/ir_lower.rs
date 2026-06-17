@@ -123,6 +123,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
+                field_final: c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var)
+                    .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| !p.is_var))
+                    .collect(),
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -205,6 +208,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     superclass: "java/lang/Object".to_string(), super_args: vec![],
                     enum_entries: vec![], bridges: vec![], interfaces: vec![],
                     is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
+                    field_final: vec![],
                 });
                 let csig = syms.classes.get(&c.name)?;
                 let mut cmethods = HashMap::new();
