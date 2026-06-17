@@ -1,5 +1,9 @@
 # krusty architecture — multiplatform backends
 
+<p align="center">
+  <img src="assets/krusty-mascot.webp" alt="krusty mascot" width="200">
+</p>
+
 krusty is designed as a Kotlin compiler with **pluggable backends** (JVM today; WASM and JS as
 targets). The front end is backend-agnostic; everything target-specific lives behind a backend
 boundary.
