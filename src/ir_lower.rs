@@ -1983,6 +1983,16 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // `f(args)` where `f` is a field/property of the enclosing class (not a local value or
+                    // a top-level function) — invoking a function value through a field isn't modeled;
+                    // bail rather than miscompile (it would emit a bogus constructor call).
+                    if self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname) {
+                        if let Some(cur) = self.cur_class.clone() {
+                            if self.classes.get(&cur).map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname)) {
+                                return None;
+                            }
+                        }
+                    }
                     // `f(args)` where `f` is a function-typed local/parameter → invoke through the
                     // `kotlin/jvm/functions/FunctionN.invoke` interface method (args boxed to Object,
                     // the Object result cast/unboxed to the function's return type).

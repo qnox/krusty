@@ -5,6 +5,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -40,7 +42,10 @@ fn constructs_and_calls_java_instance_methods() {
 
     let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
     fs::write(kr.join("M.java"), main).unwrap();
-    let kcp = format!("{}:{}", kr.to_str().unwrap(), cp.to_str().unwrap());
+    // The compiled output may reference `kotlin/jvm/internal/Intrinsics` (parameter null-checks, like
+    // kotlinc) — put the stdlib on the run classpath.
+    let stdlib = common::stdlib_jar().map(|p| format!(":{}", p.display())).unwrap_or_default();
+    let kcp = format!("{}:{}{}", kr.to_str().unwrap(), cp.to_str().unwrap(), stdlib);
     assert!(Command::new(&javac).args(["-cp", &kcp, "-d", kr.to_str().unwrap()]).arg(kr.join("M.java")).output().unwrap().status.success());
     let run = Command::new(&java).args(["-Xverify:all", "-cp", &kcp, "M"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK", "stderr={}", String::from_utf8_lossy(&run.stderr));

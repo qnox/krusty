@@ -2098,6 +2098,20 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   String/CharSequence supertype matching, JDK instance calls, and the general iterator-protocol for-loop
   that replaces the parser-hardcoded range path.**
 
+- ✅ **Phase 192 — read JDK class bytes from the jimage** (317 → 321 box()=OK, 0 FAIL). The big
+  unblocker: `Classpath::find` returned `None` for the JDK jimage, so `String`/`StringBuilder`/`List`
+  (and `String`'s `CharSequence` interface) were unreadable — blocking supertype matching and JDK
+  instance calls. The jimage (`lib/modules`) stores classes **uncompressed**, so a one-time
+  name→`(offset,size)` index + a seek-read extracts them (`build_jimage_index`, mirroring the existing
+  `scan_types_jimage` navigation). `"hi".repeat(3)` (resolves `String`→`CharSequence`→`StringsKt.repeat`)
+  and `StringBuilder().append(…)` instance calls now compile — **by resolution from the classpath, no
+  hardcoded names**. The index is cached process-globally (`global_jimage_cache`) so the 146 MB parse
+  happens once (gate 10.5s→14.5s, still <60s). Enabling JDK resolution surfaced a pre-existing miscompile
+  (`kt1721`: invoking a function-typed *field* `f()` emitted a bogus `new Object()`) — gated (bail) until
+  function-value fields are modeled. `tests/java_instance_e2e.rs` now puts the stdlib on its run-cp
+  (emitted code references `Intrinsics`, like kotlinc). This is the foundation for the iterator-protocol
+  for-loop (`IntRange.iterator()`/`hasNext()`/`next()` now readable).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
