@@ -84,3 +84,23 @@ fn reads_method_body_lazily() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn classpath_method_code_caches() {
+    if !have("javac") {
+        eprintln!("skipping: javac unavailable");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("krusty_cpc_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("C.java"), "public class C { public static int id(int a) { return a; } }").unwrap();
+    assert!(Command::new("javac").args(["C.java"]).current_dir(&dir).output().unwrap().status.success());
+
+    let cp = krusty::jvm::classpath::Classpath::new(vec![dir.clone()]);
+    let a = cp.method_code("C", "id", "(I)I").expect("body");
+    let b = cp.method_code("C", "id", "(I)I").expect("cached body");
+    assert_eq!(a.code, b.code, "cached read returns the same body");
+    assert!(cp.method_code("C", "nope", "()V").is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
