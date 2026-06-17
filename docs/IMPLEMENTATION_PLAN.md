@@ -1600,6 +1600,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   (the corpus tests using `[...]` also need KClass/enum/annotation defaults + `contentEquals`), but a
   correct general feature that removes a parser blocker. Still **471 box()=OK, 0 FAIL**.
 
+- ✅ **Top-level function references `::foo`** (chosen via a leverage map: callable refs blocked ~21
+  non-annotation tests). `::foo` resolves to `Fun(params, ret)` of the function; emit synthesizes a
+  captureless `FunctionN` whose `invoke` unboxes its `Object` args to the parameter types, calls
+  `facade.foo(...)`, and boxes the result — reusing the `emit_callable_ref` scaffold. Production
+  drop-in: **471 → 478 box()=OK, 0 FAIL** (+7). (Bound/unbound *method* refs `obj::m`/`Type::m` for
+  arbitrary methods still skip — a follow-up.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

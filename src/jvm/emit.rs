@@ -3551,6 +3551,9 @@ impl<'a> MethodEmitter<'a> {
             Expr::CallableRef { receiver, name } if matches!(name.as_str(), "equals" | "hashCode" | "toString") => {
                 self.emit_callable_ref(receiver, &name, code, cw);
             }
+            Expr::CallableRef { receiver: None, name } if self.syms.funs.contains_key(&name) => {
+                self.emit_topfun_ref(&name, code, cw);
+            }
             Expr::CallableRef { .. } => {
                 // Other callable references are rejected by the resolver; codegen never reaches here.
                 code.aconst_null();
@@ -4347,6 +4350,71 @@ impl<'a> MethodEmitter<'a> {
         let cd = if bound { "(Ljava/lang/Object;)V" } else { "()V" };
         let init = cw.methodref(&anon_name, "<init>", cd);
         code.invokespecial(init, if bound { 1 } else { 0 }, 0);
+    }
+
+    /// A top-level function reference `::foo` → a captureless `FunctionN` whose `invoke` unboxes its
+    /// `Object` args to the function's parameter types, calls `facade.foo(...)`, and boxes the result.
+    fn emit_topfun_ref(&mut self, fname: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let sig = self.syms.funs.get(fname).cloned().unwrap();
+        let param_tys = sig.params.clone();
+        let ret = sig.ret;
+        let arity = param_tys.len() as u8;
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        let iface = Ty::fun_interface(arity);
+        let anon_name = format!("{}$fref${n}", self.class);
+        let facade = self.file_facade.clone();
+
+        let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
+        acw.add_interface(&iface);
+        {
+            let mut ic = CodeBuilder::new(1);
+            ic.aload(0);
+            let oi = acw.methodref("java/lang/Object", "<init>", "()V");
+            ic.invokespecial(oi, 0, 0);
+            ic.ret_void();
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "<init>", "()V", &ic);
+        }
+        {
+            let invoke_desc = format!("({})Ljava/lang/Object;", "Ljava/lang/Object;".repeat(arity as usize));
+            let mut ic = CodeBuilder::new(1 + arity as u16 + 4);
+            for (i, pty) in param_tys.iter().enumerate() {
+                ic.aload(1 + i as u16);
+                // Coerce the erased `Object` arg to the parameter type.
+                if pty.is_primitive() {
+                    let (wrapper, _, unbox, unbox_desc) = box_wrapper(*pty).unwrap();
+                    let ci = acw.class_ref(wrapper);
+                    ic.checkcast(ci);
+                    let m = acw.methodref(wrapper, unbox, unbox_desc);
+                    ic.invokevirtual(m, 0, slot_words(*pty) as i32);
+                } else if *pty != Ty::obj("java/lang/Object") {
+                    let ci = acw.class_ref(ref_internal(*pty));
+                    ic.checkcast(ci);
+                }
+            }
+            let pdesc: String = param_tys.iter().map(|t| t.descriptor()).collect();
+            let m = acw.methodref(&facade, fname, &format!("({pdesc}){}", ret.descriptor()));
+            let argw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+            ic.invokestatic(m, argw, slot_words(ret) as i32);
+            emit_box(ret, &mut ic, &mut acw);
+            if ret == Ty::Unit {
+                ic.aconst_null();
+            }
+            ic.areturn();
+            ic.ensure_locals(1 + arity as u16);
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "invoke", &invoke_desc, &ic);
+        }
+        ensure_function_stub(arity);
+        push_lambda_class(anon_name.clone(), acw.finish());
+
+        let ci = cw.class_ref(&anon_name);
+        code.set_needs_stackmap();
+        code.new_obj(ci);
+        code.dup();
+        let init = cw.methodref(&anon_name, "<init>", "()V");
+        code.invokespecial(init, 0, 0);
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
