@@ -113,10 +113,10 @@ pub enum IrExpr {
     MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<ExprId> },
     /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
     EnumEntry { class: ClassId, index: u32 },
-    /// The singleton instance of an `object` — `getstatic <class>.INSTANCE:L<class>;`.
-    ObjectInstance { class: ClassId },
-    /// The companion singleton of `outer` — `getstatic <outer>.Companion:L<companion>;`.
-    CompanionInstance { outer: ClassId, companion: ClassId },
+    /// Read a static field holding a singleton instance (Kotlin IR's `IrGetObjectValue`):
+    /// `getstatic <owner>.<field>:L<ty>;`. An `object`'s `INSTANCE` (`owner == ty`), or a
+    /// `companion`'s `Companion` field on the outer class (`owner` = outer, `ty` = companion).
+    StaticInstance { owner: ClassId, ty: ClassId, field: &'static str },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues { class: ClassId },
     EnumValueOf { class: ClassId, arg: ExprId },

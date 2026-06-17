@@ -1441,7 +1441,7 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
                 } else if let Some(class) = self.classes.get(&class_internal(self.afile, &n)).filter(|ci| self.ir.classes[ci.id as usize].is_object).map(|ci| ci.id) {
                     // A bare `object` name → its singleton instance.
-                    self.ir.add_expr(IrExpr::ObjectInstance { class })
+                    self.ir.add_expr(IrExpr::StaticInstance { owner: class, ty: class, field: "INSTANCE" })
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
@@ -1830,7 +1830,7 @@ impl<'a> Lower<'a> {
                                 }
                                 let outer_id = self.classes[&internal].id;
                                 let comp_id = self.classes[&comp_fq].id;
-                                let recv = self.ir.add_expr(IrExpr::CompanionInstance { outer: outer_id, companion: comp_id });
+                                let recv = self.ir.add_expr(IrExpr::StaticInstance { owner: outer_id, ty: comp_id, field: "Companion" });
                                 let mut a = Vec::new();
                                 for (arg, pt) in args.iter().zip(&params) {
                                     a.push(self.lower_arg(*arg, pt)?);
