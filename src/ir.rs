@@ -170,8 +170,13 @@ pub struct IrClass {
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,
-    /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum).
+    /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum, or a
+    /// user base class for `class B : A(args)`).
     pub superclass: String,
+    /// Arguments to the base-class constructor (`: A(args)`) — lowered IR value ids, evaluated with
+    /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty
+    /// unless `superclass` is a user base class.
+    pub super_args: Vec<ExprId>,
     /// Enum entries in declaration order: `(entry_name, constructor_arg_value_ids)`. Non-empty only
     /// for an `enum class`; the backend emits a static field per entry, a `$VALUES` array, a
     /// `<clinit>` that constructs them, and `values()`/`valueOf(String)`.

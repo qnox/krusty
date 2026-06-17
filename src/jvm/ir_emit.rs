@@ -69,7 +69,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade);
     }
-    let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
+    let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
+    // A class that is extended must not be `final` (else the subclass fails verification).
+    if ir.classes.iter().any(|o| o.superclass == c.fq_name) {
+        cw.set_access(0x0001 | 0x0020); // PUBLIC | SUPER
+    }
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
     for (name, ty) in &c.fields {
@@ -83,29 +87,49 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let param_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + params_words);
-    ctor.aload(0);
-    let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
-    ctor.invokespecial(obj_init, 0, 0);
-    let mut slot = 1u16;
-    for ((name, _), t) in c.fields[..n_params].iter().zip(&param_tys) {
-        ctor.aload(0);
-        load(*t, slot, &mut ctor);
-        let fref = cw.fieldref(&c.fq_name, name, &t.descriptor());
-        ctor.putfield(fref, slot_words(*t) as i32);
-        slot += slot_words(*t);
-    }
-    let mut max_slot = slot;
-    if let Some(init_body) = c.init_body {
-        // Emit the init block with `this` = value 0 and the ctor params as values 1..=N, reusing the
-        // method emitter's value→slot machinery (the params already occupy slots 1..`slot`).
-        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: slot, ret: Ty::Unit };
+    // The superclass constructor's parameter types (empty for `java/lang/Object`).
+    let super_param_tys: Vec<Ty> = if c.superclass == "java/lang/Object" {
+        Vec::new()
+    } else {
+        ir.classes.iter().find(|sc| sc.fq_name == c.superclass)
+            .map(|sc| sc.fields[..sc.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect())
+            .unwrap_or_default()
+    };
+    let max_slot;
+    {
+        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
             e.slots.insert(vi as u32 + 1, (s, *t));
             s += slot_words(*t);
         }
-        e.emit(init_body, &mut ctor);
+        // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
+        let super_args = c.super_args.clone();
+        if super_args.iter().any(|&a| e.records_frame(a)) {
+            let temps = e.spill_to_temps(&super_args, &mut ctor);
+            ctor.aload(0);
+            for &(slot, t, _) in &temps { load(t, slot, &mut ctor); }
+            for &(_, _, key) in &temps { e.slots.remove(&key); }
+        } else {
+            ctor.aload(0);
+            for &a in &super_args { e.emit_value(a, &mut ctor); }
+        }
+        let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+        let super_init = e.cw.methodref(&c.superclass, "<init>", &method_descriptor(&super_param_tys, Ty::Unit));
+        ctor.invokespecial(super_init, aw, 0);
+        // Store this class's own primary-constructor parameter fields.
+        let mut slot = 1u16;
+        for ((name, _), t) in c.fields[..n_params].iter().zip(&param_tys) {
+            ctor.aload(0);
+            load(*t, slot, &mut ctor);
+            let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
+            ctor.putfield(fref, slot_words(*t) as i32);
+            slot += slot_words(*t);
+        }
+        if let Some(init_body) = c.init_body {
+            e.emit(init_body, &mut ctor);
+        }
         max_slot = e.next_slot;
     }
     ctor.ret_void();

@@ -21,6 +21,8 @@ struct ClassInfo {
     fields: Vec<(String, Ty)>,
     /// method name → (index into the class's `methods`, FunId, return Ty).
     methods: HashMap<String, (u32, u32, Ty)>,
+    /// Base class internal name (`class B : A(…)`), for inherited field/method resolution.
+    super_internal: Option<String>,
 }
 
 /// Lower a checked file to IR, or `None` if it uses anything outside the core subset.
@@ -64,6 +66,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .collect();
             let fields: Vec<(String, Ty)> = ctor_fields.into_iter().chain(body_fields).collect();
             let class_ty = IrType::Class { fq_name: internal.clone(), type_args: vec![], nullable: false };
+            // Resolve a base class (`: A(args)`): only a non-interface class declared in this file is
+            // supported; extending a classpath/Java type isn't modeled yet → bail.
+            let super_internal: Option<String> = match &c.base_class {
+                Some(base) => {
+                    let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface));
+                    if !is_file_class { return None; }
+                    Some(class_internal(file, base))
+                }
+                None => None,
+            };
+            let superclass = if c.is_enum {
+                "java/lang/Enum".to_string()
+            } else {
+                super_internal.clone().unwrap_or_else(|| "java/lang/Object".to_string())
+            };
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 supertypes: vec![],
@@ -72,7 +89,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 init_body: None,
                 methods: vec![],
                 is_interface: false,
-                superclass: if c.is_enum { "java/lang/Enum".to_string() } else { "java/lang/Object".to_string() },
+                superclass,
+                super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
             });
@@ -95,7 +113,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
-            lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods });
+            lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods, super_internal });
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
             // resolve and the generic method emitter handles them.
@@ -142,6 +160,33 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             Decl::Class(c) => {
                 let internal = class_internal(file, &c.name);
+                // A method that overrides a base method with a *different erased signature* (a
+                // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
+                // yet — bail rather than miscompile (the erased call wouldn't reach the override).
+                if let Some(super_int) = lo.classes[&internal].super_internal.clone() {
+                    for m in &c.methods {
+                        if let Some((_, _, base_fid, _)) = lo.resolve_method(&super_int, &m.name) {
+                            let own_fid = lo.classes[&internal].methods[&m.name].1;
+                            let bp = lo.ir.functions[base_fid as usize].params.clone();
+                            let br = lo.ir.functions[base_fid as usize].ret.clone();
+                            let op = &lo.ir.functions[own_fid as usize].params;
+                            let or = &lo.ir.functions[own_fid as usize].ret;
+                            if bp != *op || br != *or {
+                                return None;
+                            }
+                        }
+                    }
+                    // A property redeclared in the subclass (`override val field`) needs getter/setter
+                    // virtual dispatch — krusty reads the field directly, which would bypass the
+                    // override. Bail when a subclass field name shadows a base field.
+                    let own_fields = c.props.iter().filter(|p| p.is_property).map(|p| &p.name)
+                        .chain(c.body_props.iter().map(|p| &p.name));
+                    for fname in own_fields {
+                        if lo.resolve_field(&super_int, fname).is_some() {
+                            return None;
+                        }
+                    }
+                }
                 for m in &c.methods {
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
                     lo.scope.clear();
@@ -157,6 +202,32 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
+                }
+                // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
+                // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
+                if !c.base_args.is_empty() {
+                    let class_id = lo.classes[&internal].id;
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    for p in c.props.iter().filter(|p| p.is_property) {
+                        let v = lo.fresh_value();
+                        lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
+                    }
+                    let super_field_tys: Vec<IrType> = lo.classes[&internal].super_internal.clone()
+                        .and_then(|s| lo.classes.get(&s).map(|sup| sup.id))
+                        .map(|sid| {
+                            let n = lo.ir.classes[sid as usize].ctor_param_count as usize;
+                            lo.ir.classes[sid as usize].fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                        })
+                        .unwrap_or_default();
+                    let mut sargs = Vec::new();
+                    for (a, ft) in c.base_args.iter().zip(&super_field_tys) {
+                        sargs.push(lo.lower_arg(*a, ft)?);
+                    }
+                    lo.ir.classes[class_id as usize].super_args = sargs;
                 }
                 // Constructor body: run body-property initializers and `init { … }` blocks in source
                 // order, with `this` = value 0 and the constructor params as values 1..=N.
@@ -250,8 +321,10 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // A `data class` is structurally a simple class; its equals/hashCode/toString/componentN are
     // synthesized as ordinary IR methods (see `synth_data_members`). `value`/inline classes need
     // unboxing and are excluded.
-    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
-        && c.base_class.is_none() && c.supertypes.is_empty()
+    // A base class (`: A(args)`) is allowed when `A` is itself a simple/open class in this file
+    // (checked at registration); interface supertypes are not yet supported.
+    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract
+        && c.supertypes.is_empty()
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
@@ -448,6 +521,34 @@ impl<'a> Lower<'a> {
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
+    }
+
+    /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
+    /// field index within that class, and its type.
+    fn resolve_field(&self, internal: &str, name: &str) -> Option<(ClassId, u32, Ty)> {
+        let mut cur = Some(internal.to_string());
+        while let Some(ci_name) = cur {
+            let ci = self.classes.get(&ci_name)?;
+            if let Some(idx) = ci.fields.iter().position(|(fn_, _)| fn_ == name) {
+                return Some((ci.id, idx as u32, ci.fields[idx].1));
+            }
+            cur = ci.super_internal.clone();
+        }
+        None
+    }
+
+    /// Resolve a method by name, walking the superclass chain. Returns the *owning* class id, the
+    /// method index within that class, its FunId, and its return type.
+    fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
+        let mut cur = Some(internal.to_string());
+        while let Some(ci_name) = cur {
+            let ci = self.classes.get(&ci_name)?;
+            if let Some(&(idx, fid, ret)) = ci.methods.get(name) {
+                return Some((ci.id, idx, fid, ret));
+            }
+            cur = ci.super_internal.clone();
+        }
+        None
     }
 
     /// Lower a call argument, inserting an explicit `ImplicitCoercion` when a primitive must box
@@ -762,17 +863,19 @@ impl<'a> Lower<'a> {
                 if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
-                } else if let Some(ci) = self.class_of(rt) {
-                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
-                    let class = ci.id;
-                    let internal = ci.internal.clone();
+                } else if let Some(rci) = self.class_of(rt) {
+                    // Resolve the field through the superclass chain — it may be declared on a base
+                    // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
+                    let recv_internal = rci.internal.clone();
+                    let (class, idx, _) = self.resolve_field(&recv_internal, &name)?;
+                    let owner_internal = self.ir.classes[class as usize].fq_name.clone();
                     let recv = self.expr(receiver)?;
                     // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
                     // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
                     let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
-                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&internal)));
+                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&owner_internal)));
                     let recv = if needs_cast {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&internal)) })
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&owner_internal)) })
                     } else { recv };
                     self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
                 } else if rt == Ty::String && name == "length" {
@@ -1013,8 +1116,9 @@ impl<'a> Lower<'a> {
                         }
                     }
                     let rt = self.info.ty(receiver);
-                    if let Some((index, fid, _)) = self.class_of(rt).and_then(|ci| ci.methods.get(&name).copied()) {
-                        let class = self.class_of(rt)?.id;
+                    if let Some((class, index, fid, _)) = self.class_of(rt).map(|ci| ci.internal.clone()).and_then(|i| self.resolve_method(&i, &name)) {
+                        // The method may be inherited — `class` is the *owning* class. Virtual dispatch
+                        // (`invokevirtual`) still reaches an override on the receiver's actual class.
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Default/omitted arguments aren't modeled (would underflow the descriptor).
                         if args.len() != params.len() {
