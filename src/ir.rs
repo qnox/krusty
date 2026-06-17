@@ -113,6 +113,8 @@ pub enum IrExpr {
     MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<ExprId> },
     /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
     EnumEntry { class: ClassId, index: u32 },
+    /// The singleton instance of an `object` — `getstatic <class>.INSTANCE:L<class>;`.
+    ObjectInstance { class: ClassId },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues { class: ClassId },
     EnumValueOf { class: ClassId, arg: ExprId },
@@ -188,6 +190,9 @@ pub struct IrClass {
     /// Implemented interface internal names (`class C : I, J`). The class file lists them as
     /// `implements`; an interface declaration lists its super-interfaces here.
     pub interfaces: Vec<String>,
+    /// `object Foo` — a singleton: a `public static final Foo INSTANCE` field, a private no-arg
+    /// constructor, and a `<clinit>` that constructs the instance.
+    pub is_object: bool,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

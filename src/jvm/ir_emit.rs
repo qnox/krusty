@@ -145,7 +145,26 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     ctor.ret_void();
     ctor.ensure_locals(max_slot);
     ctor.link();
-    cw.add_method(0x0001, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
+    // An `object`'s constructor is private; a normal class's is public.
+    let ctor_access = if c.is_object { 0x0002 } else { 0x0001 };
+    cw.add_method(ctor_access, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
+    // A singleton `object`: a `public static final INSTANCE` built in `<clinit>`.
+    if c.is_object {
+        let self_desc = format!("L{};", c.fq_name);
+        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+        let mut clinit = CodeBuilder::new(0);
+        let ci = cw.class_ref(&c.fq_name);
+        clinit.new_obj(ci);
+        clinit.dup();
+        let init = cw.methodref(&c.fq_name, "<init>", "()V");
+        clinit.invokespecial(init, 0, 0);
+        let fref = cw.fieldref(&c.fq_name, "INSTANCE", &self_desc);
+        clinit.putstatic(fref, 1);
+        clinit.ret_void();
+        clinit.ensure_locals(0);
+        clinit.link();
+        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    }
     // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
@@ -665,6 +684,11 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref(&c.fq_name.clone(), &entry, &desc);
                 code.getstatic(f, 1);
             }
+            IrExpr::ObjectInstance { class } => {
+                let fq = self.ir.classes[*class as usize].fq_name.clone();
+                let f = self.cw.fieldref(&fq, "INSTANCE", &format!("L{fq};"));
+                code.getstatic(f, 1);
+            }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
@@ -1153,7 +1177,7 @@ impl<'a> Emitter<'a> {
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
-            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
+            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } | IrExpr::ObjectInstance { class } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {

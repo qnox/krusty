@@ -46,6 +46,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Class(c) if is_simple_class(c) => {}
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
+            Decl::Class(c) if c.is_object && is_simple_object(c) => {}
             Decl::Property(p) if is_plain_body_prop(p) => {}
             _ => return None,
         }
@@ -103,6 +104,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
                 bridges: Vec::new(),
                 interfaces: iface_internals,
+                is_object: c.is_object,
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -401,6 +403,20 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
 }
 
+/// An `object Foo` the IR can emit as a singleton: no primary-constructor params, plain body
+/// properties, concrete (bodied, non-extension) methods, no inheritance/interfaces/companion.
+fn is_simple_object(c: &ast::ClassDecl) -> bool {
+    c.is_object
+        && c.base_class.is_none() && c.supertypes.is_empty()
+        && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
+        && c.props.is_empty()
+        && c.body_props.iter().all(is_plain_body_prop)
+        && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+        // An `init { … }` block with side effects must not run when a `const val` is read (a const is
+        // inlined, not fetched through INSTANCE) — krusty doesn't model const-inlining, so bail.
+        && c.init_order.iter().all(|s| matches!(s, ast::ClassInit::PropInit(_)))
+}
+
 /// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
 /// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
@@ -591,6 +607,19 @@ impl<'a> Lower<'a> {
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
+    }
+
+    /// The receiver's class type for member access. The checker types a bare `object` name as
+    /// `Error` (it's only a qualifier), so map an object-name receiver to its object type; otherwise
+    /// use the checker's inferred type.
+    fn recv_ty(&self, receiver: AstExprId) -> Ty {
+        if let Expr::Name(rn) = self.afile.expr(receiver) {
+            let internal = class_internal(self.afile, rn);
+            if self.classes.get(&internal).map_or(false, |ci| self.ir.classes[ci.id as usize].is_object) {
+                return Ty::obj(&internal);
+            }
+        }
+        self.info.ty(receiver)
     }
 
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
@@ -909,6 +938,9 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::GetValue(v))
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
+                } else if let Some(class) = self.classes.get(&class_internal(self.afile, &n)).filter(|ci| self.ir.classes[ci.id as usize].is_object).map(|ci| ci.id) {
+                    // A bare `object` name → its singleton instance.
+                    self.ir.add_expr(IrExpr::ObjectInstance { class })
                 } else {
                     // Unqualified field of the enclosing class (`this.<field>`).
                     let (this_v, _) = self.lookup("this")?;
@@ -938,7 +970,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                let rt = self.info.ty(receiver);
+                let rt = self.recv_ty(receiver);
                 // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()`/`Enum.name()`.
                 if matches!(name.as_str(), "ordinal" | "name") {
                     if let Some(ci) = self.class_of(rt) {
@@ -1216,7 +1248,7 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    let rt = self.info.ty(receiver);
+                    let rt = self.recv_ty(receiver);
                     if let Some((class, index, fid, _)) = self.class_of(rt).map(|ci| ci.internal.clone()).and_then(|i| self.resolve_method(&i, &name)) {
                         // The method may be inherited — `class` is the *owning* class. Virtual dispatch
                         // (`invokevirtual`) still reaches an override on the receiver's actual class.
