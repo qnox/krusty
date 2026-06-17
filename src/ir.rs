@@ -125,6 +125,9 @@ pub enum IrExpr {
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     InvokeFunction { func: ExprId, args: Vec<ExprId>, ret: IrType },
+    /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
+    /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
+    NotNullAssert { operand: ExprId },
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.

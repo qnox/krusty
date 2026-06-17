@@ -769,6 +769,12 @@ impl<'a> Emitter<'a> {
                 let indy = self.cw.invoke_dynamic(bsm, "invoke", &format!("()L{iface};"));
                 code.invokedynamic(indy, 0, 1);
             }
+            IrExpr::NotNullAssert { operand } => {
+                self.emit_value(*operand, code);
+                code.dup();
+                let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNull", "(Ljava/lang/Object;)V");
+                code.invokestatic(m, 1, 0);
+            }
             IrExpr::InvokeFunction { func, args, ret } => {
                 let n = args.len();
                 self.emit_value(*func, code);
@@ -944,6 +950,7 @@ impl<'a> Emitter<'a> {
             IrExpr::SetField { receiver, value, .. } => self.records_frame(*receiver) || self.records_frame(*value),
             IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => self.records_frame(*value),
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => self.records_frame(*arg),
+            IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
             IrExpr::Block { stmts, value } =>
@@ -1273,6 +1280,7 @@ impl<'a> Emitter<'a> {
             },
             IrExpr::Lambda { arity, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")),
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
+            IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             _ => Ty::Error,
         }
     }

@@ -196,6 +196,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend** maps it to `kotlin/jvm/functions/FunctionN` and enforces the JVM-only fixed-arity limit
   (`Function0..22`) — higher arities, and bound/object/constructor references, are skipped
   (`tests/callable_ref_e2e.rs`).
+- Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
+  reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
+  stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
+  primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
 
 ## 8. Success criteria for the PoC
 
