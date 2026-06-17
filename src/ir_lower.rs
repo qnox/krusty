@@ -737,19 +737,7 @@ impl<'a> Lower<'a> {
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
-        let desc = self.syms.libraries.resolve_ctor(internal, &arg_tys).or_else(|| {
-            // Every JDK `Throwable` has a no-arg and a single-`String` constructor; accept those two
-            // shapes even when the classpath reader can't see the jimage constructor descriptors.
-            if crate::jvm::jvm_class_map::is_throwable_internal(internal) {
-                match arg_tys.as_slice() {
-                    [] => Some("()V".to_string()),
-                    [Ty::String] => Some("(Ljava/lang/String;)V".to_string()),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })?;
+        let desc = self.syms.libraries.resolve_ctor(internal, &arg_tys)?;
         let param_descs = split_param_descriptors(&desc)?;
         if param_descs.len() != args.len() {
             return None;
