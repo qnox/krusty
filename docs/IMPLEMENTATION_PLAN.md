@@ -2140,6 +2140,23 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   behaviour-neutral (325/0-FAIL); the arguments are now *present* on declared-typed values. Next:
   consume them — substitute a class's type parameters at member access (`Box<Int>().x : Int`), with the
   emit side inserting the generic-read checkcast/unbox kotlinc emits.
+- **Phase 197** consumes the arguments: a property declared as a bare type parameter is substituted at
+  member access (`ClassSig.generic_props`, `check_member`), and `coerce_generic_read` inserts the
+  checkcast/unbox kotlinc emits on the erased read. e2e covers primitive/reference/multi-param cases.
+- **Phases 198–202 — front-end/back-end decouple.** The compiler core must speak Kotlin types and
+  depend on no JVM backend (multiplatform: JVM bytecode now, Kotlin/JS via klib later).
+  - 198: the erased top type is `kotlin/Any` in the core, mapped to `java/lang/Object` only at JVM
+    emit chokepoints (`jvm_class_map::to_jvm_internal`/`to_kotlin_internal`). `Any`/`String` are
+    distinct Kotlin builtins, not typealiases for the Java types.
+  - 199: the String/StringBuilder resolvers drop their (unused) JVM descriptors and return only `Ty`.
+  - 200: a primitive array element boxes via the backend wrapper map, not an inline literal.
+  - 201: a **`LibrarySet`** trait (`src/libraries.rs`) is the common denominator a front end needs
+    from a target's compiled libraries — one half of a *platform* (the emitter is the other). The
+    JVM impl (`jvm::jvm_libraries::JvmLibraries`) owns all classpath reads / descriptor parsing /
+    name normalization. `SymbolTable` holds a `Box<dyn LibrarySet>`; resolve/ir_lower resolve through it.
+  - 202: resolve.rs and ir_lower.rs hold **zero `crate::jvm` references**. Remaining java/lang in the
+    core: `StringBuilder`, `Class`, the String supertype set; plus the `Ty::Array` boxing-model fix
+    (keep `Array<Int>` element `Int`, box in the emitter) so the resolver stops computing wrappers.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
