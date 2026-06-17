@@ -95,7 +95,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
-            lo.classes.insert(internal.clone(), ClassInfo { id, internal, fields, methods });
+            lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods });
+            // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
+            // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
+            // resolve and the generic method emitter handles them.
+            if c.is_data {
+                lo.synth_data_members(&internal, id, ctor_param_count as usize);
+            }
         }
     }
     // Pass 1b: register top-level functions.
@@ -246,7 +252,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 /// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
 /// block-bodied) without an extension receiver.
 fn is_simple_class(c: &ast::ClassDecl) -> bool {
-    !c.is_data && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
+    // A `data class` is structurally a simple class; its equals/hashCode/toString/componentN are
+    // synthesized as ordinary IR methods (see `synth_data_members`). `value`/inline classes need
+    // unboxing and are excluded.
+    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface && !c.is_abstract && !c.is_open
         && c.base_class.is_none() && c.supertypes.is_empty()
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.iter().all(|p| p.is_property)
@@ -294,6 +303,148 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
+    /// it resolves like any other method and the generic emitter handles it — no backend special-case.
+    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32) {
+        if self.classes.get(internal).map_or(false, |ci| ci.methods.contains_key(name)) {
+            return; // a user-defined override exists — don't synthesize over it
+        }
+        let fid = self.ir.add_fun(IrFunction {
+            name: name.to_string(), params, ret: ty_to_ir(ret), body: Some(body),
+            is_static: false, dispatch_receiver: Some(internal.to_string()),
+        });
+        let idx = self.ir.classes[class_id as usize].methods.len() as u32;
+        self.ir.classes[class_id as usize].methods.push(fid);
+        if let Some(ci) = self.classes.get_mut(internal) {
+            ci.methods.insert(name.to_string(), (idx, fid, ret));
+        }
+    }
+
+    fn ir_const_str(&mut self, s: String) -> u32 { self.ir.add_expr(IrExpr::Const(IrConst::String(s))) }
+    fn str_plus(&mut self, acc: u32, arg: u32) -> u32 {
+        self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![arg] })
+    }
+    fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
+        let this = self.ir.add_expr(IrExpr::GetValue(0));
+        self.ir.add_expr(IrExpr::GetField { receiver: this, class: class_id, index: i })
+    }
+    fn static_call(&mut self, fq: &str, args: Vec<u32>) -> u32 {
+        self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: None, args })
+    }
+    /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`).
+    fn field_hash(&mut self, v: u32, t: Ty) -> u32 {
+        match t {
+            Ty::Int | Ty::Short | Ty::Byte | Ty::Char => v,
+            Ty::Boolean => self.static_call("java/lang/Boolean.hashCode", vec![v]),
+            Ty::Long => self.static_call("java/lang/Long.hashCode", vec![v]),
+            Ty::Double => self.static_call("java/lang/Double.hashCode", vec![v]),
+            Ty::Float => self.static_call("java/lang/Float.hashCode", vec![v]),
+            _ => self.static_call("java/util/Objects.hashCode", vec![v]),
+        }
+    }
+    /// A `Boolean` IR expr testing field *inequality* (IEEE-aware for float/double, structural for
+    /// refs) — used to build `equals` as a chain of `if (a != b) return false` early-outs.
+    fn field_ne(&mut self, a: u32, b: u32, t: Ty) -> u32 {
+        match t {
+            Ty::Double | Ty::Float => {
+                let fq = if t == Ty::Double { "java/lang/Double.compare" } else { "java/lang/Float.compare" };
+                let cmp = self.static_call(fq, vec![a, b]);
+                let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: cmp, rhs: z })
+            }
+            // Int/Long/… → native compare; reference → `!Objects.equals` via the reference Ne path.
+            _ => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: a, rhs: b }),
+        }
+    }
+    /// `if (cond) return false` — a no-`else` statement-`when` whose only branch diverges.
+    fn guard_return_false(&mut self, cond: u32) -> u32 {
+        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        let ret = self.ir.add_expr(IrExpr::Return(Some(f)));
+        let blk = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+        self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), blk)] })
+    }
+
+    /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
+    /// first `n` (primary-constructor) fields.
+    fn synth_data_members(&mut self, internal: &str, class_id: ClassId, n: usize) {
+        let fields: Vec<(String, Ty)> = self.classes[internal].fields[..n].to_vec();
+
+        // componentN(): `return this.fieldN`.
+        for (i, (_, t)) in fields.iter().enumerate() {
+            let get = self.this_field(class_id, i as u32);
+            let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
+            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            self.add_synth_method(internal, class_id, &format!("component{}", i + 1), vec![], *t, body);
+        }
+
+        // toString(): `"Simple(f1=" + f1 + ", f2=" + f2 + ")"`.
+        {
+            let simple = internal.rsplit('/').next().unwrap_or(internal).replace('$', ".");
+            let mut acc = self.ir_const_str(format!("{simple}("));
+            for (i, (name, _)) in fields.iter().enumerate() {
+                let sep = if i == 0 { format!("{name}=") } else { format!(", {name}=") };
+                let s = self.ir_const_str(sep);
+                acc = self.str_plus(acc, s);
+                let fv = self.this_field(class_id, i as u32);
+                acc = self.str_plus(acc, fv);
+            }
+            let close = self.ir_const_str(")".to_string());
+            acc = self.str_plus(acc, close);
+            let ret = self.ir.add_expr(IrExpr::Return(Some(acc)));
+            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body);
+        }
+
+        // hashCode(): `h(f1)`, then `result*31 + h(fN)` (0 for an empty data class).
+        {
+            let result = if fields.is_empty() {
+                self.ir.add_expr(IrExpr::Const(IrConst::Int(0)))
+            } else {
+                let mut acc: Option<u32> = None;
+                for (i, (_, t)) in fields.iter().enumerate() {
+                    let fv = self.this_field(class_id, i as u32);
+                    let h = self.field_hash(fv, *t);
+                    acc = Some(match acc {
+                        None => h,
+                        Some(prev) => {
+                            let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
+                            let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Mul, lhs: prev, rhs: c31 });
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: mul, rhs: h })
+                        }
+                    });
+                }
+                acc.unwrap()
+            };
+            let ret = self.ir.add_expr(IrExpr::Return(Some(result)));
+            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body);
+        }
+
+        // equals(other): `if (other !is T) return false; if (f1 != o.f1) return false; …; return true`.
+        {
+            let class_ty = ty_to_ir(Ty::obj(internal));
+            let mut stmts = Vec::new();
+            let other = self.ir.add_expr(IrExpr::GetValue(1));
+            let not_inst = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::NotInstanceOf, arg: other, type_operand: class_ty.clone() });
+            let g = self.guard_return_false(not_inst);
+            stmts.push(g);
+            for (i, (_, t)) in fields.iter().enumerate() {
+                let af = self.this_field(class_id, i as u32);
+                let other_v = self.ir.add_expr(IrExpr::GetValue(1));
+                let ocast = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: other_v, type_operand: class_ty.clone() });
+                let bf = self.ir.add_expr(IrExpr::GetField { receiver: ocast, class: class_id, index: i as u32 });
+                let ne = self.field_ne(af, bf, *t);
+                let g = self.guard_return_false(ne);
+                stmts.push(g);
+            }
+            let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
+            let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+            let obj = ty_to_ir(Ty::obj("java/lang/Object"));
+            self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body);
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<(u32, Ty)> {
@@ -416,7 +567,15 @@ impl<'a> Lower<'a> {
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
                 // type — otherwise the local is typed `Error` and e.g. `==` takes the wrong path.
-                let kty = ty.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(init_ty);
+                // Resolve the declared type: a builtin, else a known file class (`A?` → reference
+                // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
+                let kty = match ty.as_ref() {
+                    Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
+                    Some(r) if self.classes.contains_key(&class_internal(self.afile, &r.name)) => {
+                        Ty::obj(&class_internal(self.afile, &r.name))
+                    }
+                    _ => init_ty,
+                };
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))

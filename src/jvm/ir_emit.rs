@@ -535,6 +535,28 @@ impl<'a> Emitter<'a> {
 
     fn emit_intrinsic(&mut self, fq: &str, recv: &Option<u32>, args: &[u32], code: &mut CodeBuilder) {
         match fq {
+            // Static numeric helpers used by synthesized data-class equals/hashCode.
+            "java/lang/Double.hashCode" | "java/lang/Long.hashCode" | "java/lang/Float.hashCode"
+            | "java/lang/Boolean.hashCode" | "java/util/Objects.hashCode" => {
+                self.emit_value(args[0], code);
+                let (cls, d) = match fq {
+                    "java/lang/Double.hashCode" => ("java/lang/Double", "(D)I"),
+                    "java/lang/Long.hashCode" => ("java/lang/Long", "(J)I"),
+                    "java/lang/Float.hashCode" => ("java/lang/Float", "(F)I"),
+                    "java/lang/Boolean.hashCode" => ("java/lang/Boolean", "(Z)I"),
+                    _ => ("java/util/Objects", "(Ljava/lang/Object;)I"),
+                };
+                let aw = slot_words(self.value_ty(args[0])) as i32;
+                let m = self.cw.methodref(cls, "hashCode", d);
+                code.invokestatic(m, aw, 1);
+            }
+            "java/lang/Double.compare" | "java/lang/Float.compare" => {
+                self.emit_value(args[0], code);
+                self.emit_value(args[1], code);
+                let (cls, d, aw) = if fq == "java/lang/Double.compare" { ("java/lang/Double", "(DD)I", 4) } else { ("java/lang/Float", "(FF)I", 2) };
+                let m = self.cw.methodref(cls, "compare", d);
+                code.invokestatic(m, aw, 1);
+            }
             "kotlin/String.plus" => {
                 let recv = recv.unwrap();
                 let arg = args[0];
@@ -948,6 +970,7 @@ fn intrinsic_ret(fq: &str) -> Ty {
         "kotlin/String.get" => Ty::Char,
         "kotlin/Array.set" => Ty::Unit,
         "java/lang/Enum.name" => Ty::String,
+        f if f.ends_with(".hashCode") || f.ends_with(".compare") => Ty::Int,
         _ => Ty::Error,
     }
 }
