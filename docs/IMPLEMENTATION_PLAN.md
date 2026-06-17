@@ -1951,6 +1951,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   Also unified `ObjectInstance`/`CompanionInstance` into one `IrExpr::StaticInstance { owner, ty, field }`
   (Kotlin IR's `IrGetObjectValue` — both are a `getstatic` of a singleton static field).
 
+- ✅ **Phase 179 — default property accessors (private field + `getX()`/`setX()`)** (270, 0 FAIL —
+  byte-parity). Every backing-field property of a normal class now gets a synthesized public `getX()`
+  (and `setX()` for `var`) accessor whose body reads/writes the (now **private**) field, and property
+  access from **outside** the declaring class is routed through the accessor (`recv.x` →
+  `invokevirtual getX()`, `recv.x = v` → `setX(v)`, including safe calls `r?.x`); inside the class the
+  field is read/written directly. A simple class's field + accessors + external access now match
+  kotlinc (remaining gaps: `final` on a `val` field/accessor; object/enum properties still use public
+  fields + direct access — accessors for them are a follow-up).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
