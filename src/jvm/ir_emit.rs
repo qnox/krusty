@@ -355,7 +355,8 @@ impl<'a> Emitter<'a> {
                         let ci = self.cw.class_ref(&internal);
                         code.checkcast(ci);
                     }
-                    // Box a primitive into a reference target, or unbox a wrapper into a primitive.
+                    // Box a primitive into a reference target, unbox a wrapper into a primitive, or
+                    // widen/narrow between primitive numeric types (`Int`→`Long`, `Double`→`Int`, …).
                     IrTypeOp::ImplicitCoercion => {
                         let at = self.value_ty(*arg);
                         let target = ir_ty_to_jvm(type_operand);
@@ -363,6 +364,8 @@ impl<'a> Emitter<'a> {
                             self.box_prim(at, code);
                         } else if at.is_reference() && target.is_primitive() {
                             self.unbox_to(target, code);
+                        } else if at.is_primitive() && target.is_primitive() && at != target {
+                            emit_num_conv(at, target, code);
                         }
                     }
                     IrTypeOp::SafeCast => {}
@@ -759,6 +762,23 @@ impl<'a> Emitter<'a> {
 }
 
 /// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.
+/// Convert the numeric primitive on top of the stack from `from` to `to` (JVM `i2l`/`i2d`/…).
+/// Byte/Short/Char live in the `int` stack category; widening goes via that category, and a
+/// Byte/Short/Char target is narrowed from `int` last.
+fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
+    use Ty::*;
+    if from == to { return; }
+    let wide = |t: Ty| match t { Byte | Short | Char | Int => Int, o => o };
+    match (wide(from), wide(to)) {
+        (Int, Long) => code.i2l(), (Int, Float) => code.i2f(), (Int, Double) => code.i2d(),
+        (Long, Int) => code.l2i(), (Long, Float) => code.l2f(), (Long, Double) => code.l2d(),
+        (Float, Int) => code.f2i(), (Float, Long) => code.f2l(), (Float, Double) => code.f2d(),
+        (Double, Int) => code.d2i(), (Double, Long) => code.d2l(), (Double, Float) => code.d2f(),
+        _ => {} // same wide category (e.g. Byte→Int): the value is already correct on the stack
+    }
+    match to { Byte => code.i2b(), Short => code.i2s(), Char => code.i2c(), _ => {} }
+}
+
 fn ref_internal(t: Ty) -> String {
     match t {
         Ty::String => "java/lang/String".to_string(),
