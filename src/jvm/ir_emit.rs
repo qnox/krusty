@@ -812,10 +812,10 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
-            IrExpr::Try { body, catches, result } => {
+            IrExpr::Try { body, catches, finally, result } => {
                 let catches = catches.clone();
                 let result = result.clone();
-                self.emit_try(*body, &catches, &result, code);
+                self.emit_try(*body, &catches, *finally, &result, code);
             }
             IrExpr::NewExternal { internal, ctor_desc, args } => {
                 let owner = internal.clone();
@@ -1230,7 +1230,7 @@ impl<'a> Emitter<'a> {
     /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
     /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
     /// `top` there, since an exception may occur before they are assigned).
-    fn emit_try(&mut self, body: u32, catches: &[crate::ir::IrCatch], result: &IrType, code: &mut CodeBuilder) {
+    fn emit_try(&mut self, body: u32, catches: &[crate::ir::IrCatch], finally: Option<u32>, result: &IrType, code: &mut CodeBuilder) {
         let rt = ir_ty_to_jvm(result);
         let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
         let result_slot = if is_stmt {
@@ -1241,6 +1241,8 @@ impl<'a> Emitter<'a> {
             Some(s)
         };
         const RESULT_KEY: u32 = 3_000_000;
+        // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
+        let fin_diverges = finally.map_or(false, |f| self.diverges(f));
 
         let start = code.new_label();
         let end = code.new_label();
@@ -1258,8 +1260,11 @@ impl<'a> Emitter<'a> {
         code.bind(end);
         let mut after_reachable = false;
         if !body_diverges {
-            code.goto(after);
-            after_reachable = true;
+            if let Some(f) = finally { self.emit(f, code); } // `finally` inlined on the normal path
+            if !fin_diverges {
+                code.goto(after);
+                after_reachable = true;
+            }
         }
 
         for c in catches {
@@ -1282,10 +1287,34 @@ impl<'a> Emitter<'a> {
             }
             self.slots.remove(&c.var);
             if !cbody_diverges {
-                code.goto(after);
-                after_reachable = true;
+                if let Some(f) = finally { self.emit(f, code); } // `finally` inlined after the catch
+                if !fin_diverges {
+                    code.goto(after);
+                    after_reachable = true;
+                }
             }
             code.add_exception(start, end, handler, exc_ci);
+        }
+
+        // `finally` catch-all: any exception not handled above (in the body or a catch handler) runs
+        // the `finally` then re-throws. Its protected region covers the body + all catch handlers; the
+        // handler's own code is past `protected_end`, so it doesn't catch itself.
+        if let Some(f) = finally {
+            let protected_end = code.new_label();
+            code.bind(protected_end);
+            let fin_handler = code.new_label();
+            code.bind(fin_handler);
+            let thr_ci = self.cw.class_ref("java/lang/Throwable");
+            self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
+            let thr_ty = Ty::obj("java/lang/Throwable");
+            let tslot = self.next_slot;
+            self.next_slot += 1;
+            store(thr_ty, tslot, code);
+            self.emit(f, code);
+            load(thr_ty, tslot, code);
+            code.athrow();
+            // `catch_type` 0 = catch-all (any throwable), matching kotlinc's `finally` table entry.
+            code.add_exception(start, protected_end, fin_handler, 0);
         }
 
         if after_reachable {
@@ -1318,10 +1347,11 @@ impl<'a> Emitter<'a> {
                 branches.iter().any(|(c, _)| c.is_none())
                     && branches.iter().all(|(_, b)| self.diverges(*b))
             }
-            // A `try` diverges only if the body and every catch diverge (any falling-through path
-            // reaches the merge).
-            IrExpr::Try { body, catches, .. } => {
-                self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body))
+            // A `try` diverges if its `finally` diverges, or if the body and every catch diverge (no
+            // path falls through to the merge).
+            IrExpr::Try { body, catches, finally, .. } => {
+                finally.map_or(false, |f| self.diverges(f))
+                    || (self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body)))
             }
             _ => false,
         }

@@ -1916,6 +1916,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   branchy argument to temps (a function value was live across the arg's merge frames —
   `operation(if (…) a else b)`). `tests/generic_fn_e2e.rs`.
 
+- ✅ **Phase 175 — `try … finally`** (261 → 263 box()=OK, 0 FAIL). `IrExpr::Try` gains a `finally`
+  block, inlined (as kotlinc does) at each exit: the normal fall-through, the end of each catch, and a
+  synthetic catch-all (`catch_type` 0) covering the body + all catch handlers that runs the `finally`
+  then re-throws. A diverging `finally` (`finally { throw }`) suppresses the dead `goto`s. Bails when a
+  `return`/`break`/`continue` would exit the `try` before the `finally` runs (`body_has_nonlocal_exit`,
+  loop-depth-aware so a loop-local `break` is fine), and a nested `try` inside the `finally` is rejected
+  by the checker (it would be emitted multiple times). `tests/finally_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
