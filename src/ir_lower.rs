@@ -1194,6 +1194,30 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// A member read of a property declared as a generic type parameter has the erased *physical*
+    /// type `pty` (`Object`) on the JVM, but the checker may have substituted a more specific
+    /// *logical* type (`Box<Int>().x : Int`). Insert the coercion kotlinc emits on such a read: an
+    /// unbox for a primitive target, a checkcast for a more specific reference target. A no-op when
+    /// the logical and physical types already agree (every non-generic read).
+    fn coerce_generic_read(&mut self, read: u32, member: AstExprId, pty: Ty) -> u32 {
+        let lt = self.info.ty(member);
+        if lt == pty || lt == Ty::Error {
+            return read;
+        }
+        // Only generic erasure (`Object` physical) warrants a synthesized coercion here; any other
+        // mismatch is the checker's concern and must not silently change the emitted read.
+        if pty != Ty::obj("java/lang/Object") {
+            return read;
+        }
+        if lt.is_primitive() {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(lt) })
+        } else if lt.is_reference() && !matches!(lt, Ty::Null) {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(lt) })
+        } else {
+            read
+        }
+    }
+
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -1733,7 +1757,7 @@ impl<'a> Lower<'a> {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
                     let recv_internal = rci.internal.clone();
-                    if let Some((class, idx, _)) = self.resolve_field(&recv_internal, &name) {
+                    if let Some((class, idx, pty)) = self.resolve_field(&recv_internal, &name) {
                         let owner_internal = self.ir.classes[class as usize].fq_name.clone();
                         // The backing field is private; access from outside the declaring class goes
                         // through the public `getX()` accessor (matching kotlinc). Inside the class,
@@ -1741,7 +1765,8 @@ impl<'a> Lower<'a> {
                         if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
                             if let Some((mclass, mindex, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
                                 let recv = self.expr(receiver)?;
-                                return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv, args: vec![] }));
+                                let read = self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv, args: vec![] });
+                                return Some(self.coerce_generic_read(read, e, pty));
                             }
                         }
                         let recv = self.expr(receiver)?;
@@ -1752,7 +1777,8 @@ impl<'a> Lower<'a> {
                         let recv = if needs_cast {
                             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&owner_internal)) })
                         } else { recv };
-                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                        let read = self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx });
+                        self.coerce_generic_read(read, e, pty)
                     } else if let Some((class, index, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
                         // A computed property → `recv.getX()`.
                         let recv = self.expr(receiver)?;

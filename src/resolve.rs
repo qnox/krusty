@@ -62,6 +62,14 @@ pub struct ClassSig {
     /// fill omitted trailing arguments at a constructor call site (box tests are single-file, so the
     /// `ExprId`s are valid where the constructor is called).
     pub ctor_defaults: Vec<Option<ExprId>>,
+    /// This class's own type parameters, in declaration order (`class Box<T, U>` → `["T", "U"]`).
+    /// Lets a member read substitute the receiver's type arguments for a property whose declared
+    /// type is one of these parameters.
+    pub tparam_names: Vec<String>,
+    /// Properties whose *declared* type is exactly one of this class's type parameters, mapped to
+    /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
+    /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
+    pub generic_props: HashMap<String, usize>,
 }
 
 impl ClassSig {
@@ -801,9 +809,32 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                         .filter(|p| p.is_lateinit)
                         .map(|p| p.name.clone())
                         .collect();
+                    // Record which properties are declared as a bare type parameter, so a read on a
+                    // generic instantiation can substitute the corresponding type argument. A nullable
+                    // parameter (`T?`) is skipped — substituting a primitive there would need boxing.
+                    let tparam_names = c.type_params.clone();
+                    let tparam_index = |r: &TypeRef| -> Option<usize> {
+                        if r.nullable || !r.targs.is_empty() || r.arg.is_some() {
+                            return None;
+                        }
+                        tparam_names.iter().position(|t| *t == r.name)
+                    };
+                    let mut generic_props: HashMap<String, usize> = HashMap::new();
+                    for p in c.props.iter().filter(|p| p.is_property) {
+                        if let Some(i) = tparam_index(&p.ty) {
+                            generic_props.insert(p.name.clone(), i);
+                        }
+                    }
+                    for bp in &c.body_props {
+                        if let Some(r) = &bp.ty {
+                            if let Some(i) = tparam_index(r) {
+                                generic_props.insert(bp.name.clone(), i);
+                            }
+                        }
+                    }
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults, tparam_names, generic_props },
                     );
                 }
                 Decl::Property(p) => {
@@ -3046,8 +3077,19 @@ impl<'a> Checker<'a> {
             return Ty::Int; // `sb.length` property → length()
         }
         // Property read on a class value: `p.prop` (own or inherited).
-        if let Ty::Obj(internal, _) = rt {
+        if let Ty::Obj(internal, args) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
+                // Generic substitution: if `name` is declared as one of the receiver class's type
+                // parameters and the receiver carries that argument (`Box<Int>().x`), report the
+                // argument type instead of the erased `Object`. The member-read lowering inserts the
+                // checkcast/unbox kotlinc emits on such a read.
+                if let Some(cs) = self.syms.class_by_internal(internal) {
+                    if let Some(&i) = cs.generic_props.get(name) {
+                        if let Some(&arg) = args.get(i) {
+                            return arg;
+                        }
+                    }
+                }
                 return ty;
             }
             // `java.lang.Enum` members (`name`, `ordinal`) available on any enum value.
