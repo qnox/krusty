@@ -4104,19 +4104,41 @@ impl<'a> MethodEmitter<'a> {
         let iface = Ty::fun_interface(arity);
         let anon_name = format!("{}$lambda${n}", self.class);
 
+        // Captured outer locals: names the body reads that are bound in the enclosing method (and
+        // aren't this lambda's own params). Each becomes a final field set by the constructor.
+        let mut captures: Vec<(String, u16, Ty)> = self.slots.iter()
+            .filter(|(name, _)| name.as_str() != "this" && !bind_names.iter().any(|b| b == name)
+                && crate::resolve::expr_uses_name_pub(self.file, body, name))
+            .map(|(name, (slot, ty))| (name.clone(), *slot, *ty))
+            .collect();
+        captures.sort_by(|a, b| a.0.cmp(&b.0));
+        let cap_tys: Vec<Ty> = captures.iter().map(|(_, _, t)| *t).collect();
+
         // Build the anonymous class implementing FunctionN.
         let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
         acw.add_interface(&iface);
+        for (name, _, ty) in &captures {
+            acw.add_field(ACC_PRIVATE | ACC_FINAL, name, &ty.descriptor());
+        }
 
-        // <init>()V
+        // <init>(captures…)V: super(); store each captured value into its field.
         {
-            let mut init_code = CodeBuilder::new(1);
+            let cap_words: u16 = cap_tys.iter().map(|t| slot_words(*t)).sum();
+            let mut init_code = CodeBuilder::new(1 + cap_words);
             init_code.aload(0);
             let obj_init = acw.methodref("java/lang/Object", "<init>", "()V");
             init_code.invokespecial(obj_init, 0, 0);
+            let mut slot = 1u16;
+            for (name, _, ty) in &captures {
+                init_code.aload(0);
+                load_local(*ty, slot, &mut init_code);
+                let f = acw.fieldref(&anon_name, name, &ty.descriptor());
+                init_code.putfield(f, slot_words(*ty) as i32);
+                slot += slot_words(*ty);
+            }
             init_code.ret_void();
             init_code.link();
-            acw.add_method(ACC_PUBLIC, "<init>", "()V", &init_code);
+            acw.add_method(ACC_PUBLIC, "<init>", &method_descriptor(&cap_tys, Ty::Unit), &init_code);
         }
 
         // invoke([Object...])Object — emit the lambda body.
@@ -4147,6 +4169,16 @@ impl<'a> MethodEmitter<'a> {
                 le.slots.insert(p.to_string(), (1 + i as u16, Ty::obj("java/lang/Object")));
             }
             le.next_slot = 1 + arity as u16;
+            // Prologue: copy each captured field into a local so the body reads it as a normal var.
+            for (name, _, ty) in &captures {
+                invoke_code.aload(0);
+                let f = acw.fieldref(&anon_name, name, &ty.descriptor());
+                invoke_code.getfield(f, slot_words(*ty) as i32);
+                let slot = le.next_slot;
+                store_local(*ty, slot, &mut invoke_code);
+                le.slots.insert(name.clone(), (slot, *ty));
+                le.next_slot += slot_words(*ty);
+            }
 
             // Emit the body expression; box the result if it's a primitive.
             let body_ty = self.info.ty(body);
@@ -4179,8 +4211,13 @@ impl<'a> MethodEmitter<'a> {
         code.set_needs_stackmap();
         code.new_obj(ci);
         code.dup();
-        let init = cw.methodref(&anon_name, "<init>", "()V");
-        code.invokespecial(init, 0, 0);
+        // Push the captured values (read from the enclosing method's locals) for the constructor.
+        for (_, slot, ty) in &captures {
+            load_local(*ty, *slot, code);
+        }
+        let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
+        let init = cw.methodref(&anon_name, "<init>", &method_descriptor(&cap_tys, Ty::Unit));
+        code.invokespecial(init, cap_words, 0);
 
         // The type of this expression is Fun(arity) — set it so that callers can use the value.
         let _ = e;

@@ -1544,6 +1544,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   2-arg `{ x, y -> x + y }` runs `OK`. This is the **prerequisite for callable references** (e.g.
   `Any::equals` is a 2-arg function). Production drop-in: **455 → 457 box()=OK, 0 FAIL**.
 
+- ✅ **Capturing lambdas.** A lambda that reads an enclosing local now captures it: the `$lambda$N`
+  class gets a private field per captured var, `<init>(captures)` stores them, the `invoke` prologue
+  copies each field into a local (so the body emits unchanged), and the call site passes the captured
+  values. Captures are detected as outer-slot names the body references (minus the lambda's own
+  params). Verified `{ x -> x + base }` capturing `base` runs `OK`. A lambda that calls a local
+  function is rejected (the recursive nested-closure dispatch isn't modeled — preserves 0-FAIL). Last
+  prerequisite for **callable references**. Production drop-in: **457 → 458 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
