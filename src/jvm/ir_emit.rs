@@ -516,7 +516,9 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
     }
     code.ensure_locals(e.next_slot);
     code.link();
-    let access = if instance { 0x0001 } else { 0x0009 }; // PUBLIC | (STATIC)
+    // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). Instance
+    // methods are not marked `final` yet (would need per-method `open`/`override` tracking).
+    let access = if instance { 0x0001 } else { 0x0019 }; // PUBLIC | (STATIC | FINAL)
     e.cw.add_method(access, &f.name, &method_descriptor(&param_tys, ret), &code);
 }
 
