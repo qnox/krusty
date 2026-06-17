@@ -1905,6 +1905,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   condition (`if (false) { … }`) — emit only the taken branch, like kotlinc's dead-code elimination.
   try in a property initializer is skipped (ctor frame context). `tests/try_catch_e2e.rs`.
 
+- ✅ **Phase 174 — generic-erasure call-site checkcast** (256 → 261 box()=OK, 0 FAIL). A generic
+  function (`fun <T> id(x: T): T`) erases its type-parameter return to `Object` in the JVM signature;
+  the call site must `checkcast` the result to the inferred concrete type (kotlinc does — krusty
+  previously returned the `Object` directly, a latent `VerifyError: Bad return type` miscompile).
+  `lower_arg` now inserts a `checkcast` when an erased-`Object` value flows into a more specific
+  reference target; val initializers, `return` statements (via a new `Lower.cur_ret_ty`), and the
+  expression-body return all route through it. This let the Phase 169 lambda-to-generic guard be
+  removed (`privateConst`, `syntheticAccessor`, …). Also fixed `IrExpr::InvokeFunction` to spill a
+  branchy argument to temps (a function value was live across the arg's merge frames —
+  `operation(if (…) a else b)`). `tests/generic_fn_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
