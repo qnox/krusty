@@ -133,6 +133,19 @@ pub enum IrExpr {
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
+    /// `try { body } catch (e: E) { … } …` (no `finally`). `result` is the value type (`Unit` when
+    /// used as a statement). Each catch binds the exception to a value index and runs its body.
+    Try { body: ExprId, catches: Vec<IrCatch>, result: IrType },
+}
+
+/// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
+#[derive(Clone, Debug)]
+pub struct IrCatch {
+    /// Value index the caught exception is bound to.
+    pub var: u32,
+    /// JVM internal name of the caught exception type.
+    pub exc_internal: String,
+    pub body: ExprId,
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
@@ -148,7 +161,10 @@ pub enum IrBinOp {
 pub enum IrTypeOp {
     InstanceOf,    // `is T`
     NotInstanceOf, // `!is T`
-    Cast,          // `as T`
+    Cast,          // `as T?` (or `as <primitive>`): a plain `checkcast` — `null` passes
+    /// `as T` to a non-null reference type: null-check (`Intrinsics.checkNotNull`) then `checkcast`,
+    /// so casting `null` throws — matching kotlinc.
+    CastNonNull,
     SafeCast,      // `as? T`
     /// Representation coercion the backend inserts (e.g. JVM box/unbox) — explicit in the IR so it
     /// is visible and testable, not hidden in codegen.

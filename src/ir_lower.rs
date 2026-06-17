@@ -316,7 +316,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 // A branchy body-property initializer (`val k = when { … }`) emits
                                 // merge-point frames in the constructor's init context that the flat
                                 // emitter doesn't reconcile yet — bail rather than miscompile.
-                                if matches!(lo.afile.expr(init_e), Expr::When { .. } | Expr::If { .. } | Expr::Elvis { .. } | Expr::Block { .. }) {
+                                if matches!(lo.afile.expr(init_e), Expr::When { .. } | Expr::If { .. } | Expr::Elvis { .. } | Expr::Block { .. } | Expr::Try { .. }) {
                                     return None;
                                 }
                                 let val = lo.lower_arg(init_e, &field_ty)?;
@@ -466,6 +466,13 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    /// Resolve a `catch` exception type name to its JVM internal name (mirrors the checker): a file
+    /// class, a known class-name, or a classpath/stdlib throwable alias.
+    fn catch_internal(&self, name: &str) -> Option<String> {
+        self.syms.class_names.get(name).cloned()
+            .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -1077,6 +1084,24 @@ impl<'a> Lower<'a> {
                 let v = self.expr(operand)?;
                 self.ir.add_expr(IrExpr::Throw { operand: v })
             }
+            // `try { … } catch (e: E) { … } …` (no `finally`; nested try already rejected by the checker).
+            Expr::Try { body, catches, finally } => {
+                if finally.is_some() {
+                    return None;
+                }
+                let result = ty_to_ir(self.info.ty(e));
+                let body_ir = self.expr(body)?;
+                let mut ir_catches = Vec::new();
+                for c in &catches {
+                    let exc_internal = self.catch_internal(&c.ty.name)?;
+                    let v = self.fresh_value();
+                    self.scope.push((c.name.clone(), v, Ty::obj(&exc_internal)));
+                    let cbody = self.expr(c.body)?;
+                    self.scope.pop();
+                    ir_catches.push(crate::ir::IrCatch { var: v, exc_internal, body: cbody });
+                }
+                self.ir.add_expr(IrExpr::Try { body: body_ir, catches: ir_catches, result })
+            }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
             Expr::NotNull { operand } => {
@@ -1285,6 +1310,20 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::If { cond, then_branch, else_branch } => {
+                // Constant-fold a literal-boolean condition (`if (false) { … }`) — emit only the taken
+                // branch, like kotlinc's dead-code elimination. (Emitting the dead branch can produce
+                // unverifiable frames, e.g. a `try` whose handler slot conflicts in unreachable code.)
+                match self.afile.expr(cond) {
+                    Expr::BoolLit(true) => return self.expr(then_branch),
+                    Expr::BoolLit(false) => {
+                        return match else_branch {
+                            Some(els) => self.expr(els),
+                            // `if (false) {}` with no else is a no-op `Unit` statement.
+                            None => Some(self.ir.add_expr(IrExpr::Block { stmts: vec![], value: None })),
+                        };
+                    }
+                    _ => {}
+                }
                 let c = self.expr(cond)?;
                 let t = self.expr(then_branch)?;
                 let branches = match else_branch {
@@ -1306,8 +1345,16 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let arg = self.expr(operand)?;
-                let type_operand = ty_to_ir(self.ty_ref(&ty)?);
-                self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg, type_operand })
+                let target = self.ty_ref(&ty)?;
+                let type_operand = ty_to_ir(target);
+                // `as T` to a non-null reference type throws on `null` (kotlinc null-checks before the
+                // `checkcast`); `as T?` and primitive casts are a plain `checkcast`/coercion.
+                let op = if !ty.nullable && target.is_reference() {
+                    IrTypeOp::CastNonNull
+                } else {
+                    IrTypeOp::Cast
+                };
+                self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
             }
             Expr::Unary { op, operand } => {
                 use crate::ast::UnOp;

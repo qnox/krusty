@@ -211,6 +211,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
   primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
+- `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
+  result temp and loaded at the merge, like kotlinc. The protected region covers the body + result
+  store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on
+  the stack and the pre-`try` locals. A diverging body/catch (`throw`/`return`) emits no dead store, and
+  a fully-diverging `try` has no merge. try in a property initializer is skipped (constructor frame
+  context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`).
+- `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
+  cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
+  casts are a plain `checkcast`/coercion. A literal-boolean `if` condition (`if (false) { … }`) is
+  constant-folded (only the taken branch is emitted), like kotlinc's dead-code elimination.
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader

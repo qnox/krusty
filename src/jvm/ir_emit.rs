@@ -135,6 +135,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             .unwrap_or_default()
     };
     let max_slot;
+    let mut init_diverges = false;
     {
         let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
@@ -168,10 +169,15 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         }
         if let Some(init_body) = c.init_body {
             e.emit(init_body, &mut ctor);
+            init_diverges = e.diverges(init_body);
         }
         max_slot = e.next_slot;
     }
-    ctor.ret_void();
+    // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
+    // would be dead code after `athrow` (which the verifier rejects without a frame).
+    if !init_diverges {
+        ctor.ret_void();
+    }
     ctor.ensure_locals(max_slot);
     ctor.link();
     // An `object`'s constructor is private; a normal class's is public.
@@ -703,6 +709,19 @@ impl<'a> Emitter<'a> {
                         let ci = self.cw.class_ref(&internal);
                         code.checkcast(ci);
                     }
+                    IrTypeOp::CastNonNull => {
+                        // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
+                        let kotlin_name = match type_operand {
+                            IrType::Class { fq_name, .. } => fq_name.replace('/', "."),
+                            _ => "kotlin.Any".to_string(),
+                        };
+                        code.dup();
+                        code.push_string(&format!("null cannot be cast to non-null type {kotlin_name}"), self.cw);
+                        let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNull", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                        code.invokestatic(m, 2, 0);
+                        let ci = self.cw.class_ref(&internal);
+                        code.checkcast(ci);
+                    }
                     // Box a primitive into a reference target, unbox a wrapper into a primitive, or
                     // widen/narrow between primitive numeric types (`Int`→`Long`, `Double`→`Int`, …).
                     IrTypeOp::ImplicitCoercion => {
@@ -793,6 +812,11 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
+            IrExpr::Try { body, catches, result } => {
+                let catches = catches.clone();
+                let result = result.clone();
+                self.emit_try(*body, &catches, &result, code);
+            }
             IrExpr::NewExternal { internal, ctor_desc, args } => {
                 let owner = internal.clone();
                 let desc = ctor_desc.clone();
@@ -877,12 +901,29 @@ impl<'a> Emitter<'a> {
                 let recv = recv.unwrap();
                 let arg = args[0];
                 let sb = self.cw.class_ref("java/lang/StringBuilder");
-                code.new_obj(sb);
-                code.dup();
-                let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
-                code.invokespecial(init, 0, 0);
-                self.append(recv, code);
-                self.append(arg, code);
+                // A branchy operand (`when`/`try`) can't be emitted with the `StringBuilder` on the
+                // stack — its merge frames would omit it. Spill such operands to temps first.
+                if self.records_frame(recv) || self.records_frame(arg) {
+                    let temps = self.spill_to_temps(&[recv, arg], code);
+                    code.new_obj(sb);
+                    code.dup();
+                    let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                    code.invokespecial(init, 0, 0);
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                        self.append_top(t, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
+                } else {
+                    code.new_obj(sb);
+                    code.dup();
+                    let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                    code.invokespecial(init, 0, 0);
+                    self.append(recv, code);
+                    self.append(arg, code);
+                }
                 let ts = self.cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
                 code.invokevirtual(ts, 0, 1);
             }
@@ -963,6 +1004,11 @@ impl<'a> Emitter<'a> {
     fn append(&mut self, e: u32, code: &mut CodeBuilder) {
         let ty = self.value_ty(e);
         self.emit_value(e, code);
+        self.append_top(ty, code);
+    }
+
+    /// Append a value already on the operand stack (of type `ty`) to a `StringBuilder` beneath it.
+    fn append_top(&mut self, ty: Ty, code: &mut CodeBuilder) {
         let desc = match ty {
             Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",
             Ty::Long => "(J)Ljava/lang/StringBuilder;",
@@ -983,7 +1029,7 @@ impl<'a> Emitter<'a> {
     fn records_frame(&self, e: u32) -> bool {
         use IrBinOp::*;
         match self.ir.expr(e) {
-            IrExpr::When { .. } | IrExpr::While { .. } => true,
+            IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_primitive())
                     || self.records_frame(*lhs) || self.records_frame(*rhs)
@@ -1162,6 +1208,86 @@ impl<'a> Emitter<'a> {
         code.bind(end);
     }
 
+    /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
+    /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
+    /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
+    /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
+    /// `top` there, since an exception may occur before they are assigned).
+    fn emit_try(&mut self, body: u32, catches: &[crate::ir::IrCatch], result: &IrType, code: &mut CodeBuilder) {
+        let rt = ir_ty_to_jvm(result);
+        let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
+        let result_slot = if is_stmt {
+            None
+        } else {
+            let s = self.next_slot;
+            self.next_slot += slot_words(rt);
+            Some(s)
+        };
+        const RESULT_KEY: u32 = 3_000_000;
+
+        let start = code.new_label();
+        let end = code.new_label();
+        let after = code.new_label();
+
+        code.bind(start);
+        let body_diverges = self.diverges(body);
+        if is_stmt || body_diverges {
+            // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
+            self.emit(body, code);
+        } else {
+            self.emit_value(body, code);
+            store(rt, result_slot.unwrap(), code);
+        }
+        code.bind(end);
+        let mut after_reachable = false;
+        if !body_diverges {
+            code.goto(after);
+            after_reachable = true;
+        }
+
+        for c in catches {
+            let handler = code.new_label();
+            code.bind(handler);
+            let exc_ci = self.cw.class_ref(&c.exc_internal);
+            // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
+            self.frame(handler, vec![VerifType::Object(exc_ci)], code);
+            let exc_ty = Ty::obj(&c.exc_internal);
+            let cslot = self.next_slot;
+            self.next_slot += 1;
+            self.slots.insert(c.var, (cslot, exc_ty));
+            store(exc_ty, cslot, code);
+            let cbody_diverges = self.diverges(c.body);
+            if is_stmt || cbody_diverges {
+                self.emit(c.body, code);
+            } else {
+                self.emit_value(c.body, code);
+                store(rt, result_slot.unwrap(), code);
+            }
+            self.slots.remove(&c.var);
+            if !cbody_diverges {
+                code.goto(after);
+                after_reachable = true;
+            }
+            code.add_exception(start, end, handler, exc_ci);
+        }
+
+        if after_reachable {
+            if let Some(slot) = result_slot {
+                self.slots.insert(RESULT_KEY, (slot, rt));
+            }
+            self.frame(after, vec![], code);
+            code.bind(after);
+            if let Some(slot) = result_slot {
+                load(rt, slot, code);
+                self.slots.remove(&RESULT_KEY);
+            }
+        } else {
+            // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
+            // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
+            code.bind(after);
+        }
+    }
+
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
@@ -1174,6 +1300,11 @@ impl<'a> Emitter<'a> {
             IrExpr::When { branches } => {
                 branches.iter().any(|(c, _)| c.is_none())
                     && branches.iter().all(|(_, b)| self.diverges(*b))
+            }
+            // A `try` diverges only if the body and every catch diverge (any falling-through path
+            // reaches the merge).
+            IrExpr::Try { body, catches, .. } => {
+                self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body))
             }
             _ => false,
         }
@@ -1334,6 +1465,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } => Ty::Nothing,
+            IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }
     }
