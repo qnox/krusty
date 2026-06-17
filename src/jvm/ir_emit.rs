@@ -175,13 +175,31 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8>
         let mut e = Emitter { ir, cw: &mut cw, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
+            // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
+            // first, then construct (mirrors the `New` node's spill).
+            let spill = args.iter().any(|&a| e.records_frame(a));
+            let mut temps = Vec::new();
+            if spill {
+                for &a in args {
+                    e.emit_value(a, &mut clinit);
+                    let at = e.value_ty(a);
+                    let slot = e.next_slot;
+                    e.next_slot += slot_words(at);
+                    store(at, slot, &mut clinit);
+                    temps.push((slot, at));
+                }
+            }
             let cls = e.cw.class_ref(&fq);
             clinit.new_obj(cls);
             clinit.dup();
             clinit.push_string(entry, e.cw);
             clinit.push_int(i as i32, e.cw);
-            for &a in args {
-                e.emit_value(a, &mut clinit);
+            if spill {
+                for (slot, t) in &temps { load(*t, *slot, &mut clinit); }
+            } else {
+                for &a in args {
+                    e.emit_value(a, &mut clinit);
+                }
             }
             let ctor_ref = e.cw.methodref(&fq, "<init>", &ctor_desc);
             clinit.invokespecial(ctor_ref, ctor_argw, 0);
@@ -415,15 +433,36 @@ impl<'a> Emitter<'a> {
                 // The constructor takes only the parameter fields; body properties are set inside it.
                 let field_tys: Vec<Ty> = c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
                 let args = args.clone();
-                let ci = self.cw.class_ref(&owner);
-                code.new_obj(ci);
-                code.dup();
-                for &a in &args {
-                    self.emit_value(a, code);
-                }
                 let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = self.cw.methodref(&owner, "<init>", &method_descriptor(&field_tys, Ty::Unit));
-                code.invokespecial(m, aw, 0);
+                let desc = method_descriptor(&field_tys, Ty::Unit);
+                if args.iter().any(|&a| self.records_frame(a)) {
+                    // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
+                    // would omit them. Evaluate all args into temps first (clean stack), then build.
+                    let mut temps = Vec::new();
+                    for &a in &args {
+                        self.emit_value(a, code);
+                        let at = self.value_ty(a);
+                        let slot = self.next_slot;
+                        self.next_slot += slot_words(at);
+                        store(at, slot, code);
+                        temps.push((slot, at));
+                    }
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for (slot, t) in &temps { load(*t, *slot, code); }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                } else {
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for &a in &args {
+                        self.emit_value(a, code);
+                    }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                }
             }
             IrExpr::MethodCall { class, index, receiver, args } => {
                 let c = &self.ir.classes[*class as usize];
@@ -659,6 +698,34 @@ impl<'a> Emitter<'a> {
         };
         let m = self.cw.methodref("java/lang/StringBuilder", "append", desc);
         code.invokevirtual(m, slot_words(ty) as i32, 1);
+    }
+
+    /// Whether emitting `e` as a value records a StackMapTable frame (a primitive comparison, a
+    /// `when`, or a `while` — anywhere in its subtree). Such an expression can't be emitted while
+    /// other operands sit on the stack (its merge frames would omit them); callers spill first.
+    fn records_frame(&self, e: u32) -> bool {
+        use IrBinOp::*;
+        match self.ir.expr(e) {
+            IrExpr::When { .. } | IrExpr::While { .. } => true,
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+                (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_primitive())
+                    || self.records_frame(*lhs) || self.records_frame(*rhs)
+            }
+            IrExpr::Call { dispatch_receiver, args, .. } =>
+                dispatch_receiver.map_or(false, |r| self.records_frame(r)) || args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::MethodCall { receiver, args, .. } =>
+                self.records_frame(*receiver) || args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::GetField { receiver, .. } => self.records_frame(*receiver),
+            IrExpr::SetField { receiver, value, .. } => self.records_frame(*receiver) || self.records_frame(*value),
+            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => self.records_frame(*value),
+            IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => self.records_frame(*arg),
+            IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
+            IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
+            IrExpr::Block { stmts, value } =>
+                stmts.iter().any(|&s| self.records_frame(s)) || value.map_or(false, |v| self.records_frame(v)),
+            _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — no frames
+        }
     }
 
     fn emit_binop(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {

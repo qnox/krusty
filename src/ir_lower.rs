@@ -217,12 +217,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.cur_class = None;
                         let mut lowered = Vec::new();
                         for (arg, ft) in args.iter().zip(&field_tys) {
-                            // Entry args are emitted in `<clinit>` while the new instance is already
-                            // on the stack; a branchy arg (comparison/if/when) records merge frames
-                            // that don't account for that ambient stack. Bail on those.
-                            if is_branchy(lo.afile, *arg) {
-                                return None;
-                            }
+                            // Branchy entry args (`X(1 == 1)`) are handled by the `<clinit>` spill.
                             lowered.push(lo.lower_arg(*arg, ft)?);
                         }
                         // Reject an entry whose arg count doesn't match the ctor (default args etc.).
