@@ -2416,11 +2416,17 @@ fn unquote_char(raw: &str) -> char {
             Some('n') => '\n',
             Some('t') => '\t',
             Some('r') => '\r',
+            Some('b') => '\u{0008}',
             Some('\\') => '\\',
             Some('\'') => '\'',
             Some('"') => '"',
             Some('0') => '\0',
             Some('$') => '$',
+            // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or('\0')
+            }
             Some(other) => other,
             None => '\0',
         },
@@ -2439,9 +2445,19 @@ fn unescape_chunk(inner: &str) -> String {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
                 Some('r') => out.push('\r'),
+                Some('b') => out.push('\u{0008}'),
                 Some('\\') => out.push('\\'),
                 Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
                 Some('$') => out.push('$'),
+                Some('0') => out.push('\0'),
+                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
                 Some(other) => out.push(other),
                 None => {}
             }
@@ -2487,9 +2503,19 @@ fn unquote(raw: &str) -> String {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
                 Some('r') => out.push('\r'),
+                Some('b') => out.push('\u{0008}'),
                 Some('\\') => out.push('\\'),
                 Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
                 Some('$') => out.push('$'),
+                Some('0') => out.push('\0'),
+                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
                 Some(other) => out.push(other),
                 None => {}
             }

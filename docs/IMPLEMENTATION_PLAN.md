@@ -2025,6 +2025,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   receiver, like the user-field path already did. `tests/do_while_e2e.rs`. (The same smart-cast checkcast
   is still missing on other stdlib-intrinsic receivers — not yet hit by a compiling box file.)
 
+- ✅ **Phase 186 — primitive conversions + `\uXXXX` escapes** (296 → 313 box()=OK, 0 FAIL). Primitive
+  numeric/`Char` conversion calls (`n.toLong()`, `c.toInt()`, `i.toChar()`, `n.toByte()`, …) were typed
+  by the checker but never lowered — they all bailed. Lowered them to `ImplicitCoercion` (the backend
+  already emits `i2l`/`l2i`/`i2c`/… via `emit_num_conv`); the checker now also allows them on `Char`, and
+  `c.code` (a property → `Int`). This unblocked +17 files. Enabling it surfaced a real **lexer bug**:
+  `\uXXXX` unicode escapes weren't processed (`unescape_chunk`/`unquote_char` fell through to a literal
+  `u`), so a string like `"0…"` was 3× too long and string comparisons failed. Added `\uXXXX`
+  (plus `\b`, `\'`, `\0`) to both string and char unescaping. (Also confirmed the conformance gate links
+  the **2.4.0 dist stdlib** via `dist_jar`, not the gradle 2.0.21 jar — only my ad-hoc smoke commands
+  had used 2.0.21.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -193,6 +193,7 @@ pub fn conversion_target(name: &str) -> Option<Ty> {
         "toLong" => Ty::Long,
         "toFloat" => Ty::Float,
         "toDouble" => Ty::Double,
+        "toChar" => Ty::Char,
         _ => return None,
     })
 }
@@ -2943,6 +2944,9 @@ impl<'a> Checker<'a> {
         if let (Ty::String, "length") = (rt, name) {
             return Ty::Int;
         }
+        if let (Ty::Char, "code") = (rt, name) {
+            return Ty::Int; // `c.code` — the Char's UTF-16 code unit as an `Int`.
+        }
         if let (Ty::Array(_), "size") = (rt, name) {
             return Ty::Int;
         }
@@ -3169,8 +3173,8 @@ impl<'a> Checker<'a> {
                         return Ty::String;
                     }
                 }
-                // Numeric conversion intrinsics: `n.toInt()`/`toLong()`/`toFloat()`/`toDouble()`.
-                if rt.is_numeric() && arg_tys.is_empty() {
+                // Numeric/`Char` conversion intrinsics: `n.toInt()`/`toLong()`/`c.toChar()`/….
+                if (rt.is_numeric() || rt == Ty::Char) && arg_tys.is_empty() {
                     if let Some(target) = conversion_target(&name) {
                         return target;
                     }
