@@ -3520,8 +3520,11 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::When { subject, arms } => self.emit_when(e, subject, &arms, code, cw),
+            Expr::CallableRef { receiver, name } if matches!(name.as_str(), "equals" | "hashCode" | "toString") => {
+                self.emit_callable_ref(receiver, &name, code, cw);
+            }
             Expr::CallableRef { .. } => {
-                // Callable references are rejected by the resolver; codegen never reaches here.
+                // Other callable references are rejected by the resolver; codegen never reaches here.
                 code.aconst_null();
             }
         }
@@ -4221,6 +4224,101 @@ impl<'a> MethodEmitter<'a> {
 
         // The type of this expression is Fun(arity) — set it so that callers can use the value.
         let _ = e;
+    }
+
+    /// An `Object`-method callable reference (`Any::equals`, `obj::toString`) — emit a `FunctionN`
+    /// whose `invoke` performs the method on its target (a captured receiver if *bound*, else the
+    /// first parameter). Result boxed to `Object`.
+    fn emit_callable_ref(&mut self, receiver: Option<ExprId>, name: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        let bound = match receiver {
+            Some(r) => matches!(self.file.expr(r), Expr::Name(nm) if self.slots.contains_key(nm)),
+            None => false,
+        };
+        let margs: u8 = if name == "equals" { 1 } else { 0 };
+        let arity = if bound { margs } else { margs + 1 };
+        let iface = Ty::fun_interface(arity);
+        let anon_name = format!("{}$cref${n}", self.class);
+        let obj = Ty::obj("java/lang/Object");
+
+        let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
+        acw.add_interface(&iface);
+        if bound {
+            acw.add_field(ACC_PRIVATE | ACC_FINAL, "recv", &obj.descriptor());
+        }
+        // <init>([recv])V
+        {
+            let mut ic = CodeBuilder::new(2);
+            ic.aload(0);
+            let oi = acw.methodref("java/lang/Object", "<init>", "()V");
+            ic.invokespecial(oi, 0, 0);
+            if bound {
+                ic.aload(0);
+                ic.aload(1);
+                let f = acw.fieldref(&anon_name, "recv", &obj.descriptor());
+                ic.putfield(f, 1);
+            }
+            ic.ret_void();
+            ic.link();
+            let cd = if bound { "(Ljava/lang/Object;)V" } else { "()V" };
+            acw.add_method(ACC_PUBLIC, "<init>", cd, &ic);
+        }
+        // invoke(Object*arity)Object
+        {
+            let invoke_desc: String = format!("({})Ljava/lang/Object;", "Ljava/lang/Object;".repeat(arity as usize));
+            let mut ic = CodeBuilder::new(1 + arity as u16 + 4);
+            // Load the target (bound → captured field; unbound → first param at slot 1).
+            let load_target = |ic: &mut CodeBuilder, acw: &mut ClassWriter| {
+                if bound {
+                    ic.aload(0);
+                    let f = acw.fieldref(&anon_name, "recv", &obj.descriptor());
+                    ic.getfield(f, 1);
+                } else {
+                    ic.aload(1);
+                }
+            };
+            match name {
+                "toString" => {
+                    load_target(&mut ic, &mut acw);
+                    let m = acw.methodref("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;");
+                    ic.invokestatic(m, 1, 1);
+                }
+                "hashCode" => {
+                    load_target(&mut ic, &mut acw);
+                    let m = acw.methodref("java/util/Objects", "hashCode", "(Ljava/lang/Object;)I");
+                    ic.invokestatic(m, 1, 1);
+                    let b = acw.methodref("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;");
+                    ic.invokestatic(b, 1, 1);
+                }
+                _ /* equals */ => {
+                    load_target(&mut ic, &mut acw);
+                    ic.aload(if bound { 1 } else { 2 }); // the `other` argument
+                    let m = acw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+                    ic.invokestatic(m, 2, 1);
+                    let b = acw.methodref("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;");
+                    ic.invokestatic(b, 1, 1);
+                }
+            }
+            ic.areturn();
+            ic.ensure_locals(1 + arity as u16);
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "invoke", &invoke_desc, &ic);
+        }
+        ensure_function_stub(arity);
+        push_lambda_class(anon_name.clone(), acw.finish());
+
+        // Call site: new; dup; [push captured receiver]; invokespecial <init>.
+        let ci = cw.class_ref(&anon_name);
+        code.set_needs_stackmap();
+        code.new_obj(ci);
+        code.dup();
+        if bound {
+            self.emit_expr(receiver.unwrap(), code, cw);
+        }
+        let cd = if bound { "(Ljava/lang/Object;)V" } else { "()V" };
+        let init = cw.methodref(&anon_name, "<init>", cd);
+        code.invokespecial(init, if bound { 1 } else { 0 }, 0);
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {

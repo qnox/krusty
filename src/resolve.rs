@@ -2381,8 +2381,27 @@ impl<'a> Checker<'a> {
                     Ty::Unit
                 }
             }
-            Expr::CallableRef { receiver, name: _ } => {
-                // Visit the receiver expression (if any) so its sub-expressions are type-checked.
+            Expr::CallableRef { receiver, name } => {
+                // Object-method callable references (`Any::equals`, `obj::toString`). A receiver that
+                // names a value is *bound* (captures it, arity = method args); one that names a type
+                // is *unbound* (the receiver becomes the first parameter).
+                let obj = Ty::obj("java/lang/Object");
+                if matches!(name.as_str(), "equals" | "hashCode" | "toString") {
+                    let bound = match receiver {
+                        Some(r) => matches!(self.file.expr(r), Expr::Name(n) if self.lookup(n).is_some()),
+                        None => false,
+                    };
+                    if let Some(r) = receiver {
+                        if bound { self.expr(r); } // type-check the captured receiver
+                    }
+                    let (margs, ret): (u8, Ty) = match name.as_str() {
+                        "equals" => (1, Ty::Boolean),
+                        "hashCode" => (0, Ty::Int),
+                        _ => (0, Ty::String),
+                    };
+                    let arity = if bound { margs } else { margs + 1 };
+                    return self.set(e, Ty::fun(vec![obj; arity as usize], ret));
+                }
                 if let Some(recv) = receiver {
                     self.expr(recv);
                 }

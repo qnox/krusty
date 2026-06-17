@@ -1552,6 +1552,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   function is rejected (the recursive nested-closure dispatch isn't modeled — preserves 0-FAIL). Last
   prerequisite for **callable references**. Production drop-in: **457 → 458 box()=OK, 0 FAIL**.
 
+- ✅ **Callable references (Object methods)** — `Any::equals`/`obj::hashCode`/`obj::toString`, the
+  `annotationAnyDispatch` first-failing test. A receiver that names a value is *bound* (captures it,
+  arity = method args); one that names a type is *unbound* (the receiver becomes the first param).
+  Emit generates a `FunctionN` whose `invoke` performs the method on its target and boxes the result.
+  Other callable references still skip. Completes the multi-param → capturing → callable-ref chain.
+  Production drop-in: **458 → 460 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
