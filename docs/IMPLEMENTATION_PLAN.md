@@ -1577,6 +1577,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `1 << i` panicked for a >32-field data class (now `wrapping_shl`). Production drop-in: **463 → 468
   box()=OK, 0 FAIL**.
 
+- ✅ **Stdlib-annotation instantiation** (`annotationFromStdlib`): `kotlin.SinceKotlin("1.6.0")`.
+  A qualified-name callee (`Member(Name("kotlin"),"SinceKotlin")`) is recognized as a **classpath**
+  annotation: its members are read from `Classpath::find("kotlin/SinceKotlin").methods` (no-arg
+  accessors → `desc_to_ty`), and the same `$annotationImpl$` synthesis is emitted against the existing
+  stdlib interface (not re-emitted). `toString` yields the FQ `@kotlin.SinceKotlin(version=1.6.0)`.
+  New shared helpers `qualified_path` + `classpath_annotation_members`. Production drop-in: **468 →
+  469 box()=OK, 0 FAIL**. (Concludes the `annotations/instances/` high-value cluster — remaining tests
+  there are narrow niches; the next big leverage is corpus-wide: inheritance, generics, enums, etc.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

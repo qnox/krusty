@@ -209,6 +209,36 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
+/// Extract a slash-separated qualified name from a `Name`/`Member` chain (`kotlin.SinceKotlin` →
+/// `"kotlin/SinceKotlin"`); `None` if the chain contains a non-name node.
+pub fn qualified_path(file: &File, e: ExprId) -> Option<String> {
+    match file.expr(e) {
+        Expr::Name(n) => Some(n.clone()),
+        Expr::Member { receiver, name } => Some(format!("{}/{}", qualified_path(file, *receiver)?, name)),
+        _ => None,
+    }
+}
+
+/// If `internal` names a **classpath annotation** (`ACC_ANNOTATION`), its members `(name, Ty)` read
+/// from the no-arg accessor methods. `None` if not an annotation or a member type isn't supported.
+pub fn classpath_annotation_members(cp: &Classpath, internal: &str) -> Option<Vec<(String, Ty)>> {
+    let ci = cp.find(internal)?;
+    if ci.access & 0x2000 == 0 {
+        return None; // not ACC_ANNOTATION
+    }
+    let mut members = Vec::new();
+    for m in &ci.methods {
+        if m.descriptor.starts_with("()") {
+            let ty = desc_to_ty(&m.descriptor[2..]);
+            if ty == Ty::Error {
+                return None; // a member type we can't model — skip the whole annotation
+            }
+            members.push((m.name.clone(), ty));
+        }
+    }
+    Some(members)
+}
+
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
         "I" | "B" | "S" => Ty::Int,
@@ -2704,6 +2734,23 @@ impl<'a> Checker<'a> {
         match self.file.expr(callee).clone() {
             // method call: recv.method(args)
             Expr::Member { receiver, name } => {
+                // Qualified-name instantiation of a **classpath annotation**: `kotlin.SinceKotlin(…)`.
+                // The whole callee is a dotted path naming an `@interface` on the classpath.
+                if let Expr::Name(root) = self.file.expr(receiver).clone() {
+                    if self.lookup(&root).is_none() {
+                        if let Some(internal) = qualified_path(self.file, callee) {
+                            if let Some(members) = classpath_annotation_members(&self.syms.classpath, &internal) {
+                                for (i, a) in args.iter().enumerate() {
+                                    let at = self.expr(*a);
+                                    if let Some((_, pt)) = members.get(i) {
+                                        self.expect_assignable(*pt, at, self.span(*a), "argument");
+                                    }
+                                }
+                                return Ty::obj(&internal);
+                            }
+                        }
+                    }
+                }
                 // Nested-class constructor `Outer.Inner(args)` (when `Outer` isn't a local).
                 if let Expr::Name(outer) = self.file.expr(receiver).clone() {
                     if self.lookup(&outer).is_none() {
