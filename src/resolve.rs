@@ -2002,7 +2002,15 @@ impl<'a> Checker<'a> {
                 // emit a backing-field read from the lambda class. Clear it so `field` inside a
                 // lambda body is unresolved (→ the property skips) rather than miscompiled.
                 let saved_field = self.field_ty.take();
+                let lc_before = self.local_call_map.len();
                 let bret = self.expr(body);
+                // A non-inlined lambda that calls a local function would dispatch it on the lambda
+                // class (the local fun lives on the enclosing facade/class) — reject rather than
+                // miscompile (the recursive nested-closure case).
+                if self.local_call_map.len() > lc_before {
+                    self.diags.error(self.file.expr_spans[e.0 as usize],
+                        "krusty: a lambda that calls a local function is not supported".to_string());
+                }
                 self.field_ty = saved_field;
                 self.pop_scope();
                 // Params unknown here (no annotation) → erased `Object`; return type comes from the body.
