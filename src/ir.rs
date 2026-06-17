@@ -161,6 +161,8 @@ pub enum IrBinOp {
     Add, Sub, Mul, Div, Rem,
     Lt, Le, Gt, Ge, Eq, Ne,
     And, Or,
+    /// Bitwise/shift on `Int`/`Long` (Kotlin's `and`/`or`/`xor`/`shl`/`shr`/`ushr` infix functions).
+    BitAnd, BitOr, BitXor, Shl, Shr, Ushr,
 }
 
 /// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).

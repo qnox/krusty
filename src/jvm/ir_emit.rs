@@ -1199,6 +1199,22 @@ impl<'a> Emitter<'a> {
                 if op == And { code.iand() } else { code.ior() }
                 self.slots.remove(&key);
             }
+            BitAnd | BitOr | BitXor => {
+                self.emit_value(lhs, code);
+                self.emit_value(rhs, code);
+                match lt {
+                    Ty::Long => match op { BitAnd => code.land(), BitOr => code.lor(), BitXor => code.lxor(), _ => unreachable!() },
+                    _ => match op { BitAnd => code.iand(), BitOr => code.ior(), BitXor => code.ixor(), _ => unreachable!() },
+                }
+            }
+            Shl | Shr | Ushr => {
+                self.emit_value(lhs, code);
+                self.emit_value(rhs, code); // shift amount is an `Int`
+                match lt {
+                    Ty::Long => match op { Shl => code.lshl(), Shr => code.lshr(), Ushr => code.lushr(), _ => unreachable!() },
+                    _ => match op { Shl => code.ishl(), Shr => code.ishr(), Ushr => code.iushr(), _ => unreachable!() },
+                }
+            }
             Lt | Le | Gt | Ge | Eq | Ne => self.emit_compare(op, lhs, rhs, code),
         }
     }
