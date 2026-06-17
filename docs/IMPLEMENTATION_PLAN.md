@@ -1607,6 +1607,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   drop-in: **471 → 478 box()=OK, 0 FAIL** (+7). (Bound/unbound *method* refs `obj::m`/`Type::m` for
   arbitrary methods still skip — a follow-up.)
 
+- ✅ **Reference array constructor `Array(n) { i -> e }`** (leverage map: `Array` was the top
+  unresolved function, ~34 files). Resolves to `Array<elem>` where `elem` is the lambda's return
+  (boxed when primitive — `Array<Int>` is `Integer[]`); the index param is typed `Int`. Emit reuses
+  the existing `IntArray(n){…}` counted-fill loop (now reached via `is_array_builtin("Array")`), which
+  already does `anewarray`/`aastore`/boxed-element for a reference element. A nested-array element
+  (`Array(n){ DoubleArray(m) }`) is skipped (its loop-fill StackMapTable interacts badly with
+  surrounding loops — caught 1 FAIL). Production drop-in: **478 → 480 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

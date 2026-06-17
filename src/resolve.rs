@@ -2595,6 +2595,31 @@ impl<'a> Checker<'a> {
                 return Some(Ty::array(elem));
             }
         }
+        // `Array(n) { i -> elem }` — a reference array; its element type is the lambda's return
+        // (boxed when primitive: `Array<Int>` is `Integer[]`).
+        if fname == "Array" && arg_tys.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. }) {
+            self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
+            let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
+            let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("java/lang/Object"));
+            // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
+            // StackMapTable interaction with surrounding loops — skip rather than VerifyError.
+            if matches!(elem, Ty::Array(_)) {
+                self.diags.error(span, "krusty: Array(n) {…} with an array element is not supported".to_string());
+                return Some(Ty::Error);
+            }
+            let ref_elem = match elem {
+                Ty::Int => Ty::obj("java/lang/Integer"),
+                Ty::Long => Ty::obj("java/lang/Long"),
+                Ty::Double => Ty::obj("java/lang/Double"),
+                Ty::Float => Ty::obj("java/lang/Float"),
+                Ty::Boolean => Ty::obj("java/lang/Boolean"),
+                Ty::Char => Ty::obj("java/lang/Character"),
+                Ty::Byte => Ty::obj("java/lang/Byte"),
+                Ty::Short => Ty::obj("java/lang/Short"),
+                e => e,
+            };
+            return Some(Ty::array(ref_elem));
+        }
         None
     }
 
@@ -3049,9 +3074,9 @@ impl<'a> Checker<'a> {
                 // parameter is a function type with known inner param types, check lambda args with
                 // the correct `it` type instead of always using Object.
                 let known_sig = self.syms.funs.get(&fname).cloned();
-                // A primitive-array init constructor `IntArray(n) { i -> … }` types its lambda's
-                // parameter (the index) as `Int`.
-                let array_init_lambda = Ty::primitive_array_element(&fname).is_some()
+                // An array init constructor `IntArray(n) { i -> … }` / `Array(n) { i -> … }` types its
+                // lambda's parameter (the index) as `Int`.
+                let array_init_lambda = (Ty::primitive_array_element(&fname).is_some() || fname == "Array")
                     && args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if array_init_lambda && i == 1 {
