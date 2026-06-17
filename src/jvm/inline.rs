@@ -432,6 +432,38 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
     Some(())
 }
 
+/// Relocate every constant-pool reference in a disassembled body into `cw`'s pool (the insn-level
+/// counterpart of [`relocate_code`], so relocation composes with the local/return/reified transforms
+/// before reassembly). `None` on `invokedynamic` or an `ldc` whose relocated index needs a byte but
+/// exceeds it — the assembler would otherwise widen it, which the caller handles by falling back.
+pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) -> Option<()> {
+    for insn in insns.iter_mut() {
+        let Insn::Plain { op, operands } = insn else { continue };
+        let Some((off, width)) = pool_operand(*op) else { continue };
+        if *op == 0xba {
+            return None; // invokedynamic
+        }
+        // `off` is relative to the opcode; in `operands` (opcode stripped) it is `off - 1`.
+        let o = off - 1;
+        let src_idx = if width == 1 {
+            *operands.get(o)? as u16
+        } else {
+            (*operands.get(o)? as u16) << 8 | *operands.get(o + 1)? as u16
+        };
+        let new = relocate_const(src_cp, src_idx, cw)?;
+        if width == 1 {
+            if new > 0xff {
+                return None;
+            }
+            operands[o] = new as u8;
+        } else {
+            operands[o] = (new >> 8) as u8;
+            operands[o + 1] = (new & 0xff) as u8;
+        }
+    }
+    Some(())
+}
+
 /// Redirect every `return`/`?return` in an inline body to the end of the inlined region instead of
 /// returning from the *caller*. A value-returning `?return` (`ireturn`/`areturn`/…) leaves its value
 /// on the stack — which becomes the call's result — and a plain `return` leaves nothing; replacing
@@ -517,6 +549,27 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    #[test]
+    fn relocate_insns_through_pipeline() {
+        let src_cp = vec![
+            C::Other,
+            C::Utf8("Foo".into()),  // 1
+            C::Class(1),            // 2
+            C::Utf8("bar".into()),  // 3
+            C::Utf8("()V".into()),  // 4
+            C::NameAndType(3, 4),   // 5
+            C::Methodref(2, 5),     // 6
+        ];
+        let code = [0xb8, 0x00, 0x06, 0xb1]; // invokestatic #6 ; return
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut insns = disassemble(&code).unwrap();
+        relocate_insns(&mut insns, &src_cp, &mut cw).expect("relocate");
+        let out = assemble(&insns);
+        let expected = cw.methodref("Foo", "bar", "()V");
+        assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected);
+        assert_eq!(out.len(), code.len());
     }
 
     #[test]
