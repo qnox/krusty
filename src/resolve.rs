@@ -2149,8 +2149,12 @@ impl<'a> Checker<'a> {
             }
             Expr::Try { body, catches, finally } => {
                 // Nested try/catch trips a StackMapTable frame bug in codegen — skip rather than
-                // emit a VerifyError.
-                if expr_has_try(self.file, body) || catches.iter().any(|c| expr_has_try(self.file, c.body)) {
+                // emit a VerifyError. (The `finally` is inlined at several exits, so a nested try
+                // inside it would be emitted multiple times — also rejected.)
+                if expr_has_try(self.file, body)
+                    || catches.iter().any(|c| expr_has_try(self.file, c.body))
+                    || finally.map_or(false, |f| expr_has_try(self.file, f))
+                {
                     self.diags.error(self.span(e), "krusty: nested try/catch is not supported".to_string());
                 }
                 let bt = self.expr(body);

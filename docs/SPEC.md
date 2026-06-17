@@ -216,7 +216,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on
   the stack and the pre-`try` locals. A diverging body/catch (`throw`/`return`) emits no dead store, and
   a fully-diverging `try` has no merge. try in a property initializer is skipped (constructor frame
-  context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`).
+  context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`). A `finally` block is inlined (like kotlinc)
+  at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
+  throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
+  body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
+  skipped, as is a nested `try` inside a `finally`.
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
   casts are a plain `checkcast`/coercion. A literal-boolean `if` condition (`if (false) { … }`) is

@@ -133,9 +133,11 @@ pub enum IrExpr {
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
-    /// `try { body } catch (e: E) { … } …` (no `finally`). `result` is the value type (`Unit` when
-    /// used as a statement). Each catch binds the exception to a value index and runs its body.
-    Try { body: ExprId, catches: Vec<IrCatch>, result: IrType },
+    /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when
+    /// used as a statement). Each catch binds the exception to a value index and runs its body. A
+    /// `finally` block runs on every exit (normal, each catch, and an uncaught exception via a
+    /// catch-all that re-throws); it is emitted (inlined) at each.
+    Try { body: ExprId, catches: Vec<IrCatch>, finally: Option<ExprId>, result: IrType },
 }
 
 /// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].

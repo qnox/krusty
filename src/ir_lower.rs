@@ -1103,9 +1103,14 @@ impl<'a> Lower<'a> {
                 let v = self.expr(operand)?;
                 self.ir.add_expr(IrExpr::Throw { operand: v })
             }
-            // `try { … } catch (e: E) { … } …` (no `finally`; nested try already rejected by the checker).
+            // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
             Expr::Try { body, catches, finally } => {
-                if finally.is_some() {
+                // A `finally` is inlined at each exit; a `return`/`break`/`continue` out of the body or
+                // a catch would need the `finally` run before it (not modeled) — bail in that case.
+                if finally.is_some()
+                    && (body_has_nonlocal_exit(self.afile, body)
+                        || catches.iter().any(|c| body_has_nonlocal_exit(self.afile, c.body)))
+                {
                     return None;
                 }
                 let result = ty_to_ir(self.info.ty(e));
@@ -1119,7 +1124,11 @@ impl<'a> Lower<'a> {
                     self.scope.pop();
                     ir_catches.push(crate::ir::IrCatch { var: v, exc_internal, body: cbody });
                 }
-                self.ir.add_expr(IrExpr::Try { body: body_ir, catches: ir_catches, result })
+                let fin = match finally {
+                    Some(f) => Some(self.expr(f)?),
+                    None => None,
+                };
+                self.ir.add_expr(IrExpr::Try { body: body_ir, catches: ir_catches, finally: fin, result })
             }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
@@ -1680,7 +1689,45 @@ fn ir_type_is_reference(t: &IrType) -> bool {
 
 /// Whether `t` is exactly `java/lang/Object` / `kotlin/Any` (the erased top type — no `checkcast` to it).
 fn ir_type_is_object(t: &IrType) -> bool {
-    matches!(t, IrType::Class { fq_name, .. } if fq_name == "java/lang/Object" || fq_name == "kotlin/Any")
+    matches!(t, IrType::Class { fq_name, .. } if fq_name == "java/lang/Any" || fq_name == "kotlin/Any" || fq_name == "java/lang/Object")
+}
+
+/// Whether `e` contains a `return` (always exits the function), or a `break`/`continue` that targets a
+/// loop *outside* `e` (i.e. at loop-depth 0 here) — control transfers that would skip an enclosing
+/// `finally`. Does not descend into lambdas (their control flow is separate).
+fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
+    fn ex(file: &ast::File, e: AstExprId, ld: u32) -> bool {
+        let r = |x: AstExprId| ex(file, x, ld);
+        match file.expr(e) {
+            Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+            | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
+            | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+            Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
+            | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+            Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
+            Expr::Member { receiver, .. } => r(*receiver),
+            Expr::Index { array, index } => r(*array) || r(*index),
+            Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
+            Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
+            Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
+            Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
+            Expr::Block { stmts, trailing } => stmts.iter().any(|&s| st(file, s, ld)) || trailing.map_or(false, |t| r(t)),
+            Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
+            Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
+        }
+    }
+    fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32) -> bool {
+        match file.stmt(s) {
+            Stmt::Return(_) => true,
+            Stmt::Break | Stmt::Continue => ld == 0,
+            Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld),
+            // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
+            Stmt::While { cond, body } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
+            Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1),
+            _ => false,
+        }
+    }
+    ex(file, e, 0)
 }
 
 /// The element type of a primitive-array constructor name (`IntArray` → `Int`).
