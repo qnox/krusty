@@ -1593,6 +1593,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   This is krusty's first bit of **expected-type-directed codegen** for a general call. Production
   drop-in: **469 → 471 box()=OK, 0 FAIL**.
 
+- ✅ **Array-literal `[...]` syntax** (Kotlin's collection-literal form, used in annotation
+  arguments/defaults). The parser desugars a primary-position `[a, b]` → `arrayOf(a, b)` and `[]` →
+  `emptyArray()`, reusing the array-builtin resolution + target-typed codegen. Index access `a[i]`
+  (postfix) is unaffected. Verified `val a: Array<String> = ["x","y"]` / `[]` runs `OK`. **+0 box**
+  (the corpus tests using `[...]` also need KClass/enum/annotation defaults + `contentEquals`), but a
+  correct general feature that removes a parser blocker. Still **471 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
