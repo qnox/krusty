@@ -1729,6 +1729,18 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   reference `!=` took the `if_icmpne` primitive path) — locals now resolve a declared class type.
   `copy` (needs default args) is deferred, not faked.
 
+- ✅ **Phase 156 — exhaustive `when` as a value + And/Or temp-leak fix** (140 → 146 box()=OK, 0 FAIL).
+  A no-`else` `when` used as a value is only accepted by the checker when exhaustive (every enum entry
+  / both booleans / sealed hierarchy), so the IR drops its **last arm to the `else`** — behavior-
+  preserving, since one arm always matches. Fixed a real codegen bug this exposed: the value-position
+  `&&`/`||` materialization parked its lhs in a temp slot that was inserted into the slot map
+  **permanently**, leaking into later merge-point StackMapTable frames (a `false`/`else` path that
+  never assigned the temp hit a frame claiming it defined → VerifyError). The temp is now removed
+  after the `iand`/`ior` (dead; `next_slot` stays monotonic, no reuse). Guards (skip, never
+  miscompile): a branchy `when` **subject** or arm **condition** (`when (when …)`, `x == when{…}`) —
+  emitted while operands sit on the stack, their merge frames would omit them; a proper fix is a
+  subject/condition temp.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

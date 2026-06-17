@@ -871,28 +871,41 @@ impl<'a> Lower<'a> {
                 if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
                     return None;
                 }
-                // A `when` with no `else` used as a *value* relies on exhaustiveness (e.g. an enum
-                // `when` covering every entry) that the flat emitter can't prove — without an else
-                // branch the merge point has no value on some path. Bail unless it's a statement.
+                // A no-`else` `when` used as a *value* is only accepted by the checker when it is
+                // exhaustive (every enum entry / both booleans / a sealed hierarchy covered). The flat
+                // emitter can't *prove* exhaustiveness, but it can rely on it: the last arm is dropped
+                // to the `else` (one arm always matches, so the final one is the catch-all). This is
+                // behavior-preserving for an exhaustive `when`.
                 let has_else = arms.iter().any(|a| a.conditions.is_empty());
-                if !has_else && self.info.ty(e) != Ty::Unit {
-                    return None;
-                }
+                let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
                 if let Some(subj) = subject {
+                    // The subject is re-evaluated once per condition comparison, so a branchy subject
+                    // (`when (when … ) { … }`) would be emitted multiple times — wrong and
+                    // frame-breaking. Bail (a subject temp would be the proper fix).
+                    if is_branchy(self.afile, subj) {
+                        return None;
+                    }
                     let st = self.info.ty(subj);
                     for arm in &arms {
                         for &c in &arm.conditions {
                             if st.is_primitive() != self.info.ty(c).is_primitive() {
                                 return None;
                             }
+                            // A branchy condition (`x == when(y){…}`) is emitted inside the
+                            // `subject == cond` compare while the subject is on the stack — its merge
+                            // frames would omit that operand. Bail.
+                            if is_branchy(self.afile, c) {
+                                return None;
+                            }
                         }
                     }
                 }
+                let last = arms.len().saturating_sub(1);
                 let mut branches = Vec::new();
-                for arm in &arms {
+                for (ai, arm) in arms.iter().enumerate() {
                     let body = self.expr(arm.body)?;
-                    if arm.conditions.is_empty() {
-                        branches.push((None, body)); // else
+                    if arm.conditions.is_empty() || (make_last_else && ai == last) {
+                        branches.push((None, body)); // else (real, or the exhaustive last arm)
                     } else {
                         let mut cond: Option<u32> = None;
                         for &c in &arm.conditions {
