@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
-use crate::jvm::classpath::Classpath;
+use crate::libraries::{EmptyLibrarySet, LibrarySet};
 use crate::types::Ty;
 
 #[derive(Clone, Debug)]
@@ -78,7 +78,6 @@ impl ClassSig {
     }
 }
 
-#[derive(Default)]
 pub struct SymbolTable {
     pub funs: HashMap<String, Signature>,
     /// Declared classes by simple name (e.g. `Point`).
@@ -91,8 +90,9 @@ pub struct SymbolTable {
     pub objects: std::collections::HashSet<String>,
     /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
     pub enums: HashMap<String, Vec<String>>,
-    /// Classpath for resolving Java/JDK references (empty unless the driver sets `-classpath`).
-    pub classpath: Classpath,
+    /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
+    /// supplies one). The front end resolves external references only through this abstraction.
+    pub libraries: Box<dyn LibrarySet>,
     /// Top-level extension functions: (receiver_descriptor, method_name) → Signature.
     /// Used to resolve `recv.method(args)` when no instance method matches.
     pub ext_funs: HashMap<(String, String), Signature>,
@@ -103,6 +103,23 @@ pub struct SymbolTable {
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
     pub class_names: HashMap<String, String>,
+}
+
+impl Default for SymbolTable {
+    fn default() -> SymbolTable {
+        SymbolTable {
+            funs: HashMap::new(),
+            classes: HashMap::new(),
+            props: HashMap::new(),
+            computed_props: std::collections::HashSet::new(),
+            objects: std::collections::HashSet::new(),
+            enums: HashMap::new(),
+            libraries: Box::new(EmptyLibrarySet),
+            ext_funs: HashMap::new(),
+            ext_props: HashMap::new(),
+            class_names: HashMap::new(),
+        }
+    }
 }
 
 impl SymbolTable {
@@ -228,48 +245,6 @@ pub fn qualified_path(file: &File, e: ExprId) -> Option<String> {
     }
 }
 
-/// If `internal` names a **classpath annotation** (`ACC_ANNOTATION`), its members `(name, Ty)` read
-/// from the no-arg accessor methods. `None` if not an annotation or a member type isn't supported.
-pub fn classpath_annotation_members(cp: &Classpath, internal: &str) -> Option<Vec<(String, Ty)>> {
-    let ci = cp.find(internal)?;
-    if ci.access & 0x2000 == 0 {
-        return None; // not ACC_ANNOTATION
-    }
-    let mut members = Vec::new();
-    for m in &ci.methods {
-        if m.descriptor.starts_with("()") {
-            let ty = desc_to_ty(&m.descriptor[2..]);
-            if ty == Ty::Error {
-                return None; // a member type we can't model — skip the whole annotation
-            }
-            members.push((m.name.clone(), ty));
-        }
-    }
-    Some(members)
-}
-
-pub fn desc_to_ty(d: &str) -> Ty {
-    match d {
-        "I" | "B" | "S" => Ty::Int,
-        "J" => Ty::Long,
-        "F" => Ty::Float,
-        "D" => Ty::Double,
-        "Z" => Ty::Boolean,
-        "C" => Ty::Char,
-        "V" => Ty::Unit,
-        s if s == Ty::String.descriptor() => Ty::String,
-        s if s.starts_with('[') => {
-            let elem = desc_to_ty(&s[1..]);
-            Ty::array(elem)
-        }
-        s if s.starts_with('L') && s.ends_with(';') => {
-            // Normalize a JVM built-in name read from the classpath to its Kotlin identity
-            // (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
-            Ty::obj(crate::jvm::jvm_class_map::to_kotlin_internal(&s[1..s.len() - 1]))
-        }
-        _ => Ty::Error,
-    }
-}
 
 /// Resolve the *result type* of a `kotlin.String` instance method by name + argument types — a
 /// curated subset matching what the backend supports. The JVM method/descriptor it lowers to is the
@@ -308,130 +283,6 @@ pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty
     })
 }
 
-/// Resolve a static call `Class.method(args)` against the classpath by exact param-descriptor
-/// match. Returns `(owner internal name, method descriptor, return type)`.
-pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, String, Ty)> {
-    let ci = cp.find(internal)?;
-    // Only a public method on a public class is callable from generated code (a non-public target
-    // → `IllegalAccessError`); otherwise leave it unresolved so the call is rejected, not miscompiled.
-    if !ci.is_public() {
-        return None;
-    }
-    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    let prefix = format!("({params})");
-    let m = ci.methods.iter().find(|m| m.name == method && m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix))?;
-    let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
-    Some((internal.to_string(), m.descriptor.clone(), desc_to_ty(&ret)))
-}
-
-/// Resolve an *instance* method on a classpath Java type by name + exact param descriptors.
-/// Returns `(method descriptor, return type)` for `invokevirtual`.
-pub fn resolve_java_instance(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
-    // The receiver's static type must be public (the call site references it); the method itself may be
-    // inherited from a (possibly non-public) superclass or interface — walk the chain to find it, as the
-    // JVM does for `invokevirtual`/`invokeinterface`.
-    if !cp.find(internal)?.is_public() {
-        return None;
-    }
-    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    let prefix = format!("({params})");
-    let mut seen = std::collections::HashSet::new();
-    let mut q = std::collections::VecDeque::new();
-    q.push_back(internal.to_string());
-    while let Some(name) = q.pop_front() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let Some(ci) = cp.find(&name) else { continue };
-        if let Some(m) = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix)) {
-            let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
-            return Some((m.descriptor.clone(), desc_to_ty(&ret)));
-        }
-        for i in &ci.interfaces {
-            q.push_back(i.clone());
-        }
-        if let Some(s) = &ci.super_class {
-            q.push_back(s.clone());
-        }
-    }
-    None
-}
-
-/// Resolve a constructor on a classpath Java type by argument descriptors. Returns its descriptor.
-pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Option<String> {
-    let ci = cp.find(internal)?;
-    let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    let exact = format!("({params})V");
-    if let Some(m) = ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == exact) {
-        return Some(m.descriptor.clone());
-    }
-    // Widening fallback: replace each reference-type arg with Object (e.g. String → Object).
-    // Needed because e.g. AssertionError has no public (String) ctor, only public (Object).
-    let widened: String = arg_tys.iter().map(|t| match t {
-        Ty::String | Ty::Obj(..) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => Ty::obj("kotlin/Any").descriptor(),
-        _ => t.descriptor(),
-    }).collect();
-    let widened_exact = format!("({widened})V");
-    ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == widened_exact).map(|m| m.descriptor.clone())
-}
-
-/// Resolve a Kotlin (or Java) extension / static method where `receiver` is passed as the first
-/// argument. Searches the classpath extension index for a static method named `method` on any
-/// class, whose first parameter descriptor matches `receiver`'s type and whose remaining params
-/// match `arg_tys`.
-///
-/// Returns `(owner_internal, jvm_method_name, descriptor, return_ty)` or `None` if not found.
-pub fn resolve_extension(
-    cp: &Classpath,
-    receiver: Ty,
-    method: &str,
-    arg_tys: &[Ty],
-) -> Option<(String, String, String, Ty)> {
-    let rest_params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    // Try the receiver type and its supertypes, most specific first — the extension's declared receiver
-    // may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension).
-    for recv_desc in supertype_descriptors(cp, receiver) {
-        let full_prefix = format!("({recv_desc}{rest_params})");
-        for c in cp.find_extensions(&recv_desc, method) {
-            if c.descriptor.starts_with(&full_prefix) {
-                let ret = desc_to_ty(&c.ret_desc);
-                return Some((c.owner.clone(), c.name.clone(), c.descriptor.clone(), ret));
-            }
-        }
-    }
-    None
-}
-
-/// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
-/// breadth-first so a more specific receiver is tried before a more general one. Primitives/arrays have
-/// no extension supertype chain — just their own descriptor.
-fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
-    let start = match receiver {
-        Ty::Obj(i, _) => i.to_string(),
-        Ty::String => "java/lang/String".to_string(),
-        _ => return vec![receiver.descriptor()],
-    };
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut q = std::collections::VecDeque::new();
-    q.push_back(start);
-    while let Some(name) = q.pop_front() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        out.push(format!("L{name};"));
-        if let Some(ci) = cp.find(&name) {
-            for i in &ci.interfaces {
-                q.push_back(i.clone());
-            }
-            if let Some(s) = &ci.super_class {
-                q.push_back(s.clone());
-            }
-        }
-    }
-    out
-}
-
 fn class_internal(file: &File, name: &str) -> String {
     // A nested class's source name `Outer.Inner` maps to the JVM internal name `Outer$Inner`.
     let mangled = name.replace('.', "$");
@@ -445,18 +296,18 @@ fn class_internal(file: &File, name: &str) -> String {
 /// class type can be referenced before its declaration (and across files).
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
-    collect_signatures_with_cp(files, Classpath::empty(), diags)
+    collect_signatures_with_cp(files, Box::new(EmptyLibrarySet), diags)
 }
 
-/// Like `collect_signatures` but also scans `cp` for class names and type aliases from the
-/// classpath (e.g. kotlin-stdlib.jar), eliminating the need for any hardcoded type lists.
-pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut DiagSink) -> SymbolTable {
-    // Scan classpath to get types and type aliases (e.g. StringBuilder → java/lang/StringBuilder).
-    let type_idx = cp.scan_types();
+/// Like `collect_signatures` but also seeds class names and type aliases from the target's
+/// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
+pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>, diags: &mut DiagSink) -> SymbolTable {
+    // The library set's type universe: importable names + type aliases (and intrinsic built-in maps).
+    let seed = libraries.seed();
 
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
-    // Pre-seed from the classpath type index so imports/stdlib types are visible.
-    let mut class_names: HashMap<String, String> = type_idx.class_names.clone();
+    // Pre-seed from the library type index so imports/stdlib types are visible.
+    let mut class_names: HashMap<String, String> = seed.class_names;
     // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
     // user's own declarations is a conflict, so track which names the user has defined.
@@ -472,15 +323,8 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
             }
         }
     }
-    // Seed the Kotlin built-in → JVM class mapping (ported from the reference compiler's
-    // `JavaToKotlinClassMap`; see `jvm::jvm_class_map`). These are intrinsic mapped types
-    // (`Comparable`, `Throwable`, `List`, …) — not stdlib `.class` files — so they are always
-    // available. User/classpath declarations above take precedence (`or_insert`).
-    for name in crate::jvm::jvm_class_map::BUILTIN_MAPPED_NAMES {
-        if let Some(internal) = crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(name) {
-            class_names.entry(name.to_string()).or_insert_with(|| internal.to_string());
-        }
-    }
+    // (The library set's `seed` already merged the intrinsic Kotlin built-in → target class mapping,
+    // e.g. the ported `JavaToKotlinClassMap`, beneath any classpath/user declarations.)
 
     // Expand type aliases into class_names.
     // `typealias A = B` where B is a user-defined class → A resolves to the same internal name.
@@ -490,7 +334,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
     //
     // Seed from classpath type aliases (read from @kotlin.Metadata in *TypeAliasesKt.class files)
     // then from any user-defined typealiases in the input files.
-    let mut alias_map: HashMap<String, String> = type_idx.type_aliases.clone();
+    let mut alias_map: HashMap<String, String> = seed.type_aliases;
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());
@@ -871,7 +715,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
         }
     }
 
-    table.classpath = cp;
+    table.libraries = libraries;
     table.class_names = class_names;
     table
 }
@@ -2449,7 +2293,7 @@ impl<'a> Checker<'a> {
                             resolve_string_instance(&name, &arg_tys).unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = rt {
                             self.lookup_method(internal, &name).map(|s| s.ret)
-                                .or_else(|| resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys).map(|(_, r)| r))
+                                .or_else(|| self.syms.libraries.resolve_instance(internal, &name, &arg_tys).map(|(_, r)| r))
                                 .unwrap_or(Ty::Error)
                         } else {
                             Ty::Error
@@ -3108,7 +2952,7 @@ impl<'a> Checker<'a> {
                 if let Expr::Name(root) = self.file.expr(receiver).clone() {
                     if self.lookup(&root).is_none() {
                         if let Some(internal) = qualified_path(self.file, callee) {
-                            if let Some(members) = classpath_annotation_members(&self.syms.classpath, &internal) {
+                            if let Some(members) = self.syms.libraries.annotation_members(&internal) {
                                 for (i, a) in args.iter().enumerate() {
                                     let at = self.expr(*a);
                                     if let Some((_, pt)) = members.get(i) {
@@ -3230,7 +3074,7 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                            return match resolve_java_static(&self.syms.classpath, &internal, &name, &arg_tys) {
+                            return match self.syms.libraries.resolve_static(&internal, &name, &arg_tys) {
                                 Some((_, _, ret)) => ret,
                                 None => {
                                     self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
@@ -3313,7 +3157,7 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some((_, ret)) = resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys) {
+                    if let Some((_, ret)) = self.syms.libraries.resolve_instance(internal, &name, &arg_tys) {
                         return ret;
                     }
                 }
@@ -3374,7 +3218,7 @@ impl<'a> Checker<'a> {
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
-                if let Some((owner, jvm_name, desc, ret)) = resolve_extension(&self.syms.classpath, rt, &name, &arg_tys) {
+                if let Some((owner, jvm_name, desc, ret)) = self.syms.libraries.resolve_extension(rt, &name, &arg_tys) {
                     self.ext_calls.insert(call, (owner, jvm_name, desc));
                     return ret;
                 }
@@ -3546,7 +3390,7 @@ impl<'a> Checker<'a> {
                     }
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
                     if let Some(internal) = self.imports.get(&fname).cloned() {
-                        if resolve_java_ctor(&self.syms.classpath, &internal, &arg_tys).is_some() {
+                        if self.syms.libraries.resolve_ctor(&internal, &arg_tys).is_some() {
                             return Ty::obj(&internal);
                         }
                     }

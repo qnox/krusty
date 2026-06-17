@@ -737,7 +737,7 @@ impl<'a> Lower<'a> {
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
-        let desc = crate::resolve::resolve_java_ctor(&self.syms.classpath, internal, &arg_tys).or_else(|| {
+        let desc = self.syms.libraries.resolve_ctor(internal, &arg_tys).or_else(|| {
             // Every JDK `Throwable` has a no-arg and a single-`String` constructor; accept those two
             // shapes even when the classpath reader can't see the jimage constructor descriptors.
             if crate::jvm::jvm_class_map::is_throwable_internal(internal) {
@@ -756,7 +756,7 @@ impl<'a> Lower<'a> {
         }
         let mut a = Vec::new();
         for (arg, pd) in args.iter().zip(&param_descs) {
-            let pty = ty_to_ir(crate::resolve::desc_to_ty(pd));
+            let pty = ty_to_ir(self.syms.libraries.desc_to_ty(pd));
             a.push(self.lower_arg(*arg, &pty)?);
         }
         Some(self.ir.add_expr(IrExpr::NewExternal { internal: internal.to_string(), ctor_desc: desc, args: a }))
@@ -2298,8 +2298,8 @@ impl<'a> Lower<'a> {
                         self.class_of(rt).map(|ci| ci.internal.clone())
                             .or_else(|| if let Ty::Obj(i, _) = rt { Some(i.to_string()) } else { None })
                             .and_then(|internal| {
-                                crate::resolve::resolve_java_instance(&self.syms.classpath, &internal, &name, &arg_tys).map(|(d, _)| {
-                                    let is_iface = self.syms.classpath.find(&internal).map_or(false, |c| c.is_interface());
+                                self.syms.libraries.resolve_instance(&internal, &name, &arg_tys).map(|(d, _)| {
+                                    let is_iface = self.syms.libraries.is_interface(&internal);
                                     (internal, d, is_iface)
                                 })
                             })
@@ -2315,7 +2315,7 @@ impl<'a> Lower<'a> {
                         // `invokestatic facade.name(recv, args)`. Owner + descriptor come from the
                         // classpath (`resolve_extension`), so no stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        crate::resolve::resolve_extension(&self.syms.classpath, rt, &name, &arg_tys)
+                        self.syms.libraries.resolve_extension(rt, &name, &arg_tys)
                     } {
                         let recv = self.expr(receiver)?;
                         let mut a = vec![recv];

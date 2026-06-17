@@ -12,6 +12,7 @@ pub mod lexer;
 pub mod ast;
 pub mod parser;
 pub mod types;
+pub mod libraries;
 pub mod resolve;
 pub mod ir;
 pub mod ir_lower;
