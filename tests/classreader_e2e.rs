@@ -104,3 +104,31 @@ fn classpath_method_code_caches() {
     assert!(cp.method_code("C", "nope", "()V").is_none());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn assembler_round_trips_real_bytecode() {
+    if !have("javac") {
+        eprintln!("skipping: javac unavailable");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("krusty_asm_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // A method with a loop (branches) and a switch — exercises Branch + LookupSwitch/TableSwitch.
+    fs::write(dir.join("A.java"), r#"public class A {
+        public static int f(int x) {
+            int s = 0;
+            for (int i = 0; i < x; i++) s += i;
+            switch (x) { case 1: return 1; case 5: return 5; case 9: return 9; default: return s; }
+        }
+    }"#).unwrap();
+    assert!(Command::new("javac").args(["A.java"]).current_dir(&dir).output().unwrap().status.success());
+    let bytes = fs::read(dir.join("A.class")).unwrap();
+    let body = krusty::jvm::classreader::read_method_code(&bytes, "f", "(I)I").expect("f body");
+
+    let insns = krusty::jvm::inline::disassemble(&body.code).expect("disassemble");
+    let re = krusty::jvm::inline::assemble(&insns);
+    assert_eq!(re, body.code, "disassemble∘assemble is identity on real bytecode (branches + switch)");
+
+    let _ = fs::remove_dir_all(&dir);
+}
