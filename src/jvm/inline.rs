@@ -5,7 +5,8 @@
 //! local remapping, and `reifiedOperationMarker` handling layer on top in later phases.
 
 use super::classfile::ClassWriter;
-use super::classreader::C;
+use super::classreader::{MethodCode, C};
+use std::collections::HashMap;
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
@@ -553,6 +554,70 @@ pub fn redirect_returns(insns: &mut [Insn]) {
     }
 }
 
+/// Per-parameter `(local slot, store-base opcode)` for a method descriptor, slots starting at `base`
+/// (`long`/`double` take two). Used to bind the on-stack call arguments into the inline body's frame.
+fn param_store_ops(descriptor: &str, base: u16) -> Option<Vec<(u16, u8)>> {
+    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut slot = base;
+    let mut out = Vec::new();
+    while i < b.len() {
+        let (op, width, advance) = match b[i] {
+            b'J' => (0x37, 2, 1), // lstore
+            b'D' => (0x39, 2, 1), // dstore
+            b'F' => (0x38, 1, 1), // fstore
+            b'L' => {
+                let mut j = i;
+                while *b.get(j)? != b';' {
+                    j += 1;
+                }
+                (0x3a, 1, j - i + 1) // astore
+            }
+            b'[' => {
+                let mut j = i + 1;
+                while *b.get(j)? == b'[' {
+                    j += 1;
+                }
+                if *b.get(j)? == b'L' {
+                    while *b.get(j)? != b';' {
+                        j += 1;
+                    }
+                }
+                (0x3a, 1, j - i + 1) // astore
+            }
+            _ => (0x36, 1, 1), // istore (I/Z/B/C/S)
+        };
+        out.push((slot, op));
+        slot += width;
+        i += advance;
+    }
+    Some(out)
+}
+
+/// Build the spliced instruction sequence for inlining `body` (an inline function with the given
+/// `descriptor`) at a call site whose arguments are already on the stack: store each argument into
+/// the body's parameter slots (relocated to `base..`), then the body itself — relocated into `cw`'s
+/// pool, with locals shifted by `base`, returns redirected to the end, and `reifiedOperationMarker`s
+/// resolved against `type_map`. `None` if the body uses a not-yet-relocatable construct
+/// (`invokedynamic`, byte-index `ldc` overflow), so the caller emits a real call instead.
+pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap<String, String>, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
+    let mut insns = disassemble(&body.code)?;
+    // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
+    let patches = substitute_reified(&mut insns, &body.source_cp, cw, type_map);
+    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    for (j, idx) in patches {
+        set_pool_operand(&mut insns[j], idx);
+    }
+    shift_locals(&mut insns, base)?;
+    redirect_returns(&mut insns);
+    // Prologue: pop the arguments (top = last param) into their slots, declaration order reversed.
+    let params = param_store_ops(descriptor, base)?;
+    let mut out: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    out.extend(insns);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +687,22 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    #[test]
+    fn splice_identity_function() {
+        // inline fun id(x: Int): Int = x  →  body: iload_0; ireturn
+        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0xac], source_cp: vec![C::Other] };
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let tm = HashMap::new();
+        let insns = splice(&body, "(I)I", 1, &tm, &mut cw).expect("splice");
+        // Prologue stores the arg into slot 1 (istore_1), then the body loads it (iload 1) and the
+        // return became a goto to the end (value left on stack).
+        let bytes = assemble(&insns);
+        // istore_1(0x3c); iload 1 → iload_1(0x1b); goto end.
+        assert_eq!(bytes[0], 0x3c, "istore_1 binds the argument");
+        assert_eq!(bytes[1], 0x1b, "iload_1 reads it back");
+        assert_eq!(bytes[2], 0xa7, "return redirected to goto");
     }
 
     #[test]
