@@ -1983,6 +1983,18 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   parameters (kotlinc's multi-`int` mask). `tests/default_args_member_e2e.rs`. Architecture: default
   *meaning* in IR (a call with holes), `$default` *stub* + mask in the JVM backend.
 
+- ✅ **Phase 182 — `in` / `!in` range membership** (277 → 278 box()=OK, 0 FAIL). The membership
+  operator was unparsed (`x in 1..10` → "expected ')'", blocking ~22 `ranges/` files at the parse stage).
+  Added it at comparison precedence (bp 7, beside `is`/`!is`). A range RHS (`a..b`, `a until b`,
+  `a downTo b`) parses to `Expr::InRange { value, start, end, kind, negated }`; a non-range RHS becomes
+  `container.contains(value)` (`!in` wraps in `!`). Lowering desugars `InRange` to temps — the bounds
+  then the value are each evaluated once, in source order (matching kotlinc's `start..end` then
+  `.contains`) — followed by a comparison chain (`lo <= v && v <(=) hi`); `!in` uses the De Morgan dual
+  so no logical-not node is needed. `downTo` swaps the bounds (membership is `end <= v <= start`). The
+  checker requires uniform primitive operand types (mixed Int/Long ranges would need promotion not yet
+  modeled) and types it `Boolean`. Net +1 (the `ranges/` corpus needs more — `IntRange` objects,
+  unsigned types, collections), but `in` is pervasive and foundational.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

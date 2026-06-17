@@ -57,6 +57,10 @@ pub enum Expr {
     /// `operand as T` / `operand as? T` — a cast (`checkcast`). `nullable` ⇒ `as?` (instanceof,
     /// `null` on mismatch). Result type is `T`.
     As { operand: ExprId, ty: TypeRef, nullable: bool },
+    /// `value in start..end` / `value !in start..end` — range membership, evaluates to `Boolean`.
+    /// `kind` is the range form (`..`/`until`/`downTo`); `negated` ⇒ `!in`. (Range membership only;
+    /// a non-range container would resolve `contains`, not yet modeled.)
+    InRange { value: ExprId, start: ExprId, end: ExprId, kind: RangeKind, negated: bool },
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -530,6 +534,16 @@ impl File {
                 out.push_str(if *nullable { "(as? " } else { "(as " });
                 self.write_expr(*operand, out);
                 out.push_str(&format!(" {})", ty.name));
+            }
+            Expr::InRange { value, start, end, kind, negated } => {
+                out.push_str(if *negated { "(!in " } else { "(in " });
+                self.write_expr(*value, out);
+                let op = match kind { RangeKind::Through => "..", RangeKind::Until => "until", RangeKind::DownTo => "downTo" };
+                out.push_str(&format!(" {op} "));
+                self.write_expr(*start, out);
+                out.push(' ');
+                self.write_expr(*end, out);
+                out.push(')');
             }
             Expr::SafeCall { receiver, name, args } => {
                 out.push_str("(?. ");
