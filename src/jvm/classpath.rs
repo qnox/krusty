@@ -36,8 +36,8 @@ impl Entry {
 
 /// Process-global `scan_types` results keyed by the entry path set. The JDK jimage and stdlib jars
 /// are identical across every compiled file, so this collapses N re-scans into one.
-fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, TypeIndex>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, TypeIndex>>> = std::sync::OnceLock::new();
+fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -75,7 +75,7 @@ pub struct Classpath {
     entries: Vec<Entry>,
     cache: RefCell<HashMap<String, Option<ClassInfo>>>,
     ext: RefCell<Option<ExtIndex>>,
-    types: RefCell<Option<TypeIndex>>,
+    types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
 }
 
 impl Classpath {
@@ -110,7 +110,9 @@ impl Classpath {
     /// Cached per-instance after the first call, and **process-globally** keyed by the entry paths —
     /// so scanning the JDK jimage (the whole `java.base`) happens once per process, not once per
     /// compiled file (which dominated box-suite wall time).
-    pub fn scan_types(&self) -> TypeIndex {
+    /// The classpath's type index, shared via `Arc` so per-file callers pay a pointer bump, not a
+    /// deep clone of the (large) class-name/alias maps. Cached per-instance and process-globally.
+    pub fn scan_types(&self) -> std::sync::Arc<TypeIndex> {
         if let Some(idx) = self.types.borrow().as_ref() {
             return idx.clone();
         }
@@ -134,6 +136,7 @@ impl Classpath {
         for name in &ambiguous {
             idx.class_names.remove(name.as_str());
         }
+        let idx = std::sync::Arc::new(idx);
         global_type_cache().lock().unwrap().insert(key, idx.clone());
         *self.types.borrow_mut() = Some(idx.clone());
         idx
