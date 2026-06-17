@@ -1293,16 +1293,22 @@ impl<'a> Lower<'a> {
             }
             Stmt::While { cond, body } => {
                 let c = self.expr(cond)?;
-                let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { return None };
+                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { return None };
                 let depth = self.scope.len();
                 let mut out = Vec::new();
                 for s in stmts {
                     out.push(self.stmt(s)?);
                 }
+                // A body ending in an expression (`… ; if (c) break`) keeps it as a discarded statement.
+                if let Some(t) = trailing {
+                    out.push(self.expr(t)?);
+                }
                 self.scope.truncate(depth);
                 let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b }))
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None }))
             }
+            Stmt::Break => Some(self.ir.add_expr(IrExpr::Break)),
+            Stmt::Continue => Some(self.ir.add_expr(IrExpr::Continue)),
             // `for (i in a..b [step s])` over an `Int` range → a counted `while`. The bound is
             // hoisted to a local (evaluated once, per Kotlin); the step defaults to 1.
             Stmt::For { name, range, body } => {
@@ -1323,18 +1329,23 @@ impl<'a> Lower<'a> {
                 let ge = self.ir.add_expr(IrExpr::GetValue(end_v));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: gi, rhs: ge });
                 // body + increment
-                let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
+                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
                 let mut out = Vec::new();
                 for s in stmts {
                     out.push(self.stmt(s)?);
+                }
+                if let Some(t) = trailing {
+                    out.push(self.expr(t)?);
                 }
                 let step = match range.step { Some(e) => self.expr(e)?, None => self.ir.add_expr(IrExpr::Const(IrConst::Int(1))) };
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) { IrBinOp::Sub } else { IrBinOp::Add };
                 let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: inc_op, lhs: gi2, rhs: step });
-                out.push(self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val }));
+                // The increment is the loop `update` (runs at the `continue` target), not a body stmt —
+                // so `continue` advances the counter instead of skipping it.
+                let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc) });
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
             }
@@ -1368,17 +1379,20 @@ impl<'a> Lower<'a> {
                 let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
                 let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
                 let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
-                let Expr::Block { stmts, trailing: None } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
+                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
                 let mut out = vec![var_x];
                 for s in stmts {
                     out.push(self.stmt(s)?);
                 }
+                if let Some(t) = trailing {
+                    out.push(self.expr(t)?);
+                }
                 let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
-                out.push(self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc }));
+                let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs) });
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
             }

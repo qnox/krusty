@@ -88,8 +88,14 @@ pub enum IrExpr {
     When { branches: Vec<(Option<ExprId>, ExprId)> },
     /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions.
     TypeOp { op: IrTypeOp, arg: ExprId, type_operand: IrType },
-    /// `IrWhile` loop.
-    While { cond: ExprId, body: ExprId },
+    /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
+    /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than
+    /// skipping it. A plain `while` has `update: None` (then `continue` re-tests `cond`).
+    While { cond: ExprId, body: ExprId, update: Option<ExprId> },
+    /// `break` — exit the innermost enclosing loop.
+    Break,
+    /// `continue` — jump to the innermost enclosing loop's `update`/condition.
+    Continue,
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
     Variable { index: u32, ty: IrType, init: Option<ExprId> },
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One

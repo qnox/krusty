@@ -1995,6 +1995,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   modeled) and types it `Boolean`. Net +1 (the `ranges/` corpus needs more — `IntRange` objects,
   unsigned types, collections), but `in` is pervasive and foundational.
 
+- ✅ **Phase 183 — `break` / `continue`** (278 → 285 box()=OK, 0 FAIL). Loop control was unmodeled —
+  any loop using it bailed. Added `IrExpr::Break`/`Continue` and a `loop_stack` of
+  `(continue_label, break_label)` in the JVM backend; `break` → `goto end`, `continue` → `goto cont`.
+  `IrExpr::While` gained an `update: Option<ExprId>` (a `for`-loop's increment) emitted at the `continue`
+  label, so `continue` advances the counter instead of skipping it; a plain `while` has `update: None`
+  (then `continue` re-tests the condition). Also fixed a pre-existing limitation: loop bodies ending in
+  an expression (`…; if (c) break`) parse it as the block's `trailing` expr — the three loop lowerings
+  now keep it as a discarded statement instead of bailing. `break`/`continue` in *value* position
+  (`s += if (c) x else break`) needs operand-spilling the emitter doesn't do, and across a `try`/lambda
+  needs region-crossing — those are gated by `bc_complex_e` (a context-propagating AST walk) so the file
+  skips rather than miscompiling. `tests/break_continue_e2e.rs`. (Follow-ups: `++`/`--` are parsed
+  (`Stmt::IncDec`) but not yet lowered; labeled break/continue; value-position via operand spill.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

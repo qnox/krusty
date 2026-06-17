@@ -930,6 +930,60 @@ fn stmt_has_try(file: &File, s: StmtId) -> bool {
     }
 }
 
+/// Whether `break`/`continue` appears in a position krusty's backend can't yet emit: in *value*
+/// position (its value would be consumed while operands sit on the stack — an operand-spill the
+/// emitter doesn't do), inside a `try` (the jump must cross exception regions / run `finally`), or
+/// inside a lambda (a non-local jump). `forbidden` is true once the walk is in such a context.
+/// Plain `break`/`continue` *statements* in a loop body or `if`/`when` statement branch are fine.
+fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
+    let v = |x: ExprId| bc_complex_e(file, x, true);
+    match file.expr(e) {
+        Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
+        | Expr::CallableRef { .. } => false,
+        // A lambda body's `break`/`continue` would be a non-local jump (unsupported) — forbid throughout.
+        Expr::Lambda { body, .. } => bc_complex_e(file, *body, true),
+        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
+        | Expr::Is { operand, .. } | Expr::As { operand, .. } => v(*operand),
+        Expr::InRange { value, start, end, .. } => v(*value) || v(*start) || v(*end),
+        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => v(*lhs) || v(*rhs),
+        Expr::Member { receiver, .. } => v(*receiver),
+        Expr::Index { array, index } => v(*array) || v(*index),
+        Expr::Call { callee, args } => v(*callee) || args.iter().any(|&a| v(a)),
+        Expr::SafeCall { receiver, args, .. } => v(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| v(x))),
+        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if v(*x))),
+        // The condition/subject is a value; branches inherit the current context (a value `if`/`when`
+        // makes its branches values; a statement `if` keeps them statements).
+        Expr::If { cond, then_branch, else_branch } => v(*cond) || bc_complex_e(file, *then_branch, forbidden) || else_branch.map_or(false, |x| bc_complex_e(file, x, forbidden)),
+        Expr::When { subject, arms } => subject.map_or(false, |s| v(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| v(c)) || bc_complex_e(file, a.body, forbidden)),
+        Expr::Block { stmts, trailing } => stmts.iter().any(|&s| bc_complex_s(file, s, forbidden)) || trailing.map_or(false, |t| bc_complex_e(file, t, forbidden)),
+        // Inside a `try`, any `break`/`continue` must cross the region — forbid throughout.
+        Expr::Try { body, catches, finally } => bc_complex_e(file, *body, true) || catches.iter().any(|c| bc_complex_e(file, c.body, true)) || finally.map_or(false, |f| bc_complex_e(file, f, true)),
+    }
+}
+
+fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
+    let v = |x: ExprId| bc_complex_e(file, x, true);
+    match file.stmt(s) {
+        Stmt::Break | Stmt::Continue => forbidden,
+        Stmt::Local { init, .. } | Stmt::Destructure { init, .. } | Stmt::Assign { value: init, .. } => v(*init),
+        Stmt::AssignMember { receiver, value, .. } => v(*receiver) || v(*value),
+        Stmt::AssignIndex { array, index, value } => v(*array) || v(*index) || v(*value),
+        Stmt::Return(Some(e)) => v(*e),
+        Stmt::Return(None) | Stmt::IncDec { .. } => false,
+        // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
+        Stmt::Expr(e) => bc_complex_e(file, *e, false),
+        Stmt::While { cond, body } => v(*cond) || bc_complex_e(file, *body, false),
+        Stmt::For { range, body, .. } => v(range.start) || v(range.end) || range.step.map_or(false, |s| v(s)) || bc_complex_e(file, *body, false),
+        Stmt::ForEach { iterable, body, .. } => v(*iterable) || bc_complex_e(file, *body, false),
+        // A local function is a separate body — `break`/`continue` in it would be non-local.
+        Stmt::LocalFun(f) => match &f.body {
+            FunBody::Expr(e) | FunBody::Block(e) => bc_complex_e(file, *e, true),
+            FunBody::None => false,
+        },
+    }
+}
+
 fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
     let r = |x: ExprId| expr_refs_param(file, x, names);
     match file.expr(e) {
@@ -1959,6 +2013,12 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun_body(&mut self, f: &FunDecl) {
+        if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
+            if bc_complex_e(self.file, *e, false) {
+                self.diags.error(f.span, "krusty: 'break'/'continue' in value position, inside 'try', or inside a lambda is not supported".to_string());
+                return;
+            }
+        }
         match &f.body {
             FunBody::Expr(e) => {
                 let t = self.expr(*e);
