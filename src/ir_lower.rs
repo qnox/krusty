@@ -40,6 +40,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_class: None,
         cur_fn_name: String::new(),
         lambda_seq: 0,
+        cur_ret_ty: IrType::Unit,
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -459,6 +460,9 @@ struct Lower<'a> {
     cur_fn_name: String,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
+    /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
+    /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
+    cur_ret_ty: IrType,
 }
 
 impl<'a> Lower<'a> {
@@ -869,6 +873,11 @@ impl<'a> Lower<'a> {
             // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
             // coercion (the backend does the `i2l`/`d2i`/… conversion).
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
+        } else if at == Ty::obj("java/lang/Object") && target_ref && !ir_type_is_object(target) {
+            // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
+            // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
+            // value really is the target type at runtime). `as`-style, but never null here.
+            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: e, type_operand: target.clone() }))
         } else {
             Some(e)
         }
@@ -895,13 +904,16 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
+        self.cur_ret_ty = ret_ty.clone();
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
-                let ve = self.expr(*e)?;
                 let stmts = if *ret_ty == IrType::Unit || diverges {
-                    vec![ve] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
+                    vec![self.expr(*e)?] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
                 } else {
+                    // Coerce the body to the return type (a generic-erased `Object` return gets the
+                    // `checkcast` kotlinc inserts).
+                    let ve = self.lower_arg(*e, ret_ty)?;
                     vec![self.ir.add_expr(IrExpr::Return(Some(ve)))]
                 };
                 self.ir.add_expr(IrExpr::Block { stmts, value: None })
@@ -946,6 +958,11 @@ impl<'a> Lower<'a> {
             Stmt::Expr(e) => self.expr(e),
             Stmt::Return(e) => {
                 let v = match e {
+                    // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
+                    Some(e) if self.cur_ret_ty != IrType::Unit && self.info.ty(e) != Ty::Nothing => {
+                        let rt = self.cur_ret_ty.clone();
+                        Some(self.lower_arg(e, &rt)?)
+                    }
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
@@ -962,7 +979,6 @@ impl<'a> Lower<'a> {
                 if init_ty == Ty::Unit {
                     return None;
                 }
-                let it = self.expr(init)?;
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
                 // type — otherwise the local is typed `Error` and e.g. `==` takes the wrong path.
@@ -975,6 +991,9 @@ impl<'a> Lower<'a> {
                     }
                     _ => init_ty,
                 };
+                // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
+                // typed `val` gets the `checkcast` kotlinc inserts).
+                let it = self.lower_arg(init, &ty_to_ir(kty))?;
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
@@ -1500,13 +1519,6 @@ impl<'a> Lower<'a> {
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
-                        // A generic function (`fun <T> …`) erases its type-parameter return to Object;
-                        // a lambda argument flowing through it (or a `T` return needing a checkcast at
-                        // the call site) isn't modeled — bail when a lambda meets a generic callee.
-                        if self.top_fun_decl(&fname).map_or(false, |f| !f.type_params.is_empty())
-                            && args.iter().any(|a| matches!(self.afile.expr(*a), Expr::Lambda { .. })) {
-                            return None;
-                        }
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Omitted trailing args are filled from constant-literal defaults.
                         let meta: Vec<(String, Option<AstExprId>)> = self.top_fun_decl(&fname)
@@ -1664,6 +1676,11 @@ fn ir_type_is_reference(t: &IrType) -> bool {
         IrType::Function { .. } => true,
         _ => false,
     }
+}
+
+/// Whether `t` is exactly `java/lang/Object` / `kotlin/Any` (the erased top type — no `checkcast` to it).
+fn ir_type_is_object(t: &IrType) -> bool {
+    matches!(t, IrType::Class { fq_name, .. } if fq_name == "java/lang/Object" || fq_name == "kotlin/Any")
 }
 
 /// The element type of a primitive-array constructor name (`IntArray` → `Int`).

@@ -848,11 +848,28 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::InvokeFunction { func, args, ret } => {
                 let n = args.len();
-                self.emit_value(*func, code);
-                for &arg in args {
-                    self.emit_value(arg, code);
-                    let at = self.value_ty(arg);
-                    self.box_prim(at, code); // box a primitive arg to its wrapper (an Object)
+                if args.iter().any(|&a| self.records_frame(a)) {
+                    // A branchy argument can't run with the function value on the stack — its merge
+                    // frame would omit it. Evaluate the function + args into temps first (in order),
+                    // then load and box.
+                    let mut all = vec![*func];
+                    all.extend(args.iter().copied());
+                    let temps = self.spill_to_temps(&all, code);
+                    load(temps[0].1, temps[0].0, code);
+                    for &(slot, t, _) in &temps[1..] {
+                        load(t, slot, code);
+                        self.box_prim(t, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
+                } else {
+                    self.emit_value(*func, code);
+                    for &arg in args {
+                        self.emit_value(arg, code);
+                        let at = self.value_ty(arg);
+                        self.box_prim(at, code); // box a primitive arg to its wrapper (an Object)
+                    }
                 }
                 let iface = format!("kotlin/jvm/functions/Function{n}");
                 let m = self.cw.interface_methodref(&iface, "invoke", &sam_descriptor(n as u8));

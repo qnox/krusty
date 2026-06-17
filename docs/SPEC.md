@@ -221,6 +221,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
   casts are a plain `checkcast`/coercion. A literal-boolean `if` condition (`if (false) { … }`) is
   constant-folded (only the taken branch is emitted), like kotlinc's dead-code elimination.
+- Generic functions (`fun <T> f(x: T): T`) erase the type parameter to `Object` in the JVM signature.
+  At a call site, a result of erased type `Object` flowing into a more specific reference context (a
+  typed `val`, a `return`, a function argument) gets a `checkcast` to that type — matching kotlinc (the
+  value really is that type at runtime). `kotlin.Any`/`Object` targets get no cast.
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader
