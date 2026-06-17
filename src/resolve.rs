@@ -2123,6 +2123,13 @@ impl<'a> Checker<'a> {
         if let Some(sig) = c.methods.get(name) {
             return Some(sig.clone());
         }
+        // A class provides its implemented interfaces' methods — directly overridden, inherited, or (for
+        // `: I by d`) delegated. Resolving them here lets a delegating class's calls type-check.
+        for i in c.interfaces.clone() {
+            if let Some(sig) = self.lookup_method(&i, name) {
+                return Some(sig);
+            }
+        }
         let s = c.super_internal.clone()?;
         self.lookup_method(&s, name)
     }

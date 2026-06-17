@@ -2112,6 +2112,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   (emitted code references `Intrinsics`, like kotlinc). This is the foundation for the iterator-protocol
   for-loop (`IntRange.iterator()`/`hasNext()`/`next()` now readable).
 
+- ✅ **Phase 193 — interface delegation (`: I by d`)** (321 → 325 box()=OK, 0 FAIL). Delegation is
+  sugar: the class forwards each of `I`'s methods to the delegate. The parser captures `(iface, delegate)`
+  for a simple `val`-parameter delegate (`ClassDecl.delegations`); the backend synthesizes a forwarder
+  `fun m(args) = this.delegate.m(args)` (an `invokeinterface` on the delegate field) per interface
+  method, via `synth_delegation_forwarders` (reusing `add_synth_method`). `lookup_method` now walks
+  implemented interfaces so the delegating class's calls type-check. Non-`val`/classpath-interface
+  delegation bails (skips). `tests/` covered by the conformance gate.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
