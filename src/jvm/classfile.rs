@@ -788,6 +788,7 @@ impl CodeBuilder {
         self.ensure_locals(idx + 1);
     }
     pub fn i2b(&mut self) { self.op(0x91, 0); }
+    pub fn i2c(&mut self) { self.op(0x92, 0); }
     pub fn i2s(&mut self) { self.op(0x93, 0); }
 
     // returns

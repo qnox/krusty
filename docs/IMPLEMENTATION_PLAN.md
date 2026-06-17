@@ -1672,6 +1672,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `infixFunctionOverBuiltinMember.kt`). `mod` (floor-semantics), `rangeTo`, `inc`/`dec` stay rejected.
   Production drop-in: **545 → 557 box()=OK, 0 FAIL** (+12).
 
+- ✅ **`Char` arithmetic** (leverage map: part of "operator cannot be applied", erasure-free).
+  `check_binary` now types `Char + Int` / `Char - Int` → `Char` and `Char - Char` → `Int` (Kotlin's
+  only `Char.plus`/`Char.minus` overloads — there is no `Char + Char`, `Char * …`, etc.). Codegen
+  computes in `int` then truncates with the new `i2c` opcode (0x92) for a `Char` result, matching
+  Kotlin's wrap-mod-2^16 (`Char.plus(Int) = (code + n).toChar()`). Production drop-in: **557 → 558
+  box()=OK, 0 FAIL** (+1; most `Char`-arith files have further blockers).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

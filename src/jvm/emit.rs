@@ -4047,6 +4047,10 @@ impl<'a> MethodEmitter<'a> {
             self.emit_concat(lhs, rhs, code, cw);
             return;
         }
+        // `Char` arithmetic (`Char + Int`, `Char - Int`) computes in `int`, then truncates back to
+        // the 16-bit char range with `i2c`. (`Char - Char` yields `Int` — no truncation.)
+        let char_result = result == Ty::Char;
+        let result = if char_result { Ty::Int } else { result };
         if self.expr_uses_frames(rhs) {
             // rhs will call rec() internally, registering empty-stack frames. Evaluate lhs first
             // (preserving Kotlin's L→R order), save to a temp so the stack IS empty when rhs
@@ -4066,6 +4070,9 @@ impl<'a> MethodEmitter<'a> {
             self.emit_expr_as(rhs, result, code, cw);
         }
         self.emit_arith(op, result, code);
+        if char_result {
+            code.i2c();
+        }
     }
 
     fn emit_arith(&mut self, op: BinOp, t: Ty, code: &mut CodeBuilder) {

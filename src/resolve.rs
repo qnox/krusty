@@ -2623,6 +2623,8 @@ impl<'a> Checker<'a> {
             BinOp::Add => {
                 if lt == Ty::String || rt == Ty::String {
                     Ty::String // concat
+                } else if lt == Ty::Char && rt == Ty::Int {
+                    Ty::Char // `Char.plus(Int)` → Char (wraps mod 2^16)
                 } else if let Some(t) = Ty::promote(lt, rt) {
                     t
                 } else {
@@ -2630,6 +2632,12 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                // `Char` arithmetic: `Char - Int` → Char, `Char - Char` → Int (Kotlin's only
+                // `Char.minus` overloads; there is no `Char + Char`, `Char * …`, etc.).
+                if op == BinOp::Sub && lt == Ty::Char {
+                    if rt == Ty::Int { return Ty::Char; }
+                    if rt == Ty::Char { return Ty::Int; }
+                }
                 Ty::promote(lt, rt).unwrap_or_else(|| self.bin_err(op, lt, rt, span))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
