@@ -1079,6 +1079,10 @@ pub fn emit_class(
         method_metas.extend(emit_data_members(&mut cw, internal_name, &props, &user_methods, &parent_final));
     }
 
+    // Synthetic bridge methods: a supertype's erased call dispatches here and delegates to the
+    // concrete override.
+    emit_bridges(&mut cw, internal_name, info);
+
     // @kotlin.Metadata (kind=1: class) so a Kotlin consumer sees this as a Kotlin class.
     let ctor_params: Vec<(String, Ty)> = props.iter().map(|(p, t)| (p.name.clone(), *t)).collect();
     let ctor_desc = method_descriptor(&props.iter().map(|(_, t)| *t).collect::<Vec<_>>(), Ty::Unit);
@@ -1365,6 +1369,52 @@ fn emit_data_members(
     }
 
     metas
+}
+
+/// Emit the synthetic bridge methods recorded for `internal`: each has the supertype's *erased*
+/// descriptor, downcasts its (reference) args to the concrete types, and `invokevirtual`s the
+/// concrete override.
+fn emit_bridges(cw: &mut ClassWriter, internal: &str, info: &TypeInfo) {
+    let Some(bridges) = info.bridges.get(internal) else { return };
+    for b in bridges {
+        let erased_desc = method_descriptor(&b.erased_params, b.erased_ret);
+        // Skip if a method with this exact erased signature already exists (a real override, not a
+        // bridge — emitting it would be a duplicate `ClassFormatError`).
+        if cw.has_method(&b.name, &erased_desc) {
+            continue;
+        }
+        let total: u16 = b.erased_params.iter().map(|t| slot_words(*t)).sum();
+        let mut c = CodeBuilder::new(1 + total);
+        c.aload(0);
+        let mut slot = 1u16;
+        for (ep, cp) in b.erased_params.iter().zip(&b.concrete_params) {
+            load_local(*ep, slot, &mut c);
+            if cp != ep {
+                // erased `Object` → concrete: checkcast a reference, or unbox a primitive.
+                if cp.is_primitive() {
+                    let (wrapper, _, unbox, unbox_desc) = box_wrapper(*cp).unwrap();
+                    let wci = cw.class_ref(wrapper);
+                    c.checkcast(wci);
+                    let m = cw.methodref(wrapper, unbox, unbox_desc);
+                    c.invokevirtual(m, 0, slot_words(*cp) as i32);
+                } else {
+                    let ci = cw.class_ref(ref_internal(*cp));
+                    c.checkcast(ci);
+                }
+            }
+            slot += slot_words(*ep);
+        }
+        let cpdesc: String = b.concrete_params.iter().map(|t| t.descriptor()).collect();
+        let m = cw.methodref(internal, &b.name, &format!("({cpdesc}){}", b.concrete_ret.descriptor()));
+        let aw: i32 = b.concrete_params.iter().map(|t| slot_words(*t) as i32).sum();
+        c.invokevirtual(m, aw, slot_words(b.concrete_ret) as i32);
+        emit_typed_return(b.erased_ret, &mut c);
+        c.ensure_locals(slot);
+        c.link();
+        let erased_desc = method_descriptor(&b.erased_params, b.erased_ret);
+        // ACC_PUBLIC | ACC_BRIDGE | ACC_SYNTHETIC
+        cw.add_method(ACC_PUBLIC | 0x0040 | 0x1000, &b.name, &erased_desc, &c);
+    }
 }
 
 /// Whether krusty can synthesize an annotation impl for a member of type `ty` (so the file isn't
@@ -1686,6 +1736,7 @@ fn emit_typed_return(ty: Ty, code: &mut CodeBuilder) {
         Ty::Long => code.lreturn(),
         Ty::Float => code.freturn(),
         Ty::Double => code.dreturn(),
+        Ty::Unit => code.ret_void(),
         _ => code.areturn(),
     }
 }

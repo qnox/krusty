@@ -344,6 +344,14 @@ impl ClassWriter {
         self.cp.double(v)
     }
 
+    /// Whether a method with exactly this name+descriptor has already been added (used to avoid
+    /// emitting a bridge that would duplicate an existing method).
+    pub fn has_method(&mut self, name: &str, desc: &str) -> bool {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.methods.iter().any(|m| m.name == n && m.desc == d)
+    }
+
     pub fn add_method(&mut self, access: u16, name: &str, desc: &str, code: &CodeBuilder) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
