@@ -1537,6 +1537,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   receivers are excluded (their `hashCode` identity needs lambda-singleton codegen, not yet done).
   Production drop-in: **442 → 455 box()=OK, 0 FAIL**.
 
+- ✅ **Multi-parameter lambdas** (`{ a, b -> … }`). The AST lambda became `params: Vec<String>`
+  (was a single `Option<String>`); the parser detects a param list by scanning for a top-level `->`
+  before the lambda's `}` and parses a comma-separated list; the resolver binds each param; the
+  emitter's `FunctionN` codegen (already arity-generic) binds params to slots `1..=N`. Verified a
+  2-arg `{ x, y -> x + y }` runs `OK`. This is the **prerequisite for callable references** (e.g.
+  `Any::equals` is a 2-arg function). Production drop-in: **455 → 457 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

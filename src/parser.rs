@@ -1291,23 +1291,46 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
         self.skip_newlines();
-        // Optional single parameter: `it -> …`, `x -> …`, or typed `x: Type -> …` (type discarded;
-        // the parameter's type comes from the declared function type via `check_lambda_with_types`).
-        let next_kind = self.t.get(self.i + 1).map(|t| t.kind);
-        let param = if self.at(TokenKind::Ident) && next_kind == Some(TokenKind::Arrow) {
-            let n = self.text().to_string();
-            self.bump(); // name
-            self.bump(); // '->'
-            Some(n)
-        } else if self.at(TokenKind::Ident) && next_kind == Some(TokenKind::Colon) {
-            let n = self.text().to_string();
-            self.bump(); // name
-            self.bump(); // ':'
-            let _ = self.parse_type();
+        // Optional parameter list ending in `->`: `it ->`, `x: T ->`, `a, b ->` (types discarded; the
+        // parameter types come from the declared function type via `check_lambda_with_types`). Detect
+        // by scanning for a top-level `->` before the lambda's closing `}`.
+        let has_params = {
+            let mut j = self.i;
+            let mut depth = 0i32;
+            loop {
+                match self.t.get(j).map(|t| t.kind) {
+                    None => break false,
+                    Some(TokenKind::Arrow) if depth == 0 => break true,
+                    Some(TokenKind::RBrace) if depth == 0 => break false,
+                    Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => depth += 1,
+                    Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+        };
+        let params = if has_params {
+            let mut ps = Vec::new();
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::Ident) {
+                    ps.push(self.text().to_string());
+                    self.bump();
+                    if self.at(TokenKind::Colon) {
+                        self.bump();
+                        let _ = self.parse_type();
+                    }
+                }
+                if self.at(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
             self.expect(TokenKind::Arrow, "'->'");
-            Some(n)
+            ps
         } else {
-            None
+            Vec::new()
         };
         let mut stmts = Vec::new();
         loop {
@@ -1327,7 +1350,7 @@ impl<'a> Parser<'a> {
             }
         }
         let body = self.file.add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi));
-        self.file.add_expr(Expr::Lambda { param, body }, Span::new(start.lo, end.hi))
+        self.file.add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi))
     }
 
     fn parse_block_expr(&mut self) -> ExprId {
