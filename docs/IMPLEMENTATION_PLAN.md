@@ -1750,6 +1750,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same `records_frame` spill
   should next be applied to `MethodCall`/`Call` argument lists.
 
+- ✅ **Phase 158 — finish the operand spill + single-eval branchy `when` subject** (147 → 148, 0 FAIL).
+  Generalized the Phase-157 spill into `Emitter::emit_operands` and applied it to `MethodCall`
+  (receiver+args) and local `Call` arg lists, completing the root-cause fix across every call site.
+  In lowering, a *branchy* `when` subject (`when (when …)`) is now evaluated **once** into a temp
+  (correct for side-effecting subjects too), retiring the branchy-subject bail-guard; a plain subject
+  is still re-evaluated per comparison (which stays correct for a smart-cast local, whose slot type
+  differs from its static type and would be mis-framed by a temp store).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

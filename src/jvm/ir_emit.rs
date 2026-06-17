@@ -472,11 +472,9 @@ impl<'a> Emitter<'a> {
                 let ret = ir_ty_to_jvm(&f.ret);
                 let name = f.name.clone();
                 let owner = c.fq_name.clone();
-                let args = args.clone();
-                self.emit_value(*receiver, code);
-                for &a in &args {
-                    self.emit_value(a, code);
-                }
+                let mut ops = vec![*receiver];
+                ops.extend(args.iter().copied());
+                self.emit_operands(&ops, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let m = self.cw.methodref(&owner, &name, &method_descriptor(&param_tys, ret));
                 code.invokevirtual(m, aw, slot_words(ret) as i32);
@@ -488,9 +486,7 @@ impl<'a> Emitter<'a> {
                     let ret = ir_ty_to_jvm(&f.ret);
                     let name = f.name.clone();
                     let args = args.clone();
-                    for &a in &args {
-                        self.emit_value(a, code);
-                    }
+                    self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
                     let m = self.cw.methodref(&owner, &name, &method_descriptor(&param_tys, ret));
@@ -725,6 +721,26 @@ impl<'a> Emitter<'a> {
             IrExpr::Block { stmts, value } =>
                 stmts.iter().any(|&s| self.records_frame(s)) || value.map_or(false, |v| self.records_frame(v)),
             _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — no frames
+        }
+    }
+
+    /// Push `ops` onto the stack in order. If any op after the first records a frame (so an earlier
+    /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
+    /// them — keeping the stack empty while each frame-recording op runs.
+    fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
+        if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
+            let mut temps = Vec::new();
+            for &o in ops {
+                self.emit_value(o, code);
+                let t = self.value_ty(o);
+                let slot = self.next_slot;
+                self.next_slot += slot_words(t);
+                store(t, slot, code);
+                temps.push((slot, t));
+            }
+            for (slot, t) in &temps { load(*t, *slot, code); }
+        } else {
+            for &o in ops { self.emit_value(o, code); }
         }
     }
 
