@@ -233,6 +233,10 @@ pub struct IrClass {
     /// `object Foo` — a singleton: a `public static final Foo INSTANCE` field, a private no-arg
     /// constructor, and a `<clinit>` that constructs the instance.
     pub is_object: bool,
+    /// Per-primary-constructor-parameter `Some(name)` when the backend should guard it with a non-null
+    /// assertion (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param.
+    /// Parallel to the first `ctor_param_count` `fields`. Empty for synthesized/enum/object classes.
+    pub ctor_param_checks: Vec<Option<String>>,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

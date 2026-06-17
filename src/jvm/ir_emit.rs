@@ -144,6 +144,19 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             e.slots.insert(vi as u32 + 1, (s, *t));
             s += slot_words(*t);
         }
+        // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
+        // the very start of `<init>` — before the super() call.
+        let ctor_checks = c.ctor_param_checks.clone();
+        for (i, check) in ctor_checks.iter().enumerate() {
+            if let Some(name) = check {
+                if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
+                    ctor.aload(slot);
+                    ctor.push_string(name, e.cw);
+                    let m = e.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNullParameter", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                    ctor.invokestatic(m, 2, 0);
+                }
+            }
+        }
         // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
         let super_args = c.super_args.clone();
         if super_args.iter().any(|&a| e.records_frame(a)) {
