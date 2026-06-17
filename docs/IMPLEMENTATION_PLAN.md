@@ -2120,6 +2120,18 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   implemented interfaces so the delegating class's calls type-check. Non-`val`/classpath-interface
   delegation bails (skips). `tests/` covered by the conformance gate.
 
+- ✅ **Phase 194 — read the generic `Signature` attribute (generics foundation)** (325 box()=OK, 0 FAIL;
+  foundational, +0). kotlinc's JVM generics are **erasure**: each type parameter erases to its
+  upper bound (default `Object`), and the generic info is written to the bytecode `Signature` attribute.
+  krusty already erases (generic classes/functions compile); the missing half is the generic type
+  *arguments*. Step 1: the classreader now captures the class-level `Signature` attribute
+  (`ClassInfo.signature`) — e.g. `IntRange` →
+  `Lkotlin/ranges/IntProgression;Lkotlin/ranges/ClosedRange<Ljava/lang/Integer;>;…`, so a generic
+  supertype's type argument (`ClosedRange<Int>` → element `Int`) is recoverable. The metadata reader was
+  refactored to accumulate both `@Metadata.d2` and `Signature` without early-returning (no regression to
+  type-alias resolution). Next on the generics arc: a signature-parse helper → generic supertype/element
+  types → the iterator-protocol for-loop → de-hardcoded ranges/collections.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

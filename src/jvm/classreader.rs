@@ -46,6 +46,9 @@ pub struct ClassInfo {
     pub methods: Vec<MethodSig>,
     /// Strings from the `@kotlin.Metadata` `d2` annotation element, if present.
     pub kotlin_d2: Vec<String>,
+    /// The class-level generic `Signature` attribute (JVM generics), e.g.
+    /// `Lkotlin/ranges/IntProgression;Ljava/lang/Iterable<Ljava/lang/Integer;>;`. `None` if absent.
+    pub signature: Option<String>,
 }
 
 impl ClassInfo {
@@ -166,47 +169,64 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .map(|(access, name, descriptor)| MethodSig { access, name, descriptor })
         .collect();
 
-    // Read class-level attributes to find @kotlin.Metadata → d2 array.
-    let kotlin_d2 = read_kotlin_d2(&mut r, &cp).unwrap_or_default();
+    // Read class-level attributes: @kotlin.Metadata → d2 array, and the generic `Signature` attribute.
+    let (kotlin_d2, signature) = read_class_attrs(&mut r, &cp);
 
-    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d2 })
+    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d2: kotlin_d2.unwrap_or_default(), signature })
 }
 
-/// Parse class-level attributes looking for RuntimeVisibleAnnotations → @kotlin/Metadata → d2.
-fn read_kotlin_d2(r: &mut Reader, cp: &[C]) -> Option<Vec<String>> {
+/// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin/Metadata → `d2`, and the
+/// generic `Signature` attribute. Accumulates both (does not early-return) so neither is missed.
+fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<String>) {
     let utf8 = |i: u16| -> &str {
         match cp.get(i as usize) {
             Some(C::Utf8(s)) => s.as_str(),
             _ => "",
         }
     };
-
-    let n_attrs = r.u2().ok()?;
+    let mut d2 = None;
+    let mut signature = None;
+    let Ok(n_attrs) = r.u2() else { return (d2, signature) };
     for _ in 0..n_attrs {
-        let name = utf8(r.u2().ok()?);
-        let len = r.u4().ok()? as usize;
+        let Ok(ni) = r.u2() else { break };
+        let name = utf8(ni).to_string();
+        let Ok(len) = r.u4() else { break };
+        let len = len as usize;
+        if name == "Signature" {
+            if let Ok(si) = r.u2() {
+                if let Some(C::Utf8(s)) = cp.get(si as usize) {
+                    signature = Some(s.clone());
+                }
+            }
+            if len > 2 {
+                let _ = r.take(len - 2);
+            }
+            continue;
+        }
         if name != "RuntimeVisibleAnnotations" {
-            r.take(len).ok()?;
+            if r.take(len).is_err() {
+                break;
+            }
             continue;
         }
         // Parse annotations: find the one with type == "Lkotlin/Metadata;"
-        let n_ann = r.u2().ok()?;
+        let Ok(n_ann) = r.u2() else { break };
         for _ in 0..n_ann {
-            let ann_type = utf8(r.u2().ok()?);
-            let is_kotlin_meta = ann_type == "Lkotlin/Metadata;";
-            let n_pairs = r.u2().ok()?;
+            let Ok(ati) = r.u2() else { break };
+            let is_kotlin_meta = utf8(ati) == "Lkotlin/Metadata;";
+            let Ok(n_pairs) = r.u2() else { break };
             for _ in 0..n_pairs {
-                let elem_name = utf8(r.u2().ok()?);
-                let want_d2 = is_kotlin_meta && elem_name == "d2";
+                let Ok(eni) = r.u2() else { break };
+                let want_d2 = is_kotlin_meta && utf8(eni) == "d2";
                 match skip_element_value_extract_string_array(r, cp, want_d2) {
-                    Ok(Some(strings)) => return Some(strings),
+                    Ok(Some(strings)) => d2 = Some(strings),
                     Ok(None) => {}
-                    Err(_) => return None,
+                    Err(_) => return (d2, signature),
                 }
             }
         }
     }
-    None
+    (d2, signature)
 }
 
 /// Skip or extract an element_value. If `extract` is true and the value is a string array,
