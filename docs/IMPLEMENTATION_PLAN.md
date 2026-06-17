@@ -1942,6 +1942,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   `Intrinsics.checkNotNullParameter` (non-null reference primary-ctor params, emitted before `super()`)
   — a simple class's `<init>` is now byte-identical to kotlinc.
 
+- ✅ **Phase 178 — computed properties (custom getters)** (268 → 270 box()=OK, 0 FAIL). A property with
+  a custom getter and no backing field (`val x: T get() = expr`) compiles to a `getX()` accessor; reads
+  call it. Top-level → static `getX()` on the facade (read → `invokestatic`); class body property →
+  instance `getX()` (`obj.x` → `invokevirtual getX()`, unqualified `x` inside the class → `this.getX()`).
+  Accessor name is `getX` (an `is`-prefixed boolean keeps its name). Computed body properties are
+  excluded from the class fields, and the constructor init-order skips them. `tests/computed_prop_e2e.rs`.
+  Also unified `ObjectInstance`/`CompanionInstance` into one `IrExpr::StaticInstance { owner, ty, field }`
+  (Kotlin IR's `IrGetObjectValue` — both are a `getstatic` of a singleton static field).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

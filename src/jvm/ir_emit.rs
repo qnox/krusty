@@ -778,15 +778,10 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref(&c.fq_name.clone(), &entry, &desc);
                 code.getstatic(f, 1);
             }
-            IrExpr::ObjectInstance { class } => {
-                let fq = self.ir.classes[*class as usize].fq_name.clone();
-                let f = self.cw.fieldref(&fq, "INSTANCE", &format!("L{fq};"));
-                code.getstatic(f, 1);
-            }
-            IrExpr::CompanionInstance { outer, companion } => {
-                let outer_fq = self.ir.classes[*outer as usize].fq_name.clone();
-                let comp_fq = self.ir.classes[*companion as usize].fq_name.clone();
-                let f = self.cw.fieldref(&outer_fq, "Companion", &format!("L{comp_fq};"));
+            IrExpr::StaticInstance { owner, ty, field } => {
+                let owner_fq = self.ir.classes[*owner as usize].fq_name.clone();
+                let ty_fq = self.ir.classes[*ty as usize].fq_name.clone();
+                let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
                 code.getstatic(f, 1);
             }
             IrExpr::EnumValues { class } => {
@@ -1557,8 +1552,8 @@ impl<'a> Emitter<'a> {
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
-            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } | IrExpr::ObjectInstance { class } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
-            IrExpr::CompanionInstance { companion, .. } => Ty::obj(&self.ir.classes[*companion as usize].fq_name),
+            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
+            IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
             IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {
