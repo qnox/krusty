@@ -1112,6 +1112,30 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::Block { stmts: out, value })
             }
             Expr::Lambda { params, body } => return self.lower_lambda(e, &params, body),
+            // Unbound top-level function reference `::foo` → the same `invokedynamic` +
+            // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
+            // the referenced function (no synthesized body). Bound/object/constructor references bail.
+            Expr::CallableRef { receiver, name } => {
+                if receiver.is_some() {
+                    return None;
+                }
+                let Ty::Fun(sig) = self.info.ty(e) else { return None };
+                let arity = sig.params.len();
+                let fid = *self.fun_ids.get(&name)?;
+                // Same guards as lambdas: a `Unit`/`Nothing` return needs the `kotlin/Unit` singleton,
+                // and a generic referenced function erases its type parameters.
+                let ret = self.ir.functions[fid as usize].ret.clone();
+                if ret == IrType::Unit || ret == IrType::Nothing {
+                    return None;
+                }
+                if self.ir.functions[fid as usize].params.len() != arity {
+                    return None;
+                }
+                if self.top_fun_decl(&name).map_or(false, |f| !f.type_params.is_empty()) {
+                    return None;
+                }
+                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }));
+            }
             Expr::Name(n) => {
                 if let Some((v, _)) = self.lookup(&n) {
                     self.ir.add_expr(IrExpr::GetValue(v))
@@ -1569,10 +1593,11 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
         Ty::Obj(n) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
-        // A Kotlin function type `(A,…) -> R` is the JVM interface `kotlin/jvm/functions/FunctionN`.
-        Ty::Fun(s) => return IrType::Class {
-            fq_name: format!("kotlin/jvm/functions/Function{}", s.params.len()),
-            type_args: vec![], nullable: false,
+        // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
+        // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
+        Ty::Fun(s) => return IrType::Function {
+            params: s.params.iter().map(|t| ty_to_ir(*t)).collect(),
+            ret: Box::new(ty_to_ir(s.ret)),
         },
         // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
         // its representation. Primitive arrays encode the element in the class name.

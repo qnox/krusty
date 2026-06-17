@@ -10,8 +10,12 @@ use crate::jvm::names::method_descriptor;
 use crate::types::Ty;
 
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
-/// `IrClass`. Returns `(internal_name, bytes)` for each.
-pub fn emit_all(ir: &IrFile, facade: &str) -> Vec<(String, Vec<u8>)> {
+/// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
+/// JVM backend can't represent (so every emission path skips it rather than miscompiling).
+pub fn emit_all(ir: &IrFile, facade: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    if !jvm_can_emit(ir) {
+        return None;
+    }
     let mut out = Vec::new();
     // Facade: the static top-level functions (those with no dispatch receiver).
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
@@ -27,7 +31,32 @@ pub fn emit_all(ir: &IrFile, facade: &str) -> Vec<(String, Vec<u8>)> {
     for c in &ir.classes {
         out.push((c.fq_name.clone(), emit_class(ir, c, facade)));
     }
-    out
+    Some(out)
+}
+
+/// Whether the JVM backend can represent this IR. The JVM stdlib provides fixed-arity
+/// `kotlin/jvm/functions/Function0..22`; a function type or lambda of higher arity needs a different
+/// vararg representation krusty doesn't emit, so such a file is skipped — never miscompiled. This is a
+/// JVM constraint (the language allows any arity), so it lives in the JVM emitter, not common lowering.
+fn jvm_can_emit(ir: &IrFile) -> bool {
+    fn ty_ok(t: &IrType) -> bool {
+        match t {
+            IrType::Function { params, ret } => params.len() <= 22 && params.iter().all(ty_ok) && ty_ok(ret),
+            IrType::Class { type_args, .. } => type_args.iter().all(ty_ok),
+            _ => true,
+        }
+    }
+    if ir.functions.iter().any(|f| !ty_ok(&f.ret) || !f.params.iter().all(ty_ok)) {
+        return false;
+    }
+    if ir.statics.iter().any(|s| !ty_ok(&s.ty)) {
+        return false;
+    }
+    ir.exprs.iter().all(|e| match e {
+        IrExpr::Lambda { arity, .. } => *arity <= 22,
+        IrExpr::Variable { ty, .. } => ty_ok(ty),
+        _ => true,
+    })
 }
 
 /// Back-compat single-facade entry (used where a file has only functions).
@@ -1405,6 +1434,8 @@ fn ir_ty_to_jvm(t: &IrType) -> Ty {
             "kotlin/Array" => Ty::array(type_args.first().map(ir_ty_to_jvm).unwrap_or(Ty::obj("java/lang/Object"))),
             _ => Ty::obj(fq_name),
         },
+        // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`.
+        IrType::Function { params, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{}", params.len())),
         _ => Ty::Error,
     }
 }
