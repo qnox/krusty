@@ -123,6 +123,8 @@ pub enum Stmt {
     Break,
     Continue,
     While { cond: ExprId, body: ExprId }, // body is a Block expr
+    /// `do { body } while (cond)` — post-test loop (body runs at least once).
+    DoWhile { body: ExprId, cond: ExprId },
     /// `for (name in start <op> end (step s)?) body` over an integer range.
     For { name: String, range: ForRange, body: ExprId },
     /// `for (name in iterable) body` over an array (element iteration).
@@ -701,6 +703,13 @@ impl File {
                 self.write_expr(*cond, out);
                 out.push(' ');
                 self.write_expr(*body, out);
+                out.push(')');
+            }
+            Stmt::DoWhile { body, cond } => {
+                out.push_str("(do ");
+                self.write_expr(*body, out);
+                out.push_str(" while ");
+                self.write_expr(*cond, out);
                 out.push(')');
             }
             Stmt::For { name, range, body } => {

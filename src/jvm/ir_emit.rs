@@ -678,16 +678,20 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.putstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::While { cond, body, update } => {
+            IrExpr::While { cond, body, update, post_test } => {
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
                 self.frame(start, vec![], code);
                 code.bind(start);
-                self.emit_value(cond, code);
-                self.frame(end, vec![], code);
-                code.ifeq(end);
-                // `continue` targets `cont` (run the update, then re-test); `break` targets `end`.
+                // A pre-test loop checks the condition before the body; a `do…while` skips this and
+                // tests at the bottom (`cont`), so the body always runs once.
+                if !post_test {
+                    self.emit_value(cond, code);
+                    self.frame(end, vec![], code);
+                    code.ifeq(end);
+                }
+                // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
                 self.loop_stack.push((cont, end));
                 self.emit(body, code);
                 self.loop_stack.pop();
@@ -698,8 +702,15 @@ impl<'a> Emitter<'a> {
                 if let Some(u) = update {
                     self.emit(u, code);
                 }
-                self.frame(start, vec![], code);
-                code.goto(start);
+                if post_test {
+                    // `do…while`: loop back while the condition holds, then fall through to `end`.
+                    self.emit_value(cond, code);
+                    self.frame(start, vec![], code);
+                    code.ifne(start);
+                } else {
+                    self.frame(start, vec![], code);
+                    code.goto(start);
+                }
                 self.frame(end, vec![], code);
                 code.bind(end);
             }

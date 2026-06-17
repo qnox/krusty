@@ -2015,6 +2015,16 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   `operator inc`/`dec` still bails (skipped, not miscompiled). Unblocks the common `while (…) { i++ }`
   counter idiom. (Follow-up: `++`/`--` in expression position, and on fields/properties.)
 
+- ✅ **Phase 185 — `do … while`** (291 → 296 box()=OK, 0 FAIL). Added the `KwDo` keyword,
+  `Stmt::DoWhile`, and a `post_test: bool` on `IrExpr::While` (one loop node parameterized by where the
+  condition is tested) — the JVM emit skips the top test and tests at the bottom (`ifne start`), so the
+  body always runs once; `continue`/`break` reuse the Phase-183 `loop_stack`. JS emits a native
+  `do { } while`. Enabling it surfaced a **pre-existing smart-cast bug** (independent of loops):
+  `if (o is String) return o.length` emitted the receiver as its wide slot type (`Any`) without a
+  `checkcast` to `String` → `VerifyError`. The `String.length` intrinsic now checkcasts a smart-cast
+  receiver, like the user-field path already did. `tests/do_while_e2e.rs`. (The same smart-cast checkcast
+  is still missing on other stdlib-intrinsic receivers — not yet hit by a compiling box file.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

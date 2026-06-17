@@ -90,8 +90,9 @@ pub enum IrExpr {
     TypeOp { op: IrTypeOp, arg: ExprId, type_operand: IrType },
     /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than
-    /// skipping it. A plain `while` has `update: None` (then `continue` re-tests `cond`).
-    While { cond: ExprId, body: ExprId, update: Option<ExprId> },
+    /// skipping it. A plain `while` has `update: None` (then `continue` re-tests `cond`). `post_test`
+    /// ⇒ a `do…while` (the body runs once before `cond` is first tested).
+    While { cond: ExprId, body: ExprId, update: Option<ExprId>, post_test: bool },
     /// `break` — exit the innermost enclosing loop.
     Break,
     /// `continue` — jump to the innermost enclosing loop's `update`/condition.

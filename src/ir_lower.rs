@@ -1323,7 +1323,24 @@ impl<'a> Lower<'a> {
                 }
                 self.scope.truncate(depth);
                 let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None }))
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: false }))
+            }
+            Stmt::DoWhile { body, cond } => {
+                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { return None };
+                let depth = self.scope.len();
+                let mut out = Vec::new();
+                for s in stmts {
+                    out.push(self.stmt(s)?);
+                }
+                if let Some(t) = trailing {
+                    out.push(self.expr(t)?);
+                }
+                self.scope.truncate(depth);
+                // The condition is lowered after the body's scope is dropped — a `do…while` condition
+                // can't see body-local declarations (Kotlin scopes them to the body).
+                let c = self.expr(cond)?;
+                let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: true }))
             }
             Stmt::Break => Some(self.ir.add_expr(IrExpr::Break)),
             Stmt::Continue => Some(self.ir.add_expr(IrExpr::Continue)),
@@ -1363,7 +1380,7 @@ impl<'a> Lower<'a> {
                 // so `continue` advances the counter instead of skipping it.
                 let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc) });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc), post_test: false });
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
             }
@@ -1410,7 +1427,7 @@ impl<'a> Lower<'a> {
                 let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
                 let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs) });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
             }
@@ -1672,8 +1689,14 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                 } else if rt == Ty::String && name == "length" {
-                    // `s.length` → stdlib intrinsic (0-arg), `Int`.
+                    // `s.length` → stdlib intrinsic (0-arg), `Int`. The receiver may be a smart-cast
+                    // variable whose slot is wider than `String` (`Any` narrowed by `is`) — checkcast it.
                     let recv = self.expr(receiver)?;
+                    let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
+                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::String));
+                    let recv = if needs_cast {
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::String) })
+                    } else { recv };
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
                 } else {
                     return None;
@@ -2229,6 +2252,7 @@ fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
             Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld),
             // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
             Stmt::While { cond, body } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
+            Stmt::DoWhile { body, cond } => ex(file, *body, ld + 1) || ex(file, *cond, ld),
             Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1),
             _ => false,
         }

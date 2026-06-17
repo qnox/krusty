@@ -889,7 +889,7 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
         Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
         Stmt::Return(Some(e)) => r(*e),
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
-        Stmt::While { cond, body } => r(*cond) || r(*body),
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => r(*cond) || r(*body),
         Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
         Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
         Stmt::Expr(e) => r(*e),
@@ -973,7 +973,7 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
         Stmt::Return(None) | Stmt::IncDec { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
         Stmt::Expr(e) => bc_complex_e(file, *e, false),
-        Stmt::While { cond, body } => v(*cond) || bc_complex_e(file, *body, false),
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => v(*cond) || bc_complex_e(file, *body, false),
         Stmt::For { range, body, .. } => v(range.start) || v(range.end) || range.step.map_or(false, |s| v(s)) || bc_complex_e(file, *body, false),
         Stmt::ForEach { iterable, body, .. } => v(*iterable) || bc_complex_e(file, *body, false),
         // A local function is a separate body — `break`/`continue` in it would be non-local.
@@ -1045,7 +1045,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
             Stmt::AssignIndex{array,index,value} => r(*array)||r(*index)||r(*value),
             Stmt::Return(Some(e)) => r(*e),
             Stmt::Return(None)|Stmt::Break|Stmt::Continue => false,
-            Stmt::While{cond,body} => r(*cond)||r(*body),
+            Stmt::While{cond,body} | Stmt::DoWhile{cond,body} => r(*cond)||r(*body),
             Stmt::For{range,body,..} => r(range.start)||r(range.end)||range.step.map_or(false,|s|r(s))||r(*body),
             Stmt::ForEach{iterable,body,..} => r(*iterable)||r(*body),
             Stmt::Expr(e) => r(*e),
@@ -1086,7 +1086,7 @@ fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collectio
             Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
             Stmt::Return(Some(e)) => r(*e),
             Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
-            Stmt::While { cond, body } => r(*cond) || r(*body),
+            Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => r(*cond) || r(*body),
             Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
             Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
             Stmt::Expr(e) => r(*e),
@@ -3746,6 +3746,11 @@ impl<'a> Checker<'a> {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 self.expr(body);
+            }
+            Stmt::DoWhile { body, cond } => {
+                self.expr(body);
+                let ct = self.expr(cond);
+                self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
             }
             Stmt::For { name, range, body } => {
                 let st = self.expr(range.start);
