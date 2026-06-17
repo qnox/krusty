@@ -93,6 +93,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
+                bridges: Vec::new(),
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -169,10 +170,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let own_fid = lo.classes[&internal].methods[&m.name].1;
                             let bp = lo.ir.functions[base_fid as usize].params.clone();
                             let br = lo.ir.functions[base_fid as usize].ret.clone();
-                            let op = &lo.ir.functions[own_fid as usize].params;
-                            let or = &lo.ir.functions[own_fid as usize].ret;
-                            if bp != *op || br != *or {
-                                return None;
+                            let op = lo.ir.functions[own_fid as usize].params.clone();
+                            let or = lo.ir.functions[own_fid as usize].ret.clone();
+                            if bp != op || br != or {
+                                // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
+                                // the supertype's erased descriptor that delegates to the concrete one.
+                                let cid = lo.classes[&internal].id;
+                                lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                    name: m.name.clone(),
+                                    erased_params: bp, erased_ret: br,
+                                    concrete_params: op, concrete_ret: or,
+                                });
                             }
                         }
                     }

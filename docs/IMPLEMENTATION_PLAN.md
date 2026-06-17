@@ -1780,6 +1780,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   — needs getter/setter dispatch, which krusty's direct-field model lacks). Base from a classpath/Java
   type, secondary constructors, and `abstract` classes also stay out for now.
 
+- ✅ **Phase 161 — bridge-method synthesis** (155 → 164 box()=OK, 0 FAIL). An override whose erased
+  signature differs from the supertype's (a generic or covariant override) now gets a synthetic
+  `ACC_BRIDGE|ACC_SYNTHETIC` method (in `IrClass.bridges`, recorded in lowering instead of bailing).
+  `emit_bridges` emits each with the supertype's erased descriptor: it adapts every argument
+  (checkcast a reference, unbox a primitive, numeric-convert) and the return value (box / convert),
+  delegating via `invokevirtual` to the concrete override. Straight-line code (no frames). Unblocks
+  the `bridges/*` generic/covariant-override tests.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
