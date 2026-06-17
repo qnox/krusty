@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::jvm::classreader::{parse_class, ClassInfo};
+use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 
 enum Entry {
     Dir(PathBuf),
@@ -87,6 +87,9 @@ pub struct Classpath {
     /// so JDK class bytes can be seek-read on demand (the jimage stores classes uncompressed). Shared
     /// via `Arc` from a process-global cache so the 146 MB parse happens once.
     jimage: RefCell<Option<(PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>)>>,
+    /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
+    /// expander reads each inline function's body once even when it's called many times.
+    bodies: RefCell<HashMap<(String, String, String), Option<MethodCode>>>,
 }
 
 impl Classpath {
@@ -110,7 +113,7 @@ impl Classpath {
                 }
             })
             .collect();
-        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None) }
+        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None), bodies: RefCell::new(HashMap::new()) }
     }
 
     pub fn empty() -> Classpath {
@@ -216,6 +219,36 @@ impl Classpath {
         }
         self.cache.borrow_mut().insert(internal.to_string(), found.clone());
         found
+    }
+
+    /// The raw `.class` bytes for an internal name (Kotlin built-in names mapped to JVM first), or
+    /// `None` if absent. Unlike `find`, this keeps the bytes (the inline expander needs the body).
+    fn class_bytes(&self, internal: &str) -> Option<Vec<u8>> {
+        let internal = super::jvm_class_map::to_jvm_internal(internal);
+        let name = format!("{internal}.class");
+        for e in &self.entries {
+            let bytes = match e {
+                Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
+                Entry::Jar(j) => read_jar_entry(j, &name),
+                Entry::Jimage(_) => self.jimage_bytes(internal),
+            };
+            if bytes.is_some() {
+                return bytes;
+            }
+        }
+        None
+    }
+
+    /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
+    /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
+    pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
+        let key = (internal.to_string(), name.to_string(), descriptor.to_string());
+        if let Some(hit) = self.bodies.borrow().get(&key) {
+            return hit.clone();
+        }
+        let code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
+        self.bodies.borrow_mut().insert(key, code.clone());
+        code
     }
 
     /// Find extension function candidates for `receiver_desc.method_name`.
