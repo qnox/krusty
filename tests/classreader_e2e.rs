@@ -56,3 +56,31 @@ fn reads_real_javac_class() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn reads_method_body_lazily() {
+    if !have("javac") {
+        eprintln!("skipping: javac unavailable");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("krusty_crb_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("B.java"), "public class B { public static int add(int a, int b) { return a + b; } }").unwrap();
+    let javac = Command::new("javac").args(["B.java"]).current_dir(&dir).output().expect("javac");
+    assert!(javac.status.success(), "javac failed: {}", String::from_utf8_lossy(&javac.stderr));
+    let bytes = fs::read(dir.join("B.class")).unwrap();
+
+    // The lazy reader returns the matching method's real bytecode body.
+    let code = krusty::jvm::classreader::read_method_code(&bytes, "add", "(II)I").expect("add body");
+    assert!(code.max_locals >= 2, "two int params need >=2 locals, got {}", code.max_locals);
+    // `return a + b` ends in iadd (0x60) then ireturn (0xac).
+    assert!(code.code.windows(2).any(|w| w == [0x60, 0xac]), "expected iadd;ireturn in {:?}", code.code);
+    assert!(!code.source_cp.is_empty());
+
+    // A non-existent method / descriptor yields None (no body, not a panic).
+    assert!(krusty::jvm::classreader::read_method_code(&bytes, "add", "(I)I").is_none());
+    assert!(krusty::jvm::classreader::read_method_code(&bytes, "nope", "()V").is_none());
+
+    let _ = fs::remove_dir_all(&dir);
+}
