@@ -670,9 +670,11 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                         for (i, (_, ty, _)) in props.iter().enumerate() {
                             methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new() });
                         }
+                        // Every `copy` parameter has a default (the receiver's property) — so `required`
+                        // is 0 and any subset may be passed, by name or position.
                         methods.insert(
                             "copy".into(),
-                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: props.len(), param_names: Vec::new(), lambda_param_types: Vec::new() },
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: 0, param_names: props.iter().map(|(n, _, _)| n.clone()).collect(), lambda_param_types: Vec::new() },
                         );
                     }
                     if c.is_object {
@@ -2894,16 +2896,26 @@ impl<'a> Checker<'a> {
     }
 
     fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
-        // Named arguments (`f(x = 1)`) are only reordered for top-level function calls. Anywhere else
-        // (methods, constructors, builtins) the labels would be silently ignored — reject instead.
+        // Named arguments map onto parameter positions for a top-level function or a method whose
+        // signature records parameter names (e.g. a data-class `copy`). Elsewhere the labels would be
+        // silently ignored — reject instead.
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         if arg_names.is_some() {
-            let to_free_fn = matches!(self.file.expr(callee), Expr::Name(n) if self.syms.funs.contains_key(n));
-            if !to_free_fn {
+            let callee_expr = self.file.expr(callee).clone();
+            let supports_named = match &callee_expr {
+                Expr::Name(n) => self.syms.funs.contains_key(n),
+                Expr::Member { receiver, name } => {
+                    // A method with default parameters (e.g. data-class `copy`) — `required < params`.
+                    let rt = self.expr(*receiver);
+                    matches!(rt, Ty::Obj(i) if self.lookup_method(i, name).map_or(false, |s| s.required < s.params.len() && !s.param_names.is_empty()))
+                }
+                _ => false,
+            };
+            if !supports_named {
                 for &a in args {
                     self.expr(a);
                 }
-                self.diags.error(span, "krusty: named arguments are only supported for top-level function calls".to_string());
+                self.diags.error(span, "krusty: named arguments are only supported for top-level functions and methods with named parameters".to_string());
                 return Ty::Error;
             }
         }
@@ -3095,6 +3107,21 @@ impl<'a> Checker<'a> {
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal) = rt {
                     if let Some(sig) = self.lookup_method(internal, &name) {
+                        // Named or omitted arguments (a method with parameter defaults, e.g. data-class
+                        // `copy`): map by name/position via the parameter names, honouring `required`.
+                        if (arg_names.is_some() || arg_tys.len() != sig.params.len()) && sig.required < sig.params.len() && !sig.param_names.is_empty() {
+                            match map_call_args(args, arg_names.as_deref(), &sig.param_names, sig.required) {
+                                Ok(slots) => {
+                                    for (i, slot) in slots.iter().enumerate() {
+                                        if let Some(a) = slot {
+                                            self.expect_assignable(sig.params[i], self.expr_types[a.0 as usize], self.span(*a), "argument");
+                                        }
+                                    }
+                                }
+                                Err(msg) => self.diags.error(span, format!("call to '{name}': {msg}")),
+                            }
+                            return sig.ret;
+                        }
                         if sig.params.len() != arg_tys.len() {
                             self.diags.error(span, format!("method '{name}' expects {} args, got {}", sig.params.len(), arg_tys.len()));
                         } else {

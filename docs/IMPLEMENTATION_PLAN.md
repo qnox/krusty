@@ -1960,6 +1960,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   kotlinc (remaining gaps: `final` on a `val` field/accessor; object/enum properties still use public
   fields + direct access — accessors for them are a follow-up).
 
+- ✅ **Phase 180 — default arguments via the `$default` mechanism** (272 → 275 box()=OK, 0 FAIL,
+  byte-parity). A parameter's default *value* is backend-agnostic IR (`IrFile.fn_param_defaults: FunId →
+  Vec<Option<ExprId>>`); a call that omits arguments is an `IrExpr::DefaultedCall` (provided/omitted per
+  position). The JVM backend realizes both: it emits a `name$default(self, params…, int mask, Object
+  marker)` synthetic stub (`if ((mask & (1<<i)) != 0) param = <default>;` then tail-call the real
+  method — using the bitwise ops added in the previous phase), and a `DefaultedCall` invokes it with the
+  computed mask + null marker (omitted args get a zero placeholder). Data-class `copy(y = 5)` is the
+  first user: each `copy` parameter defaults to the receiver's property, so `copy` + `copy$default(P,
+  …, int, Object)` are byte-identical to kotlinc. The checker now maps named/omitted arguments onto
+  parameters (`map_call_args`) for any method whose signature has defaults (`required < params`) — not a
+  `copy` special-case. Wide data classes (>31 fields) keep positional `copy()` only (single-`int` mask).
+  `tests/data_copy_e2e.rs`. Architecture: default *meaning* in IR, `$default` *stub* in the JVM backend.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

@@ -247,6 +247,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             let ret = ir_ty_to_jvm(&f.ret);
             cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ret));
         }
+        // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
+        // synthetic stub (the JVM realization of default arguments).
+        if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
+            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults);
+        }
     }
     emit_bridges(c, &mut cw);
     cw.finish()
@@ -526,6 +531,69 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
         0x0019 // PUBLIC | STATIC | FINAL
     };
     e.cw.add_method(access, &f.name, &method_descriptor(&param_tys, ret), &code);
+}
+
+/// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
+/// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
+/// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
+/// 0. This is the JVM realization of default arguments — the `param_defaults` *meaning* is in the IR.
+fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, defaults: &[Option<u32>]) {
+    let f = &ir.functions[fid as usize];
+    let method_name = f.name.clone();
+    let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+    let ret = ir_ty_to_jvm(&f.ret);
+    let n = real_params.len();
+    let owner_ty = Ty::obj(owner);
+
+    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret };
+    // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
+    e.slots.insert(0, (0, owner_ty));
+    let mut slot = 1u16;
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for (i, t) in real_params.iter().enumerate() {
+        e.slots.insert((i + 1) as u32, (slot, *t));
+        param_slots.push((slot, *t));
+        slot += slot_words(*t);
+    }
+    let mask_slot = slot;
+    e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
+    slot += 1;
+    e.slots.insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
+    slot += 1;
+    e.next_slot = slot;
+
+    let mut code = CodeBuilder::new(slot);
+    for (i, def) in defaults.iter().enumerate().take(n) {
+        if let Some(def_expr) = def {
+            let (pslot, pty) = param_slots[i];
+            code.iload(mask_slot);
+            code.push_int(1 << i, e.cw);
+            code.iand();
+            let skip = code.new_label();
+            e.frame(skip, vec![], &mut code);
+            code.ifeq(skip);
+            e.emit_value(*def_expr, &mut code);
+            store(pty, pslot, &mut code);
+            code.bind(skip);
+        }
+    }
+    code.aload(0);
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
+    let m = e.cw.methodref(owner, &method_name, &method_descriptor(&real_params, ret));
+    code.invokevirtual(m, aw, slot_words(ret) as i32);
+    emit_return(ret, &mut code);
+    code.ensure_locals(e.next_slot);
+    code.link();
+
+    let mut stub_params = vec![owner_ty];
+    stub_params.extend(real_params.iter().copied());
+    stub_params.push(Ty::Int);
+    stub_params.push(Ty::obj("java/lang/Object"));
+    let desc = method_descriptor(&stub_params, ret);
+    e.cw.add_method(0x1009 /* PUBLIC | STATIC | SYNTHETIC */, &format!("{method_name}$default"), &desc, &code);
 }
 
 struct Emitter<'a> {
@@ -859,6 +927,34 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
+            IrExpr::DefaultedCall { class, method, receiver, args } => {
+                // Invoke the `<name>$default(self, params…, mask, marker)` stub: emit the receiver,
+                // each provided arg (or a zero placeholder for an omitted one, with its mask bit set),
+                // then the mask and a null marker.
+                let class_fq = self.ir.classes[*class as usize].fq_name.clone();
+                let fid = self.ir.classes[*class as usize].methods[*method as usize];
+                let method_name = self.ir.functions[fid as usize].name.clone();
+                let real_params: Vec<Ty> = self.ir.functions[fid as usize].params.iter().map(ir_ty_to_jvm).collect();
+                let ret = ir_ty_to_jvm(&self.ir.functions[fid as usize].ret);
+                let args = args.clone();
+                self.emit_value(*receiver, code);
+                let mut mask = 0i32;
+                for (i, arg) in args.iter().enumerate() {
+                    match arg {
+                        Some(a) => self.emit_value(*a, code),
+                        None => { push_zero(real_params[i], code, self.cw); mask |= 1 << i; }
+                    }
+                }
+                code.push_int(mask, self.cw);
+                code.aconst_null();
+                let mut stub_params = vec![Ty::obj(&class_fq)];
+                stub_params.extend(real_params.iter().copied());
+                stub_params.push(Ty::Int);
+                stub_params.push(Ty::obj("java/lang/Object"));
+                let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
+                let m = self.cw.methodref(&class_fq, &format!("{method_name}$default"), &method_descriptor(&stub_params, ret));
+                code.invokestatic(m, aw, slot_words(ret) as i32);
+            }
             IrExpr::Vararg { element_type, elements } => {
                 let et = ir_ty_to_jvm(element_type);
                 let elements = elements.clone();
@@ -1128,6 +1224,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::Throw { operand } => self.records_frame(*operand),
+            IrExpr::DefaultedCall { receiver, args, .. } => self.records_frame(*receiver) || args.iter().any(|a| a.map_or(false, |x| self.records_frame(x))),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
@@ -1595,6 +1692,10 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } => Ty::Nothing,
+            IrExpr::DefaultedCall { class, method, .. } => {
+                let fid = self.ir.classes[*class as usize].methods[*method as usize];
+                ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)
+            }
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
@@ -1724,6 +1825,18 @@ fn array_load_op(elem: Ty) -> (u8, i32) {
 }
 
 /// `(opcode, value-words)` for an array element store (`Xastore`).
+/// Push the zero value of `t` (the placeholder for an omitted `$default` argument; the stub overwrites
+/// it when the mask bit is set).
+fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    match t {
+        Ty::Long => code.lconst_0(),
+        Ty::Double => code.dconst_0(),
+        Ty::Float => code.fconst_0(),
+        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => { code.push_int(0, cw); }
+        _ => code.aconst_null(),
+    }
+}
+
 fn array_store_op(elem: Ty) -> (u8, i32) {
     match elem {
         Ty::Int => (0x4f, 1), Ty::Long => (0x50, 2), Ty::Float => (0x51, 1), Ty::Double => (0x52, 2),
