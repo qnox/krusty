@@ -90,6 +90,9 @@ pub struct Classpath {
     /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
     bodies: RefCell<HashMap<(String, String, String), Option<MethodCode>>>,
+    /// Cache of the `inline` function names declared by a class (from its `@Metadata`), so inline
+    /// recognition at a call site doesn't re-decode the metadata per call.
+    inline_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
 }
 
 impl Classpath {
@@ -113,7 +116,7 @@ impl Classpath {
                 }
             })
             .collect();
-        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None), bodies: RefCell::new(HashMap::new()) }
+        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None), bodies: RefCell::new(HashMap::new()), inline_names: RefCell::new(HashMap::new()) }
     }
 
     pub fn empty() -> Classpath {
@@ -249,6 +252,19 @@ impl Classpath {
         let code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
         self.bodies.borrow_mut().insert(key, code.clone());
         code
+    }
+
+    /// Whether `internal.name(...)` is a Kotlin `inline` function, per the class's `@Metadata` (the
+    /// inline-name set is decoded once per class and cached). The call site uses this to decide
+    /// whether to expand the body rather than emit a call.
+    pub fn is_inline_method(&self, internal: &str, name: &str) -> bool {
+        if let Some(set) = self.inline_names.borrow().get(internal) {
+            return set.contains(name);
+        }
+        let set = std::rc::Rc::new(self.find(internal).map(|ci| super::metadata::inline_method_names(&ci)).unwrap_or_default());
+        let hit = set.contains(name);
+        self.inline_names.borrow_mut().insert(internal.to_string(), set);
+        hit
     }
 
     /// Find extension function candidates for `receiver_desc.method_name`.
