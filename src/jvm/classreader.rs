@@ -77,14 +77,21 @@ pub enum ReadError {
     BadConstant(u8),
 }
 
-/// Constant-pool entry (only the variants we need to resolve names/descriptors). Public so a lazily
-/// read [`MethodCode`] can carry its defining class's pool for later relocation by the inliner.
+/// Constant-pool entry. Public so a lazily read [`MethodCode`] can carry its defining class's pool;
+/// the variants retain enough to *relocate* a body's pool references into a target class's pool.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // NameAndType payload retained for completeness / future Methodref resolution
 pub enum C {
     Utf8(String),
-    Class(u16),        // name_index
-    NameAndType(u16, u16),
+    Class(u16),                  // name_index
+    NameAndType(u16, u16),       // name_index, descriptor_index
+    Fieldref(u16, u16),          // class_index, name_and_type_index
+    Methodref(u16, u16),
+    InterfaceMethodref(u16, u16),
+    String(u16),                 // utf8_index
+    Integer(i32),
+    Float(u32),                  // raw bits
+    Long(i64),
+    Double(u64),                 // raw bits
     Other,
 }
 
@@ -104,10 +111,16 @@ fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {
             }
             7 => C::Class(r.u2()?),
             12 => C::NameAndType(r.u2()?, r.u2()?),
-            9 | 10 | 11 | 17 | 18 => { r.u2()?; r.u2()?; C::Other }
-            8 | 16 | 19 | 20 => { r.u2()?; C::Other }
-            3 | 4 => { r.u4()?; C::Other }
-            5 | 6 => { r.u4()?; r.u4()?; C::Other } // long/double: 2 slots
+            9 => C::Fieldref(r.u2()?, r.u2()?),
+            10 => C::Methodref(r.u2()?, r.u2()?),
+            11 => C::InterfaceMethodref(r.u2()?, r.u2()?),
+            17 | 18 => { r.u2()?; r.u2()?; C::Other } // dynamic / invokedynamic
+            8 => C::String(r.u2()?),
+            16 | 19 | 20 => { r.u2()?; C::Other } // methodtype / module / package
+            3 => C::Integer(r.u4()? as i32),
+            4 => C::Float(r.u4()?),
+            5 => C::Long(((r.u4()? as i64) << 32) | r.u4()? as i64),
+            6 => C::Double(((r.u4()? as u64) << 32) | r.u4()? as u64),
             15 => { r.u1()?; r.u2()?; C::Other }
             _ => return Err(ReadError::BadConstant(tag)),
         };
