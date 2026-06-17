@@ -44,6 +44,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_ret_ty: IrType::Unit,
         companions: HashMap::new(),
         computed_props: HashMap::new(),
+        expr_depth: 0,
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -716,6 +717,10 @@ struct Lower<'a> {
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
     /// the property compiles to a call to the getter (there is no backing field).
     computed_props: HashMap<String, (u32, Ty)>,
+    /// Current expression-lowering recursion depth — guards against a stack overflow on a pathologically
+    /// deep expression (a stress test with thousands of nested operators): past the limit, lowering
+    /// bails (the file is skipped, never miscompiled or crashed).
+    expr_depth: u32,
 }
 
 impl<'a> Lower<'a> {
@@ -1612,6 +1617,19 @@ impl<'a> Lower<'a> {
     }
 
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
+        // Guard against a stack overflow on a pathologically deep expression (a stress test with
+        // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
+        self.expr_depth += 1;
+        if self.expr_depth > 500 {
+            self.expr_depth -= 1;
+            return None;
+        }
+        let r = self.expr_inner(e);
+        self.expr_depth -= 1;
+        r
+    }
+
+    fn expr_inner(&mut self, e: AstExprId) -> Option<u32> {
         Some(match self.afile.expr(e).clone() {
             Expr::IntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as i32))),
             Expr::LongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
