@@ -271,10 +271,10 @@ impl<'a> Lower<'a> {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
         } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
-        } else if at.is_primitive() && !target_ref && *target != IrType::Error && ty_to_ir(at) != *target {
-            // Primitive widening/narrowing (`Int` → `Long`) isn't modeled yet — bail so the file falls
-            // back to the direct emitter rather than putting an `Int` into a `Long` slot.
-            None
+        } else if at.is_primitive() && !target_ref && *target != IrType::Error && *target != IrType::Unit && ty_to_ir(at) != *target {
+            // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
+            // coercion (the backend does the `i2l`/`d2i`/… conversion).
+            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
         } else {
             Some(e)
         }
@@ -561,15 +561,18 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
                 } else {
                     let irop = bin_to_ir(op)?;
-                    // The flat IR emits a single primitive op — it doesn't widen mixed numeric
-                    // operands (`Double < Int`). Require matching operand types for arithmetic /
-                    // comparison on primitives; bail otherwise (a mismatched op = bad-typed stack).
+                    // A primitive op needs both operands in one type. For mixed numeric operands
+                    // (`Double < Int`, `1 + 2L`) coerce both to the promoted type; the backend emits
+                    // the conversion. Non-numeric mixes (e.g. involving `Char`) have no promotion → bail.
                     let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
+                    let mut l = self.expr(lhs)?;
+                    let mut r = self.expr(rhs)?;
                     if lt.is_primitive() && rt.is_primitive() && lt != rt {
-                        return None;
+                        let p = Ty::promote(lt, rt)?;
+                        let pir = ty_to_ir(p);
+                        if lt != p { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: pir.clone() }); }
+                        if rt != p { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: pir }); }
                     }
-                    let l = self.expr(lhs)?;
-                    let r = self.expr(rhs)?;
                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
                 }
             }
@@ -604,8 +607,12 @@ impl<'a> Lower<'a> {
                 match op {
                     // `-x` → `0 - x` (zero typed to match); `!x` → `x == false`.
                     UnOp::Neg => {
+                        // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
+                        // share one numeric type (Byte/Short/Char negate in the `int` category).
                         let zero = match self.info.ty(operand) {
                             Ty::Long => self.ir.add_expr(IrExpr::Const(IrConst::Long(0))),
+                            Ty::Double => self.ir.add_expr(IrExpr::Const(IrConst::Double(0.0))),
+                            Ty::Float => self.ir.add_expr(IrExpr::Const(IrConst::Float(0.0))),
                             _ => self.ir.add_expr(IrExpr::Const(IrConst::Int(0))),
                         };
                         self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Sub, lhs: zero, rhs: v })
@@ -715,8 +722,14 @@ impl<'a> Lower<'a> {
                         if args.len() != ctor_count {
                             return None;
                         }
+                        // Coerce each argument to its constructor-parameter field type (e.g. an
+                        // `Int` literal into a `Long` field — `LongWrapper(2)`).
+                        let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields[..ctor_count]
+                            .iter().map(|(_, t)| t.clone()).collect();
                         let mut a = Vec::new();
-                        for arg in args { a.push(self.expr(arg)?); }
+                        for (arg, ft) in args.iter().zip(&field_tys) {
+                            a.push(self.lower_arg(*arg, ft)?);
+                        }
                         self.ir.add_expr(IrExpr::New { class, args: a })
                     }
                 }
