@@ -1511,6 +1511,17 @@ impl<'a> Parser<'a> {
                 let body = self.parse_branch();
                 self.finish_stmt(Stmt::While { cond, body }, start)
             }
+            TokenKind::KwDo => {
+                self.bump();
+                self.skip_newlines();
+                let body = self.parse_branch();
+                self.skip_newlines();
+                self.expect(TokenKind::KwWhile, "'while'");
+                self.expect(TokenKind::LParen, "'('");
+                let cond = self.parse_expr();
+                self.expect(TokenKind::RParen, "')'");
+                self.finish_stmt(Stmt::DoWhile { body, cond }, start)
+            }
             TokenKind::KwFor => self.parse_for(start),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
             TokenKind::KwFun => {
