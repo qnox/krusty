@@ -351,8 +351,15 @@ impl BoxRunner {
 }
 
 /// Compile and run BoxRunner.java once, return path to the directory with BoxRunner.class.
-fn setup_runner(java_home: &str, work: &Path) -> PathBuf {
-    let runner_dir = work.join("runner");
+fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
+    // Cache the compiled runner in a stable location keyed by the source hash — BoxRunner.java is
+    // static, so javac runs once across all test runs, not every invocation (~1.8s saved per run).
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in BOX_RUNNER_SRC.bytes() { hash = (hash ^ b as u64).wrapping_mul(0x100000001b3); }
+    let runner_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/box_runner_{hash:016x}"));
+    if runner_dir.join("BoxRunner.class").is_file() {
+        return runner_dir; // already compiled
+    }
     fs::create_dir_all(&runner_dir).unwrap();
     let src_path = runner_dir.join("BoxRunner.java");
     fs::write(&src_path, BOX_RUNNER_SRC).unwrap();
@@ -409,7 +416,13 @@ fn kotlin_codegen_box_conformance() {
 
     let mut files = Vec::new();
     collect_kt(Path::new(&box_dir), &mut files);
-    files.truncate(limit);
+    // KRUSTY_BOX_LIMIT caps the run for fast dev rounds. Sample evenly across the *sorted* corpus
+    // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
+    // would hide coverage in every other package. A full (unset) run keeps the whole corpus.
+    if limit < files.len() {
+        let stride = files.len() / limit;
+        files = files.into_iter().step_by(stride.max(1)).collect();
+    }
 
     let work = std::env::temp_dir().join(format!("krusty_box_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
@@ -433,13 +446,34 @@ fn kotlin_codegen_box_conformance() {
     // Phase timers (nanoseconds, accumulated across threads).
     let t_compile = AtomicU64::new(0);
     let t_jvm = AtomicU64::new(0);
+    let t_closure = AtomicU64::new(0);
+    let t_read = AtomicU64::new(0);
+    let t_cpjars = AtomicU64::new(0);
     let t_total_start = std::time::Instant::now();
+
+    // Optional sampling profiler → flamegraph SVG (KRUSTY_FLAMEGRAPH=1). Captures all rayon worker
+    // threads via SIGPROF; off by default so normal runs aren't perturbed.
+    let flame_guard = if env("KRUSTY_FLAMEGRAPH").is_some() {
+        Some(pprof::ProfilerGuardBuilder::default()
+            .frequency(997)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("start profiler"))
+    } else {
+        None
+    };
+
+    let no_run = env("KRUSTY_NO_RUN").is_some();
 
     // Parallel phase: compile each test in-process, run in the per-thread JVM.
     let results: Vec<(PathBuf, TestResult)> = pool.install(|| files
         .par_iter()
         .map(|file| {
+            let tc0 = std::time::Instant::now();
+            let tr0 = std::time::Instant::now();
             let src = fs::read_to_string(file).unwrap_or_default();
+            t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let __ret = (|| {
             // Skip multi-file, multi-module, or no-box tests.
             if src.contains("// FILE:") || src.contains("// MODULE:") || !src.contains("fun box()") {
                 return (file.clone(), TestResult::Skip);
@@ -467,7 +501,9 @@ fn kotlin_codegen_box_conformance() {
             // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
             let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File").to_string();
             // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
+            let tj0 = std::time::Instant::now();
             let compile_cp = common::classpath_jars_for(&src);
+            t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
             let t0 = std::time::Instant::now();
             let classes = match compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref()) {
                 Some(c) => c,
@@ -478,6 +514,12 @@ fn kotlin_codegen_box_conformance() {
                 Some(c) => c,
                 None => return (file.clone(), TestResult::Skip),
             };
+
+            // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
+            // front-end/codegen cost in isolation. A lowered file counts as Pass.
+            if no_run {
+                return (file.clone(), TestResult::Pass);
+            }
 
             // Execute in the per-thread persistent JVM.
             let tid = rayon::current_thread_index().unwrap_or(0);
@@ -502,8 +544,37 @@ fn kotlin_codegen_box_conformance() {
             } else {
                 (file.clone(), TestResult::Fail(result))
             }
+            })();
+            t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            __ret
         })
         .collect());
+
+    // Emit the flamegraph (if profiling was on) before computing summaries.
+    if let Some(g) = flame_guard {
+        if let Ok(report) = g.report().build() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
+            if let Ok(f) = std::fs::File::create(&path) {
+                let _ = report.flamegraph(f);
+                eprintln!("flamegraph written to {}", path.display());
+            }
+            // Terminal-readable hotspots: aggregate samples by leaf frame, print the top 25.
+            let mut leaf: std::collections::HashMap<String, isize> = std::collections::HashMap::new();
+            let mut total: isize = 0;
+            for (frames, count) in &report.data {
+                total += *count;
+                if let Some(top) = frames.frames.first().and_then(|f| f.first()) {
+                    *leaf.entry(top.name()).or_default() += *count;
+                }
+            }
+            let mut v: Vec<_> = leaf.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            eprintln!("--- profiler: top self-frames ({total} samples) ---");
+            for (name, c) in v.into_iter().take(25) {
+                eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
+            }
+        }
+    }
 
     let total_ms = t_total_start.elapsed().as_millis();
     let compile_ms = t_compile.load(Ordering::Relaxed) / 1_000_000;
@@ -513,7 +584,10 @@ fn kotlin_codegen_box_conformance() {
     let sigs_ms = T_SIGS.load(Ordering::Relaxed) / 1_000_000;
     let check_ms = T_CHECK.load(Ordering::Relaxed) / 1_000_000;
     let emit_ms = T_EMIT.load(Ordering::Relaxed) / 1_000_000;
-    eprintln!("timing (wall={total_ms}ms, thread-sum): compile={compile_ms}ms [lex={lex_ms}ms parse={parse_ms}ms sigs={sigs_ms}ms check={check_ms}ms emit={emit_ms}ms]  jvm={jvm_ms}ms");
+    let closure_ms = t_closure.load(Ordering::Relaxed) / 1_000_000;
+    let read_ms = t_read.load(Ordering::Relaxed) / 1_000_000;
+    let cpjars_ms = t_cpjars.load(Ordering::Relaxed) / 1_000_000;
+    eprintln!("timing (wall={total_ms}ms, thread-sum): closure={closure_ms}ms [read={read_ms}ms cpjars={cpjars_ms}ms compile={compile_ms}ms (lex={lex_ms} parse={parse_ms} sigs={sigs_ms} check={check_ms} emit={emit_ms}) jvm={jvm_ms}ms]");
 
     let _ = fs::remove_dir_all(&work);
 
@@ -530,6 +604,19 @@ fn kotlin_codegen_box_conformance() {
                 compiled += 1;
                 failures.push(format!("{}: {why}", file.display()));
             }
+        }
+    }
+
+    // Performance + coverage trend log: append one CSV row per run so trends are visible over time.
+    // Under target/ (untracked); inspect with `column -ts, target/ir_conformance_trend.csv`.
+    {
+        use std::io::Write;
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ir_conformance_trend.csv");
+        let new = !path.exists();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if new { let _ = writeln!(f, "epoch,scanned,compiled,passed,failed,wall_ms,compile_ms,lex_ms,parse_ms,sigs_ms,check_ms,emit_ms,jvm_ms"); }
+            let _ = writeln!(f, "{epoch},{},{compiled},{passed},{},{total_ms},{compile_ms},{lex_ms},{parse_ms},{sigs_ms},{check_ms},{emit_ms},{jvm_ms}", files.len(), failures.len());
         }
     }
 

@@ -456,7 +456,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
     //
     // Seed from classpath type aliases (read from @kotlin.Metadata in *TypeAliasesKt.class files)
     // then from any user-defined typealiases in the input files.
-    let mut alias_map: HashMap<String, String> = type_idx.type_aliases.into_iter().collect();
+    let mut alias_map: HashMap<String, String> = type_idx.type_aliases.clone();
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());

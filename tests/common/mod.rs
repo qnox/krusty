@@ -163,6 +163,25 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
 /// `WITH_COROUTINES` adds kotlinx-coroutines-core. Missing jars are fetched from Maven Central.
 #[allow(dead_code)]
 pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
+    // The jar locations are constant; only the *directive set* of a file varies. Locating jars walks
+    // the (huge) gradle/m2 caches recursively, so memoize per directive-signature — collapsing
+    // thousands of ~1s filesystem walks into at most a handful.
+    let sig: u8 = (directive(src, "WITH_STDLIB") as u8)
+        | (directive(src, "WITH_RUNTIME") as u8) << 1
+        | (directive(src, "WITH_REFLECT") as u8) << 2
+        | (directive(src, "STDLIB_JDK8") as u8) << 3
+        | (directive(src, "WITH_COROUTINES") as u8) << 4;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u8, Vec<PathBuf>>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(&sig) {
+        return v.clone();
+    }
+    let jars = classpath_jars_uncached(src);
+    cache.lock().unwrap().insert(sig, jars.clone());
+    jars
+}
+
+fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
     let mut jars = Vec::new();
     let v = kotlin_version();
     let with_stdlib = directive(src, "WITH_STDLIB") || directive(src, "WITH_RUNTIME") || directive(src, "WITH_REFLECT");
