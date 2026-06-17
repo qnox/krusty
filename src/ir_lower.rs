@@ -30,6 +30,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     let mut lo = Lower {
         afile: file,
         info,
+        syms,
         ir: IrFile { package: file.package.clone(), ..Default::default() },
         fun_ids: HashMap::new(),
         classes: HashMap::new(),
@@ -441,6 +442,7 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
 struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
+    syms: &'a SymbolTable,
     ir: IrFile,
     fun_ids: HashMap<String, u32>,
     classes: HashMap<String, ClassInfo>,
@@ -461,6 +463,36 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
+    /// The constructor descriptor is resolved from the classpath; arguments are coerced to its
+    /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
+    fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+        let desc = crate::resolve::resolve_java_ctor(&self.syms.classpath, internal, &arg_tys).or_else(|| {
+            // Every JDK `Throwable` has a no-arg and a single-`String` constructor; accept those two
+            // shapes even when the classpath reader can't see the jimage constructor descriptors.
+            if crate::jvm::jvm_class_map::is_throwable_internal(internal) {
+                match arg_tys.as_slice() {
+                    [] => Some("()V".to_string()),
+                    [Ty::String] => Some("(Ljava/lang/String;)V".to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })?;
+        let param_descs = split_param_descriptors(&desc)?;
+        if param_descs.len() != args.len() {
+            return None;
+        }
+        let mut a = Vec::new();
+        for (arg, pd) in args.iter().zip(&param_descs) {
+            let pty = ty_to_ir(crate::resolve::desc_to_ty(pd));
+            a.push(self.lower_arg(*arg, &pty)?);
+        }
+        Some(self.ir.add_expr(IrExpr::NewExternal { internal: internal.to_string(), ctor_desc: desc, args: a }))
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -1035,6 +1067,11 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
             Expr::NullLit => self.ir.add_expr(IrExpr::Const(IrConst::Null)),
+            // `throw e` — throw the exception value; control never returns.
+            Expr::Throw { operand } => {
+                let v = self.expr(operand)?;
+                self.ir.add_expr(IrExpr::Throw { operand: v })
+            }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
             Expr::NotNull { operand } => {
@@ -1437,6 +1474,10 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
                         self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a })
+                    } else if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| !self.classes.contains_key(*i)) {
+                        // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
+                        // `StringBuilder()`. The constructor descriptor comes from the classpath.
+                        return self.lower_external_new(internal, &args);
                     } else {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
@@ -1623,6 +1664,31 @@ fn ty_to_ir(t: Ty) -> IrType {
         _ => return IrType::Error,
     };
     IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
+}
+
+/// Split the parameter section of a JVM method descriptor (`(Ljava/lang/String;I)V`) into the
+/// individual field descriptors (`["Ljava/lang/String;", "I"]`).
+fn split_param_descriptors(desc: &str) -> Option<Vec<String>> {
+    let inner = desc.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while b[i] == b'[' {
+            i += 1;
+            if i >= b.len() { return None; }
+        }
+        if b[i] == b'L' {
+            while i < b.len() && b[i] != b';' { i += 1; }
+            i += 1; // include the ';'
+        } else {
+            i += 1; // a single-char primitive
+        }
+        if i > b.len() { return None; }
+        out.push(inner[start..i].to_string());
+    }
+    Some(out)
 }
 
 fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
