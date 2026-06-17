@@ -186,65 +186,78 @@ impl Classpath {
         if self.ext.borrow().is_some() {
             return;
         }
-        let mut idx = ExtIndex::default();
+        // Pass 1: parse every class (public or not) by internal name. The stdlib's extension/top-level
+        // functions live in package-private multifile *part* classes (`RangesKt___RangesKt`) that the
+        // public facade (`RangesKt`) extends — so we need the parts even though they aren't public.
+        let mut all: HashMap<String, ClassInfo> = HashMap::new();
         for e in &self.entries {
             match e {
-                Entry::Dir(d) => index_dir(d, &mut idx),
-                Entry::Jar(j) => index_jar(j, &mut idx),
-                // No extension functions live in the JDK (Kotlin extensions come from stdlib jars).
+                Entry::Dir(d) => collect_dir(d, &mut all),
+                Entry::Jar(j) => collect_jar(j, &mut all),
+                // No Kotlin extensions live in the JDK.
                 Entry::Jimage(_) => {}
+            }
+        }
+        // Pass 2: index the public static methods reachable from each PUBLIC class — its own and those
+        // inherited through its superclass chain (the multifile parts) — with owner = the public class
+        // (the facade), which is what an `invokestatic` resolves through, like kotlinc.
+        let mut idx = ExtIndex::default();
+        for ci in all.values() {
+            if !ci.is_public() {
+                continue;
+            }
+            let mut cur = Some(ci);
+            let mut visited = std::collections::HashSet::new();
+            while let Some(c) = cur {
+                if !visited.insert(c.this_class.clone()) {
+                    break;
+                }
+                for m in &c.methods {
+                    if !m.is_static() || !m.is_public() || m.name.starts_with('<') {
+                        continue;
+                    }
+                    let Some(first_param) = first_descriptor_param(&m.descriptor) else { continue };
+                    let Some(ret_desc) = descriptor_ret(&m.descriptor) else { continue };
+                    idx.by_recv
+                        .entry(first_param)
+                        .or_default()
+                        .entry(m.name.clone())
+                        .or_default()
+                        .push(ExtCandidate {
+                            owner: ci.this_class.clone(),
+                            name: m.name.clone(),
+                            descriptor: m.descriptor.clone(),
+                            ret_desc,
+                        });
+                }
+                cur = c.super_class.as_ref().and_then(|s| all.get(s));
             }
         }
         *self.ext.borrow_mut() = Some(idx);
     }
 }
 
-fn index_class_bytes(bytes: &[u8], idx: &mut ExtIndex) {
-    let Ok(ci) = parse_class(bytes) else { return };
-    // Only public methods on a public class are callable from generated code — a non-public
-    // member (e.g. a multifile-facade *part* class, or a private overload) would `IllegalAccessError`
-    // at runtime. Skip them so such a call stays unresolved (rejected) rather than miscompiled.
-    if !ci.is_public() {
-        return;
-    }
-    for m in &ci.methods {
-        if !m.is_static() || !m.is_public() || m.name.starts_with('<') {
-            continue;
-        }
-        // Parse first parameter from descriptor `(Lfoo/Bar;II)V` → `Lfoo/Bar;`
-        let Some(first_param) = first_descriptor_param(&m.descriptor) else { continue };
-        // Return type.
-        let Some(ret_desc) = descriptor_ret(&m.descriptor) else { continue };
-        let cand = ExtCandidate {
-            owner: ci.this_class.clone(),
-            name: m.name.clone(),
-            descriptor: m.descriptor.clone(),
-            ret_desc,
-        };
-        idx.by_recv
-            .entry(first_param)
-            .or_default()
-            .entry(m.name.clone())
-            .or_default()
-            .push(cand);
+fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassInfo>) {
+    if let Ok(ci) = parse_class(bytes) {
+        all.insert(ci.this_class.clone(), ci);
     }
 }
 
-fn index_dir(dir: &Path, idx: &mut ExtIndex) {
+fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassInfo>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            index_dir(&p, idx);
+            collect_dir(&p, all);
         } else if p.extension().map_or(false, |x| x == "class") {
             if let Ok(b) = std::fs::read(&p) {
-                index_class_bytes(&b, idx);
+                collect_class_bytes(&b, all);
             }
         }
     }
 }
 
-fn index_jar(jar: &Path, idx: &mut ExtIndex) {
+fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassInfo>) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
     for i in 0..archive.len() {
@@ -254,7 +267,7 @@ fn index_jar(jar: &Path, idx: &mut ExtIndex) {
         }
         let mut buf = Vec::new();
         if entry.read_to_end(&mut buf).is_ok() {
-            index_class_bytes(&buf, idx);
+            collect_class_bytes(&buf, all);
         }
     }
 }
