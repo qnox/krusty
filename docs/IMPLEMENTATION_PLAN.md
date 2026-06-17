@@ -1559,6 +1559,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   Other callable references still skip. Completes the multi-param → capturing → callable-ref chain.
   Production drop-in: **458 → 460 box()=OK, 0 FAIL**.
 
+- ✅ **Class literals + `KClass` members** (`annotationEqHc` test). `UserType::class` lowers to
+  `ldc UserType.class` (modeled as `java.lang.Class`); `KClass<*>` resolves to `java.lang.Class` in
+  both type resolvers (checker + emitter — a mismatch there caused a `NoSuchMethodError`). Restricted
+  to declared-class receivers — primitive `Int::class` (needs `Integer.TYPE`) and bound `obj::class`
+  (needs `getClass()`) skip rather than emit a bad `ldc` (caught 8 FAILs incl. lateinit tests using
+  those forms). Also fixed annotation equality for `Float`/`Double` members to JLS boxed semantics
+  via `Float.compare`/`Double.compare` (`NaN==NaN`), where `fcmpg`/`dcmpg` gave `NaN!=NaN`.
+  Production drop-in: **460 → 463 box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

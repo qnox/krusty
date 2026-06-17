@@ -578,6 +578,9 @@ fn resolve_ty(r: &TypeRef, syms: &SymbolTable) -> Ty {
             return Ty::array(resolve_ty(a, syms));
         }
     }
+    if r.name == "KClass" {
+        return Ty::obj("java/lang/Class"); // `KClass<*>` modeled as `java.lang.Class`
+    }
     Ty::from_name(&r.name)
         .or_else(|| syms.classes.get(&r.name).map(|c| Ty::obj(&c.internal)))
         // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
@@ -1478,8 +1481,10 @@ fn build_annotation_impl(impl_internal: &str, ann_internal: &str, members: &[(St
             match ty {
                 Ty::Int | Ty::Byte | Ty::Short | Ty::Boolean | Ty::Char => c.if_icmpeq(cont),
                 Ty::Long => { c.lcmp(); c.ifeq(cont); }
-                Ty::Double => { c.dcmpg(); c.ifeq(cont); }
-                Ty::Float => { c.fcmpg(); c.ifeq(cont); }
+                // JLS annotation equality uses the boxed `Float`/`Double` semantics (`NaN==NaN`,
+                // `+0.0 != -0.0`) — `Float.compare`/`Double.compare` give exactly that.
+                Ty::Double => { let m = cw.methodref("java/lang/Double", "compare", "(DD)I"); c.invokestatic(m, 4, 1); c.ifeq(cont); }
+                Ty::Float => { let m = cw.methodref("java/lang/Float", "compare", "(FF)I"); c.invokestatic(m, 2, 1); c.ifeq(cont); }
                 Ty::Array(elem) => {
                     let ad = arrays_arg_desc(**elem);
                     let m = cw.methodref("java/util/Arrays", "equals", &format!("({ad}{ad})Z"));
@@ -3520,6 +3525,14 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
             Expr::When { subject, arms } => self.emit_when(e, subject, &arms, code, cw),
+            Expr::CallableRef { receiver, name } if name == "class" => {
+                // `Type::class` → `ldc Type.class` (modeled as `java.lang.Class`).
+                let internal = match receiver.map(|r| self.file.expr(r).clone()) {
+                    Some(Expr::Name(tn)) => self.syms.classes.get(&tn).map(|c| c.internal.clone()).unwrap_or(tn),
+                    _ => "java/lang/Object".to_string(),
+                };
+                code.ldc_class(&internal, cw);
+            }
             Expr::CallableRef { receiver, name } if matches!(name.as_str(), "equals" | "hashCode" | "toString") => {
                 self.emit_callable_ref(receiver, &name, code, cw);
             }
