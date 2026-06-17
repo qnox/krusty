@@ -516,9 +516,16 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
     }
     code.ensure_locals(e.next_slot);
     code.link();
-    // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). Instance
-    // methods are not marked `final` yet (would need per-method `open`/`override` tracking).
-    let access = if instance { 0x0001 } else { 0x0019 }; // PUBLIC | (STATIC | FINAL)
+    // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
+    // instance method of a *final* class (nothing extends it) is also `final` and can never be
+    // overridden, so marking it is safe; in an open/extended class we conservatively leave it
+    // non-`final` (a method-level `open`/`override` model would refine this).
+    let access = if instance {
+        let final_class = !ir.classes.iter().any(|o| o.superclass == owner);
+        0x0001 | if final_class { 0x0010 } else { 0 }
+    } else {
+        0x0019 // PUBLIC | STATIC | FINAL
+    };
     e.cw.add_method(access, &f.name, &method_descriptor(&param_tys, ret), &code);
 }
 
