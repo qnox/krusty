@@ -353,7 +353,7 @@ impl<'a> Parser<'a> {
             }
             let nullable = self.eat(TokenKind::Question);
             self.expect(TokenKind::Dot, "'.'");
-            let recv = TypeRef { name: first, nullable, arg: None, span, fun_params: vec![] };
+            let recv = TypeRef { name: first, nullable, arg: None, targs: vec![], span, fun_params: vec![] };
             (Some(recv), self.ident_or_error("property name"))
         } else {
             (None, first)
@@ -719,7 +719,7 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Lt) { self.parse_type_args(); }  // skip type args on receiver
             if self.eat(TokenKind::Question) { recv_nullable = true; }
             self.expect(TokenKind::Dot, "'.'");
-            let recv_ty = TypeRef { name: first_name, nullable: recv_nullable, arg: None, span, fun_params: vec![] };
+            let recv_ty = TypeRef { name: first_name, nullable: recv_nullable, arg: None, targs: vec![], span, fun_params: vec![] };
             let fun_name = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -1197,36 +1197,38 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::Arrow) {
                 let ret = self.parse_type();
                 let nullable = self.eat(TokenKind::Question);
-                TypeRef { name: "<fun>".to_string(), nullable, arg: Some(Box::new(ret)), span, fun_params }
+                TypeRef { name: "<fun>".to_string(), nullable, arg: Some(Box::new(ret)), targs: Vec::new(), span, fun_params }
             } else {
                 // Parenthesized type (rare) — just return error; krusty doesn't support tuple types.
                 self.diags.error(span, "expected '->' for function type");
-                TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span, fun_params: Vec::new() }
+                TypeRef { name: "<error>".to_string(), nullable: false, arg: None, targs: Vec::new(), span, fun_params: Vec::new() }
             }
         } else if self.at(TokenKind::Ident) {
             let name = self.text().to_string();
             self.bump();
-            // For `Array<T>`, capture the element type; other generic type arguments are erased.
+            // For `Array<T>`, capture the element type in `arg`; for any other generic type, capture
+            // the full argument list in `targs` (erased in JVM descriptors, kept for member typing).
+            let mut targs = Vec::new();
             let arg = if name == "Array" && self.at(TokenKind::Lt) {
                 self.bump(); // '<'
                 self.skip_variance(); // `out`/`in`
                 // Star projection `Array<*>` — erase to Object.
                 let elem = if self.eat(TokenKind::Star) {
-                    TypeRef { name: "Any".to_string(), nullable: true, arg: None, span, fun_params: Vec::new() }
+                    TypeRef { name: "Any".to_string(), nullable: true, arg: None, targs: Vec::new(), span, fun_params: Vec::new() }
                 } else {
                     self.parse_type()
                 };
                 self.expect(TokenKind::Gt, "'>'");
                 Some(Box::new(elem))
             } else {
-                self.parse_type_args(); // erase generic type arguments: `Box<Int>` → raw `Box`
+                targs = self.parse_type_args(); // `Box<Int>` → carry `[Int]` (erased in descriptors)
                 None
             };
             let nullable = self.eat(TokenKind::Question); // `T?`
-            TypeRef { name, nullable, arg, span, fun_params: Vec::new() }
+            TypeRef { name, nullable, arg, targs, span, fun_params: Vec::new() }
         } else {
             self.diags.error(span, "expected a type");
-            TypeRef { name: "<error>".to_string(), nullable: false, arg: None, span, fun_params: Vec::new() }
+            TypeRef { name: "<error>".to_string(), nullable: false, arg: None, targs: Vec::new(), span, fun_params: Vec::new() }
         }
     }
 
@@ -1251,7 +1253,7 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;
-                args.push(TypeRef { name: "Any".to_string(), nullable: true, arg: None, span, fun_params: Vec::new() });
+                args.push(TypeRef { name: "Any".to_string(), nullable: true, arg: None, targs: Vec::new(), span, fun_params: Vec::new() });
             } else {
                 args.push(self.parse_type());
             }

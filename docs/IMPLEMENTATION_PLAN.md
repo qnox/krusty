@@ -2131,6 +2131,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   refactored to accumulate both `@Metadata.d2` and `Signature` without early-returning (no regression to
   type-alias resolution). Next on the generics arc: a signature-parse helper → generic supertype/element
   types → the iterator-protocol for-loop → de-hardcoded ranges/collections.
+- **Phase 195** made `Ty::Obj` carry a (interned) generic argument slice (`Ty::obj_args`,
+  `Ty::type_args()`) — the architectural core, behaviour-neutral (all sites passed empty args).
+- **Phase 196** populates those arguments from *declared* types: the parser now captures the full
+  `<…>` list on a class type into `TypeRef.targs` (instead of discarding it), and the checker's
+  `resolve_ty`/`ty_of_ref` build `Ty::obj_args(internal, [resolved args])` for a generic instantiation
+  (`val m: Map<String, Int>` → `Obj("…/Map", [String, Int])`). Still JVM-erased in descriptors, so
+  behaviour-neutral (325/0-FAIL); the arguments are now *present* on declared-typed values. Next:
+  consume them — substitute a class's type parameters at member access (`Box<Int>().x : Int`), with the
+  emit side inserting the generic-read checkcast/unbox kotlinc emits.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.

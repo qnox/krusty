@@ -156,8 +156,12 @@ pub struct TypeRef {
     pub name: String,
     /// Trailing `?` — a nullable type (e.g. `String?`).
     pub nullable: bool,
-    /// The first generic type argument, captured for `Array<T>` (other type args are erased/skipped).
+    /// The first generic type argument, captured for `Array<T>` (element) and function types
+    /// (the return type). General class type arguments live in `targs`.
     pub arg: Option<Box<TypeRef>>,
+    /// All generic type arguments on a class type (`Map<K, V>` → `[K, V]`). Empty for non-generic
+    /// types. JVM-erased in descriptors but kept so the front end recovers member/element types.
+    pub targs: Vec<TypeRef>,
     pub span: Span,
     /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
     /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
