@@ -4,6 +4,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -19,6 +21,13 @@ fn safe_calls_run() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
+    // Reference `==`/`!=` compiles to `kotlin/jvm/internal/Intrinsics.areEqual` — needs kotlin-stdlib
+    // on the runtime classpath, as any real Kotlin program does.
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping safe_call_e2e: no kotlin-stdlib jar found");
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_sc_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -29,7 +38,8 @@ fn safe_calls_run() {
     if !kc.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&kc.stderr)); return; }
     fs::write(dir.join("M.java"), "public class M { public static void main(String[] a) { System.out.println(SKt.box()); } }").unwrap();
     assert!(Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap().status.success());
-    let r = Command::new(&java).args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "M"]).output().unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java).args(["-Xverify:all", "-cp", &cp, "M"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "OK", "stderr={}", String::from_utf8_lossy(&r.stderr));
     let _ = fs::remove_dir_all(&dir);
 }

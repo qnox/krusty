@@ -147,7 +147,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - String concat of mixed types (`Int + String`, `Boolean + String`) and evaluation order.
 - `if`-as-expression typing (common supertype) and as-statement (Unit).
 - Operator precedence/associativity vs Kotlin grammar (Pratt table must match).
-- `==` on `String` (Kotlin `==` = `.equals`, `===` = reference) — v0 supports `==` only.
+- `==` on `String` (Kotlin `==` = `.equals`, `===` = reference) — v0 supports `==` only. Structural
+  `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
+  — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the
+  bytecode matches (krusty previously used `java/util/Objects.equals`, which behaves identically but
+  isn't byte-equal). Note: the Kotlin compiler exposes **no metadata** marking these intrinsics — the
+  operation→helper mapping is a hardcoded registry in its backend (`IrIntrinsicMethods.kt`, keyed by
+  built-in IR symbols), which krusty mirrors.
 - Boolean short-circuit evaluation (`&&`/`||`) side-effect order.
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.

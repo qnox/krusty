@@ -623,7 +623,7 @@ impl<'a> Lower<'a> {
                 let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: cmp, rhs: z })
             }
-            // Int/Long/… → native compare; reference → `!Objects.equals` via the reference Ne path.
+            // Int/Long/… → native compare; reference → `!Intrinsics.areEqual` via the reference Ne path.
             _ => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: a, rhs: b }),
         }
     }
@@ -1549,8 +1549,8 @@ impl<'a> Lower<'a> {
 
 /// Whether `e` emits as a branch (a conditional that materializes via jumps + merge frames). Such an
 /// expression can't be safely emitted while other operands sit on the stack (the merge frame would
-/// omit them). Primitive `==`/`<`… and `if`/`when`/elvis are branchy; reference `==` (Objects.equals)
-/// and plain calls are not.
+/// omit them). Primitive `==`/`<`… and `if`/`when`/elvis are branchy; reference `==`
+/// (`Intrinsics.areEqual`) and plain calls are not.
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
         Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
@@ -1572,7 +1572,7 @@ fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
 }
 
 /// Best-effort: is the literal/operand a primitive (so `==` would use a numeric branch, not
-/// `Objects.equals`)? Conservative — only obvious primitive literals count.
+/// `Intrinsics.areEqual`)? Conservative — only obvious primitive literals count.
 fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e),
         Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
