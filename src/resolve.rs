@@ -2894,6 +2894,19 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
+    /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
+    /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
+    /// resolve. Falls back to the raw class type when there are no explicit type arguments.
+    fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
+        if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
+            let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
+            if !args.is_empty() {
+                return Ty::obj_args(internal, &args);
+            }
+        }
+        Ty::obj(internal)
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -3410,12 +3423,12 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        return Ty::obj(&cls.internal);
+                        return self.ctor_result(call, &cls.internal);
                     }
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
                     if let Some(internal) = self.imports.get(&fname).cloned() {
                         if crate::libraries::resolve_constructor(&*self.syms.libraries, &internal, &arg_tys).is_some() {
-                            return Ty::obj(&internal);
+                            return self.ctor_result(call, &internal);
                         }
                     }
                     // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
@@ -3424,7 +3437,7 @@ impl<'a> Checker<'a> {
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
                         if crate::libraries::resolve_constructor(&*self.syms.libraries, &internal, &arg_tys).is_some() {
-                            return Ty::obj(&internal);
+                            return self.ctor_result(call, &internal);
                         }
                     }
                     // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
