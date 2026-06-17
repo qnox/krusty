@@ -602,6 +602,14 @@ impl<'a> Lower<'a> {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
                         let class = ci.id;
+                        // The IR models only an exact positional match against the primary
+                        // constructor's parameter fields. Default arguments and secondary
+                        // constructors aren't lowered — bail (skip) rather than emit a call whose
+                        // stack shape won't match the constructor descriptor (a VerifyError).
+                        let ctor_count = self.ir.classes[class as usize].ctor_param_count as usize;
+                        if args.len() != ctor_count {
+                            return None;
+                        }
                         let mut a = Vec::new();
                         for arg in args { a.push(self.expr(arg)?); }
                         self.ir.add_expr(IrExpr::New { class, args: a })
