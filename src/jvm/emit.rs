@@ -4358,6 +4358,32 @@ impl<'a> MethodEmitter<'a> {
             }
             return;
         }
+        // Qualified-name classpath-annotation instantiation: `kotlin.SinceKotlin("1.6.0")` → construct
+        // a synthetic impl of the classpath `@interface`.
+        if let Expr::Member { receiver, .. } = self.file.expr(callee).clone() {
+            if let Expr::Name(root) = self.file.expr(receiver).clone() {
+                if !self.slots.contains_key(&root) {
+                    if let Some(internal) = crate::resolve::qualified_path(self.file, callee) {
+                        if let Some(members) = crate::resolve::classpath_annotation_members(&self.syms.classpath, &internal) {
+                            let simple = internal.rsplit('/').next().unwrap_or(&internal).to_string();
+                            let impl_internal = annotation_impl_name(&self.file_facade, &simple);
+                            ensure_annotation_impl(&impl_internal, &internal, &members);
+                            let ctor_tys: Vec<Ty> = members.iter().map(|(_, t)| *t).collect();
+                            let class_idx = cw.class_ref(&impl_internal);
+                            code.new_obj(class_idx);
+                            code.dup();
+                            for (a, pty) in args.iter().zip(&ctor_tys) {
+                                self.emit_expr_as(*a, *pty, code, cw);
+                            }
+                            let aw: i32 = ctor_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                            let m = cw.methodref(&impl_internal, "<init>", &method_descriptor(&ctor_tys, Ty::Unit));
+                            code.invokespecial(m, aw, 0);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         // Nested-class constructor `Outer.Inner(args)` → new `Outer$Inner` + invokespecial <init>.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if let Expr::Name(outer) = self.file.expr(receiver).clone() {
