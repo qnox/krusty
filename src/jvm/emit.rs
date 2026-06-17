@@ -518,7 +518,7 @@ fn trim_margin(s: &str, prefix: &str) -> String {
 fn is_array_builtin(name: &str) -> bool {
     matches!(
         name,
-        "arrayOf" | "emptyArray" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "booleanArrayOf" | "charArrayOf"
+        "arrayOf" | "emptyArray" | "Array" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "booleanArrayOf" | "charArrayOf"
     ) || Ty::primitive_array_element(name).is_some()
 }
 
