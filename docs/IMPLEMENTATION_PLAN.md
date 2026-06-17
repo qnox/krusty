@@ -1926,8 +1926,8 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 
 - ✅ **Phase 176 — `vararg` + array `for`-iteration** (263 → 264 box()=OK, 0 FAIL). A `vararg`
   parameter's JVM type is the array; the call site packs the trailing arguments into a fresh array via
-  the new `IrExpr::ArrayOf { elem, elements }` (`newarray`/`anewarray` + per-element `dup`/index/store)
-  and passes it (matching kotlinc). Spread (`*arr`) and a branchy element are skipped. `for (x in arr)`
+  the new `IrExpr::Vararg { element_type, elements }` (Kotlin IR's `IrVararg`; the JVM backend emits
+  `newarray`/`anewarray` + per-element `dup`/index/store) and passes it (matching kotlinc). Spread (`*arr`) and a branchy element are skipped. `for (x in arr)`
   over an array now lowers to an index loop (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, with
   the array/size hoisted) — the complement that consumes a vararg array. `tests/vararg_e2e.rs`.
 

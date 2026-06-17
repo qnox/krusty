@@ -812,8 +812,8 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
-            IrExpr::ArrayOf { elem, elements } => {
-                let et = ir_ty_to_jvm(elem);
+            IrExpr::Vararg { element_type, elements } => {
+                let et = ir_ty_to_jvm(element_type);
                 let elements = elements.clone();
                 code.push_int(elements.len() as i32, self.cw);
                 if et.is_primitive() {
@@ -1081,7 +1081,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::Throw { operand } => self.records_frame(*operand),
-            IrExpr::ArrayOf { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
+            IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
             IrExpr::Block { stmts, value } =>
@@ -1531,7 +1531,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } => Ty::Nothing,
-            IrExpr::ArrayOf { elem, .. } => Ty::array(ir_ty_to_jvm(elem)),
+            IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }
