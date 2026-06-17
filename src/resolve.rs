@@ -2989,6 +2989,14 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
+                // `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()` on arrays.
+                if let Ty::Array(_) = rt {
+                    match (name.as_str(), arg_tys.len()) {
+                        ("contentEquals", 1) => return Ty::Boolean,
+                        ("contentHashCode", 0) => return Ty::Int,
+                        _ => {}
+                    }
+                }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));
                 Ty::Error
             }

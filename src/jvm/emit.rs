@@ -4583,6 +4583,29 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
         }
+        // Array content methods: `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()`.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            let rt = self.info.ty(receiver);
+            if let Ty::Array(elem) = rt {
+                let ad = arrays_arg_desc(*elem);
+                match (name.as_str(), args.len()) {
+                    ("contentEquals", 1) => {
+                        self.emit_expr(receiver, code, cw);
+                        self.emit_expr_as(args[0], rt, code, cw);
+                        let m = cw.methodref("java/util/Arrays", "equals", &format!("({ad}{ad})Z"));
+                        code.invokestatic(m, 2, 1);
+                        return;
+                    }
+                    ("contentHashCode", 0) => {
+                        self.emit_expr(receiver, code, cw);
+                        let m = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
+                        code.invokestatic(m, 1, 1);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         // `Object` methods on any reference receiver (`x.hashCode()`/`toString()`/`equals(y)`) —
         // dispatched virtually, so a user/data/annotation override is still called. Skip the
         // class-name (static/companion) form, handled elsewhere.
