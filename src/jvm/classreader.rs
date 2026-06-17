@@ -77,22 +77,20 @@ pub enum ReadError {
     BadConstant(u8),
 }
 
-/// Constant-pool entry (only the variants we need to resolve names/descriptors).
+/// Constant-pool entry (only the variants we need to resolve names/descriptors). Public so a lazily
+/// read [`MethodCode`] can carry its defining class's pool for later relocation by the inliner.
+#[derive(Clone, Debug)]
 #[allow(dead_code)] // NameAndType payload retained for completeness / future Methodref resolution
-enum C {
+pub enum C {
     Utf8(String),
     Class(u16),        // name_index
     NameAndType(u16, u16),
     Other,
 }
 
-pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
-    let mut r = Reader { b: bytes, i: 0 };
-    if r.u4()? != 0xCAFEBABE {
-        return Err(ReadError::NotAClass);
-    }
-    let _minor = r.u2()?;
-    let major = r.u2()?;
+/// Parse the constant pool (the reader must be positioned at `constant_pool_count`). Shared by the
+/// full class parse and the lazy method-body reader.
+fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {
     let cp_count = r.u2()? as usize;
     let mut cp: Vec<C> = Vec::with_capacity(cp_count);
     cp.push(C::Other); // index 0 unused
@@ -102,8 +100,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         let entry = match tag {
             1 => {
                 let len = r.u2()? as usize;
-                let s = decode_modified_utf8(r.take(len)?);
-                C::Utf8(s)
+                C::Utf8(decode_modified_utf8(r.take(len)?))
             }
             7 => C::Class(r.u2()?),
             12 => C::NameAndType(r.u2()?, r.u2()?),
@@ -122,6 +119,89 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             idx += 1;
         }
     }
+    Ok(cp)
+}
+
+/// The body of a method, read lazily (`read_method_code`) only when a caller — the inline expander —
+/// actually needs it, never during the eager classpath scan. `code` is the raw JVM bytecode; the
+/// indices in it reference `source_cp` (the defining class's constant pool) and must be relocated
+/// into the target class's pool before the body can be spliced into another method.
+#[derive(Clone, Debug)]
+pub struct MethodCode {
+    pub max_stack: u16,
+    pub max_locals: u16,
+    pub code: Vec<u8>,
+    /// The defining class's constant pool — needed to relocate `code`'s pool references on inlining.
+    pub source_cp: Vec<C>,
+}
+
+/// Lazily read one method's `Code` (bytecode body) from class `bytes`, without parsing every other
+/// method's body — the foundation for the inline expander. `None` if the class/method/`Code` is
+/// absent (e.g. an abstract or native method).
+pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<MethodCode> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4().ok()? != 0xCAFEBABE {
+        return None;
+    }
+    r.u2().ok()?; // minor
+    r.u2().ok()?; // major
+    let cp = parse_constant_pool(&mut r).ok()?;
+    let utf8 = |i: u16| -> &str {
+        match cp.get(i as usize) {
+            Some(C::Utf8(s)) => s.as_str(),
+            _ => "",
+        }
+    };
+    r.u2().ok()?; // access_flags
+    r.u2().ok()?; // this_class
+    r.u2().ok()?; // super_class
+    let ifaces = r.u2().ok()?;
+    for _ in 0..ifaces {
+        r.u2().ok()?;
+    }
+    // Skip fields (each: access, name, desc, attributes).
+    let nfields = r.u2().ok()?;
+    for _ in 0..nfields {
+        r.u2().ok()?;
+        r.u2().ok()?;
+        r.u2().ok()?;
+        skip_attributes(&mut r).ok()?;
+    }
+    // Methods — find the matching (name, descriptor), then its `Code` attribute.
+    let nmethods = r.u2().ok()?;
+    for _ in 0..nmethods {
+        r.u2().ok()?; // access
+        let mname = utf8(r.u2().ok()?).to_string();
+        let mdesc = utf8(r.u2().ok()?).to_string();
+        let matches = mname == name && mdesc == descriptor;
+        let nattr = r.u2().ok()?;
+        for _ in 0..nattr {
+            let attr_name = utf8(r.u2().ok()?).to_string();
+            let attr_len = r.u4().ok()? as usize;
+            if matches && attr_name == "Code" {
+                let max_stack = r.u2().ok()?;
+                let max_locals = r.u2().ok()?;
+                let code_len = r.u4().ok()? as usize;
+                let code = r.take(code_len).ok()?.to_vec();
+                return Some(MethodCode { max_stack, max_locals, code, source_cp: cp });
+            }
+            r.take(attr_len).ok()?;
+        }
+        if matches {
+            return None; // method found but has no Code (abstract/native)
+        }
+    }
+    None
+}
+
+pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4()? != 0xCAFEBABE {
+        return Err(ReadError::NotAClass);
+    }
+    let _minor = r.u2()?;
+    let major = r.u2()?;
+    let cp = parse_constant_pool(&mut r)?;
 
     let utf8 = |i: u16| -> String {
         match cp.get(i as usize) {
