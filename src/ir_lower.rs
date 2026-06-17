@@ -952,6 +952,43 @@ impl<'a> Lower<'a> {
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
             Expr::NullLit => self.ir.add_expr(IrExpr::Const(IrConst::Null)),
+            // `r?.m(args)` / `r?.p` → `{ val t = r; if (t != null) t.m(args)/t.p else null }`.
+            Expr::SafeCall { receiver, name, args } => {
+                let rty = self.info.ty(receiver);
+                let result_ty = self.info.ty(e);
+                // Only reference receiver + reference result are modeled (a nullable-primitive result
+                // would need boxing the member value, which the checker rejects anyway).
+                if !rty.is_reference() || !result_ty.is_reference() {
+                    return None;
+                }
+                let internal = rty.obj_internal()?.to_string();
+                let rv = self.expr(receiver)?;
+                let v = self.fresh_value();
+                let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(rty), init: Some(rv) });
+                let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+                let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
+                let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
+                let member = match args {
+                    Some(args) => {
+                        let (class, index, fid, _) = self.resolve_method(&internal, &name)?;
+                        let params = self.ir.functions[fid as usize].params.clone();
+                        if args.len() != params.len() { return None; }
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, pt)?);
+                        }
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a })
+                    }
+                    None => {
+                        let (fclass, idx, _) = self.resolve_field(&internal, &name)?;
+                        self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                    }
+                };
+                let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), member), (None, nullb)] });
+                self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) })
+            }
             // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
             Expr::Elvis { lhs, rhs } => {
                 let lty = self.info.ty(lhs);

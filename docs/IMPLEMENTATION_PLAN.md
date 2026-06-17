@@ -1832,6 +1832,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   the side-effect-free common case). Non-literal defaults (need `$default`) and instance-method default
   args remain follow-ups.
 
+- ✅ **Phase 167 — safe calls `a?.b` / `a?.m(...)`** (226 box()=OK, 0 FAIL — corpus-neutral, real feature).
+  Lowered in the front-end (backend-agnostic) to `{ val t = recv; if (t != null) t.member else null }`:
+  a temp holds the receiver, a `null` guard selects the member access (`GetField` / `MethodCall`)
+  against the non-null receiver, else `null`. Composes with Elvis (`a?.m() ?: d`) and chains through the
+  existing `when` lowering. Required fixing `value_ty_of_when`: a `null`/`Nothing` last branch (the
+  no-receiver arm) carries no concrete type and verify-typed the merge stack as `top`, tripping
+  `VerifyError: Bad type on operand stack`; it now uses a concrete branch type (a reference) for the
+  merge frame, since `null` is assignable to any reference. Covered by `tests/safe_call_e2e.rs`
+  (round-trip vs the JVM under `-Xverify:all`). Resolves to user-defined methods/properties; **stdlib**
+  receivers (`s?.substring(1)`) still bail — they need the external-call path and are a follow-up.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
