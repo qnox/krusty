@@ -1211,7 +1211,9 @@ fn emit_data_members(
         let mut slot = 1u16;
         for (i, (p, ty)) in props.iter().enumerate() {
             c.iload(mask_slot);
-            c.push_int(1 << i, cw);
+            // `wrapping_shl` avoids a debug panic for a data class with >32 properties (kotlinc uses
+            // multiple mask ints there; that wide case is out of scope but must not crash the build).
+            c.push_int(1i32.wrapping_shl(i as u32), cw);
             c.iand();
             let skip = c.new_label();
             c.add_frame_if_new(skip, skip_locals.clone(), vec![]); // frame at branch target
@@ -4813,6 +4815,7 @@ impl<'a> MethodEmitter<'a> {
             // Constructor call: `ClassName(args)` → new + dup + invokespecial <init>.
             Expr::Name(fname) if !self.slots.contains_key(&fname) && self.syms.classes.contains_key(&fname) => {
                 let cls = self.syms.classes.get(&fname).unwrap();
+                let defaults = cls.ctor_defaults.clone();
                 // Annotation instance `A(args)` → construct the synthetic `$annotationImpl$A$0`
                 // (emitted once), whose ctor takes the members in order.
                 let (internal, ctor_tys) = if cls.is_annotation {
@@ -4825,13 +4828,17 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     (cls.internal.clone(), cls.ctor_params.clone())
                 };
+                // Effective arguments: each provided arg, else the parameter's default expression.
+                let eff: Vec<ExprId> = (0..ctor_tys.len())
+                    .map(|i| args.get(i).copied().or_else(|| defaults.get(i).copied().flatten()).expect("checker guaranteed a value or default"))
+                    .collect();
                 let class_idx = cw.class_ref(&internal);
                 // If an argument branches (frames), the `new`/`dup` references underneath aren't
                 // recorded by those frames → VerifyError. Spill the args to locals first (evaluated
                 // on an empty stack), then `new`/`dup` and reload them for the constructor call.
-                if args.iter().zip(&ctor_tys).any(|(&a, _)| self.expr_uses_frames(a)) {
+                if eff.iter().zip(&ctor_tys).any(|(&a, _)| self.expr_uses_frames(a)) {
                     let mut tmps = Vec::new();
-                    for (a, pty) in args.iter().zip(&ctor_tys) {
+                    for (a, pty) in eff.iter().zip(&ctor_tys) {
                         self.emit_expr_as(*a, *pty, code, cw);
                         let t = self.alloc_temp(*pty);
                         store_local(*pty, t, code);
@@ -4845,7 +4852,7 @@ impl<'a> MethodEmitter<'a> {
                 } else {
                     code.new_obj(class_idx);
                     code.dup();
-                    for (a, pty) in args.iter().zip(&ctor_tys) {
+                    for (a, pty) in eff.iter().zip(&ctor_tys) {
                         self.emit_expr_as(*a, *pty, code, cw);
                     }
                 }
