@@ -15,6 +15,9 @@ fn splices_real_empty_array_body() {
         return;
     };
     let cp = Classpath::new(vec![stdlib]);
+    // The @Metadata d1 protobuf (carrying inline flags) is captured for a real Kotlin facade.
+    let collections = cp.find("kotlin/collections/CollectionsKt").expect("CollectionsKt");
+    assert!(!collections.kotlin_d1.is_empty(), "@Metadata d1 protobuf is read");
     // emptyArray<T>(): T[]  — erased `()[Ljava/lang/Object;`, defined in kotlin/ArrayIntrinsicsKt.
     let Some(body) = cp.method_code("kotlin/ArrayIntrinsicsKt", "emptyArray", "()[Ljava/lang/Object;") else {
         eprintln!("skipping: emptyArray body not found (stdlib layout differs)");
