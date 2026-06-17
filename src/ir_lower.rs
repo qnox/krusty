@@ -1593,7 +1593,7 @@ impl<'a> Lower<'a> {
                                 }
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
-                            let arr = self.ir.add_expr(IrExpr::ArrayOf { elem: elem_ir, elements });
+                            let arr = self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements });
                             a.push(arr);
                             return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
                         }
