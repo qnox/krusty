@@ -2959,8 +2959,8 @@ impl<'a> MethodEmitter<'a> {
             Expr::StringLit(s) => code.push_string(&s, cw),
             Expr::CharLit(c) => code.push_int(c as i32, cw),
             Expr::NullLit => code.aconst_null(),
-            Expr::Lambda { param, body } => {
-                self.emit_lambda(e, param.as_deref(), body, code, cw);
+            Expr::Lambda { params, body } => {
+                self.emit_lambda(e, &params, body, code, cw);
             }
             Expr::NotNull { operand } if !self.info.ty(operand).is_reference() => {
                 // `!!` on a non-null primitive (`42!!`) is the operand itself — no null check.
@@ -4089,17 +4089,18 @@ impl<'a> MethodEmitter<'a> {
     /// Emit a lambda literal `{ [param ->] body }` as an anonymous class implementing
     /// `kotlin/jvm/functions/FunctionN`. The anonymous class is registered via the thread-local
     /// `LAMBDA_CLASSES` and the call site pushes a fresh instance: `new Anon; dup; invokespecial`.
-    fn emit_lambda(&mut self, e: ExprId, param: Option<&str>, body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+    fn emit_lambda(&mut self, e: ExprId, params: &[String], body: ExprId, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         let n = self.lambda_counter;
         self.lambda_counter += 1;
-        // Infer arity: explicit param → 1; no param but body uses `it` → 1 (implicit param); else 0.
-        let (arity, bind_name): (u8, Option<&str>) = if let Some(p) = param {
-            (1, Some(p))
+        // Infer arity: explicit params → their count; no params but body uses `it` → implicit arity 1.
+        let bind_names: Vec<&str> = if !params.is_empty() {
+            params.iter().map(|s| s.as_str()).collect()
         } else if crate::resolve::expr_uses_name_pub(self.file, body, "it") {
-            (1, Some("it"))
+            vec!["it"]
         } else {
-            (0, None)
+            vec![]
         };
+        let arity = bind_names.len() as u8;
         let iface = Ty::fun_interface(arity);
         let anon_name = format!("{}$lambda${n}", self.class);
 
@@ -4142,10 +4143,10 @@ impl<'a> MethodEmitter<'a> {
             le.inside_lambda = true;
             le.file_facade = self.file_facade.clone();
             le.next_slot = 1; // skip `this`
-            if let Some(p) = bind_name {
-                le.slots.insert(p.to_string(), (1, Ty::obj("java/lang/Object")));
-                le.next_slot = 1 + arity as u16;
+            for (i, p) in bind_names.iter().enumerate() {
+                le.slots.insert(p.to_string(), (1 + i as u16, Ty::obj("java/lang/Object")));
             }
+            le.next_slot = 1 + arity as u16;
 
             // Emit the body expression; box the result if it's a primitive.
             let body_ty = self.info.ty(body);
@@ -4187,8 +4188,8 @@ impl<'a> MethodEmitter<'a> {
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
         // IIFE: `{ [p ->] body }([arg])` — inline the lambda body so it can read/write outer locals.
-        if let Expr::Lambda { param, body } = self.file.expr(callee).clone() {
-            if let Some(pname) = param {
+        if let Expr::Lambda { params, body } = self.file.expr(callee).clone() {
+            if let Some(pname) = params.first().cloned() {
                 if let Some(&arg) = args.first() {
                     let arg_ty = self.info.ty(arg);
                     self.emit_expr(arg, code, cw);
@@ -4273,7 +4274,8 @@ impl<'a> MethodEmitter<'a> {
         // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
-                if let Expr::Lambda { param, body } = self.file.expr(args[0]).clone() {
+                if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                    let param = params.into_iter().next();
                     let rt = self.info.ty(receiver);
                     self.emit_expr(receiver, code, cw);
                     let slot = self.fresh_slot(rt);
@@ -4310,18 +4312,22 @@ impl<'a> MethodEmitter<'a> {
             }
             // `recv.run { … }` / `recv.apply { … }` — receiver becomes the body's implicit `this`.
             if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
-                if let Expr::Lambda { param: None, body } = self.file.expr(args[0]).clone() {
-                    self.emit_with_receiver(e, receiver, body, name == "apply", code, cw);
-                    return;
+                if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                    if params.is_empty() {
+                        self.emit_with_receiver(e, receiver, body, name == "apply", code, cw);
+                        return;
+                    }
                 }
             }
         }
         // `with(x) { … }` — `x` becomes the body's implicit `this`.
         if let Expr::Name(fname) = self.file.expr(callee).clone() {
             if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
-                if let Expr::Lambda { param: None, body } = self.file.expr(args[1]).clone() {
-                    self.emit_with_receiver(e, args[0], body, false, code, cw);
-                    return;
+                if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
+                    if params.is_empty() {
+                        self.emit_with_receiver(e, args[0], body, false, code, cw);
+                        return;
+                    }
                 }
             }
         }
@@ -4780,7 +4786,7 @@ impl<'a> MethodEmitter<'a> {
                     let i_slot = self.alloc_temp(Ty::Int);
                     code.istore(i_slot);
                     let (param, body) = match self.file.expr(args[1]).clone() {
-                        Expr::Lambda { param, body } => (param.unwrap_or_else(|| "it".to_string()), body),
+                        Expr::Lambda { params, body } => (params.into_iter().next().unwrap_or_else(|| "it".to_string()), body),
                         _ => unreachable!(),
                     };
                     // The element temp is written each iteration; allocate + default-init it before

@@ -1973,17 +1973,17 @@ impl<'a> Checker<'a> {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing
             }
-            Expr::Lambda { param, body } => {
-                // A lambda literal `{ param -> body }` — type is `Fun(arity)`.
-                // If no explicit parameter is declared but the body references `it`, bind it
-                // as the implicit parameter (arity 1). Otherwise treat as a no-arg lambda.
-                let (arity, bind_name) = if let Some(ref p) = param {
-                    (1u8, Some(p.clone()))
+            Expr::Lambda { params, body } => {
+                // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
+                // parameters but a body referencing `it`, bind the implicit single parameter.
+                let bind_names: Vec<String> = if !params.is_empty() {
+                    params.clone()
                 } else if expr_uses_name(self.file, body, "it") {
-                    (1u8, Some("it".to_string()))
+                    vec!["it".to_string()]
                 } else {
-                    (0u8, None)
+                    vec![]
                 };
+                let arity = bind_names.len() as u8;
                 // Lambdas that are not inlined (let/also/run/apply) become closure classes and
                 // cannot mutate the outer function's local variables. Detect this and reject.
                 let outer_names: std::collections::HashSet<String> = self.scopes.iter()
@@ -1995,7 +1995,7 @@ impl<'a> Checker<'a> {
                     return Ty::fun(vec![Ty::obj("java/lang/Object"); arity as usize], Ty::Unit);
                 }
                 self.push_scope();
-                if let Some(ref name) = bind_name {
+                for name in &bind_names {
                     self.declare(name, Ty::obj("java/lang/Object"), false);
                 }
                 // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
@@ -2579,27 +2579,24 @@ impl<'a> Checker<'a> {
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
     /// type `String` instead of the default `Object`.
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
-        if let Expr::Lambda { param, body } = self.file.expr(e).clone() {
-            let (arity, bind_name) = if let Some(ref p) = param {
-                (param_types.len().max(1) as u8, Some(p.clone()))
-            } else if !param_types.is_empty() {
-                (param_types.len() as u8, Some("it".to_string()))
-            } else if expr_uses_name(self.file, body, "it") {
-                (1u8, Some("it".to_string()))
+        if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
+            let bind_names: Vec<String> = if !params.is_empty() {
+                params.clone()
+            } else if !param_types.is_empty() || expr_uses_name(self.file, body, "it") {
+                vec!["it".to_string()]
             } else {
-                (0u8, None)
+                vec![]
             };
             self.push_scope();
-            if let Some(ref name) = bind_name {
-                let it_ty = param_types.first().copied().unwrap_or(Ty::obj("java/lang/Object"));
-                self.declare(name, it_ty, false);
+            for (i, name) in bind_names.iter().enumerate() {
+                let pty = param_types.get(i).copied().unwrap_or(Ty::obj("java/lang/Object"));
+                self.declare(name, pty, false);
             }
             // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
             let saved_field = self.field_ty.take();
             let bret = self.expr(body);
             self.field_ty = saved_field;
             self.pop_scope();
-            let _ = arity;
             // Carry the declared parameter types and the inferred body return type.
             let ty = Ty::fun(param_types.to_vec(), bret);
             return self.set(e, ty);
@@ -2680,10 +2677,10 @@ impl<'a> Checker<'a> {
                 // Inlined scope functions `recv.let { … }` / `recv.also { … }`: bind the lambda's
                 // parameter (default `it`) to the receiver; `let` yields the body, `also` the receiver.
                 if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
-                    if let Expr::Lambda { param, body } = self.file.expr(args[0]).clone() {
+                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
                         let rt = self.expr(receiver);
                         self.push_scope();
-                        self.declare(param.as_deref().unwrap_or("it"), rt, false);
+                        self.declare(params.first().map(|s| s.as_str()).unwrap_or("it"), rt, false);
                         let bt = self.expr(body);
                         self.pop_scope();
                         return if name == "let" { bt } else { rt };
@@ -2692,10 +2689,12 @@ impl<'a> Checker<'a> {
                 // `recv.run { … }` / `recv.apply { … }`: the lambda body has `recv` as its implicit
                 // receiver (`this`); `run` yields the body, `apply` the receiver.
                 if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
-                    if let Expr::Lambda { param: None, body } = self.file.expr(args[0]).clone() {
+                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                      if params.is_empty() {
                         let rt = self.expr(receiver);
                         let bt = self.check_with_receiver(rt, body, self.span(args[0]));
                         return if name == "run" { bt } else { rt };
+                      }
                     }
                 }
                 // `super.method(args)` — dispatch to the base class's method (non-virtual).
@@ -2917,9 +2916,11 @@ impl<'a> Checker<'a> {
                 // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
                 // args are evaluated, since the trailing lambda isn't a normal value).
                 if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
-                    if let Expr::Lambda { param: None, body } = self.file.expr(args[1]).clone() {
+                    if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
+                      if params.is_empty() {
                         let rt = self.expr(args[0]);
                         return self.check_with_receiver(rt, body, self.span(args[1]));
+                      }
                     }
                 }
                 // Type-directed lambda checking: if we know the target function's signature and a
