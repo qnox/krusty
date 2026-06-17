@@ -168,7 +168,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ast::ClassInit::PropInit(i) => {
                                 let field_idx = ctor_count + *i as u32;
                                 let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize].1.clone();
-                                let val = lo.lower_arg(c.body_props[*i].init.unwrap(), &field_ty)?;
+                                let init_e = c.body_props[*i].init.unwrap();
+                                // A branchy body-property initializer (`val k = when { … }`) emits
+                                // merge-point frames in the constructor's init context that the flat
+                                // emitter doesn't reconcile yet — bail rather than miscompile.
+                                if matches!(lo.afile.expr(init_e), Expr::When { .. } | Expr::If { .. } | Expr::Elvis { .. } | Expr::Block { .. }) {
+                                    return None;
+                                }
+                                let val = lo.lower_arg(init_e, &field_ty)?;
                                 let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
                                 stmts.push(lo.ir.add_expr(IrExpr::SetField { receiver: recv, class: class_id, index: field_idx, value: val }));
                             }
@@ -296,9 +303,10 @@ impl<'a> Lower<'a> {
     fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
         let b = match body {
             FunBody::Expr(e) => {
+                let diverges = self.info.ty(*e) == Ty::Nothing;
                 let ve = self.expr(*e)?;
-                let stmts = if *ret_ty == IrType::Unit {
-                    vec![ve] // run for effect; the backend appends the single `return`
+                let stmts = if *ret_ty == IrType::Unit || diverges {
+                    vec![ve] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
                 } else {
                     vec![self.ir.add_expr(IrExpr::Return(Some(ve)))]
                 };
@@ -319,9 +327,18 @@ impl<'a> Lower<'a> {
             out.push(self.stmt(s)?);
         }
         if let Some(t) = trailing {
+            let tt = self.info.ty(*t);
+            let diverges = tt == Ty::Nothing;
+            // A value-less statement (e.g. a no-`else` `when`) can only be a value-returning
+            // function's body if it's exhaustive (hence diverging). krusty doesn't prove
+            // exhaustiveness, so bail rather than emit `return <no-value>`.
+            if *ret_ty != IrType::Unit && !diverges && tt == Ty::Unit {
+                self.scope.truncate(depth);
+                return None;
+            }
             let ve = self.expr(*t)?;
-            if *ret_ty == IrType::Unit {
-                out.push(ve); // run the trailing for effect; the backend appends the single `return`
+            if *ret_ty == IrType::Unit || diverges {
+                out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
             } else {
                 out.push(self.ir.add_expr(IrExpr::Return(Some(ve))));
             }
@@ -341,8 +358,18 @@ impl<'a> Lower<'a> {
                 Some(self.ir.add_expr(IrExpr::Return(v)))
             }
             Stmt::Local { name, init, ty, .. } => {
+                let init_ty = self.info.ty(init);
+                // A diverging initializer (`val x = when { … all branches return … }`) never binds
+                // anything — emit it for effect (it returns/throws), no slot store.
+                if init_ty == Ty::Nothing {
+                    return Some(self.expr(init)?);
+                }
+                // `Unit` as a stored value (the `kotlin.Unit` singleton) isn't modeled yet — bail.
+                if init_ty == Ty::Unit {
+                    return None;
+                }
                 let it = self.expr(init)?;
-                let kty = ty.as_ref().map(|r| Ty::from_name(&r.name).unwrap_or(Ty::Error)).unwrap_or_else(|| self.info.ty(init));
+                let kty = ty.as_ref().map(|r| Ty::from_name(&r.name).unwrap_or(Ty::Error)).unwrap_or(init_ty);
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
@@ -370,11 +397,14 @@ impl<'a> Lower<'a> {
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
             Stmt::AssignMember { receiver, name, value } => {
                 let rt = self.info.ty(receiver);
-                let ci = self.class_of(rt)?;
-                let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
-                let class = ci.id;
+                let (class, idx, field_ty) = {
+                    let ci = self.class_of(rt)?;
+                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
+                    (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
+                };
                 let r = self.expr(receiver)?;
-                let v = self.expr(value)?;
+                // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
+                let v = self.lower_arg(value, &field_ty)?;
                 Some(self.ir.add_expr(IrExpr::SetField { receiver: r, class, index: idx, value: v }))
             }
             Stmt::AssignIndex { array, index, value } => {
@@ -443,6 +473,46 @@ impl<'a> Lower<'a> {
             Expr::CharLit(c) => self.ir.add_expr(IrExpr::Const(IrConst::Char(c))),
             Expr::BoolLit(b) => self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b))),
             Expr::StringLit(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s))),
+            Expr::NullLit => self.ir.add_expr(IrExpr::Const(IrConst::Null)),
+            // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
+            Expr::Elvis { lhs, rhs } => {
+                let lty = self.info.ty(lhs);
+                // A statically-null or non-reference lhs isn't a meaningful elvis (and would emit a
+                // bad-typed null compare) — bail. The common reference case is handled below.
+                if lty == Ty::Null || !lty.is_reference() {
+                    return None;
+                }
+                let lv = self.expr(lhs)?;
+                let v = self.fresh_value();
+                let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(lty), init: Some(lv) });
+                let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+                let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
+                let get2 = self.ir.add_expr(IrExpr::GetValue(v));
+                let rv = self.expr(rhs)?;
+                let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), get2), (None, rv)] });
+                self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) })
+            }
+            // A block in expression position: `{ stmt; …; trailing }`; value is the trailing expr.
+            Expr::Block { stmts, trailing } => {
+                let depth = self.scope.len();
+                let mut out = Vec::new();
+                for &s in &stmts {
+                    match self.stmt(s) {
+                        Some(v) => out.push(v),
+                        None => { self.scope.truncate(depth); return None; }
+                    }
+                }
+                let value = match trailing {
+                    Some(t) => match self.expr(t) {
+                        Some(v) => Some(v),
+                        None => { self.scope.truncate(depth); return None; }
+                    },
+                    None => None,
+                };
+                self.scope.truncate(depth);
+                self.ir.add_expr(IrExpr::Block { stmts: out, value })
+            }
             Expr::Name(n) => {
                 if let Some((v, _)) = self.lookup(&n) {
                     self.ir.add_expr(IrExpr::GetValue(v))
@@ -491,6 +561,13 @@ impl<'a> Lower<'a> {
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
                 } else {
                     let irop = bin_to_ir(op)?;
+                    // The flat IR emits a single primitive op — it doesn't widen mixed numeric
+                    // operands (`Double < Int`). Require matching operand types for arithmetic /
+                    // comparison on primitives; bail otherwise (a mismatched op = bad-typed stack).
+                    let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
+                    if lt.is_primitive() && rt.is_primitive() && lt != rt {
+                        return None;
+                    }
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
@@ -512,7 +589,11 @@ impl<'a> Lower<'a> {
                 let type_operand = ty_to_ir(self.ty_ref(&ty)?);
                 self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
             }
-            Expr::As { operand, ty, nullable: _ } => {
+            Expr::As { operand, ty, nullable } => {
+                // `as?` (safe cast: null on mismatch) isn't modeled — only the throwing `as`.
+                if nullable {
+                    return None;
+                }
                 let arg = self.expr(operand)?;
                 let type_operand = ty_to_ir(self.ty_ref(&ty)?);
                 self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg, type_operand })
@@ -540,6 +621,25 @@ impl<'a> Lower<'a> {
             // side-effect-free subjects in the core subset). Without a subject, the conditions are
             // boolean tests directly.
             Expr::When { subject, arms } => {
+                // Bail on shapes the flat IR can't emit safely: branches that mix `Unit` with real
+                // values (only valid as a discarded statement, indistinguishable here from a value
+                // use → inconsistent frames), and a subject `==` comparison that mixes a primitive
+                // with a reference (e.g. `when (i: Int) { null -> … }` → bad-typed compare).
+                let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
+                let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
+                if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
+                    return None;
+                }
+                if let Some(subj) = subject {
+                    let st = self.info.ty(subj);
+                    for arm in &arms {
+                        for &c in &arm.conditions {
+                            if st.is_primitive() != self.info.ty(c).is_primitive() {
+                                return None;
+                            }
+                        }
+                    }
+                }
                 let mut branches = Vec::new();
                 for arm in &arms {
                     let body = self.expr(arm.body)?;
@@ -592,6 +692,11 @@ impl<'a> Lower<'a> {
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         let params = self.ir.functions[fid as usize].params.clone();
+                        // Default/omitted arguments aren't modeled — an arg count below the param
+                        // count would push too few values for the method descriptor (stack underflow).
+                        if args.len() != params.len() {
+                            return None;
+                        }
                         let mut a = Vec::new();
                         for (k, arg) in args.iter().enumerate() {
                             let target = params.get(k).cloned().unwrap_or(IrType::Error);

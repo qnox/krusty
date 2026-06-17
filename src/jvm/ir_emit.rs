@@ -160,13 +160,23 @@ impl<'a> Emitter<'a> {
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
+                // Scope block-locals: restore the slot *map* after the block (keeping next_slot
+                // monotonic) so a local declared here doesn't leak into a later merge-point frame
+                // (its slot must read as `Top` once out of scope — else a sibling branch that never
+                // initialized it fails verification).
+                let saved = self.slots.clone();
+                let mut dead = false;
                 for s in stmts {
                     self.emit(s, code);
+                    if self.diverges(s) { dead = true; break; } // rest of the block is unreachable
                 }
-                if let Some(v) = value {
-                    self.emit_value(v, code);
-                    discard(self.value_ty(v), code);
+                if !dead {
+                    if let Some(v) = value {
+                        self.emit_value(v, code);
+                        discard(self.value_ty(v), code);
+                    }
                 }
+                self.slots = saved;
             }
             IrExpr::Return(v) => match v {
                 Some(v) => {
@@ -254,7 +264,7 @@ impl<'a> Emitter<'a> {
                 IrConst::Double(v) => code.push_double(*v, self.cw),
                 IrConst::Float(v) => code.push_float(*v, self.cw),
                 IrConst::String(s) => code.push_string(s, self.cw),
-                IrConst::Null => {}
+                IrConst::Null => code.aconst_null(),
             },
             IrExpr::GetValue(i) => {
                 let (slot, jt) = self.slots[i];
@@ -360,6 +370,22 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
             IrExpr::When { branches } => self.emit_when(branches, code),
+            // Block in value position: run its statements for effect, leave the trailing value on the
+            // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
+            IrExpr::Block { stmts, value } => {
+                let saved = self.slots.clone();
+                let mut dead = false;
+                for s in stmts {
+                    self.emit(*s, code);
+                    if self.diverges(*s) { dead = true; break; }
+                }
+                if !dead {
+                    if let Some(v) = value {
+                        self.emit_value(*v, code);
+                    }
+                }
+                self.slots = saved;
+            }
             _ => {}
         }
     }
@@ -534,27 +560,13 @@ impl<'a> Emitter<'a> {
     fn emit_when(&mut self, branches: &[(Option<u32>, u32)], code: &mut CodeBuilder) {
         let end = code.new_label();
         let has_else = branches.iter().any(|(c, _)| c.is_none());
-        if !has_else {
-            // A `when` with no `else` is a *statement* (`Unit`): each matched branch runs for effect
-            // (its value discarded), and no value reaches the operand stack.
-            for (cond, body) in branches {
-                if let Some(c) = cond {
-                    self.emit_value(*c, code);
-                    let next = code.new_label();
-                    self.frame(next, vec![], code);
-                    code.ifeq(next);
-                    self.emit_value(*body, code);
-                    discard(self.value_ty(*body), code);
-                    self.frame(end, vec![], code);
-                    code.goto(end);
-                    code.bind(next);
-                }
-            }
-            self.frame(end, vec![], code);
-            code.bind(end);
-            return;
-        }
-        let result_stack = self.verif_stack(self.value_ty_of_when(branches));
+        // A `when` with no `else`, or one whose value is `Unit`, is a statement: branch values are
+        // discarded and nothing reaches the operand stack at `end`.
+        let is_stmt = !has_else || self.value_ty_of_when(branches) == Ty::Unit;
+        let result_stack = if is_stmt { vec![] } else { self.verif_stack(self.value_ty_of_when(branches)) };
+        // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
+        // no-`else` statement always has the implicit no-match fallthrough.
+        let mut end_reachable = !has_else;
         for (cond, body) in branches {
             match cond {
                 Some(c) => {
@@ -563,15 +575,46 @@ impl<'a> Emitter<'a> {
                     self.frame(next, vec![], code);
                     code.ifeq(next);
                     self.emit_value(*body, code);
-                    self.frame(end, result_stack.clone(), code);
-                    code.goto(end);
+                    if is_stmt { discard(self.value_ty(*body), code); }
+                    if !self.diverges(*body) {
+                        // Only a falling-through branch jumps to (and needs a frame at) `end`.
+                        self.frame(end, result_stack.clone(), code);
+                        code.goto(end);
+                        end_reachable = true;
+                    }
                     code.bind(next);
                 }
-                None => self.emit_value(*body, code),
+                None => {
+                    self.emit_value(*body, code);
+                    if is_stmt { discard(self.value_ty(*body), code); }
+                    if !self.diverges(*body) { end_reachable = true; }
+                    // The else is last — it falls through to `end` (no goto needed).
+                }
             }
         }
-        self.frame(end, result_stack, code);
+        // Frame `end` only when it's actually reachable; if every branch diverges, `end` is dead
+        // (no jump targets it) and a frame there would be "Expecting a stack map frame".
+        if end_reachable {
+            self.frame(end, result_stack, code);
+        }
         code.bind(end);
+    }
+
+    /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
+    /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
+    fn diverges(&self, e: u32) -> bool {
+        match self.ir.expr(e) {
+            IrExpr::Return(_) => true,
+            IrExpr::Block { stmts, value } => match value {
+                Some(v) => self.diverges(*v),
+                None => stmts.last().map_or(false, |s| self.diverges(*s)),
+            },
+            IrExpr::When { branches } => {
+                branches.iter().any(|(c, _)| c.is_none())
+                    && branches.iter().all(|(_, b)| self.diverges(*b))
+            }
+            _ => false,
+        }
     }
 
     /// Box a primitive value already on the stack to its wrapper (`Integer.valueOf`, …).
@@ -683,7 +726,7 @@ impl<'a> Emitter<'a> {
                 IrConst::String(_) => Ty::String,
                 IrConst::Short(_) => Ty::Short,
                 IrConst::Byte(_) => Ty::Byte,
-                IrConst::Null => Ty::Error,
+                IrConst::Null => Ty::Null,
             },
             IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
             IrExpr::GetField { class, index, .. } => ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1),
@@ -705,6 +748,7 @@ impl<'a> Emitter<'a> {
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
+            IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {
                 IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
                 _ => ir_ty_to_jvm(type_operand),
