@@ -97,7 +97,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let superclass = if c.is_enum {
                 "java/lang/Enum".to_string()
             } else {
-                super_internal.clone().unwrap_or_else(|| "java/lang/Object".to_string())
+                super_internal.clone().unwrap_or_else(|| "kotlin/Any".to_string())
             };
             // Implemented interfaces (`: I, J`): each must be a file interface, else bail.
             let mut iface_internals = Vec::new();
@@ -215,7 +215,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: comp_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
                     init_body: None, methods: vec![], is_interface: false,
-                    superclass: "java/lang/Object".to_string(), super_args: vec![],
+                    superclass: "kotlin/Any".to_string(), super_args: vec![],
                     enum_entries: vec![], bridges: vec![], interfaces: vec![],
                     is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
                     field_final: vec![],
@@ -1013,7 +1013,7 @@ impl<'a> Lower<'a> {
             let t = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
             let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
-            let obj = ty_to_ir(Ty::obj("java/lang/Object"));
+            let obj = ty_to_ir(Ty::obj("kotlin/Any"));
             self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body);
         }
 
@@ -1184,7 +1184,7 @@ impl<'a> Lower<'a> {
             // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
             // coercion (the backend does the `i2l`/`d2i`/… conversion).
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
-        } else if at == Ty::obj("java/lang/Object") && target_ref && !ir_type_is_object(target) {
+        } else if at == Ty::obj("kotlin/Any") && target_ref && !ir_type_is_object(target) {
             // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
             // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
             // value really is the target type at runtime). `as`-style, but never null here.
@@ -1206,7 +1206,7 @@ impl<'a> Lower<'a> {
         }
         // Only generic erasure (`Object` physical) warrants a synthesized coercion here; any other
         // mismatch is the checker's concern and must not silently change the emitted read.
-        if pty != Ty::obj("java/lang/Object") {
+        if pty != Ty::obj("kotlin/Any") {
             return read;
         }
         if lt.is_primitive() {
@@ -2385,7 +2385,7 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
     if is_class {
         Ty::obj(&class_internal(file, &r.name))
     } else {
-        Ty::obj("java/lang/Object")
+        Ty::obj("kotlin/Any")
     }
 }
 

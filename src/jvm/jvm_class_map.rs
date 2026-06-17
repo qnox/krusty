@@ -1,4 +1,6 @@
-//! Kotlin built-in class → JVM class mapping.
+//! Kotlin built-in class → JVM class mapping, plus the canonical JVM internal names / descriptors
+//! the rest of the compiler must occasionally materialize. The front end speaks Kotlin types; every
+//! `java/lang/…` name lives here (the JVM "part") rather than being spelled across the core.
 //!
 //! This is a faithful port of the reference Kotlin compiler's `JavaToKotlinClassMap`:
 //!   <kotlin>/core/compiler.common.jvm/src/org/jetbrains/kotlin/builtins/jvm/JavaToKotlinClassMap.kt
@@ -58,4 +60,49 @@ pub fn is_throwable_internal(internal: &str) -> bool {
     internal == "java/lang/Throwable"
         || internal.ends_with("Exception")
         || internal.ends_with("Error")
+}
+
+use crate::types::Ty;
+
+/// Bidirectional Kotlin↔JVM internal-name mapping for built-in *type identities* — the subset of
+/// `JavaToKotlinClassMap` whose two sides have different internal names. The front-end core speaks
+/// the Kotlin name (`kotlin/Any`); the JVM name (`java/lang/Object`) is materialized only when a
+/// type crosses into the backend (descriptor emission, constant-pool class references). Listing the
+/// pairs once here is what keeps every `java/lang/…` literal out of the compiler core.
+const TYPE_MAP: &[(&str, &str)] = &[
+    ("kotlin/Any", "java/lang/Object"),
+    ("kotlin/String", "java/lang/String"),
+    // Further built-ins (CharSequence, Comparable, Number, Enum, the primitive wrappers) and the
+    // curated JVM-ABI method tables are migrated off `java/lang/…` in later phases; adding a pair
+    // here also requires normalizing that name everywhere the classpath surfaces it.
+];
+
+/// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
+/// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
+/// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
+pub fn to_jvm_internal(internal: &str) -> &str {
+    TYPE_MAP.iter().find(|(k, _)| *k == internal).map(|(_, j)| *j).unwrap_or(internal)
+}
+
+/// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
+/// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
+/// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
+pub fn to_kotlin_internal(internal: &str) -> &str {
+    TYPE_MAP.iter().find(|(_, j)| *j == internal).map(|(k, _)| *k).unwrap_or(internal)
+}
+
+/// The JVM wrapper (box) class for a primitive `Ty` (`Int` → `java/lang/Integer`), or `None` for a
+/// non-primitive. The single source of truth for boxing owners shared by codegen and the front end.
+pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Int => "java/lang/Integer",
+        Ty::Long => "java/lang/Long",
+        Ty::Short => "java/lang/Short",
+        Ty::Byte => "java/lang/Byte",
+        Ty::Double => "java/lang/Double",
+        Ty::Float => "java/lang/Float",
+        Ty::Boolean => "java/lang/Boolean",
+        Ty::Char => "java/lang/Character",
+        _ => return None,
+    })
 }

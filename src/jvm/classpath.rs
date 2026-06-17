@@ -191,6 +191,9 @@ impl Classpath {
     }
 
     pub fn find(&self, internal: &str) -> Option<ClassInfo> {
+        // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
+        // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up.
+        let internal = super::jvm_class_map::to_jvm_internal(internal);
         if let Some(hit) = self.cache.borrow().get(internal) {
             return hit.clone();
         }
