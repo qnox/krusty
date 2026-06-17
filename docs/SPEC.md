@@ -152,6 +152,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
+- `data class`: `equals`/`hashCode`/`toString`/`componentN` are synthesized (in IR lowering, so all
+  backends share them). `equals` compares field-wise with IEEE-aware `Double/Float.compare` and
+  structural reference equality; `hashCode` is the `31*result + fieldHash` fold; `toString` is
+  `Class(p1=v1, p2=v2)`. `copy` (default arguments) is not yet supported — such files are skipped.
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

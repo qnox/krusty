@@ -1716,6 +1716,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   abstract enum methods. KNOWN shortcut to generalize: `e.ordinal`/`e.name` are emitted as intrinsics
   rather than via general inherited-method resolution on the `java/lang/Enum` superclass.
 
+- ✅ **Phase 155 — `data class` via backend-agnostic IR synthesis** (128 → 140 box()=OK, 0 FAIL).
+  A `data class`'s `equals`/`hashCode`/`toString`/`componentN` are Kotlin **language** semantics, so
+  they are synthesized in **AST→IR lowering** (`Lower::synth_data_members`) as ordinary `IrFunction`s
+  with IR bodies — *not* hand-written JVM bytecode — and registered in the class's method table so
+  calls resolve and the generic method emitter handles them (a JS/other backend would get them for
+  free). `equals` is `if (other !is T) return false; if (f != o.f) return false; … return true`
+  (early-return chain — no value-position `&&` whose temp would leak into a merge frame); IEEE-aware
+  via `Double/Float.compare`, structural ref-compare via the reference `Ne` path. `hashCode` is the
+  `31*r + h(f)` fold (`{Double,Long,Float,Boolean}.hashCode`/`Objects.hashCode`); `toString` a
+  `String.plus` chain. Fixed a latent bug: a `val b: A? = null` local was typed `Ty::Null` (so a
+  reference `!=` took the `if_icmpne` primitive path) — locals now resolve a declared class type.
+  `copy` (needs default args) is deferred, not faked.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
