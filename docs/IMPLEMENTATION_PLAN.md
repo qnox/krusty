@@ -1741,6 +1741,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   emitted while operands sit on the stack, their merge frames would omit them; a proper fix is a
   subject/condition temp.
 
+- ✅ **Phase 157 — spill branchy operands to temps (root-cause fix)** (146 → 147 box()=OK, 0 FAIL).
+  The recurring bug behind several `is_branchy` bail-guards: an expression that records a StackMapTable
+  frame (a primitive comparison, `when`, `while`) can't be emitted while other operands sit on the
+  stack — its merge frame omits them (VerifyError). Added `Emitter::records_frame(e)` (recurses the IR
+  subtree for frame-recording nodes) and, in `New` and the enum `<clinit>` entry construction, when an
+  argument records a frame, evaluate all args into temps **first** (clean stack) then construct. This
+  retires the branchy-enum-entry-arg guard (`X(1 == 1)` now compiles). The same `records_frame` spill
+  should next be applied to `MethodCall`/`Call` argument lists.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
