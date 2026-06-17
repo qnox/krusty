@@ -44,6 +44,9 @@ pub struct ClassInfo {
     pub interfaces: Vec<String>,
     pub fields: Vec<FieldSig>,
     pub methods: Vec<MethodSig>,
+    /// Strings from the `@kotlin.Metadata` `d1` annotation element — the BitEncoded protobuf carrying
+    /// declaration metadata (function flags incl. `inline`, signatures). Empty if absent.
+    pub kotlin_d1: Vec<String>,
     /// Strings from the `@kotlin.Metadata` `d2` annotation element, if present.
     pub kotlin_d2: Vec<String>,
     /// The class-level generic `Signature` attribute (JVM generics), e.g.
@@ -262,24 +265,25 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         .map(|(access, name, descriptor)| MethodSig { access, name, descriptor })
         .collect();
 
-    // Read class-level attributes: @kotlin.Metadata → d2 array, and the generic `Signature` attribute.
-    let (kotlin_d2, signature) = read_class_attrs(&mut r, &cp);
+    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, and the generic `Signature` attr.
+    let (kotlin_d1, kotlin_d2, signature) = read_class_attrs(&mut r, &cp);
 
-    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d2: kotlin_d2.unwrap_or_default(), signature })
+    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d1: kotlin_d1.unwrap_or_default(), kotlin_d2: kotlin_d2.unwrap_or_default(), signature })
 }
 
 /// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin/Metadata → `d2`, and the
 /// generic `Signature` attribute. Accumulates both (does not early-return) so neither is missed.
-fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<String>) {
+fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<Vec<String>>, Option<String>) {
     let utf8 = |i: u16| -> &str {
         match cp.get(i as usize) {
             Some(C::Utf8(s)) => s.as_str(),
             _ => "",
         }
     };
+    let mut d1 = None;
     let mut d2 = None;
     let mut signature = None;
-    let Ok(n_attrs) = r.u2() else { return (d2, signature) };
+    let Ok(n_attrs) = r.u2() else { return (d1, d2, signature) };
     for _ in 0..n_attrs {
         let Ok(ni) = r.u2() else { break };
         let name = utf8(ni).to_string();
@@ -310,16 +314,18 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<St
             let Ok(n_pairs) = r.u2() else { break };
             for _ in 0..n_pairs {
                 let Ok(eni) = r.u2() else { break };
-                let want_d2 = is_kotlin_meta && utf8(eni) == "d2";
-                match skip_element_value_extract_string_array(r, cp, want_d2) {
+                let field = if is_kotlin_meta { utf8(eni) } else { "" };
+                let want = field == "d1" || field == "d2";
+                match skip_element_value_extract_string_array(r, cp, want) {
+                    Ok(Some(strings)) if field == "d1" => d1 = Some(strings),
                     Ok(Some(strings)) => d2 = Some(strings),
                     Ok(None) => {}
-                    Err(_) => return (d2, signature),
+                    Err(_) => return (d1, d2, signature),
                 }
             }
         }
     }
-    (d2, signature)
+    (d1, d2, signature)
 }
 
 /// Skip or extract an element_value. If `extract` is true and the value is a string array,
