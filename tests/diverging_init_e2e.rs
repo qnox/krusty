@@ -55,7 +55,7 @@ fn diverging_property_initializer_runs() {
     let mut d = DiagSink::new();
     let toks = lex(SRC, &mut d);
     let files = vec![parse(SRC, &toks, &mut d)];
-    let syms = collect_signatures_with_cp(&files, krusty::jvm::classpath::Classpath::new(vec![stdlib.clone()]), &mut d);
+    let syms = collect_signatures_with_cp(&files, Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(krusty::jvm::classpath::Classpath::new(vec![stdlib.clone()]))), &mut d);
     let _ = check_file(&files[0], &syms, &mut d);
     assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
 

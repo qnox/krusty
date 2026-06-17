@@ -3,6 +3,7 @@
 pub mod classreader;
 pub mod classpath;
 pub mod jvm_class_map;
+pub mod jvm_libraries;
 pub mod classfile;
 pub mod names;
 pub mod ir_emit;

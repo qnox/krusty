@@ -10,6 +10,7 @@ use krusty::diag::DiagSink;
 use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::jvm::classpath::Classpath;
+use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::resolve::collect_signatures_with_cp;
 
 fn main() {
@@ -46,8 +47,8 @@ fn main() {
         sources.push(src);
     }
 
-    let cp = Classpath::new(opts.classpath.clone());
-    let syms = collect_signatures_with_cp(&files, cp, &mut diags);
+    let platform = Box::new(JvmLibraries::new(Classpath::new(opts.classpath.clone())));
+    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
 
     // Common pipeline: front-end type-check each file, then lower through the selected backend
     // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.

@@ -189,8 +189,8 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
     // path, exactly as a `kotlinc -classpath` invocation would.
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
-    let cp = Classpath::new(cp_paths);
-    let syms = collect_signatures_with_cp(&files, cp, &mut diags);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(Classpath::new(cp_paths)));
+    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;
