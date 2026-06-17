@@ -950,6 +950,9 @@ impl CodeBuilder {
     pub fn lshr(&mut self) { self.op(0x7b, -1); }
     pub fn lushr(&mut self) { self.op(0x7d, -1); }
     pub fn aconst_null(&mut self) { self.op(0x01, 1); }
+    pub fn lconst_0(&mut self) { self.op(0x09, 2); }
+    pub fn fconst_0(&mut self) { self.op(0x0b, 1); }
+    pub fn dconst_0(&mut self) { self.op(0x0e, 2); }
     pub fn athrow(&mut self) { self.op(0xbf, -1); }
 
     /// `instanceof <class>` (pops ref, pushes int 0/1).

@@ -778,15 +778,15 @@ impl<'a> Lower<'a> {
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
     /// it resolves like any other method and the generic emitter handles it — no backend special-case.
-    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32) {
+    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32) -> Option<u32> {
         if self.classes.get(internal).map_or(false, |ci| ci.methods.contains_key(name)) {
-            return; // a user-defined override exists — don't synthesize over it
+            return None; // a user-defined override exists — don't synthesize over it
         }
         // Don't synthesize a member a superclass already provides (e.g. a `final override fun
         // toString()` on a base class — a data class inherits it instead of regenerating).
         if let Some(s) = self.classes.get(internal).and_then(|ci| ci.super_internal.clone()) {
             if self.resolve_method(&s, name).is_some() {
-                return;
+                return None;
             }
         }
         let fid = self.ir.add_fun(IrFunction {
@@ -799,6 +799,7 @@ impl<'a> Lower<'a> {
         if let Some(ci) = self.classes.get_mut(internal) {
             ci.methods.insert(name.to_string(), (idx, fid, ret));
         }
+        Some(fid)
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 { self.ir.add_expr(IrExpr::Const(IrConst::String(s))) }
@@ -933,7 +934,19 @@ impl<'a> Lower<'a> {
             let new = self.ir.add_expr(IrExpr::New { class: class_id, args });
             let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body);
+            if let Some(copy_fid) = self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body) {
+                // Each `copy` parameter defaults to the corresponding property of the receiver — the
+                // backend-agnostic meaning. (The JVM backend realizes this as `copy$default`.) The
+                // `$default` mask is one `int`, so it covers ≤31 parameters; a wider data class uses
+                // copy() positionally only (the multi-mask form isn't modeled).
+                if fields.len() <= 31 {
+                    let defaults: Vec<Option<u32>> = (0..fields.len()).map(|i| {
+                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        Some(self.ir.add_expr(IrExpr::GetField { receiver: this, class: class_id, index: i as u32 }))
+                    }).collect();
+                    self.ir.fn_param_defaults.insert(copy_fid, defaults);
+                }
+            }
         }
     }
 
@@ -1951,6 +1964,43 @@ impl<'a> Lower<'a> {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
                                 return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a }));
+                            }
+                        }
+                    }
+                    // A call with named or omitted arguments to a method that has parameter defaults
+                    // (data-class `copy`): build a `DefaultedCall` (the JVM backend realizes it via the
+                    // `$default` stub). Map provided args to positions; absent positions are defaulted.
+                    if let Some(internal) = self.class_of(self.recv_ty(receiver)).map(|ci| ci.internal.clone()) {
+                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name) {
+                            if self.ir.fn_param_defaults.contains_key(&fid) {
+                                let params = self.ir.functions[fid as usize].params.clone();
+                                let n = params.len();
+                                let field_names: Vec<String> = self.classes[&internal].fields.iter().take(n).map(|(nm, _)| nm.clone()).collect();
+                                let names = self.afile.call_arg_names.get(&e.0).cloned();
+                                let mut provided: Vec<Option<u32>> = vec![None; n];
+                                let mut next_pos = 0usize;
+                                let mut ok = field_names.len() == n;
+                                for (ai, arg) in args.iter().enumerate() {
+                                    let nm = names.as_ref().and_then(|v| v.get(ai).cloned().flatten());
+                                    let pos = match nm {
+                                        Some(s) => field_names.iter().position(|f| *f == s),
+                                        None => { let p = next_pos; next_pos += 1; Some(p) }
+                                    };
+                                    match pos {
+                                        Some(p) if p < n => { let l = self.lower_arg(*arg, &params[p])?; provided[p] = Some(l); }
+                                        _ => { ok = false; break; }
+                                    }
+                                }
+                                if ok {
+                                    let recv = self.expr(receiver)?;
+                                    // All provided (possibly reordered) → a plain call in parameter
+                                    // order; any omitted → the defaulted call.
+                                    if provided.iter().all(|x| x.is_some()) {
+                                        let a: Vec<u32> = provided.into_iter().map(|x| x.unwrap()).collect();
+                                        return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a }));
+                                    }
+                                    return Some(self.ir.add_expr(IrExpr::DefaultedCall { class, method: index, receiver: recv, args: provided }));
+                                }
                             }
                         }
                     }

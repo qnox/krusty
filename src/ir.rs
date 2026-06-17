@@ -135,6 +135,10 @@ pub enum IrExpr {
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
+    /// A call to a class method where some arguments are omitted and take their default (`p.copy(y=5)`,
+    /// `f(a)` of `f(a, b=…)`). `args[i] = None` means parameter `i` is defaulted. Backend-agnostic — the
+    /// JVM backend realizes it via the `$default` stub + mask; another backend may fill defaults inline.
+    DefaultedCall { class: ClassId, method: u32, receiver: ExprId, args: Vec<Option<ExprId>> },
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
     Vararg { element_type: IrType, elements: Vec<ExprId> },
@@ -280,6 +284,10 @@ pub struct IrFile {
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
     pub exprs: Vec<IrExpr>,
+    /// `FunId` → each parameter's default-value expression (`None` = required). The *meaning* of a
+    /// default is backend-agnostic language data; a backend chooses how to realize it (the JVM emits a
+    /// `name$default(params, mask, marker)` stub; JS uses native default parameters).
+    pub fn_param_defaults: std::collections::HashMap<u32, Vec<Option<ExprId>>>,
 }
 
 impl IrFile {
