@@ -432,6 +432,22 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
     Some(())
 }
 
+/// Redirect every `return`/`?return` in an inline body to the end of the inlined region instead of
+/// returning from the *caller*. A value-returning `?return` (`ireturn`/`areturn`/…) leaves its value
+/// on the stack — which becomes the call's result — and a plain `return` leaves nothing; replacing
+/// each with `goto end` preserves that stack effect while continuing into the caller's code. `end` is
+/// index `insns.len()` (one past the last instruction), a valid target the assembler lays out.
+pub fn redirect_returns(insns: &mut [Insn]) {
+    let end = insns.len();
+    for insn in insns.iter_mut() {
+        if let Insn::Plain { op, .. } = insn {
+            if matches!(*op, 0xac..=0xb1) {
+                *insn = Insn::Branch { op: 0xa7, target: end };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +517,23 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    #[test]
+    fn redirect_returns_jumps_to_end() {
+        // iload_0; ifeq +6 (→ second return); iconst_1; ireturn; iconst_0; ireturn
+        // Two value-returns; both become goto end, value left on stack.
+        let code = [0x1a, 0x99, 0x00, 0x06, 0x04, 0xac, 0x03, 0xac];
+        let mut insns = disassemble(&code).unwrap();
+        let n = insns.len();
+        redirect_returns(&mut insns);
+        // No return opcodes remain; both replaced by goto.
+        assert!(insns.iter().all(|i| !matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))));
+        let gotos = insns.iter().filter(|i| matches!(i, Insn::Branch { op: 0xa7, target } if *target == n)).count();
+        assert_eq!(gotos, 2, "both returns became goto end");
+        // Reassembles to valid bytecode of the right shape (goto is 3 bytes vs ireturn's 1).
+        let out = assemble(&insns);
+        assert!(out.len() > code.len());
     }
 
     #[test]
