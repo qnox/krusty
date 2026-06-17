@@ -200,6 +200,9 @@ pub struct FunDecl {
     pub type_params: Vec<String>,
     /// Subset of `type_params` that carry an `Any` upper bound (`T: Any`) — non-nullable on JVM.
     pub non_null_type_params: std::collections::HashSet<String>,
+    /// Subset of `type_params` declared `reified` (only meaningful on an `inline` function): the body
+    /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
+    pub reified_type_params: std::collections::HashSet<String>,
     pub span: Span,
     pub is_inline: bool,
     /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
