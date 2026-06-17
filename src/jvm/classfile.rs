@@ -52,6 +52,9 @@ enum Const {
     Methodref(u16, u16),
     InterfaceMethodref(u16, u16),
     Fieldref(u16, u16),
+    MethodHandle(u8, u16),   // reference_kind, reference_index
+    MethodType(u16),         // descriptor (Utf8 index)
+    InvokeDynamic(u16, u16), // bootstrap_method_attr_index, name_and_type_index
 }
 
 #[derive(Default)]
@@ -126,6 +129,19 @@ impl ConstPool {
         let nt = self.name_and_type(name, desc);
         self.intern(Const::Fieldref(c, nt))
     }
+    /// A `CONSTANT_MethodHandle` of kind `invokestatic` (reference_kind 6) onto a `Methodref`.
+    fn method_handle_static(&mut self, class: &str, name: &str, desc: &str) -> u16 {
+        let r = self.methodref(class, name, desc);
+        self.intern(Const::MethodHandle(6, r))
+    }
+    fn method_type(&mut self, desc: &str) -> u16 {
+        let d = self.utf8(desc);
+        self.intern(Const::MethodType(d))
+    }
+    fn invoke_dynamic(&mut self, bootstrap: u16, name: &str, desc: &str) -> u16 {
+        let nt = self.name_and_type(name, desc);
+        self.intern(Const::InvokeDynamic(bootstrap, nt))
+    }
 
     fn serialize(&self, out: &mut Vec<u8>) {
         u2(out, self.slot_count() + 1);
@@ -183,6 +199,20 @@ impl ConstPool {
                     u2(out, *n);
                     u2(out, *d);
                 }
+                Const::MethodHandle(kind, r) => {
+                    out.push(15);
+                    out.push(*kind);
+                    u2(out, *r);
+                }
+                Const::MethodType(d) => {
+                    out.push(16);
+                    u2(out, *d);
+                }
+                Const::InvokeDynamic(b, nt) => {
+                    out.push(18);
+                    u2(out, *b);
+                    u2(out, *nt);
+                }
             }
         }
     }
@@ -218,6 +248,9 @@ pub struct ClassWriter {
     fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
+    /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
+    /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
+    bootstrap_methods: Vec<(u16, Vec<u16>)>,
     pub internal_name: String,
 }
 
@@ -235,6 +268,7 @@ impl ClassWriter {
             fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
+            bootstrap_methods: Vec::new(),
             internal_name: internal_name.to_string(),
         }
     }
@@ -344,6 +378,28 @@ impl ClassWriter {
         self.cp.double(v)
     }
 
+    /// A `MethodType` constant from a method descriptor (e.g. `(Ljava/lang/Object;)Ljava/lang/Object;`).
+    pub fn method_type(&mut self, desc: &str) -> u16 {
+        self.cp.method_type(desc)
+    }
+    /// An `invokestatic` `MethodHandle` constant (reference_kind 6) onto a static method.
+    pub fn method_handle_static(&mut self, class: &str, name: &str, desc: &str) -> u16 {
+        self.cp.method_handle_static(class, name, desc)
+    }
+    /// Register a `BootstrapMethods` entry — `method_handle` is a `MethodHandle` cp index, `args` are
+    /// the static-argument cp indices. Returns the `bootstrap_method_attr_index` (deduped).
+    pub fn add_bootstrap(&mut self, method_handle: u16, args: Vec<u16>) -> u16 {
+        if let Some(i) = self.bootstrap_methods.iter().position(|e| e.0 == method_handle && e.1 == args) {
+            return i as u16;
+        }
+        self.bootstrap_methods.push((method_handle, args));
+        (self.bootstrap_methods.len() - 1) as u16
+    }
+    /// An `InvokeDynamic` constant binding a bootstrap entry to a call-site name+descriptor.
+    pub fn invoke_dynamic(&mut self, bootstrap: u16, name: &str, desc: &str) -> u16 {
+        self.cp.invoke_dynamic(bootstrap, name, desc)
+    }
+
     /// Whether a method with exactly this name+descriptor has already been added (used to avoid
     /// emitting a bridge that would duplicate an existing method).
     pub fn has_method(&mut self, name: &str, desc: &str) -> bool {
@@ -371,6 +427,22 @@ impl ClassWriter {
     pub fn finish(mut self) -> Vec<u8> {
         let code_attr_name = self.cp.utf8("Code");
         let stackmap_attr_name = self.cp.utf8("StackMapTable");
+        // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
+        // remaining indices must already be interned). All handle/argument indices were interned
+        // when `add_bootstrap` ran during code emission.
+        if !self.bootstrap_methods.is_empty() {
+            let name = self.cp.utf8("BootstrapMethods");
+            let mut body = Vec::new();
+            u2(&mut body, self.bootstrap_methods.len() as u16);
+            for (mh, args) in &self.bootstrap_methods {
+                u2(&mut body, *mh);
+                u2(&mut body, args.len() as u16);
+                for &a in args {
+                    u2(&mut body, a);
+                }
+            }
+            self.class_attributes.push((name, body));
+        }
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
@@ -814,6 +886,14 @@ impl CodeBuilder {
         self.bytes.push((arg_words + 1) as u8); // count includes the receiver
         self.bytes.push(0);
         self.adjust(ret_words - arg_words - 1);
+    }
+    /// `invokedynamic <indy-const> 0 0` — pops `arg_words`, pushes the call-site result (`ret_words`).
+    pub fn invokedynamic(&mut self, indy_index: u16, arg_words: i32, ret_words: i32) {
+        self.bytes.push(0xba);
+        self.bytes.extend_from_slice(&indy_index.to_be_bytes());
+        self.bytes.push(0);
+        self.bytes.push(0);
+        self.adjust(ret_words - arg_words);
     }
     pub fn getstatic(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb2, fieldref, words);
