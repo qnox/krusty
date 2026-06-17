@@ -214,7 +214,13 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
             return None;
         }
     };
-    let outputs: Vec<(String, Vec<u8>)> = ir_emit::emit_all(&ir, &facade_name);
+    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name) {
+        Some(o) => o,
+        None => {
+            T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            return None;
+        }
+    };
     T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     if outputs.is_empty() {

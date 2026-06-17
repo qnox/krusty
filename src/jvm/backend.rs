@@ -36,7 +36,13 @@ impl Backend for JvmBackend {
             diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
             return outputs;
         };
-        for (internal, bytes) in crate::jvm::ir_emit::emit_all(&ir, &facade_name) {
+        // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
+        // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
+        let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name) else {
+            diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
+            return outputs;
+        };
+        for (internal, bytes) in classes {
             outputs.push((format!("{internal}.class"), bytes));
         }
 

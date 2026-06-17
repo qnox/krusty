@@ -1865,6 +1865,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   Follow-ups: capturing lambdas (indy call-site args), `Unit` lambdas, generic/suspend consumers,
   callable references (same indy infra).
 
+- ✅ **Phase 170 — unbound top-level function references `::foo`** (234 → 235 box()=OK, 0 FAIL).
+  `::foo` reuses the lambda machinery: it lowers to `IrExpr::Lambda` whose `impl_fn` points directly at
+  the referenced function (no synthesized body), so `invokedynamic` + `LambdaMetafactory` bind the
+  function handle as a `FunctionN`. (kotlinc emits a `FunctionReferenceImpl` subclass with reflection
+  metadata, but that class is synthetic/non-ABI — the facade's public signatures and the round-trip
+  result are identical.) Same guards as lambdas (`Unit`/`Nothing` return, generic referenced function),
+  plus an **arity > 22** limit. Bound/object/constructor references still bail. `tests/callable_ref_e2e.rs`.
+  Architecture: a function type lowers to the **structural** `IrType::Function { params, ret }` (no JVM
+  package name in common lowering); the JVM backend maps it to `kotlin/jvm/functions/FunctionN` and owns
+  the fixed-arity `Function0..22` constraint — a JVM detail, not a language one. That constraint is
+  enforced inside `emit_all` (now returning `Option`, `None` when unrepresentable), so no emission path
+  (backend or conformance harness) can bypass it.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

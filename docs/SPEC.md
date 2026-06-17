@@ -188,6 +188,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
+  lambda, but the impl method handle points directly at the referenced function (no synthesized body).
+  kotlinc instead emits a `kotlin/jvm/internal/FunctionReferenceImpl` subclass carrying reflection
+  metadata, but that class is synthetic and not part of the facade's ABI, so public signatures and the
+  round-trip result match. A function type lowers to the backend-neutral `IrType::Function`; the **JVM
+  backend** maps it to `kotlin/jvm/functions/FunctionN` and enforces the JVM-only fixed-arity limit
+  (`Function0..22`) — higher arities, and bound/object/constructor references, are skipped
+  (`tests/callable_ref_e2e.rs`).
 
 ## 8. Success criteria for the PoC
 
