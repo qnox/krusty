@@ -676,14 +676,21 @@ impl<'a> Emitter<'a> {
                 }
             }
             And | Or => {
+                // Evaluate lhs, hold it in a temp while rhs is emitted (rhs may record frames that
+                // must see the temp as live), then combine. The temp is dead afterwards, so remove it
+                // from the slot map so it doesn't leak into later merge frames (next_slot stays
+                // monotonic — no reuse). Without this, a `false`/`else` path that never assigned the
+                // temp reaches a merge whose frame claims it's defined → VerifyError.
                 self.emit_value(lhs, code);
                 let tmp = self.next_slot;
                 self.next_slot += 1;
-                self.slots.insert(1_000_000 + tmp as u32, (tmp, Ty::Boolean));
+                let key = 1_000_000 + tmp as u32;
+                self.slots.insert(key, (tmp, Ty::Boolean));
                 code.istore(tmp);
                 self.emit_value(rhs, code);
                 code.iload(tmp);
                 if op == And { code.iand() } else { code.ior() }
+                self.slots.remove(&key);
             }
             Lt | Le | Gt | Ge | Eq | Ne => self.emit_compare(op, lhs, rhs, code),
         }
