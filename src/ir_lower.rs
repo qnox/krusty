@@ -1159,12 +1159,27 @@ impl<'a> Lower<'a> {
     /// Lower a call argument, inserting an explicit `ImplicitCoercion` when a primitive must box
     /// into a reference parameter (`Int` → `Any`) or a wrapper must unbox into a primitive param.
     /// Box/unbox is the backend's concern, but the *coercion* is explicit in the IR.
+    /// Whether `e` is the `emptyArray()` reified intrinsic call — a bare `emptyArray(...)` with no
+    /// arguments. kotlinc treats `emptyArray`/`arrayOfNulls`/`arrayOf` as codegen intrinsics; this
+    /// recognizes the empty case so it can be specialized to the target element type at the use site.
+    fn is_empty_array_intrinsic(&self, e: AstExprId) -> bool {
+        if let Expr::Call { callee, args } = self.afile.expr(e) {
+            if args.is_empty() {
+                if let Expr::Name(n) = self.afile.expr(*callee) {
+                    return n == "emptyArray";
+                }
+            }
+        }
+        false
+    }
+
     fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
         let at = self.info.ty(arg);
-        // `emptyArray<T>()` is a reified intrinsic typed `Array<Null>` by the checker — expand it to a
-        // fresh empty array of the *target* element type (the reified `T`), exactly as kotlinc inlines
-        // it, rather than calling the throwing stub. The target supplies the otherwise-erased element.
-        if at == Ty::array(Ty::Null) {
+        // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
+        // element type (the reified `T`), exactly as kotlinc specializes it, rather than calling the
+        // throwing stub. Recognized by the call shape (not the erased `Array<Any>` type, which a real
+        // `Object[]` value also has); the target supplies the otherwise-erased element.
+        if self.is_empty_array_intrinsic(arg) {
             if let Some(elem) = ir_array_element(target) {
                 return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem, elements: vec![] }));
             }

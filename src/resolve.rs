@@ -2022,10 +2022,11 @@ impl<'a> Checker<'a> {
         if actual == Ty::Null && expected.is_reference() {
             return;
         }
-        // `emptyArray()` is typed `Array<Null>` (bottom array) — assignable to any reference array;
-        // the emitter materializes it with the target's element type.
+        // An erased generic reference array (`Array<Any>`, e.g. `emptyArray<T>()` → `Object[]`) is
+        // assignable to any specific reference array — `Array` is invariant, but the erased value
+        // really is the target type at runtime, so kotlinc inserts a `checkcast` at the use site.
         if let (Ty::Array(ae), Ty::Array(ee)) = (actual, expected) {
-            if *ae == Ty::Null && ee.is_reference() {
+            if *ae == Ty::obj("kotlin/Any") && ee.is_reference() {
                 return;
             }
         }
@@ -2707,9 +2708,10 @@ impl<'a> Checker<'a> {
             return Some(Ty::array(elem));
         }
         if fname == "emptyArray" && args.is_empty() {
-            // `emptyArray<T>()` → a bottom reference array (`Array<Null>`), assignable to any reference
-            // array; the emitter materializes it with the *target* element type.
-            return Some(Ty::array(Ty::Null));
+            // `emptyArray<T>()` is a reified intrinsic — an erased reference array (`Array<Any>`,
+            // i.e. `Object[]`), assignable to any reference array; codegen specializes the empty array
+            // to the *target* element type (the reified `T`) at the use site.
+            return Some(Ty::array(Ty::obj("kotlin/Any")));
         }
         if fname == "arrayOf" {
             // The element type is the common type of the arguments; it must be a reference type
