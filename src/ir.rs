@@ -118,6 +118,13 @@ pub enum IrExpr {
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues { class: ClassId },
     EnumValueOf { class: ClassId, arg: ExprId },
+    /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory` producing a
+    /// `kotlin/jvm/functions/Function{arity}`. `impl_fn` is the synthesized static method holding the
+    /// body; `captures` are the free-variable values bound into the call site (empty = non-capturing).
+    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId> },
+    /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
+    /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
+    InvokeFunction { func: ExprId, args: Vec<ExprId>, ret: IrType },
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.

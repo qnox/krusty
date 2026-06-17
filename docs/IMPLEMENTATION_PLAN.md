@@ -1843,6 +1843,28 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   (round-trip vs the JVM under `-Xverify:all`). Resolves to user-defined methods/properties; **stdlib**
   receivers (`s?.substring(1)`) still bail — they need the external-call path and are a follow-up.
 
+- ✅ **Phase 168 — invokedynamic + BootstrapMethods class-writer infrastructure** (226, 0 FAIL).
+  Added the constant-pool kinds `MethodHandle`/`MethodType`/`InvokeDynamic`, a `BootstrapMethods`
+  class attribute, and the `invokedynamic` opcode + emitter API (`method_type`,
+  `method_handle_static`, `add_bootstrap`, `invoke_dynamic`). Purely additive — the foundation for
+  indy lambda/callable-ref lowering. Validated by `tests/indy_infra_e2e.rs` (a hand-built
+  `LambdaMetafactory` lambda over `java.util.function.IntUnaryOperator`, run under `-Xverify:all`).
+
+- ✅ **Phase 169 — non-capturing lambdas** (226 → 234 box()=OK, 0 FAIL). A lambda literal
+  `{ a -> … }` lowers to `IrExpr::Lambda` → `invokedynamic` + `LambdaMetafactory.metafactory`
+  producing a `kotlin/jvm/functions/Function{arity}`; the body becomes a synthesized `private static`
+  facade method `<enclosing>$lambda$<n>` with the lambda's real parameter types (the checker already
+  infers these via `lambda_param_types`). Calling a function value `f(args)` lowers to
+  `IrExpr::InvokeFunction` → `FunctionN.invoke` (args boxed to `Object`, the `Object` result
+  cast/unboxed to the return type). `Ty::Fun` now maps to `FunctionN`. The impl method uses primitive
+  specialization with a boxed `instantiatedMethodType`, so `LambdaMetafactory` inserts the box/unbox
+  adapter (matching kotlinc). Guards (skip, never miscompile): capturing lambdas (body reads an
+  enclosing local), lambdas inside class methods (could capture `this`/fields), `Unit`/`Nothing`
+  returns (need the `kotlin/Unit` singleton), and lambda arguments to a **generic** function
+  (type-parameter erasure needs a call-site checkcast not yet modeled). `tests/lambda_e2e.rs`.
+  Follow-ups: capturing lambdas (indy call-site args), `Unit` lambdas, generic/suspend consumers,
+  callable references (same indy infra).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

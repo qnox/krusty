@@ -37,6 +37,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         scope: Vec::new(),
         next_value: 0,
         cur_class: None,
+        cur_fn_name: String::new(),
+        lambda_seq: 0,
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -162,6 +164,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
+                lo.cur_fn_name = f.name.clone();
+                lo.lambda_seq = 0;
                 let sig = syms.funs.get(&f.name)?;
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
@@ -245,6 +249,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.scope.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
+                    lo.cur_fn_name = m.name.clone();
+                    lo.lambda_seq = 0;
                     // `this` is value 0.
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -443,6 +449,11 @@ struct Lower<'a> {
     scope: Vec<(String, u32, Ty)>,
     next_value: u32,
     cur_class: Option<String>,
+    /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
+    /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
+    cur_fn_name: String,
+    /// Per-enclosing-function counter for lambda impl-method naming.
+    lambda_seq: u32,
 }
 
 impl<'a> Lower<'a> {
@@ -450,6 +461,78 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
+    /// `LambdaMetafactory`). The body becomes a synthesized static method `<enclosing>$lambda$<n>`
+    /// with the lambda's (real, from the checker) parameter types. Non-capturing only: a body that
+    /// reads any enclosing local/parameter, or a lambda inside a class method (which could capture
+    /// `this`/fields), bails (`None`) rather than miscompile.
+    fn lower_lambda(&mut self, e: AstExprId, params: &[String], body: AstExprId) -> Option<u32> {
+        let Ty::Fun(sig) = self.info.ty(e) else { return None };
+        let arity = sig.params.len();
+        // A lambda inside a class method could capture `this`/fields — not modeled yet.
+        if self.cur_class.is_some() {
+            return None;
+        }
+        // A `Unit`/`Nothing`-returning lambda must yield the `kotlin/Unit` singleton from its impl
+        // method (so `FunctionN.invoke` returns an Object); krusty doesn't emit that yet — bail.
+        if sig.ret == Ty::Unit || sig.ret == Ty::Nothing {
+            return None;
+        }
+        // Bound parameter names: explicit, or the implicit single `it` for a unary lambda.
+        let bind_names: Vec<String> = if !params.is_empty() {
+            params.to_vec()
+        } else if arity == 1 {
+            vec!["it".to_string()]
+        } else if arity == 0 {
+            vec![]
+        } else {
+            return None;
+        };
+        if bind_names.len() != arity {
+            return None;
+        }
+        // Non-capturing only: bail if the body reads any enclosing local/parameter that the lambda
+        // does not itself bind (capturing it would require a closure with captured fields).
+        for (name, _, _) in &self.scope {
+            if !bind_names.contains(name) && crate::resolve::expr_uses_name_pub(self.afile, body, name) {
+                return None;
+            }
+        }
+        // Lower the body in a fresh value-numbering scope (the impl method's own locals).
+        let saved_scope = std::mem::take(&mut self.scope);
+        let saved_next = self.next_value;
+        self.next_value = 0;
+        for (name, pty) in bind_names.iter().zip(sig.params.iter()) {
+            let v = self.fresh_value();
+            self.scope.push((name.clone(), v, *pty));
+        }
+        let ve = self.expr(body);
+        self.scope = saved_scope;
+        self.next_value = saved_next;
+        let ve = ve?;
+        let ret_ty = ty_to_ir(sig.ret);
+        // Wrap the body value in a `Return` unless the lambda is `Unit`-valued or diverges.
+        let diverges = self.info.ty(body) == Ty::Nothing;
+        let body_expr = if ret_ty == IrType::Unit || diverges {
+            ve
+        } else {
+            self.ir.add_expr(IrExpr::Return(Some(ve)))
+        };
+        let block = self.ir.add_expr(IrExpr::Block { stmts: vec![body_expr], value: None });
+        let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
+        self.lambda_seq += 1;
+        let params_ir: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+        let fid = self.ir.add_fun(IrFunction {
+            name: impl_name,
+            params: params_ir,
+            ret: ret_ty,
+            body: Some(block),
+            is_static: true,
+            dispatch_receiver: None,
+        });
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -1028,6 +1111,7 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 self.ir.add_expr(IrExpr::Block { stmts: out, value })
             }
+            Expr::Lambda { params, body } => return self.lower_lambda(e, &params, body),
             Expr::Name(n) => {
                 if let Some((v, _)) = self.lookup(&n) {
                     self.ir.add_expr(IrExpr::GetValue(v))
@@ -1271,6 +1355,21 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // `f(args)` where `f` is a function-typed local/parameter → invoke through the
+                    // `kotlin/jvm/functions/FunctionN.invoke` interface method (args boxed to Object,
+                    // the Object result cast/unboxed to the function's return type).
+                    if let Some((v, Ty::Fun(sig))) = self.lookup(&fname) {
+                        if sig.params.len() != args.len() {
+                            return None;
+                        }
+                        let func = self.ir.add_expr(IrExpr::GetValue(v));
+                        let mut a = Vec::new();
+                        for arg in &args {
+                            a.push(self.expr(*arg)?);
+                        }
+                        let ret = ty_to_ir(sig.ret);
+                        return Some(self.ir.add_expr(IrExpr::InvokeFunction { func, args: a, ret }));
+                    }
                     // Primitive-array size constructor `IntArray(n)` → a per-element intrinsic that
                     // encodes the element type (so the backend picks the right allocation).
                     if prim_array_elem(&fname).is_some() && args.len() == 1 {
@@ -1278,6 +1377,13 @@ impl<'a> Lower<'a> {
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
+                        // A generic function (`fun <T> …`) erases its type-parameter return to Object;
+                        // a lambda argument flowing through it (or a `T` return needing a checkcast at
+                        // the call site) isn't modeled — bail when a lambda meets a generic callee.
+                        if self.top_fun_decl(&fname).map_or(false, |f| !f.type_params.is_empty())
+                            && args.iter().any(|a| matches!(self.afile.expr(*a), Expr::Lambda { .. })) {
+                            return None;
+                        }
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Omitted trailing args are filled from constant-literal defaults.
                         let meta: Vec<(String, Option<AstExprId>)> = self.top_fun_decl(&fname)
@@ -1463,6 +1569,11 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
         Ty::Obj(n) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
+        // A Kotlin function type `(A,…) -> R` is the JVM interface `kotlin/jvm/functions/FunctionN`.
+        Ty::Fun(s) => return IrType::Class {
+            fq_name: format!("kotlin/jvm/functions/Function{}", s.params.len()),
+            type_args: vec![], nullable: false,
+        },
         // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
         // its representation. Primitive arrays encode the element in the class name.
         Ty::Array(e) => {
