@@ -181,6 +181,20 @@ pub struct IrClass {
     /// for an `enum class`; the backend emits a static field per entry, a `$VALUES` array, a
     /// `<clinit>` that constructs them, and `values()`/`valueOf(String)`.
     pub enum_entries: Vec<(String, Vec<ExprId>)>,
+    /// Synthetic bridge methods: an override whose erased signature differs from the supertype's
+    /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
+    /// that adapts arguments and delegates to the concrete override.
+    pub bridges: Vec<Bridge>,
+}
+
+/// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).
+#[derive(Clone, Debug)]
+pub struct Bridge {
+    pub name: String,
+    pub erased_params: Vec<IrType>,
+    pub erased_ret: IrType,
+    pub concrete_params: Vec<IrType>,
+    pub concrete_ret: IrType,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.

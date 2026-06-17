@@ -142,7 +142,88 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, true);
         }
     }
+    emit_bridges(c, &mut cw);
     cw.finish()
+}
+
+/// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
+/// arguments (checkcast / unbox / numeric convert), delegates to the concrete override, and adapts
+/// the return value back (box / numeric convert). Bridges are straight-line — no frames.
+fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+    for b in &c.bridges {
+        let ep: Vec<Ty> = b.erased_params.iter().map(ir_ty_to_jvm).collect();
+        let cp: Vec<Ty> = b.concrete_params.iter().map(ir_ty_to_jvm).collect();
+        let er = ir_ty_to_jvm(&b.erased_ret);
+        let cr = ir_ty_to_jvm(&b.concrete_ret);
+        let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
+        let mut code = CodeBuilder::new(1 + pw);
+        code.aload(0);
+        let mut slot = 1u16;
+        for (et, ct) in ep.iter().zip(&cp) {
+            load(*et, slot, &mut code);
+            slot += slot_words(*et);
+            if et != ct {
+                if et.is_reference() && ct.is_reference() {
+                    let ci = cw.class_ref(&ref_internal(*ct));
+                    code.checkcast(ci);
+                } else if et.is_reference() && ct.is_primitive() {
+                    unbox_prim(cw, &mut code, *ct);
+                } else if et.is_primitive() && ct.is_primitive() {
+                    emit_num_conv(*et, *ct, &mut code);
+                }
+            }
+        }
+        let argw: i32 = cp.iter().map(|t| slot_words(*t) as i32).sum();
+        let m = cw.methodref(&c.fq_name, &b.name, &method_descriptor(&cp, cr));
+        code.invokevirtual(m, argw, slot_words(cr) as i32);
+        if cr != er {
+            if er.is_reference() && cr.is_primitive() {
+                box_prim_free(cw, &mut code, cr);
+            } else if er.is_primitive() && cr.is_primitive() {
+                emit_num_conv(cr, er, &mut code);
+            } // reference→reference: concrete return is a subtype of erased — no cast needed
+        }
+        emit_return(er, &mut code);
+        code.ensure_locals(1 + pw);
+        code.link();
+        cw.add_method(0x0001 | 0x0040 | 0x1000, &b.name, &method_descriptor(&ep, er), &code);
+    }
+}
+
+/// Box a primitive on the stack to its wrapper (free-function form for the bridge emitter).
+fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
+    let (cls, desc) = match t {
+        Ty::Int => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
+        Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;"),
+        Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;"),
+        Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;"),
+        Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
+        Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;"),
+        Ty::Byte => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
+        Ty::Short => ("java/lang/Short", "(S)Ljava/lang/Short;"),
+        _ => return,
+    };
+    let m = cw.methodref(cls, "valueOf", desc);
+    code.invokestatic(m, slot_words(t) as i32, 1);
+}
+
+/// Unbox a wrapper on the stack to the primitive `t` (free-function form for the bridge emitter).
+fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
+    let (cls, meth, desc) = match t {
+        Ty::Int => ("java/lang/Integer", "intValue", "()I"),
+        Ty::Long => ("java/lang/Long", "longValue", "()J"),
+        Ty::Double => ("java/lang/Double", "doubleValue", "()D"),
+        Ty::Float => ("java/lang/Float", "floatValue", "()F"),
+        Ty::Boolean => ("java/lang/Boolean", "booleanValue", "()Z"),
+        Ty::Char => ("java/lang/Character", "charValue", "()C"),
+        Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
+        Ty::Short => ("java/lang/Short", "shortValue", "()S"),
+        _ => return,
+    };
+    let ci = cw.class_ref(cls);
+    code.checkcast(ci);
+    let m = cw.methodref(cls, meth, desc);
+    code.invokevirtual(m, 0, slot_words(t) as i32);
 }
 
 /// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →
