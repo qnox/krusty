@@ -1615,6 +1615,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   (`Array(n){ DoubleArray(m) }`) is skipped (its loop-fill StackMapTable interacts badly with
   surrounding loops — caught 1 FAIL). Production drop-in: **478 → 480 box()=OK, 0 FAIL**.
 
+- ✅ **`StringBuilder.appendLine`** (leverage map: top unresolved method, 19 files) → `append(x)` then
+  `append('\n')` (it's a Kotlin extension, not a JDK method). +12 raw, but it unblocked files exposing
+  **two pre-existing bugs**, both then guarded to hold 0-FAIL: (a) **nested try/catch** trips a
+  StackMapTable frame bug (verified `append` in nested try/catch `VerifyError`s independent of
+  `appendLine`) — rejected via a new `expr_has_try` walker; (b) a **lateinit *local*** defaults to
+  `null` instead of throwing on read-before-init (miscompiles a negative test) — rejected at parse.
+  Net **480 → 485 box()=OK, 0 FAIL**. (Nested-try frames + lateinit-local throw are now logged
+  follow-up bugs.)
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

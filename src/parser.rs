@@ -1419,10 +1419,12 @@ impl<'a> Parser<'a> {
             }
             return self.parse_stmt();
         }
-        // `lateinit var x: T` local — consume the modifier; the deferred-`var` path below handles
-        // the (no-initializer) declaration, defaulting the backing slot to `null`.
+        // `lateinit var x: T` local — krusty defaults the slot to `null` rather than throwing
+        // `UninitializedPropertyAccessException` on a read-before-init (a semantic difference that
+        // miscompiles a negative test), so reject it (the file skips).
         if self.at(TokenKind::Ident) && self.text() == "lateinit"
             && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwVar) {
+            self.diags.error(self.tok().span, "krusty: lateinit local variables are not supported");
             self.bump(); // 'lateinit'
         }
         let start = self.tok().span;
