@@ -156,7 +156,19 @@ impl LibrarySet for JvmLibraries {
             _ => t.descriptor(),
         }).collect();
         let widened_exact = format!("({widened})V");
-        ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == widened_exact).map(|m| m.descriptor.clone())
+        if let Some(m) = ci.methods.iter().find(|m| m.name == "<init>" && m.is_public() && m.descriptor == widened_exact) {
+            return Some(m.descriptor.clone());
+        }
+        // Every JDK `Throwable` has a no-arg and a single-message constructor; accept those two
+        // shapes even when the classpath reader can't see the jimage constructor descriptors.
+        if super::jvm_class_map::is_throwable_internal(internal) {
+            return match arg_tys {
+                [] => Some("()V".to_string()),
+                [Ty::String] => Some(format!("({})V", Ty::String.descriptor())),
+                _ => None,
+            };
+        }
+        None
     }
 
     fn resolve_extension(&self, receiver: Ty, method: &str, arg_tys: &[Ty]) -> Option<(String, String, String, Ty)> {
@@ -180,5 +192,13 @@ impl LibrarySet for JvmLibraries {
 
     fn is_interface(&self, internal: &str) -> bool {
         self.cp.find(internal).map_or(false, |c| c.is_interface())
+    }
+
+    fn is_throwable(&self, internal: &str) -> bool {
+        super::jvm_class_map::is_throwable_internal(internal)
+    }
+
+    fn boxed_type(&self, prim: Ty) -> Option<Ty> {
+        super::jvm_class_map::wrapper_internal(prim).map(Ty::obj)
     }
 }

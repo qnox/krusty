@@ -2759,9 +2759,9 @@ impl<'a> Checker<'a> {
                 self.diags.error(span, "krusty: Array(n) {…} with an array element is not supported".to_string());
                 return Some(Ty::Error);
             }
-            // A primitive element boxes to its wrapper reference type — the boxing policy (and the
-            // JVM wrapper names) belong to the backend.
-            let ref_elem = crate::jvm::jvm_class_map::wrapper_internal(elem).map_or(elem, Ty::obj);
+            // A primitive element boxes to its wrapper reference type — the boxing policy is the
+            // target's, so it comes through the library-set abstraction.
+            let ref_elem = self.syms.libraries.boxed_type(elem).unwrap_or(elem);
             return Some(Ty::array(ref_elem));
         }
         None
@@ -3399,7 +3399,7 @@ impl<'a> Checker<'a> {
                     // hardcoded list. Every JDK `Throwable` has both a no-arg and a single-`String`
                     // constructor, so those two arg shapes are accepted for a throwable-shaped type.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if crate::jvm::jvm_class_map::is_throwable_internal(&internal) && matches!(arg_tys.as_slice(), [] | [Ty::String]) {
+                        if self.syms.libraries.is_throwable(&internal) && matches!(arg_tys.as_slice(), [] | [Ty::String]) {
                             return Ty::obj(&internal);
                         }
                     }
