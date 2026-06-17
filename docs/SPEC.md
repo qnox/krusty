@@ -229,6 +229,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   At a call site, a result of erased type `Object` flowing into a more specific reference context (a
   typed `val`, a `return`, a function argument) gets a `checkcast` to that type — matching kotlinc (the
   value really is that type at runtime). `kotlin.Any`/`Object` targets get no cast.
+- `vararg` parameters: the parameter's JVM type is the array (`Int...` → `[I`); a call packs the trailing
+  arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
+  Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
+  (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader

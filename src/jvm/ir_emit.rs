@@ -812,6 +812,24 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
+            IrExpr::ArrayOf { elem, elements } => {
+                let et = ir_ty_to_jvm(elem);
+                let elements = elements.clone();
+                code.push_int(elements.len() as i32, self.cw);
+                if et.is_primitive() {
+                    code.newarray(prim_newarray_atype(et));
+                } else {
+                    let ci = self.cw.class_ref(&ref_internal(et));
+                    code.anewarray(ci);
+                }
+                let (op, w) = array_store_op(et);
+                for (i, &el) in elements.iter().enumerate() {
+                    code.dup();
+                    code.push_int(i as i32, self.cw);
+                    self.emit_value(el, code);
+                    code.array_store(op, w);
+                }
+            }
             IrExpr::Try { body, catches, finally, result } => {
                 let catches = catches.clone();
                 let result = result.clone();
@@ -1063,6 +1081,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::Throw { operand } => self.records_frame(*operand),
+            IrExpr::ArrayOf { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
             IrExpr::Block { stmts, value } =>
@@ -1512,6 +1531,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } => Ty::Nothing,
+            IrExpr::ArrayOf { elem, .. } => Ty::array(ir_ty_to_jvm(elem)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }
@@ -1645,6 +1665,15 @@ fn array_store_op(elem: Ty) -> (u8, i32) {
         Ty::Int => (0x4f, 1), Ty::Long => (0x50, 2), Ty::Float => (0x51, 1), Ty::Double => (0x52, 2),
         Ty::Boolean | Ty::Byte => (0x54, 1), Ty::Char => (0x55, 1), Ty::Short => (0x56, 1),
         _ => (0x53, 1), // aastore
+    }
+}
+
+/// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
+fn prim_newarray_atype(elem: Ty) -> u8 {
+    match elem {
+        Ty::Boolean => 4, Ty::Char => 5, Ty::Float => 6, Ty::Double => 7,
+        Ty::Byte => 8, Ty::Short => 9, Ty::Long => 11,
+        _ => 10, // int
     }
 }
 
