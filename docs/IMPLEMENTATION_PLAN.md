@@ -1807,6 +1807,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   when a superclass already declares it (e.g. a base's `final override fun toString()`), inheriting it
   instead of regenerating.
 
+- ✅ **Phase 164 — objects (named singletons)** (214 → 217 box()=OK, 0 FAIL). `object Foo { … }` now
+  emits as a class with a `public static final Foo INSTANCE` field, a private no-arg constructor (body
+  properties initialized in it), and a `<clinit>` that builds the instance. A bare `Foo` reference
+  lowers to `IrExpr::ObjectInstance` (`getstatic INSTANCE`); `Foo.x`/`Foo.f()` read/call through it
+  (the checker types a bare object name as `Error`, so `recv_ty` maps an object-name receiver to its
+  object type). Guard: an object with an `init { … }` block is skipped (a `const val` read must not
+  trigger the init — krusty doesn't model const-inlining).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
