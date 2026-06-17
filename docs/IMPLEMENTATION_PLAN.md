@@ -1654,6 +1654,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `Serializable` is expected (krusty's `obj_is_subtype` only knew *user*-class hierarchies). One rule,
   **526 → 539 box()=OK, 0 FAIL** (+13).
 
+- ✅ **Standalone `run { … }`** (leverage map: top unresolved function after `listOf`, ~12 files) →
+  the no-param lambda body is inlined, yielding its value (resolve + emit, like the `with` scope
+  function). It exposed a pre-existing **elvis-with-`Unit`-RHS** frame bug (`x ?: someUnitExpr`
+  pushes incompatible stack shapes → `VerifyError`), now guarded (skip). Production drop-in: **539 →
+  545 box()=OK, 0 FAIL** (+6).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
