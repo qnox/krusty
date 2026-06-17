@@ -880,12 +880,6 @@ impl<'a> Lower<'a> {
                             if st.is_primitive() != self.info.ty(c).is_primitive() {
                                 return None;
                             }
-                            // A branchy condition (`x == when(y){…}`) is emitted inside the
-                            // `subject == cond` compare while the subject is on the stack — its merge
-                            // frames would omit that operand. Bail.
-                            if is_branchy(self.afile, c) {
-                                return None;
-                            }
                         }
                     }
                 }

@@ -1758,6 +1758,16 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   is still re-evaluated per comparison (which stays correct for a smart-cast local, whose slot type
   differs from its static type and would be mis-framed by a temp store).
 
+- ✅ **Phase 159 — spill `emit_compare` operands; complete + correct the spill** (148 → 149, 0 FAIL).
+  Applied the spill to `emit_compare` (both the `Objects.equals` and primitive paths), retiring the
+  last branchy-operand guard — the branchy `when` **condition** (`x == when{…}`) now compiles. Fixed a
+  latent correctness bug in the spill itself: an earlier operand's temp is **live** while a later
+  branchy operand records frames, so the temps must be in `self.slots` during that window (else those
+  frames mark the slot `Top` → "Bad local variable type"). Centralized into `spill_to_temps` (registers
+  each temp in `self.slots`, caller removes after load); `New`/`MethodCall`/`Call`/enum-`<clinit>`/
+  `emit_compare` all share it. The branchy-operand-on-non-empty-stack VerifyError class is now fully
+  closed.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

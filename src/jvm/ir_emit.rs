@@ -178,24 +178,15 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8>
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
             let spill = args.iter().any(|&a| e.records_frame(a));
-            let mut temps = Vec::new();
-            if spill {
-                for &a in args {
-                    e.emit_value(a, &mut clinit);
-                    let at = e.value_ty(a);
-                    let slot = e.next_slot;
-                    e.next_slot += slot_words(at);
-                    store(at, slot, &mut clinit);
-                    temps.push((slot, at));
-                }
-            }
+            let temps = if spill { e.spill_to_temps(args, &mut clinit) } else { Vec::new() };
             let cls = e.cw.class_ref(&fq);
             clinit.new_obj(cls);
             clinit.dup();
             clinit.push_string(entry, e.cw);
             clinit.push_int(i as i32, e.cw);
             if spill {
-                for (slot, t) in &temps { load(*t, *slot, &mut clinit); }
+                for &(slot, t, _) in &temps { load(t, slot, &mut clinit); }
+                for &(_, _, key) in &temps { e.slots.remove(&key); }
             } else {
                 for &a in args {
                     e.emit_value(a, &mut clinit);
@@ -438,19 +429,12 @@ impl<'a> Emitter<'a> {
                 if args.iter().any(|&a| self.records_frame(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
                     // would omit them. Evaluate all args into temps first (clean stack), then build.
-                    let mut temps = Vec::new();
-                    for &a in &args {
-                        self.emit_value(a, code);
-                        let at = self.value_ty(a);
-                        let slot = self.next_slot;
-                        self.next_slot += slot_words(at);
-                        store(at, slot, code);
-                        temps.push((slot, at));
-                    }
+                    let temps = self.spill_to_temps(&args, code);
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
-                    for (slot, t) in &temps { load(*t, *slot, code); }
+                    for &(slot, t, _) in &temps { load(t, slot, code); }
+                    for &(_, _, key) in &temps { self.slots.remove(&key); }
                     let m = self.cw.methodref(&owner, "<init>", &desc);
                     code.invokespecial(m, aw, 0);
                 } else {
@@ -729,19 +713,30 @@ impl<'a> Emitter<'a> {
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
-            let mut temps = Vec::new();
-            for &o in ops {
-                self.emit_value(o, code);
-                let t = self.value_ty(o);
-                let slot = self.next_slot;
-                self.next_slot += slot_words(t);
-                store(t, slot, code);
-                temps.push((slot, t));
-            }
-            for (slot, t) in &temps { load(*t, *slot, code); }
+            let temps = self.spill_to_temps(ops, code);
+            for &(slot, t, _) in &temps { load(t, slot, code); }
+            for &(_, _, key) in &temps { self.slots.remove(&key); }
         } else {
             for &o in ops { self.emit_value(o, code); }
         }
+    }
+
+    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is registered in `self.slots`
+    /// (so a *later* op's frames see the earlier temps as live, not `Top`); the caller loads them and
+    /// then removes them (they're dead once loaded). Returns `(slot, ty, slots-key)` per op.
+    fn spill_to_temps(&mut self, ops: &[u32], code: &mut CodeBuilder) -> Vec<(u16, Ty, u32)> {
+        let mut temps = Vec::new();
+        for &o in ops {
+            self.emit_value(o, code);
+            let t = self.value_ty(o);
+            let slot = self.next_slot;
+            self.next_slot += slot_words(t);
+            store(t, slot, code);
+            let key = 2_000_000 + slot as u32;
+            self.slots.insert(key, (slot, t));
+            temps.push((slot, t, key));
+        }
+        temps
     }
 
     fn emit_binop(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
@@ -784,8 +779,8 @@ impl<'a> Emitter<'a> {
         // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
         // null-safe `Objects.equals`. Primitives keep the `if_icmp*`/3-way-compare path below.
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
-            self.emit_value(lhs, code);
-            self.emit_value(rhs, code);
+            // Spill if rhs is branchy (`x == when{…}`) so lhs isn't live across its merge frames.
+            self.emit_operands(&[lhs, rhs], code);
             let m = self.cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
             code.invokestatic(m, 2, 1);
             if op == IrBinOp::Ne {
@@ -794,8 +789,7 @@ impl<'a> Emitter<'a> {
             }
             return;
         }
-        self.emit_value(lhs, code);
-        self.emit_value(rhs, code);
+        self.emit_operands(&[lhs, rhs], code);
         // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`.
         match lt {
             Ty::Long => { code.lcmp(); code.push_int(0, self.cw); }
