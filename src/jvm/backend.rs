@@ -4,7 +4,7 @@
 use crate::ast::{Decl, File};
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::jvm::emit::{emit_class, emit_file, file_class_name};
+use crate::jvm::names::file_class_name;
 use crate::resolve::{SymbolTable, TypeInfo};
 
 pub struct JvmBackend;
@@ -29,38 +29,26 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let mut outputs = Vec::new();
 
-        // Each top-level `class` becomes its own `.class` file.
+        // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
+        // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
-        for &d in &file.decls {
-            if let Decl::Class(c) = file.decl(d) {
-                let internal = match file.package.as_deref() {
-                    Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), c.name),
-                    _ => c.name.clone(),
-                };
-                let (bytes, extra) = emit_class(c, file, info, &internal, &facade_name, syms, diags);
-                outputs.push((format!("{internal}.class"), bytes));
-                for (name, eb) in extra {
-                    outputs.push((format!("{name}.class"), eb));
-                }
-            }
+        let Some(ir) = crate::ir_lower::lower_file(file, info, syms) else {
+            diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
+            return outputs;
+        };
+        for (internal, bytes) in crate::jvm::ir_emit::emit_all(&ir, &facade_name) {
+            outputs.push((format!("{internal}.class"), bytes));
         }
 
-        // The file facade (`<File>Kt`) is emitted only if the file has top-level functions/props.
+        // Record the file facade (`<File>Kt`) for the `.kotlin_module` mapping when the file has
+        // top-level functions/props.
         let has_facade_members = file
             .decls
             .iter()
             .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)));
         if has_facade_members {
-            let internal = file_class_name(stem, file.package.as_deref());
-            let (bytes, extra) = emit_file(file, info, syms, &internal, diags);
-            if !diags.has_errors() {
-                let facade = internal.rsplit('/').next().unwrap_or(&internal).to_string();
-                state.module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
-                outputs.push((format!("{internal}.class"), bytes));
-                for (name, eb) in extra {
-                    outputs.push((format!("{name}.class"), eb));
-                }
-            }
+            let facade = facade_name.rsplit('/').next().unwrap_or(&facade_name).to_string();
+            state.module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
         }
         outputs
     }

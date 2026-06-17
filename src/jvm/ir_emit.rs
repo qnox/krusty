@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
-use crate::jvm::emit::method_descriptor;
+use crate::jvm::names::method_descriptor;
 use crate::types::Ty;
 
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
