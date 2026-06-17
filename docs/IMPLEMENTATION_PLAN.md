@@ -2050,6 +2050,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   extension functions (`kotlin.ranges.until`/`downTo`/`step`) by symbol — the proper, non-hardcoded path
   to range support.
 
+- ✅ **Phase 188 — stdlib multifile-facade resolution** (315 box()=OK, 0 FAIL; foundational, +0 box).
+  The stdlib's extension/top-level functions don't live on the public facade class — the facade
+  (`kotlin/text/StringsKt`, `kotlin/ranges/RangesKt`) is **empty and extends a chain of package-private
+  multifile *part* classes** (`StringsKt___StringsKt` → `StringsKt__StringsKt` → …) that hold the actual
+  `public static` methods. krusty's classpath extension index scanned each class's own public methods and
+  skipped non-public classes, so it found *nothing* in the stdlib — every stdlib extension was
+  "unresolved". Rewrote `ensure_ext_index` as two passes: collect every class (public or not), then for
+  each **public** class index the static methods reachable through its **superclass chain** (the parts),
+  with `owner` = the public facade — which is what kotlinc emits (`invokestatic StringsKt.repeat`,
+  verified). `1.until(10)` now resolves (was "unresolved method"). Remaining for actually compiling these
+  calls: match the receiver against its **supertype chain** (kotlinc's `repeat` is a `CharSequence`
+  extension, called on a `String`) and a lowering path that emits `invokestatic facade.name(recv, …)`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
