@@ -155,6 +155,42 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods.insert(gname, (mi, fid, ty));
                 method_fids.push(fid);
             }
+            // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
+            // them; the fields are private). Getter returns the field; setter (var only) writes it.
+            // Interfaces/enums/objects keep their existing shape — accessors are for normal classes.
+            if !c.is_interface && !c.is_enum && !c.is_object {
+                let field_props: Vec<(String, bool)> = c.props.iter().filter(|p| p.is_property).map(|p| (p.name.clone(), p.is_var))
+                    .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| (p.name.clone(), p.is_var)))
+                    .collect();
+                for (fidx, (pname, is_var)) in field_props.iter().enumerate() {
+                    let fty = fields[fidx].1;
+                    let fty_ir = ty_to_ir(fty);
+                    let gname = getter_name(pname);
+                    if !methods.contains_key(&gname) {
+                        let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let gf = lo.ir.add_expr(IrExpr::GetField { receiver: this_e, class: id, index: fidx as u32 });
+                        let ret = lo.ir.add_expr(IrExpr::Return(Some(gf)));
+                        let body = lo.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+                        let mi = method_fids.len() as u32;
+                        let fid = lo.ir.add_fun(IrFunction { name: gname.clone(), params: vec![], ret: fty_ir.clone(), body: Some(body), is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                        methods.insert(gname, (mi, fid, fty));
+                        method_fids.push(fid);
+                    }
+                    if *is_var {
+                        let sname = setter_name(pname);
+                        if !methods.contains_key(&sname) {
+                            let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                            let v = lo.ir.add_expr(IrExpr::GetValue(1));
+                            let sf = lo.ir.add_expr(IrExpr::SetField { receiver: this_e, class: id, index: fidx as u32, value: v });
+                            let body = lo.ir.add_expr(IrExpr::Block { stmts: vec![sf], value: None });
+                            let mi = method_fids.len() as u32;
+                            let fid = lo.ir.add_fun(IrFunction { name: sname.clone(), params: vec![fty_ir.clone()], ret: IrType::Unit, body: Some(body), is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                            methods.insert(sname, (mi, fid, Ty::Unit));
+                            method_fids.push(fid);
+                        }
+                    }
+                }
+            }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
             lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods, super_internal });
@@ -582,6 +618,14 @@ fn getter_name(prop: &str) -> String {
     }
     let mut c = prop.chars();
     format!("get{}{}", c.next().unwrap().to_uppercase(), c.as_str())
+}
+
+/// The JVM setter name for a property: `x` → `setX`; `isOpen` → `setOpen` (the `is` prefix is dropped).
+fn setter_name(prop: &str) -> String {
+    let b = prop.as_bytes();
+    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() { &prop[2..] } else { prop };
+    let mut c = base.chars();
+    format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
 }
 
 struct Lower<'a> {
@@ -1167,6 +1211,17 @@ impl<'a> Lower<'a> {
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
             Stmt::AssignMember { receiver, name, value } => {
                 let rt = self.info.ty(receiver);
+                let owner_internal = self.class_of(rt)?.internal.clone();
+                // The backing field is private; a write from outside the declaring class goes through
+                // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
+                if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                    if let Some((mclass, mindex, mfid, _)) = self.resolve_method(&owner_internal, &setter_name(&name)) {
+                        let pty = self.ir.functions[mfid as usize].params[0].clone();
+                        let r = self.expr(receiver)?;
+                        let v = self.lower_arg(value, &pty)?;
+                        return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: r, args: vec![v] }));
+                    }
+                }
                 let (class, idx, field_ty) = {
                     let ci = self.class_of(rt)?;
                     let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
@@ -1360,7 +1415,17 @@ impl<'a> Lower<'a> {
                     }
                     None => {
                         let (fclass, idx, _) = self.resolve_field(&internal, &name)?;
-                        self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                        let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
+                        // External read → `getX()` (the backing field is private); internal → field.
+                        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                            if let Some((mclass, mindex, _, _)) = self.resolve_method(&internal, &getter_name(&name)) {
+                                self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv2, args: vec![] })
+                            } else {
+                                self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                            }
+                        } else {
+                            self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                        }
                     }
                 };
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -1496,6 +1561,15 @@ impl<'a> Lower<'a> {
                     let recv_internal = rci.internal.clone();
                     if let Some((class, idx, _)) = self.resolve_field(&recv_internal, &name) {
                         let owner_internal = self.ir.classes[class as usize].fq_name.clone();
+                        // The backing field is private; access from outside the declaring class goes
+                        // through the public `getX()` accessor (matching kotlinc). Inside the class,
+                        // read the field directly.
+                        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                            if let Some((mclass, mindex, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
+                                let recv = self.expr(receiver)?;
+                                return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv, args: vec![] }));
+                            }
+                        }
                         let recv = self.expr(receiver)?;
                         // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
                         // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
