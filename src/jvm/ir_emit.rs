@@ -881,6 +881,23 @@ impl<'a> Emitter<'a> {
                     let m = self.cw.methodref(&owner, &name, &descriptor);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
+                Callee::Virtual { owner, name, descriptor, interface } => {
+                    let (owner, name, descriptor, interface) = (owner.clone(), name.clone(), descriptor.clone(), *interface);
+                    let recv = dispatch_receiver.expect("virtual call needs a receiver");
+                    let args = args.clone();
+                    let mut ops = vec![recv];
+                    ops.extend(args.iter().copied());
+                    self.emit_operands(&ops, code);
+                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let ret = ty_from_descriptor_ret(&descriptor);
+                    if interface {
+                        let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                        code.invokeinterface(m, aw, slot_words(ret) as i32);
+                    } else {
+                        let m = self.cw.methodref(&owner, &name, &descriptor);
+                        code.invokevirtual(m, aw, slot_words(ret) as i32);
+                    }
+                }
             },
             IrExpr::TypeOp { op, arg, type_operand } => {
                 let internal = ref_internal(ir_ty_to_jvm(type_operand));
@@ -1721,7 +1738,7 @@ impl<'a> Emitter<'a> {
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
                 Callee::External(fq) if prim_array_elem_ty(fq).is_some() => Ty::array(prim_array_elem_ty(fq).unwrap()),
                 Callee::External(fq) => intrinsic_ret(fq),
-                Callee::Static { descriptor, .. } => ty_from_descriptor_ret(descriptor),
+                Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } => ty_from_descriptor_ret(descriptor),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
