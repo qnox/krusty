@@ -1823,6 +1823,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   source order, not the checker's reordered positions). The full `$default` mechanism (mask + synthetic
   method) and named-argument reordering are the follow-ups that would generalize this.
 
+- ✅ **Phase 166 — named arguments + defaults (functions & constructors)** (218 → 226 box()=OK, 0 FAIL).
+  `lower_args_defaulted` now places each argument into its parameter slot — a positional arg fills the
+  next free position, a named arg (`x = …`) fills its named parameter (resolved against the callee's
+  parameter names) — then fills unprovided slots from constant-literal defaults. Applied to top-level
+  function calls and constructor calls (so `C(y = 1, x = 2)`, `foo(b = 2)`, annotation-style named ctor
+  args, and `C()`/`f()` with defaults all work). Arguments are still evaluated in slot order (fine for
+  the side-effect-free common case). Non-literal defaults (need `$default`) and instance-method default
+  args remain follow-ups.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

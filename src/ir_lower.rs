@@ -616,31 +616,52 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
+        self.afile.decls.iter().find_map(|&d| match self.afile.decl(d) {
+            Decl::Class(c) if c.name == name => Some(c),
+            _ => None,
+        })
+    }
+
     /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
     /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
     /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
-    fn lower_args_defaulted(&mut self, call: AstExprId, ast_params: &[ast::Param], args: &[AstExprId], ir_params: &[IrType]) -> Option<Vec<u32>> {
-        if args.len() > ir_params.len() {
+    fn lower_args_defaulted(&mut self, call: AstExprId, param_meta: &[(String, Option<AstExprId>)], args: &[AstExprId], ir_params: &[IrType]) -> Option<Vec<u32>> {
+        let n = ir_params.len();
+        if args.len() > n {
             return None;
         }
-        // Named arguments are reordered by the checker but the IR sees them in source order — the
-        // positional `args[k] → param[k]` mapping below is only valid when none are named. (A fully
-        // positional call still works.)
-        if args.len() < ir_params.len()
-            && self.afile.call_arg_names.get(&call.0).map_or(false, |n| n.iter().any(|x| x.is_some()))
-        {
-            return None;
+        // Place each argument into its parameter slot: a positional arg fills the next free position;
+        // a named arg (`x = …`) fills its named parameter. Unfilled slots take constant-literal
+        // defaults. (Arguments are evaluated in slot order — fine for the side-effect-free common case.)
+        let names = self.afile.call_arg_names.get(&call.0).cloned().unwrap_or_default();
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut pos = 0;
+        for (i, &arg) in args.iter().enumerate() {
+            match names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if pos >= n { return None; }
+                    slot[pos] = Some(arg);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
+                    if idx >= n || slot[idx].is_some() { return None; }
+                    slot[idx] = Some(arg);
+                }
+            }
         }
         let mut a = Vec::new();
         for (k, pt) in ir_params.iter().enumerate() {
-            if k < args.len() {
-                a.push(self.lower_arg(args[k], pt)?);
-            } else {
-                let def = ast_params.get(k)?.default?;
-                if !is_const_literal(self.afile, def) {
-                    return None;
+            match slot[k] {
+                Some(arg) => a.push(self.lower_arg(arg, pt)?),
+                None => {
+                    let def = param_meta.get(k).and_then(|(_, d)| *d)?;
+                    if !is_const_literal(self.afile, def) {
+                        return None;
+                    }
+                    a.push(self.lower_arg(def, pt)?);
                 }
-                a.push(self.lower_arg(def, pt)?);
             }
         }
         Some(a)
@@ -1222,8 +1243,10 @@ impl<'a> Lower<'a> {
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Omitted trailing args are filled from constant-literal defaults.
-                        let ast_params = self.top_fun_decl(&fname).map(|f| f.params.clone()).unwrap_or_default();
-                        let a = self.lower_args_defaulted(e, &ast_params, &args, &params)?;
+                        let meta: Vec<(String, Option<AstExprId>)> = self.top_fun_decl(&fname)
+                            .map(|f| f.params.iter().map(|p| (p.name.clone(), p.default)).collect())
+                            .unwrap_or_default();
+                        let a = self.lower_args_defaulted(e, &meta, &args, &params)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
                     } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
@@ -1246,17 +1269,14 @@ impl<'a> Lower<'a> {
                         // constructors aren't lowered — bail (skip) rather than emit a call whose
                         // stack shape won't match the constructor descriptor (a VerifyError).
                         let ctor_count = self.ir.classes[class as usize].ctor_param_count as usize;
-                        if args.len() != ctor_count {
-                            return None;
-                        }
-                        // Coerce each argument to its constructor-parameter field type (e.g. an
-                        // `Int` literal into a `Long` field — `LongWrapper(2)`).
+                        // Coerce each argument to its constructor-parameter field type, filling named
+                        // args + constant-literal defaults (`LongWrapper(2)`, `C(y = 1)`, `C()`).
                         let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields[..ctor_count]
                             .iter().map(|(_, t)| t.clone()).collect();
-                        let mut a = Vec::new();
-                        for (arg, ft) in args.iter().zip(&field_tys) {
-                            a.push(self.lower_arg(*arg, ft)?);
-                        }
+                        let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&fname)
+                            .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
+                            .unwrap_or_default();
+                        let a = self.lower_args_defaulted(e, &meta, &args, &field_tys)?;
                         self.ir.add_expr(IrExpr::New { class, args: a })
                     }
                 }
