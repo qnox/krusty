@@ -872,6 +872,15 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
+                Callee::Static { owner, name, descriptor } => {
+                    let (owner, name, descriptor) = (owner.clone(), name.clone(), descriptor.clone());
+                    let args = args.clone();
+                    self.emit_operands(&args, code);
+                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let ret = ty_from_descriptor_ret(&descriptor);
+                    let m = self.cw.methodref(&owner, &name, &descriptor);
+                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                }
             },
             IrExpr::TypeOp { op, arg, type_operand } => {
                 let internal = ref_internal(ir_ty_to_jvm(type_operand));
@@ -1712,6 +1721,7 @@ impl<'a> Emitter<'a> {
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
                 Callee::External(fq) if prim_array_elem_ty(fq).is_some() => Ty::array(prim_array_elem_ty(fq).unwrap()),
                 Callee::External(fq) => intrinsic_ret(fq),
+                Callee::Static { descriptor, .. } => ty_from_descriptor_ret(descriptor),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
@@ -1784,6 +1794,30 @@ fn boxed_descriptor(t: Ty) -> String {
 /// Convert the numeric primitive on top of the stack from `from` to `to` (JVM `i2l`/`i2d`/…).
 /// Byte/Short/Char live in the `int` stack category; widening goes via that category, and a
 /// Byte/Short/Char target is narrowed from `int` last.
+/// Parse the return type of a JVM method descriptor (`(…)Lfoo/Bar;` → `Obj("foo/Bar")`) into a `Ty`.
+fn ty_from_descriptor_ret(desc: &str) -> Ty {
+    let ret = desc.rsplit(')').next().unwrap_or("V");
+    ty_from_field_descriptor(ret)
+}
+
+/// Parse a single JVM field/type descriptor into a `Ty`.
+fn ty_from_field_descriptor(d: &str) -> Ty {
+    match d.as_bytes().first() {
+        Some(b'I') => Ty::Int,
+        Some(b'J') => Ty::Long,
+        Some(b'Z') => Ty::Boolean,
+        Some(b'B') => Ty::Byte,
+        Some(b'C') => Ty::Char,
+        Some(b'S') => Ty::Short,
+        Some(b'F') => Ty::Float,
+        Some(b'D') => Ty::Double,
+        Some(b'V') => Ty::Unit,
+        Some(b'L') => Ty::obj(d.strip_prefix('L').and_then(|s| s.strip_suffix(';')).unwrap_or(d)),
+        Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
+        _ => Ty::Error,
+    }
+}
+
 fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
     use Ty::*;
     if from == to { return; }

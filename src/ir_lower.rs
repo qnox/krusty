@@ -2217,6 +2217,19 @@ impl<'a> Lower<'a> {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                    } else if let Some((owner, jvm_name, desc, _)) = {
+                        // A classpath-resolved extension/stdlib function `recv.name(args)` →
+                        // `invokestatic facade.name(recv, args)`. Owner + descriptor come from the
+                        // classpath (`resolve_extension`), so no stdlib name is hardcoded here.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        crate::resolve::resolve_extension(&self.syms.classpath, rt, &name, &arg_tys)
+                    } {
+                        let recv = self.expr(receiver)?;
+                        let mut a = vec![recv];
+                        for &arg in &args {
+                            a.push(self.expr(arg)?);
+                        }
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner, name: jvm_name, descriptor: desc }, dispatch_receiver: None, args: a })
                     } else {
                         return None;
                     }

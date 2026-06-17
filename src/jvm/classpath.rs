@@ -186,10 +186,11 @@ impl Classpath {
         if self.ext.borrow().is_some() {
             return;
         }
-        // Pass 1: parse every class (public or not) by internal name. The stdlib's extension/top-level
-        // functions live in package-private multifile *part* classes (`RangesKt___RangesKt`) that the
-        // public facade (`RangesKt`) extends — so we need the parts even though they aren't public.
-        let mut all: HashMap<String, ClassInfo> = HashMap::new();
+        // Pass 1: collect a *lean* record per class — its `super_class` and its public static methods
+        // (names+descriptors only, not the full `ClassInfo`). The stdlib's extension/top-level functions
+        // live in package-private multifile *part* classes (`RangesKt___RangesKt`) that the public
+        // facade (`RangesKt`) extends, so we need the parts even though they aren't public.
+        let mut all: HashMap<String, ClassLite> = HashMap::new();
         for e in &self.entries {
             match e {
                 Entry::Dir(d) => collect_dir(d, &mut all),
@@ -202,48 +203,60 @@ impl Classpath {
         // inherited through its superclass chain (the multifile parts) — with owner = the public class
         // (the facade), which is what an `invokestatic` resolves through, like kotlinc.
         let mut idx = ExtIndex::default();
-        for ci in all.values() {
-            if !ci.is_public() {
+        for (name, lite) in &all {
+            if !lite.is_public {
                 continue;
             }
-            let mut cur = Some(ci);
+            let mut cur = Some(name.clone());
             let mut visited = std::collections::HashSet::new();
-            while let Some(c) = cur {
-                if !visited.insert(c.this_class.clone()) {
+            while let Some(cn) = cur {
+                if !visited.insert(cn.clone()) {
                     break;
                 }
-                for m in &c.methods {
-                    if !m.is_static() || !m.is_public() || m.name.starts_with('<') {
-                        continue;
-                    }
-                    let Some(first_param) = first_descriptor_param(&m.descriptor) else { continue };
-                    let Some(ret_desc) = descriptor_ret(&m.descriptor) else { continue };
+                let Some(c) = all.get(&cn) else { break };
+                for (mname, mdesc) in &c.statics {
+                    let Some(first_param) = first_descriptor_param(mdesc) else { continue };
+                    let Some(ret_desc) = descriptor_ret(mdesc) else { continue };
                     idx.by_recv
                         .entry(first_param)
                         .or_default()
-                        .entry(m.name.clone())
+                        .entry(mname.clone())
                         .or_default()
                         .push(ExtCandidate {
-                            owner: ci.this_class.clone(),
-                            name: m.name.clone(),
-                            descriptor: m.descriptor.clone(),
+                            owner: name.clone(),
+                            name: mname.clone(),
+                            descriptor: mdesc.clone(),
                             ret_desc,
                         });
                 }
-                cur = c.super_class.as_ref().and_then(|s| all.get(s));
+                cur = c.super_class.clone();
             }
         }
         *self.ext.borrow_mut() = Some(idx);
     }
 }
 
-fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassInfo>) {
-    if let Ok(ci) = parse_class(bytes) {
-        all.insert(ci.this_class.clone(), ci);
-    }
+/// A lean per-class record for building the extension index — only what's needed to follow facade
+/// superclass chains and index static methods (no fields, no instance methods).
+struct ClassLite {
+    is_public: bool,
+    super_class: Option<String>,
+    /// `(name, descriptor)` of each public static method (excluding `<init>`/`<clinit>`).
+    statics: Vec<(String, String)>,
 }
 
-fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassInfo>) {
+fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
+    let Ok(ci) = parse_class(bytes) else { return };
+    let statics = ci
+        .methods
+        .iter()
+        .filter(|m| m.is_static() && m.is_public() && !m.name.starts_with('<'))
+        .map(|m| (m.name.clone(), m.descriptor.clone()))
+        .collect();
+    all.insert(ci.this_class.clone(), ClassLite { is_public: ci.is_public(), super_class: ci.super_class, statics });
+}
+
+fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassLite>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
@@ -257,7 +270,7 @@ fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassInfo>) {
     }
 }
 
-fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassInfo>) {
+fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
     for i in 0..archive.len() {

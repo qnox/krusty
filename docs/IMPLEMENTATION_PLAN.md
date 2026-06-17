@@ -2063,6 +2063,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   calls: match the receiver against its **supertype chain** (kotlinc's `repeat` is a `CharSequence`
   extension, called on a `String`) and a lowering path that emits `invokestatic facade.name(recv, …)`.
 
+- ✅ **Phase 189 — resolved stdlib extension calls** (315 → 317 box()=OK, 0 FAIL). Added
+  `Callee::Static { owner, name, descriptor }` — a general `invokestatic owner.name:descriptor` carrying
+  the **resolved** JVM descriptor, so no stdlib name is hardcoded in the backend. The member-call
+  lowering now falls back to `resolve_extension` (the Phase-188 classpath index): a `recv.name(args)`
+  that resolves to a classpath extension becomes `invokestatic facade.name(recv, args…)` — owner and
+  descriptor from the classpath, like kotlinc. `5.coerceAtLeast(3)`, `5.coerceIn(1,3)` (real
+  `kotlin.ranges` extensions) now compile, resolved not hardcoded. The ext-index was also made lean
+  (retain only `(super_class, public-static method sigs)` per class, not full `ClassInfo`). Still needed
+  for `String`/collection extensions: receiver-supertype matching (`String.repeat` is a `CharSequence`
+  extension), and the range loop-optimization keyed on the resolved `kotlin.ranges` symbol.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
