@@ -1063,11 +1063,13 @@ impl<'a> Emitter<'a> {
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         let lt = self.value_ty(lhs);
         // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
-        // null-safe `Objects.equals`. Primitives keep the `if_icmp*`/3-way-compare path below.
+        // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
+        // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
+        // `if_icmp*`/3-way-compare path below.
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
             // Spill if rhs is branchy (`x == when{…}`) so lhs isn't live across its merge frames.
             self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+            let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "areEqual", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
             code.invokestatic(m, 2, 1);
             if op == IrBinOp::Ne {
                 code.push_int(1, self.cw);
