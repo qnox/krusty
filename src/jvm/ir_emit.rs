@@ -66,6 +66,9 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
 }
 
 fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+    if !c.enum_entries.is_empty() {
+        return emit_enum_class(ir, c, facade);
+    }
     let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
@@ -113,6 +116,125 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     for &fid in &c.methods {
         if ir.functions[fid as usize].body.is_some() {
             emit_method(ir, fid, &c.fq_name, facade, &mut cw, true);
+        }
+    }
+    cw.finish()
+}
+
+/// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →
+/// `super(name, ordinal)`, a `public static final` field per entry plus a `$VALUES` array, a
+/// `<clinit>` that constructs the entries and fills `$VALUES`, and synthetic `values()`/`valueOf`.
+fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+    const ACC_ENUM: u16 = 0x4000;
+    const ACC_SYNTHETIC: u16 = 0x1000;
+    let fq = c.fq_name.clone();
+    let self_desc = format!("L{fq};");
+    let arr_desc = format!("[{self_desc}");
+    let mut cw = ClassWriter::new(&fq, "java/lang/Enum");
+    cw.set_access(0x0001 | 0x0010 | 0x0020 | ACC_ENUM); // PUBLIC | FINAL | SUPER | ENUM
+
+    let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+    let n_params = c.ctor_param_count as usize;
+    let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
+    // User (primary-constructor) fields — public so the IR's direct cross-class reads work.
+    for ((name, _), t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.add_field(0x0001, name, &t.descriptor());
+    }
+    // One static-final constant per entry, plus the private `$VALUES` array.
+    for (entry, _) in &c.enum_entries {
+        cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, entry, &self_desc);
+    }
+    cw.add_field(0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC, "$VALUES", &arr_desc);
+
+    // Private constructor: `(Ljava/lang/String;I<user>)V` → `super(name, ordinal)` + store user fields.
+    let ctor_params: Vec<Ty> = std::iter::once(Ty::String).chain(std::iter::once(Ty::Int)).chain(user_tys.iter().copied()).collect();
+    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
+    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
+    let mut ctor = CodeBuilder::new(1 + ctor_words);
+    ctor.aload(0);
+    ctor.aload(1);
+    load(Ty::Int, 2, &mut ctor);
+    let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    ctor.invokespecial(super_init, 2, 0);
+    let mut slot = 3u16;
+    for ((name, _), t) in c.fields[..n_params].iter().zip(&user_tys) {
+        ctor.aload(0);
+        load(*t, slot, &mut ctor);
+        let fref = cw.fieldref(&fq, name, &t.descriptor());
+        ctor.putfield(fref, slot_words(*t) as i32);
+        slot += slot_words(*t);
+    }
+    ctor.ret_void();
+    ctor.ensure_locals(1 + ctor_words);
+    ctor.link();
+    cw.add_method(0x0002 | ACC_SYNTHETIC, "<init>", &ctor_desc, &ctor);
+
+    // <clinit>: construct each entry, then build `$VALUES`.
+    let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
+    {
+        let mut e = Emitter { ir, cw: &mut cw, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit };
+        let mut clinit = CodeBuilder::new(0);
+        for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
+            let cls = e.cw.class_ref(&fq);
+            clinit.new_obj(cls);
+            clinit.dup();
+            clinit.push_string(entry, e.cw);
+            clinit.push_int(i as i32, e.cw);
+            for &a in args {
+                e.emit_value(a, &mut clinit);
+            }
+            let ctor_ref = e.cw.methodref(&fq, "<init>", &ctor_desc);
+            clinit.invokespecial(ctor_ref, ctor_argw, 0);
+            let fref = e.cw.fieldref(&fq, entry, &self_desc);
+            clinit.putstatic(fref, 1);
+        }
+        clinit.push_int(c.enum_entries.len() as i32, e.cw);
+        let acls = e.cw.class_ref(&fq);
+        clinit.anewarray(acls);
+        for (i, (entry, _)) in c.enum_entries.iter().enumerate() {
+            clinit.dup();
+            clinit.push_int(i as i32, e.cw);
+            let fref = e.cw.fieldref(&fq, entry, &self_desc);
+            clinit.getstatic(fref, 1);
+            clinit.array_store(0x53, 1); // aastore
+        }
+        let valref = e.cw.fieldref(&fq, "$VALUES", &arr_desc);
+        clinit.putstatic(valref, 1);
+        clinit.ret_void();
+        clinit.ensure_locals(e.next_slot.max(4));
+        clinit.link();
+        e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    }
+
+    // values(): `$VALUES.clone()` cast back to the array type.
+    let mut vals = CodeBuilder::new(0);
+    let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
+    vals.getstatic(valref, 1);
+    let clone_m = cw.methodref(&arr_desc, "clone", "()Ljava/lang/Object;");
+    vals.invokevirtual(clone_m, 0, 1);
+    let arr_cls = cw.class_ref(&arr_desc);
+    vals.checkcast(arr_cls);
+    vals.areturn();
+    vals.ensure_locals(0);
+    vals.link();
+    cw.add_method(0x0009, "values", &format!("(){arr_desc}"), &vals);
+
+    // valueOf(String): `Enum.valueOf(E.class, name)` cast to E.
+    let mut vof = CodeBuilder::new(1);
+    vof.ldc_class(&fq, &mut cw);
+    vof.aload(0);
+    let veo = cw.methodref("java/lang/Enum", "valueOf", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;");
+    vof.invokestatic(veo, 2, 1);
+    let cc = cw.class_ref(&fq);
+    vof.checkcast(cc);
+    vof.areturn();
+    vof.ensure_locals(1);
+    vof.link();
+    cw.add_method(0x0009, "valueOf", &format!("(Ljava/lang/String;){self_desc}"), &vof);
+
+    for &fid in &c.methods {
+        if ir.functions[fid as usize].body.is_some() {
+            emit_method(ir, fid, &fq, facade, &mut cw, true);
         }
     }
     cw.finish()
@@ -372,6 +494,24 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
+            IrExpr::EnumEntry { class, index } => {
+                let c = &self.ir.classes[*class as usize];
+                let (entry, _) = c.enum_entries[*index as usize].clone();
+                let desc = format!("L{};", c.fq_name);
+                let f = self.cw.fieldref(&c.fq_name.clone(), &entry, &desc);
+                code.getstatic(f, 1);
+            }
+            IrExpr::EnumValues { class } => {
+                let fq = self.ir.classes[*class as usize].fq_name.clone();
+                let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
+                code.invokestatic(m, 0, 1);
+            }
+            IrExpr::EnumValueOf { class, arg } => {
+                let fq = self.ir.classes[*class as usize].fq_name.clone();
+                self.emit_value(*arg, code);
+                let m = self.cw.methodref(&fq, "valueOf", &format!("(Ljava/lang/String;)L{fq};"));
+                code.invokestatic(m, 1, 1);
+            }
             IrExpr::When { branches } => self.emit_when(branches, code),
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
@@ -407,6 +547,17 @@ impl<'a> Emitter<'a> {
                 self.append(arg, code);
                 let ts = self.cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
                 code.invokevirtual(ts, 0, 1);
+            }
+            // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()I` / `Enum.name()String`.
+            "java/lang/Enum.ordinal" => {
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref("java/lang/Enum", "ordinal", "()I");
+                code.invokevirtual(m, 0, 1);
+            }
+            "java/lang/Enum.name" => {
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref("java/lang/Enum", "name", "()Ljava/lang/String;");
+                code.invokevirtual(m, 0, 1);
             }
             // `s.length` → `String.length()`.
             "kotlin/String.length" => {
@@ -751,6 +902,8 @@ impl<'a> Emitter<'a> {
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
+            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
+            IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {
                 IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
@@ -791,9 +944,10 @@ fn ref_internal(t: Ty) -> String {
 fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
         "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
-        "kotlin/String.length" | "kotlin/Array.size" => Ty::Int,
+        "kotlin/String.length" | "kotlin/Array.size" | "java/lang/Enum.ordinal" => Ty::Int,
         "kotlin/String.get" => Ty::Char,
         "kotlin/Array.set" => Ty::Unit,
+        "java/lang/Enum.name" => Ty::String,
         _ => Ty::Error,
     }
 }

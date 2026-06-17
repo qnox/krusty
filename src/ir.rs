@@ -111,6 +111,11 @@ pub enum IrExpr {
     New { class: ClassId, args: Vec<ExprId> },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`.
     MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<ExprId> },
+    /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
+    EnumEntry { class: ClassId, index: u32 },
+    /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
+    EnumValues { class: ClassId },
+    EnumValueOf { class: ClassId, arg: ExprId },
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
@@ -165,6 +170,12 @@ pub struct IrClass {
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,
+    /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum).
+    pub superclass: String,
+    /// Enum entries in declaration order: `(entry_name, constructor_arg_value_ids)`. Non-empty only
+    /// for an `enum class`; the backend emits a static field per entry, a `$VALUES` array, a
+    /// `<clinit>` that constructs them, and `values()`/`valueOf(String)`.
+    pub enum_entries: Vec<(String, Vec<ExprId>)>,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.

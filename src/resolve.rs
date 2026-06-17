@@ -2923,6 +2923,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
+                if let Expr::Name(en) = self.file.expr(receiver).clone() {
+                    if self.lookup(&en).is_none() && self.syms.enums.contains_key(&en) {
+                        let internal = self.syms.classes.get(&en).map(|c| c.internal.clone()).unwrap_or(en.clone());
+                        if name == "values" && args.is_empty() {
+                            return Ty::array(Ty::obj(&internal));
+                        }
+                        if name == "valueOf" && args.len() == 1 {
+                            let at = self.expr(args[0]);
+                            self.expect_assignable(Ty::String, at, self.span(args[0]), "argument");
+                            return Ty::obj(&internal);
+                        }
+                    }
+                }
                 // Nested-class constructor `Outer.Inner(args)` (when `Outer` isn't a local).
                 if let Expr::Name(outer) = self.file.expr(receiver).clone() {
                     if self.lookup(&outer).is_none() {

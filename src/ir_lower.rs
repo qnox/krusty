@@ -42,6 +42,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         match file.decl(d) {
             Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {}
             Decl::Class(c) if is_simple_class(c) => {}
+            Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Property(p) if is_plain_body_prop(p) => {}
             _ => return None,
         }
@@ -71,6 +72,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 init_body: None,
                 methods: vec![],
                 is_interface: false,
+                superclass: if c.is_enum { "java/lang/Enum".to_string() } else { "java/lang/Object".to_string() },
+                // Entry names now; constructor-arg value-ids are lowered in pass 2.
+                enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -194,6 +198,34 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
+                // Enum entries: lower each entry's constructor arguments (constant expressions
+                // evaluated in `<clinit>`), coerced to the matching ctor-parameter field type.
+                if c.is_enum {
+                    let class_id = lo.classes[&internal].id;
+                    let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
+                    let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields[..ctor_count]
+                        .iter().map(|(_, t)| t.clone()).collect();
+                    for (ei, args) in c.enum_entry_args.iter().enumerate() {
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = None;
+                        let mut lowered = Vec::new();
+                        for (arg, ft) in args.iter().zip(&field_tys) {
+                            // Entry args are emitted in `<clinit>` while the new instance is already
+                            // on the stack; a branchy arg (comparison/if/when) records merge frames
+                            // that don't account for that ambient stack. Bail on those.
+                            if is_branchy(lo.afile, *arg) {
+                                return None;
+                            }
+                            lowered.push(lo.lower_arg(*arg, ft)?);
+                        }
+                        // Reject an entry whose arg count doesn't match the ctor (default args etc.).
+                        if lowered.len() != ctor_count {
+                            return None;
+                        }
+                        lo.ir.classes[class_id as usize].enum_entries[ei].1 = lowered;
+                    }
+                }
             }
             Decl::Property(p) => {
                 lo.scope.clear();
@@ -223,6 +255,18 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         && c.body_props.iter().all(is_plain_body_prop)
         // Methods may be expr- OR block-bodied — both route through the same `lower_body` as
         // top-level funs (a block-body method is no different from a block-body top-level fun).
+        && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+}
+
+/// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
+/// bodied) methods, plain body-props, and no companion / secondary ctors / supertypes / per-entry
+/// bodies (entry bodies would need an anonymous subclass per entry, which the flat AST doesn't carry).
+fn is_simple_enum(c: &ast::ClassDecl) -> bool {
+    c.is_enum
+        && c.companion_methods.is_empty() && c.companion_props.is_empty()
+        && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
+        && c.props.iter().all(|p| p.is_property)
+        && c.body_props.iter().all(is_plain_body_prop)
         && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
 }
 
@@ -369,7 +413,10 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let it = self.expr(init)?;
-                let kty = ty.as_ref().map(|r| Ty::from_name(&r.name).unwrap_or(Ty::Error)).unwrap_or(init_ty);
+                // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
+                // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
+                // type — otherwise the local is typed `Error` and e.g. `==` takes the wrong path.
+                let kty = ty.as_ref().and_then(|r| Ty::from_name(&r.name)).unwrap_or(init_ty);
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
@@ -537,14 +584,42 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: Some(a), args: vec![i] })
             }
             Expr::Member { receiver, name } => {
+                // `EnumClass.ENTRY` — a static enum-constant read.
+                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                    let internal = class_internal(self.afile, &rn);
+                    if let Some(ci) = self.classes.get(&internal) {
+                        let cls = ci.id;
+                        if let Some(idx) = self.ir.classes[cls as usize].enum_entries.iter().position(|(n, _)| *n == name) {
+                            return Some(self.ir.add_expr(IrExpr::EnumEntry { class: cls, index: idx as u32 }));
+                        }
+                    }
+                }
                 let rt = self.info.ty(receiver);
+                // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()`/`Enum.name()`.
+                if matches!(name.as_str(), "ordinal" | "name") {
+                    if let Some(ci) = self.class_of(rt) {
+                        if !self.ir.classes[ci.id as usize].enum_entries.is_empty() {
+                            let recv = self.expr(receiver)?;
+                            let fq = format!("java/lang/Enum.{name}");
+                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq), dispatch_receiver: Some(recv), args: vec![] }));
+                        }
+                    }
+                }
                 if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
                 } else if let Some(ci) = self.class_of(rt) {
                     let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
                     let class = ci.id;
+                    let internal = ci.internal.clone();
                     let recv = self.expr(receiver)?;
+                    // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
+                    // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
+                    let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
+                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&internal)));
+                    let recv = if needs_cast {
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&internal)) })
+                    } else { recv };
                     self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
                 } else if rt == Ty::String && name == "length" {
                     // `s.length` → stdlib intrinsic (0-arg), `Int`.
@@ -635,6 +710,13 @@ impl<'a> Lower<'a> {
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
+                    return None;
+                }
+                // A `when` with no `else` used as a *value* relies on exhaustiveness (e.g. an enum
+                // `when` covering every entry) that the flat emitter can't prove — without an else
+                // branch the merge point has no value on some path. Bail unless it's a statement.
+                let has_else = arms.iter().any(|a| a.conditions.is_empty());
+                if !has_else && self.info.ty(e) != Ty::Unit {
                     return None;
                 }
                 if let Some(subj) = subject {
@@ -735,6 +817,22 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // `EnumClass.values()` / `EnumClass.valueOf(s)` — static enum methods.
+                    if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                        let internal = class_internal(self.afile, &rn);
+                        if let Some(ci) = self.classes.get(&internal) {
+                            let cls = ci.id;
+                            if !self.ir.classes[cls as usize].enum_entries.is_empty() {
+                                if name == "values" && args.is_empty() {
+                                    return Some(self.ir.add_expr(IrExpr::EnumValues { class: cls }));
+                                }
+                                if name == "valueOf" && args.len() == 1 {
+                                    let a = self.expr(args[0])?;
+                                    return Some(self.ir.add_expr(IrExpr::EnumValueOf { class: cls, arg: a }));
+                                }
+                            }
+                        }
+                    }
                     let rt = self.info.ty(receiver);
                     if let Some((index, fid, _)) = self.class_of(rt).and_then(|ci| ci.methods.get(&name).copied()) {
                         let class = self.class_of(rt)?.id;
@@ -763,6 +861,31 @@ impl<'a> Lower<'a> {
             _ => return None,
         })
     }
+}
+
+/// Whether `e` emits as a branch (a conditional that materializes via jumps + merge frames). Such an
+/// expression can't be safely emitted while other operands sit on the stack (the merge frame would
+/// omit them). Primitive `==`/`<`… and `if`/`when`/elvis are branchy; reference `==` (Objects.equals)
+/// and plain calls are not.
+fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
+    match file.expr(e) {
+        Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
+        Expr::Binary { op, lhs, .. } => {
+            use ast::BinOp::*;
+            matches!(op, Lt | Le | Gt | Ge | And | Or)
+                || (matches!(op, Eq | Ne) && file_expr_is_primitive(file, *lhs))
+        }
+        Expr::Unary { op: ast::UnOp::Not, .. } => true,
+        _ => false,
+    }
+}
+
+/// Best-effort: is the literal/operand a primitive (so `==` would use a numeric branch, not
+/// `Objects.equals`)? Conservative — only obvious primitive literals count.
+fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
+    matches!(file.expr(e),
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        | Expr::BoolLit(_) | Expr::CharLit(_))
 }
 
 fn class_internal(file: &ast::File, name: &str) -> String {

@@ -152,6 +152,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
+- `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
+  constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
+  constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
+  order, and synthetic `values()`/`valueOf(String)`. `e.ordinal`/`e.name` are `Enum.ordinal()`/
+  `name()`; entry equality is reference identity (`==`). Entry constructor args are constant
+  expressions evaluated in `<clinit>` (branchy args, entry bodies, and abstract enum methods are not
+  yet supported — krusty skips such files rather than miscompile).
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
