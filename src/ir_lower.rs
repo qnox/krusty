@@ -1161,6 +1161,14 @@ impl<'a> Lower<'a> {
     /// Box/unbox is the backend's concern, but the *coercion* is explicit in the IR.
     fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
         let at = self.info.ty(arg);
+        // `emptyArray<T>()` is a reified intrinsic typed `Array<Null>` by the checker — expand it to a
+        // fresh empty array of the *target* element type (the reified `T`), exactly as kotlinc inlines
+        // it, rather than calling the throwing stub. The target supplies the otherwise-erased element.
+        if at == Ty::array(Ty::Null) {
+            if let Some(elem) = ir_array_element(target) {
+                return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem, elements: vec![] }));
+            }
+        }
         let e = self.expr(arg)?;
         let target_ref = ir_type_is_reference(target);
         if at.is_primitive() && target_ref {
@@ -2462,6 +2470,7 @@ fn ty_to_ir(t: Ty) -> IrType {
         Ty::String => "kotlin/String",
         Ty::Unit => return IrType::Unit,
         Ty::Nothing => return IrType::Nothing,
+        // (see `ir_array_element` below for the inverse — extracting an array IrType's element.)
         // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
         // primitive `T` when it lays out the array; the front end keeps the logical element).
         Ty::Obj("kotlin/Array", args) => return IrType::Class {
@@ -2490,6 +2499,24 @@ fn ty_to_ir(t: Ty) -> IrType {
         _ => return IrType::Error,
     };
     IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
+}
+
+/// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a
+/// primitive specialized array (`kotlin/IntArray` → `kotlin/Int`). `None` for a non-array type. Used
+/// to materialize an empty array (`emptyArray<T>()`) of the target's element type.
+fn ir_array_element(t: &IrType) -> Option<IrType> {
+    let IrType::Class { fq_name, type_args, .. } = t else { return None };
+    if fq_name == "kotlin/Array" {
+        return type_args.first().cloned();
+    }
+    let prim = match fq_name.as_str() {
+        "kotlin/IntArray" => "kotlin/Int", "kotlin/LongArray" => "kotlin/Long",
+        "kotlin/DoubleArray" => "kotlin/Double", "kotlin/FloatArray" => "kotlin/Float",
+        "kotlin/BooleanArray" => "kotlin/Boolean", "kotlin/CharArray" => "kotlin/Char",
+        "kotlin/ByteArray" => "kotlin/Byte", "kotlin/ShortArray" => "kotlin/Short",
+        _ => return None,
+    };
+    Some(IrType::Class { fq_name: prim.to_string(), type_args: vec![], nullable: false })
 }
 
 /// Per-parameter `Some(name)` when a non-null assertion (`Intrinsics.checkNotNullParameter`) should

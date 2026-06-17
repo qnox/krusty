@@ -699,9 +699,10 @@ impl<'a> Parser<'a> {
             }
             return FunDecl { name: "<fun-interface>".to_string(), receiver: None, params: vec![], ret: None,
                 body: FunBody::None, type_params: vec![], non_null_type_params: Default::default(),
+                reified_type_params: Default::default(),
                 span: start, is_inline: false, is_final: false, is_private: false };
         }
-        let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
+        let (type_params, non_null_type_params, reified_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new(), std::collections::HashSet::new()) };
         // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
         // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
         let first_name = if self.at(TokenKind::Ident) {
@@ -748,7 +749,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final, is_private: false }
+        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, reified_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final, is_private: false }
     }
 
     /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
@@ -824,7 +825,7 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected class name");
             "<error>".to_string()
         };
-        let (type_params, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
+        let (type_params, _, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new(), std::collections::HashSet::new()) };
         let mut props = Vec::new();
         if self.eat(TokenKind::LParen) {
             self.skip_newlines();
@@ -1056,7 +1057,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (type_params, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
+        let (type_params, _, _) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new(), std::collections::HashSet::new()) };
         let (supertypes, _base, _base_args, _) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -1267,17 +1268,24 @@ impl<'a> Parser<'a> {
         args
     }
 
-    /// Parse and discard a `<T, reified U : Bound, out V>` type-parameter list, returning the names.
-    fn parse_type_params(&mut self) -> (Vec<String>, std::collections::HashSet<String>) {
+    /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
+    /// the `: Any`-bounded (non-null) names, and the `reified` names (which an `inline` function may
+    /// use concretely — `is T`, `as T`, `T::class` — and which codegen specializes per call site).
+    fn parse_type_params(&mut self) -> (Vec<String>, std::collections::HashSet<String>, std::collections::HashSet<String>) {
         let mut names = Vec::new();
         let mut non_null = std::collections::HashSet::new();
+        let mut reified = std::collections::HashSet::new();
         if !self.eat(TokenKind::Lt) {
-            return (names, non_null);
+            return (names, non_null, reified);
         }
         loop {
             self.skip_newlines();
             // Skip variance/reified modifiers. `in` is a keyword; `out`/`reified` are idents.
+            let mut is_reified = false;
             while (self.at(TokenKind::Ident) && matches!(self.text(), "reified" | "out")) || self.at(TokenKind::KwIn) {
+                if self.at(TokenKind::Ident) && self.text() == "reified" {
+                    is_reified = true;
+                }
                 self.bump();
             }
             let tname = if self.at(TokenKind::Ident) {
@@ -1289,6 +1297,9 @@ impl<'a> Parser<'a> {
             };
             if !tname.is_empty() {
                 names.push(tname.clone());
+                if is_reified {
+                    reified.insert(tname.clone());
+                }
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
@@ -1308,7 +1319,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::Gt, "'>'");
-        (names, non_null)
+        (names, non_null, reified)
     }
 
     // ---- statements ----
