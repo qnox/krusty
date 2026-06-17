@@ -160,8 +160,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
-            // Interfaces/enums/objects keep their existing shape — accessors are for normal classes.
-            if !c.is_interface && !c.is_enum && !c.is_object {
+            // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
+            if !c.is_interface && !c.is_enum {
                 let field_props: Vec<(String, bool)> = c.props.iter().filter(|p| p.is_property).map(|p| (p.name.clone(), p.is_var))
                     .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| (p.name.clone(), p.is_var)))
                     .collect();
