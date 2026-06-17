@@ -2459,6 +2459,14 @@ impl<'a> Checker<'a> {
                     let arity = if bound { margs } else { margs + 1 };
                     return self.set(e, Ty::fun(vec![obj; arity as usize], ret));
                 }
+                // Top-level function reference `::foo` → `Fun(params, ret)` of that function.
+                if receiver.is_none() {
+                    if let Some(sig) = self.syms.funs.get(&name).cloned() {
+                        if !sig.vararg && sig.params.len() == sig.required {
+                            return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                        }
+                    }
+                }
                 if let Some(recv) = receiver {
                     self.expr(recv);
                 }
