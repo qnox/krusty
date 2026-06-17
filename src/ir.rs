@@ -166,6 +166,10 @@ pub struct IrFunction {
     pub is_static: bool,
     /// `Some(class fq_name)` for an instance method — `this` is value index 0, params follow.
     pub dispatch_receiver: Option<String>,
+    /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
+    /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
+    /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
+    pub param_checks: Vec<Option<String>>,
 }
 
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
@@ -279,6 +283,7 @@ mod tests {
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,
+            param_checks: Vec::new(),
         });
         assert_eq!(f.functions[fun as usize].name, "answer");
         // The return type is a Kotlin FqName, not a JVM descriptor — the backend maps it.

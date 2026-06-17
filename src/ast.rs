@@ -195,6 +195,9 @@ pub struct FunDecl {
     /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
     /// `final` (overriding them would produce wrong behavior).
     pub is_final: bool,
+    /// `private` visibility. Public/internal/protected functions get `Intrinsics.checkNotNullParameter`
+    /// guards on their non-null reference parameters (kotlinc does); private ones do not.
+    pub is_private: bool,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).

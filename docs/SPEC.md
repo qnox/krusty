@@ -154,6 +154,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   isn't byte-equal). Note: the Kotlin compiler exposes **no metadata** marking these intrinsics — the
   operation→helper mapping is a hardcoded registry in its backend (`IrIntrinsicMethods.kt`, keyed by
   built-in IR symbols), which krusty mirrors.
+- Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
+  `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
+  kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
+  (krusty has no visibility model beyond `private`, and skips extension functions and constructors for
+  now — minor byte-parity gaps, not correctness ones.)
 - Boolean short-circuit evaluation (`&&`/`||`) side-effect order.
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.

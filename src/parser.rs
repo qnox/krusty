@@ -128,7 +128,8 @@ impl<'a> Parser<'a> {
                     if mods.iter().any(|m| m == "suspend") {
                         self.diags.error(self.tok().span, "krusty: suspend functions are not supported");
                     }
-                    let d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
+                    let mut d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
+                    d.is_private = mods.iter().any(|m| m == "private");
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -487,7 +488,11 @@ impl<'a> Parser<'a> {
             let lateinit = mods.iter().any(|m| m == "lateinit");
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
-                TokenKind::KwFun => methods.push(self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"))),
+                TokenKind::KwFun => {
+                    let mut d = self.parse_fun(mods.iter().any(|m| m == "inline"), mods.iter().any(|m| m == "final"));
+                    d.is_private = mods.iter().any(|m| m == "private");
+                    methods.push(d);
+                }
                 TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property(lateinit, false)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
@@ -694,7 +699,7 @@ impl<'a> Parser<'a> {
             }
             return FunDecl { name: "<fun-interface>".to_string(), receiver: None, params: vec![], ret: None,
                 body: FunBody::None, type_params: vec![], non_null_type_params: Default::default(),
-                span: start, is_inline: false, is_final: false };
+                span: start, is_inline: false, is_final: false, is_private: false };
         }
         let (type_params, non_null_type_params) = if self.at(TokenKind::Lt) { self.parse_type_params() } else { (Vec::new(), std::collections::HashSet::new()) };
         // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
@@ -743,7 +748,7 @@ impl<'a> Parser<'a> {
             FunBody::None
         };
         let end = self.t[self.i.saturating_sub(1)].span;
-        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final }
+        FunDecl { name, receiver, params, ret, body, type_params, non_null_type_params, span: Span::new(start.lo, end.hi), is_inline, is_final, is_private: false }
     }
 
     /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
