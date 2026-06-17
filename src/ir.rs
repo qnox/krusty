@@ -109,8 +109,11 @@ pub enum IrExpr {
     SetStatic { index: u32, value: ExprId },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
     New { class: ClassId, args: Vec<ExprId> },
-    /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`.
-    MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<ExprId> },
+    /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
+    /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
+    /// the meaning is backend-agnostic — the JVM realizes omitted args via the `$default` stub + mask,
+    /// another backend may fill them inline. All-`Some` is an ordinary full call.
+    MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<Option<ExprId>> },
     /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
     EnumEntry { class: ClassId, index: u32 },
     /// Read a static field holding a singleton instance (Kotlin IR's `IrGetObjectValue`):
@@ -135,10 +138,6 @@ pub enum IrExpr {
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
-    /// A call to a class method where some arguments are omitted and take their default (`p.copy(y=5)`,
-    /// `f(a)` of `f(a, b=…)`). `args[i] = None` means parameter `i` is defaulted. Backend-agnostic — the
-    /// JVM backend realizes it via the `$default` stub + mask; another backend may fill defaults inline.
-    DefaultedCall { class: ClassId, method: u32, receiver: ExprId, args: Vec<Option<ExprId>> },
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
     Vararg { element_type: IrType, elements: Vec<ExprId> },
@@ -288,6 +287,9 @@ pub struct IrFile {
     /// default is backend-agnostic language data; a backend chooses how to realize it (the JVM emits a
     /// `name$default(params, mask, marker)` stub; JS uses native default parameters).
     pub fn_param_defaults: std::collections::HashMap<u32, Vec<Option<ExprId>>>,
+    /// `FunId` → parameter names, for mapping a call's named/omitted arguments onto positions. Recorded
+    /// only for functions that have defaults (where such mapping is needed).
+    pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
 }
 
 impl IrFile {

@@ -1962,16 +1962,26 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 
 - ✅ **Phase 180 — default arguments via the `$default` mechanism** (272 → 275 box()=OK, 0 FAIL,
   byte-parity). A parameter's default *value* is backend-agnostic IR (`IrFile.fn_param_defaults: FunId →
-  Vec<Option<ExprId>>`); a call that omits arguments is an `IrExpr::DefaultedCall` (provided/omitted per
-  position). The JVM backend realizes both: it emits a `name$default(self, params…, int mask, Object
-  marker)` synthetic stub (`if ((mask & (1<<i)) != 0) param = <default>;` then tail-call the real
-  method — using the bitwise ops added in the previous phase), and a `DefaultedCall` invokes it with the
-  computed mask + null marker (omitted args get a zero placeholder). Data-class `copy(y = 5)` is the
+  Vec<Option<ExprId>>`). The JVM backend realizes it by emitting a `name$default(self, params…, int
+  mask, Object marker)` synthetic stub (`if ((mask & (1<<i)) != 0) param = <default>;` then tail-call the
+  real method — using the bitwise ops added in the previous phase). Data-class `copy(y = 5)` was the
   first user: each `copy` parameter defaults to the receiver's property, so `copy` + `copy$default(P,
-  …, int, Object)` are byte-identical to kotlinc. The checker now maps named/omitted arguments onto
+  …, int, Object)` are byte-identical to kotlinc. The checker maps named/omitted arguments onto
   parameters (`map_call_args`) for any method whose signature has defaults (`required < params`) — not a
-  `copy` special-case. Wide data classes (>31 fields) keep positional `copy()` only (single-`int` mask).
-  `tests/data_copy_e2e.rs`. Architecture: default *meaning* in IR, `$default` *stub* in the JVM backend.
+  `copy` special-case. `tests/data_copy_e2e.rs`.
+
+- ✅ **Phase 181 — defaulted call = a call with holes; instance methods** (275 → 277 box()=OK, 0 FAIL,
+  byte-parity). A call that omits arguments is *not a new operation* — it is an ordinary call where some
+  arguments are absent (Kotlin's own IR lets an `IrCall` argument be null). So the separate
+  `IrExpr::DefaultedCall` is removed and folded into `MethodCall { …, args: Vec<Option<ExprId>> }`:
+  `args[i] = None` means parameter `i` is omitted and takes its default; all-`Some` is an ordinary full
+  call. The JVM backend emits the `$default`-stub invocation when any argument is `None`, an ordinary
+  `invokevirtual`/`invokeinterface` otherwise; JS passes `undefined` for a hole (native defaults). This
+  generalizes defaults from `copy` to any instance method (`fun add(a: Int, b: Int = 10)`); param→arg
+  mapping uses `IrFile.fn_param_names` (recorded for defaulted functions). Out of model (so the file
+  skips, never miscompiles): interface defaults (kotlinc routes those through `$DefaultImpls`) and >31
+  parameters (kotlinc's multi-`int` mask). `tests/default_args_member_e2e.rs`. Architecture: default
+  *meaning* in IR (a call with holes), `$default` *stub* + mask in the JVM backend.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.

@@ -166,7 +166,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - `data class`: `equals`/`hashCode`/`toString`/`componentN` are synthesized (in IR lowering, so all
   backends share them). `equals` compares field-wise with IEEE-aware `Double/Float.compare` and
   structural reference equality; `hashCode` is the `31*result + fieldHash` fold; `toString` is
-  `Class(p1=v1, p2=v2)`. `copy` (default arguments) is not yet supported — such files are skipped.
+  `Class(p1=v1, p2=v2)`. `copy(p = v)` is supported via the default-argument mechanism (below).
+- **Default arguments.** A parameter's default *value* is backend-agnostic IR
+  (`IrFile.fn_param_defaults`). A call that omits arguments is an ordinary call with holes —
+  `IrExpr::MethodCall { args: Vec<Option<ExprId>> }`, `None` = omitted (mirrors Kotlin IR, where an
+  `IrCall` argument may be null); there is no separate "defaulted call" node. The JVM backend realizes
+  defaults exactly as kotlinc: a synthetic `name$default(self, params…, int mask, Object marker)` stub
+  that, for each defaulted parameter, does `if ((mask & (1<<i)) != 0) param = <default>;` then tail-calls
+  the real method; a call with holes passes the computed mask + null marker. Byte-identical to kotlinc
+  for data-class `copy` and instance methods. Not yet modeled (such files are skipped, never
+  miscompiled): interface defaults (kotlinc routes them through `$DefaultImpls`) and >31 parameters
+  (kotlinc's multi-`int` mask).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

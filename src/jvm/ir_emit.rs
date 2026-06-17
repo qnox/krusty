@@ -776,8 +776,32 @@ impl<'a> Emitter<'a> {
                 let name = f.name.clone();
                 let owner = c.fq_name.clone();
                 let is_iface = c.is_interface;
+                if args.iter().any(|a| a.is_none()) {
+                    // Some arguments are omitted — invoke the `<name>$default(self, params…, mask, marker)`
+                    // stub: receiver, each provided arg (or a zero placeholder for an omitted one with its
+                    // mask bit set), the mask, then a null marker.
+                    let args = args.clone();
+                    self.emit_value(*receiver, code);
+                    let mut mask = 0i32;
+                    for (i, arg) in args.iter().enumerate() {
+                        match arg {
+                            Some(a) => self.emit_value(*a, code),
+                            None => { push_zero(param_tys[i], code, self.cw); mask |= 1 << i; }
+                        }
+                    }
+                    code.push_int(mask, self.cw);
+                    code.aconst_null();
+                    let mut stub_params = vec![Ty::obj(&owner)];
+                    stub_params.extend(param_tys.iter().copied());
+                    stub_params.push(Ty::Int);
+                    stub_params.push(Ty::obj("java/lang/Object"));
+                    let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
+                    let m = self.cw.methodref(&owner, &format!("{name}$default"), &method_descriptor(&stub_params, ret));
+                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                    return;
+                }
                 let mut ops = vec![*receiver];
-                ops.extend(args.iter().copied());
+                ops.extend(args.iter().map(|a| a.unwrap()));
                 self.emit_operands(&ops, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&param_tys, ret);
@@ -926,34 +950,6 @@ impl<'a> Emitter<'a> {
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
                 code.athrow();
-            }
-            IrExpr::DefaultedCall { class, method, receiver, args } => {
-                // Invoke the `<name>$default(self, params…, mask, marker)` stub: emit the receiver,
-                // each provided arg (or a zero placeholder for an omitted one, with its mask bit set),
-                // then the mask and a null marker.
-                let class_fq = self.ir.classes[*class as usize].fq_name.clone();
-                let fid = self.ir.classes[*class as usize].methods[*method as usize];
-                let method_name = self.ir.functions[fid as usize].name.clone();
-                let real_params: Vec<Ty> = self.ir.functions[fid as usize].params.iter().map(ir_ty_to_jvm).collect();
-                let ret = ir_ty_to_jvm(&self.ir.functions[fid as usize].ret);
-                let args = args.clone();
-                self.emit_value(*receiver, code);
-                let mut mask = 0i32;
-                for (i, arg) in args.iter().enumerate() {
-                    match arg {
-                        Some(a) => self.emit_value(*a, code),
-                        None => { push_zero(real_params[i], code, self.cw); mask |= 1 << i; }
-                    }
-                }
-                code.push_int(mask, self.cw);
-                code.aconst_null();
-                let mut stub_params = vec![Ty::obj(&class_fq)];
-                stub_params.extend(real_params.iter().copied());
-                stub_params.push(Ty::Int);
-                stub_params.push(Ty::obj("java/lang/Object"));
-                let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = self.cw.methodref(&class_fq, &format!("{method_name}$default"), &method_descriptor(&stub_params, ret));
-                code.invokestatic(m, aw, slot_words(ret) as i32);
             }
             IrExpr::Vararg { element_type, elements } => {
                 let et = ir_ty_to_jvm(element_type);
@@ -1215,7 +1211,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Call { dispatch_receiver, args, .. } =>
                 dispatch_receiver.map_or(false, |r| self.records_frame(r)) || args.iter().any(|&a| self.records_frame(a)),
             IrExpr::MethodCall { receiver, args, .. } =>
-                self.records_frame(*receiver) || args.iter().any(|&a| self.records_frame(a)),
+                self.records_frame(*receiver) || args.iter().any(|a| a.map_or(false, |x| self.records_frame(x))),
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::GetField { receiver, .. } => self.records_frame(*receiver),
             IrExpr::SetField { receiver, value, .. } => self.records_frame(*receiver) || self.records_frame(*value),
@@ -1224,7 +1220,6 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::Throw { operand } => self.records_frame(*operand),
-            IrExpr::DefaultedCall { receiver, args, .. } => self.records_frame(*receiver) || args.iter().any(|a| a.map_or(false, |x| self.records_frame(x))),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
@@ -1692,10 +1687,6 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } => Ty::Nothing,
-            IrExpr::DefaultedCall { class, method, .. } => {
-                let fid = self.ir.classes[*class as usize].methods[*method as usize];
-                ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)
-            }
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
