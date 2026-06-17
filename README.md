@@ -1,21 +1,10 @@
 # krusty 🤡
 
-> *"Hey hey! It compiles Kotlin, kids!"*
+<p align="center">
+  <img src="docs/assets/krusty-mascot.webp" alt="krusty mascot" width="320">
+</p>
 
-```
-            _____
-         .-'     '-.
-        /   _   _   \
-       |   (o) (o)   |        krusty
-       |   .-----.   |     the Kotlin→JVM
-        \  '.___.'  /        compiler PoC
-         '-._____.-'
-        __/| | | |\__
-      /`   | | | |   `\
-     |  .--| | | |--.  |
-     |_/   '-'-'-'   \_|
-        ~~~ HONK ~~~
-```
+> *"Hey hey! It compiles Kotlin, kids!"*
 
 A **memory-lean Kotlin → JVM bytecode compiler** written in Rust, built as a proof of concept for a
 *linear, per-file streaming* pipeline — the opposite of holding the whole program graph in memory.
@@ -110,8 +99,3 @@ A working compiler for a real (and growing) subset, with `kotlinc`-equivalent pu
 supported language, Java interop, and Kotlin-consumer round-trips passing. The roadmap
 (`docs/IMPLEMENTATION_PLAN.md`) widens the language surface — data classes, secondary constructors,
 class-typed members, generics, nullability — each gated by the same differential harness.
-
----
-
-*krusty is a research PoC, not a production compiler. Krusty the Clown is a parody mascot; no
-affiliation, honk honk.*
