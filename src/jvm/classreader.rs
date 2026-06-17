@@ -40,6 +40,8 @@ pub struct ClassInfo {
     /// internal name, e.g. `java/lang/String`
     pub this_class: String,
     pub super_class: Option<String>,
+    /// Directly-implemented interface internal names (e.g. `String` → `[java/lang/CharSequence, …]`).
+    pub interfaces: Vec<String>,
     pub fields: Vec<FieldSig>,
     pub methods: Vec<MethodSig>,
     /// Strings from the `@kotlin.Metadata` `d2` annotation element, if present.
@@ -132,8 +134,9 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     let super_class = if super_idx == 0 { None } else { Some(class_name(super_idx)) };
 
     let ifaces = r.u2()?;
+    let mut interfaces = Vec::with_capacity(ifaces as usize);
     for _ in 0..ifaces {
-        r.u2()?;
+        interfaces.push(class_name(r.u2()?));
     }
 
     let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String)>, ReadError> {
@@ -161,7 +164,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // Read class-level attributes to find @kotlin.Metadata → d2 array.
     let kotlin_d2 = read_kotlin_d2(&mut r, &cp).unwrap_or_default();
 
-    Ok(ClassInfo { major, access, this_class, super_class, fields, methods, kotlin_d2 })
+    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d2 })
 }
 
 /// Parse class-level attributes looking for RuntimeVisibleAnnotations → @kotlin/Metadata → d2.

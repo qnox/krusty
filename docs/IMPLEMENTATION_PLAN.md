@@ -2074,6 +2074,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   for `String`/collection extensions: receiver-supertype matching (`String.repeat` is a `CharSequence`
   extension), and the range loop-optimization keyed on the resolved `kotlin.ranges` symbol.
 
+- ✅ **Phase 190 — read interfaces + receiver-supertype extension matching** (317 box()=OK, 0 FAIL;
+  foundational, +0). The classreader now captures a class's `interfaces` (it discarded them).
+  `resolve_extension` walks the receiver type's **supertype chain** (superclass + interfaces, BFS,
+  most-specific first) so an extension declared on a supertype resolves — kotlinc's `String.repeat` is a
+  `CharSequence` extension (`StringsKt.repeat(Ljava/lang/CharSequence;I)`). Works for receivers krusty
+  can read (Kotlin stdlib types / user classes in jars). **Blocked for JDK receivers** (`String` →
+  `CharSequence`): `Classpath::find` returns `None` for `Entry::Jimage` — krusty doesn't yet read class
+  bytes from the JDK jimage (`lib/modules`), so `String`'s interfaces are unknown. Reading JDK class
+  bytes (jimage, or the simpler `jmods/*.jmod` zips) is the next prerequisite for `String`/`CharSequence`
+  extension calls.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

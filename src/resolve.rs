@@ -386,17 +386,49 @@ pub fn resolve_extension(
     method: &str,
     arg_tys: &[Ty],
 ) -> Option<(String, String, String, Ty)> {
-    let recv_desc = receiver.descriptor();
     let rest_params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
-    let full_prefix = format!("({recv_desc}{rest_params})");
-    let candidates = cp.find_extensions(&recv_desc, method);
-    for c in &candidates {
-        if c.descriptor.starts_with(&full_prefix) {
-            let ret = desc_to_ty(&c.ret_desc);
-            return Some((c.owner.clone(), c.name.clone(), c.descriptor.clone(), ret));
+    // Try the receiver type and its supertypes, most specific first — the extension's declared receiver
+    // may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension).
+    for recv_desc in supertype_descriptors(cp, receiver) {
+        let full_prefix = format!("({recv_desc}{rest_params})");
+        for c in cp.find_extensions(&recv_desc, method) {
+            if c.descriptor.starts_with(&full_prefix) {
+                let ret = desc_to_ty(&c.ret_desc);
+                return Some((c.owner.clone(), c.name.clone(), c.descriptor.clone(), ret));
+            }
         }
     }
     None
+}
+
+/// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
+/// breadth-first so a more specific receiver is tried before a more general one. Primitives/arrays have
+/// no extension supertype chain — just their own descriptor.
+fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
+    let start = match receiver {
+        Ty::Obj(i) => i.to_string(),
+        Ty::String => "java/lang/String".to_string(),
+        _ => return vec![receiver.descriptor()],
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut q = std::collections::VecDeque::new();
+    q.push_back(start);
+    while let Some(name) = q.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        out.push(format!("L{name};"));
+        if let Some(ci) = cp.find(&name) {
+            for i in &ci.interfaces {
+                q.push_back(i.clone());
+            }
+            if let Some(s) = &ci.super_class {
+                q.push_back(s.clone());
+            }
+        }
+    }
+    out
 }
 
 fn class_internal(file: &File, name: &str) -> String {
