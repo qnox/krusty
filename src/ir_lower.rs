@@ -874,12 +874,6 @@ impl<'a> Lower<'a> {
                 let has_else = arms.iter().any(|a| a.conditions.is_empty());
                 let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
                 if let Some(subj) = subject {
-                    // The subject is re-evaluated once per condition comparison, so a branchy subject
-                    // (`when (when … ) { … }`) would be emitted multiple times — wrong and
-                    // frame-breaking. Bail (a subject temp would be the proper fix).
-                    if is_branchy(self.afile, subj) {
-                        return None;
-                    }
                     let st = self.info.ty(subj);
                     for arm in &arms {
                         for &c in &arm.conditions {
@@ -895,6 +889,20 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A *branchy* subject (`when (when …)`) is evaluated ONCE into a temp so it runs on a
+                // clean stack and isn't re-emitted per condition. A plain subject (a name/field) is
+                // cheaply re-evaluated per comparison instead — that path also stays correct for a
+                // smart-cast local (whose slot type differs from its static type), which a temp store
+                // would mis-frame.
+                let subj_tmp = match subject {
+                    Some(subj) if is_branchy(self.afile, subj) => {
+                        let sv = self.expr(subj)?;
+                        let v = self.fresh_value();
+                        let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(self.info.ty(subj)), init: Some(sv) });
+                        Some((v, var))
+                    }
+                    _ => None,
+                };
                 let last = arms.len().saturating_sub(1);
                 let mut branches = Vec::new();
                 for (ai, arm) in arms.iter().enumerate() {
@@ -904,13 +912,18 @@ impl<'a> Lower<'a> {
                     } else {
                         let mut cond: Option<u32> = None;
                         for &c in &arm.conditions {
-                            let test = match subject {
-                                Some(subj) => {
+                            let test = match (subj_tmp, subject) {
+                                (Some((v, _)), _) => {
+                                    let s = self.ir.add_expr(IrExpr::GetValue(v));
+                                    let cv = self.expr(c)?;
+                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                }
+                                (None, Some(subj)) => {
                                     let s = self.expr(subj)?;
                                     let cv = self.expr(c)?;
                                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
                                 }
-                                None => self.expr(c)?,
+                                (None, None) => self.expr(c)?,
                             };
                             cond = Some(match cond {
                                 Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: prev, rhs: test }),
@@ -920,7 +933,12 @@ impl<'a> Lower<'a> {
                         branches.push((cond, body));
                     }
                 }
-                self.ir.add_expr(IrExpr::When { branches })
+                let when = self.ir.add_expr(IrExpr::When { branches });
+                // Prepend the subject-temp declaration (if any) so it's evaluated before the arms.
+                match subj_tmp {
+                    Some((_, var)) => self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) }),
+                    None => when,
+                }
             }
             Expr::Template(parts) => {
                 let mut iter = parts.iter();
