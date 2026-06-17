@@ -386,7 +386,7 @@ pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Opti
     // Widening fallback: replace each reference-type arg with Object (e.g. String → Object).
     // Needed because e.g. AssertionError has no public (String) ctor, only public (Object).
     let widened: String = arg_tys.iter().map(|t| match t {
-        Ty::String | Ty::Obj(_) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => "Ljava/lang/Object;".to_string(),
+        Ty::String | Ty::Obj(..) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => "Ljava/lang/Object;".to_string(),
         _ => t.descriptor(),
     }).collect();
     let widened_exact = format!("({widened})V");
@@ -425,7 +425,7 @@ pub fn resolve_extension(
 /// no extension supertype chain — just their own descriptor.
 fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     let start = match receiver {
-        Ty::Obj(i) => i.to_string(),
+        Ty::Obj(i, _) => i.to_string(),
         Ty::String => "java/lang/String".to_string(),
         _ => return vec![receiver.descriptor()],
     };
@@ -1863,7 +1863,7 @@ impl<'a> Checker<'a> {
     /// declared subclass is matched by a positive `is` arm. Conservative: anything it can't prove
     /// (non-sealed subject, an uncovered subclass, a nested sealed subclass) returns false.
     fn when_sealed_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
-        let Some(Ty::Obj(internal)) = subj_ty else { return false };
+        let Some(Ty::Obj(internal, _)) = subj_ty else { return false };
         let Some(cs) = self.syms.class_by_internal(internal) else { return false };
         if !cs.is_sealed {
             return false;
@@ -1876,7 +1876,7 @@ impl<'a> Checker<'a> {
         for arm in arms {
             for &c in &arm.conditions {
                 if let Expr::Is { ty, negated: false, .. } = self.file.expr(c) {
-                    if let Ty::Obj(n) = self.resolve_ty_no_diag(ty) {
+                    if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
                         covered.insert(n.to_string());
                     }
                 }
@@ -1888,7 +1888,7 @@ impl<'a> Checker<'a> {
     /// True if a subject `when` is exhaustive because the subject is an enum type and every
     /// declared entry is matched by a `EnumName.ENTRY` arm condition.
     fn when_enum_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
-        let Some(Ty::Obj(internal)) = subj_ty else { return false };
+        let Some(Ty::Obj(internal, _)) = subj_ty else { return false };
         // Find the enum's simple name (key in self.syms.enums) matching this internal name.
         let Some((_, entries)) = self.syms.enums.iter()
             .find(|(name, _)| self.syms.classes.get(*name).map_or(false, |c| c.internal == internal))
@@ -2054,7 +2054,7 @@ impl<'a> Checker<'a> {
         self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or_else(|| {
             // For a method without an explicit return type (e.g. `override fun foo() = "Z"`),
             // use the return type that collect_signatures already inferred from the method body.
-            if let Some(Ty::Obj(internal)) = self.this_ty {
+            if let Some(Ty::Obj(internal, _)) = self.this_ty {
                 if let Some(sig) = self.syms.class_by_internal(internal).and_then(|c| c.methods.get(&f.name)) {
                     return sig.ret;
                 }
@@ -2187,7 +2187,7 @@ impl<'a> Checker<'a> {
             return;
         }
         // A class value is assignable to an interface (supertype) it implements.
-        if let (Ty::Obj(e), Ty::Obj(a)) = (expected, actual) {
+        if let (Ty::Obj(e, _), Ty::Obj(a, _)) = (expected, actual) {
             if self.obj_is_subtype(a, e) {
                 return;
             }
@@ -2425,7 +2425,7 @@ impl<'a> Checker<'a> {
                             Ty::Int // Int (not a reference), so safe-call rejection fires below
                         } else if rt == Ty::String {
                             resolve_string_instance(&name, &arg_tys).map(|(_, r)| r).unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal) = rt {
+                        } else if let Ty::Obj(internal, _) = rt {
                             self.lookup_method(internal, &name).map(|s| s.ret)
                                 .or_else(|| resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys).map(|(_, r)| r))
                                 .unwrap_or(Ty::Error)
@@ -2469,7 +2469,7 @@ impl<'a> Checker<'a> {
                     }
                     // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
                     // means `this.v` (sibling method calls already resolve via `this_ty`).
-                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         if let Some((ty, _)) = self.lookup_prop(internal, &n) {
                             return self.set(e, ty);
                         }
@@ -2962,7 +2962,7 @@ impl<'a> Checker<'a> {
     /// Type-check a `run`/`with`/`apply` lambda body with `recv` as its implicit receiver: `this` is
     /// `recv`, and the receiver's properties resolve unqualified. Returns the body's type.
     fn check_with_receiver(&mut self, recv: Ty, body: ExprId, span: Span) -> Ty {
-        let Ty::Obj(internal) = recv else {
+        let Ty::Obj(internal, _) = recv else {
             if recv != Ty::Error {
                 self.diags.error(span, "krusty: run/with/apply receiver must be a class instance".to_string());
             }
@@ -3029,7 +3029,7 @@ impl<'a> Checker<'a> {
             return Ty::Int; // `sb.length` property → length()
         }
         // Property read on a class value: `p.prop` (own or inherited).
-        if let Ty::Obj(internal) = rt {
+        if let Ty::Obj(internal, _) = rt {
             if let Some((ty, _)) = self.lookup_prop(internal, name) {
                 return ty;
             }
@@ -3063,7 +3063,7 @@ impl<'a> Checker<'a> {
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params`.
                     let rt = self.expr(*receiver);
-                    matches!(rt, Ty::Obj(i) if self.lookup_method(i, name).map_or(false, |s| s.required < s.params.len() && !s.param_names.is_empty()))
+                    matches!(rt, Ty::Obj(i, _) if self.lookup_method(i, name).map_or(false, |s| s.required < s.params.len() && !s.param_names.is_empty()))
                 }
                 _ => false,
             };
@@ -3152,7 +3152,7 @@ impl<'a> Checker<'a> {
                 // `super.method(args)` — dispatch to the base class's method (non-virtual).
                 if matches!(self.file.expr(receiver), Expr::Name(r) if r == "super") {
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sup = self.syms.class_by_internal(internal).and_then(|c| c.super_internal.clone());
                         if let Some(sup) = sup {
                             if let Some(sig) = self.syms.method_of(&sup, &name) {
@@ -3219,7 +3219,7 @@ impl<'a> Checker<'a> {
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
                 let method_sig = match rt {
-                    Ty::Obj(internal) => self.lookup_method(internal, &name),
+                    Ty::Obj(internal, _) => self.lookup_method(internal, &name),
                     _ => None,
                 };
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
@@ -3261,7 +3261,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
-                if let Ty::Obj(internal) = rt {
+                if let Ty::Obj(internal, _) = rt {
                     if let Some(sig) = self.lookup_method(internal, &name) {
                         // Named or omitted arguments (a method with parameter defaults, e.g. data-class
                         // `copy`): map by name/position via the parameter names, honouring `required`.
@@ -3545,7 +3545,7 @@ impl<'a> Checker<'a> {
                 }
                 // Unqualified call to a sibling instance method: `foo()` → `this.foo()`.
                 if !self.syms.funs.contains_key(&fname) {
-                    if let Some(Ty::Obj(internal)) = self.this_ty {
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         if let Some(sig) = self.lookup_method(internal, &fname) {
                             for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
@@ -3776,7 +3776,7 @@ impl<'a> Checker<'a> {
                 } else {
                     match rt {
                         Ty::Error => {}
-                        Ty::Obj(internal) => match self.syms.prop_of(internal, &name) {
+                        Ty::Obj(internal, _) => match self.syms.prop_of(internal, &name) {
                             Some((lty, is_var)) => {
                                 if !is_var {
                                     self.diags.error(span, "val cannot be reassigned".to_string());
