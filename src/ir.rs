@@ -185,6 +185,9 @@ pub struct IrClass {
     /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
     /// that adapts arguments and delegates to the concrete override.
     pub bridges: Vec<Bridge>,
+    /// Implemented interface internal names (`class C : I, J`). The class file lists them as
+    /// `implements`; an interface declaration lists its super-interfaces here.
+    pub interfaces: Vec<String>,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

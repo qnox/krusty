@@ -69,10 +69,16 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade);
     }
+    if c.is_interface {
+        return emit_interface_class(ir, c);
+    }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     // A class that is extended must not be `final` (else the subclass fails verification).
     if ir.classes.iter().any(|o| o.superclass == c.fq_name) {
         cw.set_access(0x0001 | 0x0020); // PUBLIC | SUPER
+    }
+    for itf in &c.interfaces {
+        cw.add_interface(itf);
     }
     // Public fields (the IR slice reads them cross-class directly; kotlinc uses private + getters —
     // an ABI refinement, not a runtime difference).
@@ -224,6 +230,23 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     code.checkcast(ci);
     let m = cw.methodref(cls, meth, desc);
     code.invokevirtual(m, 0, slot_words(t) as i32);
+}
+
+/// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`, with one
+/// `public abstract` method per declared (abstract) method and no fields/constructor.
+fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
+    let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
+    cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
+    for itf in &c.interfaces {
+        cw.add_interface(itf);
+    }
+    for &fid in &c.methods {
+        let f = &ir.functions[fid as usize];
+        let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+        let ret = ir_ty_to_jvm(&f.ret);
+        cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ret)); // PUBLIC | ABSTRACT
+    }
+    cw.finish()
 }
 
 /// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →
@@ -561,12 +584,20 @@ impl<'a> Emitter<'a> {
                 let ret = ir_ty_to_jvm(&f.ret);
                 let name = f.name.clone();
                 let owner = c.fq_name.clone();
+                let is_iface = c.is_interface;
                 let mut ops = vec![*receiver];
                 ops.extend(args.iter().copied());
                 self.emit_operands(&ops, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let m = self.cw.methodref(&owner, &name, &method_descriptor(&param_tys, ret));
-                code.invokevirtual(m, aw, slot_words(ret) as i32);
+                let desc = method_descriptor(&param_tys, ret);
+                if is_iface {
+                    // Dispatch through an interface — `invokeinterface I.m`.
+                    let m = self.cw.interface_methodref(&owner, &name, &desc);
+                    code.invokeinterface(m, aw, slot_words(ret) as i32);
+                } else {
+                    let m = self.cw.methodref(&owner, &name, &desc);
+                    code.invokevirtual(m, aw, slot_words(ret) as i32);
+                }
             }
             IrExpr::Call { callee, dispatch_receiver, args } => match callee {
                 Callee::Local(fid) => {
