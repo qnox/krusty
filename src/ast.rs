@@ -271,6 +271,9 @@ pub struct ClassDecl {
     pub is_sealed: bool,
     /// Implemented interface names from a supertype list (`class C : I1, I2`).
     pub supertypes: Vec<String>,
+    /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name)`. The
+    /// class forwards each of `Iface`'s methods to `delegate` (a `val` constructor-parameter field).
+    pub delegations: Vec<(String, String)>,
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
     pub base_class: Option<String>,
     pub base_args: Vec<ExprId>,

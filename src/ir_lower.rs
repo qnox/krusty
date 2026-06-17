@@ -246,6 +246,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             if c.is_data {
                 lo.synth_data_members(&internal, id, ctor_param_count as usize);
             }
+            // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
+            // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
+            if !c.delegations.is_empty() {
+                lo.synth_delegation_forwarders(file, c, &internal, id)?;
+            }
         }
     }
     // Pass 1b: register top-level functions and extension functions.
@@ -854,6 +859,38 @@ impl<'a> Lower<'a> {
             ci.methods.insert(name.to_string(), (idx, fid, ret));
         }
         Some(fid)
+    }
+
+    /// Synthesize forwarding methods for `: Iface by delegate` — each of `Iface`'s methods becomes
+    /// `fun m(args) = this.delegate.m(args)` (an `invokeinterface` on the delegate field). Only
+    /// user-interface delegation with a simple `val`-parameter delegate is modeled; anything else
+    /// (classpath interface, missing field) returns `None` so the file is skipped, never miscompiled.
+    fn synth_delegation_forwarders(&mut self, file: &ast::File, c: &ast::ClassDecl, internal: &str, class_id: ClassId) -> Option<()> {
+        for (iface_name, delegate) in &c.delegations {
+            let delegate_idx = self.classes.get(internal)?.fields.iter().position(|(n, _)| n == delegate)? as u32;
+            let iface_internal = class_internal(file, iface_name);
+            let methods: Vec<(String, Vec<Ty>, Ty)> = self.syms.classes.get(iface_name)?
+                .methods.iter().map(|(n, s)| (n.clone(), s.params.clone(), s.ret)).collect();
+            for (mname, params, ret) in methods {
+                let params_ir: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
+                let descriptor = format!("({}){}", params.iter().map(|t| t.descriptor()).collect::<String>(), ret.descriptor());
+                let field = self.this_field(class_id, delegate_idx);
+                let args: Vec<u32> = (0..params.len()).map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1))).collect();
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual { owner: iface_internal.clone(), name: mname.clone(), descriptor, interface: true },
+                    dispatch_receiver: Some(field),
+                    args,
+                });
+                let body = if ret == Ty::Unit {
+                    self.ir.add_expr(IrExpr::Block { stmts: vec![call], value: None })
+                } else {
+                    let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
+                    self.ir.add_expr(IrExpr::Block { stmts: vec![ret_stmt], value: None })
+                };
+                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body);
+            }
+        }
+        Some(())
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 { self.ir.add_expr(IrExpr::Const(IrConst::String(s))) }
