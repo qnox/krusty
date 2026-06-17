@@ -1931,6 +1931,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   over an array now lowers to an index loop (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, with
   the array/size hoisted) — the complement that consumes a vararg array. `tests/vararg_e2e.rs`.
 
+- ✅ **Phase 177 — companion object methods** (264 → 268 box()=OK, 0 FAIL). A `class C` with a
+  `companion object { fun … }` now compiles (like kotlinc) to a synthesized `C$Companion` class holding
+  the companion methods as instance methods, a `public static final Companion` field of that type on
+  `C` built in `C`'s `<clinit>`, and `C.foo(args)` → `getstatic C.Companion; invokevirtual`
+  (`IrExpr::CompanionInstance`). The companion's constructor is package-private (so `C`'s `<clinit>` can
+  call it without nestmate attributes — kotlinc uses `private` + a `DefaultConstructorMarker` ctor; a
+  byte-parity gap). Companion **properties** (`val`/`const val`, whose backing fields live on the outer
+  class) are not yet modeled — such a class is skipped. `tests/companion_e2e.rs`. Also: constructor
+  `Intrinsics.checkNotNullParameter` (non-null reference primary-ctor params, emitted before `super()`)
+  — a simple class's `<init>` is now byte-identical to kotlinc.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
