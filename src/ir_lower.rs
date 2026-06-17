@@ -1261,6 +1261,24 @@ impl<'a> Lower<'a> {
                     Some(self.ir.add_expr(IrExpr::SetField { receiver: recv, class, index: idx, value: val }))
                 }
             }
+            // `name++` / `name--` on a local numeric variable → `name = name ± 1`. (In statement
+            // position the pre/post distinction is irrelevant — the value isn't observed.) A built-in
+            // numeric primitive only; a `var` field/property or a user `operator inc`/`dec` bails.
+            Stmt::IncDec { name, dec } => {
+                let (v, ty) = self.lookup(&name)?;
+                let one = match ty {
+                    Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+                    Ty::Long => IrConst::Long(1),
+                    Ty::Double => IrConst::Double(1.0),
+                    Ty::Float => IrConst::Float(1.0),
+                    _ => return None,
+                };
+                let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                let one = self.ir.add_expr(IrExpr::Const(one));
+                let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one });
+                Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: nv }))
+            }
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
             Stmt::AssignMember { receiver, name, value } => {
                 let rt = self.info.ty(receiver);
