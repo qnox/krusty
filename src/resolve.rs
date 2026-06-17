@@ -58,6 +58,10 @@ pub struct ClassSig {
     pub super_internal: Option<String>,
     /// `annotation class` — emitted as an interface; instantiation builds a synthetic impl class.
     pub is_annotation: bool,
+    /// Default-value expression for each primary-constructor parameter (`None` = required). Used to
+    /// fill omitted trailing arguments at a constructor call site (box tests are single-file, so the
+    /// `ExprId`s are valid where the constructor is called).
+    pub ctor_defaults: Vec<Option<ExprId>>,
 }
 
 impl ClassSig {
@@ -580,6 +584,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                     }
                     // All primary-ctor params (in order) define the constructor signature.
                     let ctor_params: Vec<Ty> = c.props.iter().map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags)).collect();
+                    let ctor_defaults: Vec<Option<ExprId>> = c.props.iter().map(|p| p.default).collect();
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = c
                         .props
@@ -714,7 +719,7 @@ pub fn collect_signatures_with_cp(files: &[File], cp: Classpath, diags: &mut Dia
                         .collect();
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults },
                     );
                 }
                 Decl::Property(p) => {
@@ -3011,8 +3016,31 @@ impl<'a> Checker<'a> {
                 if self.lookup(&fname).is_none() {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
-                        if ctor_params.len() != arg_tys.len() {
-                            self.diags.error(span, format!("constructor '{fname}' expects {} args, got {}", ctor_params.len(), arg_tys.len()));
+                        // Omitted trailing arguments are allowed when those parameters have a default
+                        // that is a *simple literal of the parameter's exact type* — the call site can
+                        // emit it directly. Adapting defaults (`Long = 0`) or complex defaults
+                        // (anonymous objects, `emptyArray()`) aren't modeled yet → skip those.
+                        let got = arg_tys.len();
+                        let ok_arity = got <= ctor_params.len()
+                            && (got..ctor_params.len()).all(|i| match cls.ctor_defaults.get(i).copied().flatten() {
+                                Some(dx) => {
+                                    let pt = ctor_params[i];
+                                    match self.file.expr(dx) {
+                                        Expr::IntLit(_) => matches!(pt, Ty::Int | Ty::Byte | Ty::Short | Ty::Char),
+                                        Expr::LongLit(_) => pt == Ty::Long,
+                                        Expr::DoubleLit(_) => pt == Ty::Double,
+                                        Expr::FloatLit(_) => pt == Ty::Float,
+                                        Expr::BoolLit(_) => pt == Ty::Boolean,
+                                        Expr::CharLit(_) => pt == Ty::Char,
+                                        Expr::StringLit(_) => pt == Ty::String,
+                                        Expr::NullLit => pt.is_reference(),
+                                        _ => false,
+                                    }
+                                }
+                                None => false,
+                            });
+                        if !ok_arity {
+                            self.diags.error(span, format!("constructor '{fname}' expects {} args, got {}", ctor_params.len(), got));
                         } else {
                             for (i, (p, a)) in ctor_params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");

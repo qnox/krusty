@@ -1568,6 +1568,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   via `Float.compare`/`Double.compare` (`NaN==NaN`), where `fcmpg`/`dcmpg` gave `NaN!=NaN`.
   Production drop-in: **460 → 463 box()=OK, 0 FAIL**.
 
+- ✅ **Constructor default arguments.** `ClassSig` gains `ctor_defaults` (the default `ExprId` per
+  primary-ctor param; box tests are single-file so the ids are valid at the call site). A `Name(...)`
+  constructor call may omit trailing args whose params have defaults; the emitter fills each omitted
+  param with its default expression. Restricted (to hold 0-FAIL) to **simple-literal defaults whose
+  literal kind matches the param's primitive category** — adapting defaults (`Long = 0`) and complex
+  ones (anonymous objects, `emptyArray()`) still skip. Also fixed a real crash: `copy$default`'s mask
+  `1 << i` panicked for a >32-field data class (now `wrapping_shl`). Production drop-in: **463 → 468
+  box()=OK, 0 FAIL**.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
