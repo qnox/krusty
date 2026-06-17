@@ -1699,6 +1699,45 @@ impl<'a> Lower<'a> {
                 let type_operand = ty_to_ir(self.ty_ref(&ty)?);
                 self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
             }
+            Expr::InRange { value, start, end, kind, negated } => {
+                use crate::ast::RangeKind;
+                // Evaluate the bounds then the value once each (source order: start, end, value —
+                // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
+                // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
+                let s = self.expr(start)?;
+                let sv = self.fresh_value();
+                let var_s = self.ir.add_expr(IrExpr::Variable { index: sv, ty: ty_to_ir(self.info.ty(start)), init: Some(s) });
+                let en = self.expr(end)?;
+                let ev = self.fresh_value();
+                let var_e = self.ir.add_expr(IrExpr::Variable { index: ev, ty: ty_to_ir(self.info.ty(end)), init: Some(en) });
+                let v = self.expr(value)?;
+                let vv = self.fresh_value();
+                let var_v = self.ir.add_expr(IrExpr::Variable { index: vv, ty: ty_to_ir(self.info.ty(value)), init: Some(v) });
+                // `lo`/`hi` are the inclusive low / (in/ex)clusive high bound. `downTo` runs high→low, so
+                // membership is `end <= value <= start` — swap the bounds.
+                let (lo, hi, hi_strict) = match kind {
+                    RangeKind::Through => (sv, ev, false),
+                    RangeKind::Until => (sv, ev, true),
+                    RangeKind::DownTo => (ev, sv, false),
+                };
+                let get = |this: &mut Self, idx: u32| this.ir.add_expr(IrExpr::GetValue(idx));
+                let cond = if negated {
+                    // value < lo  ||  value (> | >=) hi
+                    let v1 = get(self, vv); let l1 = get(self, lo);
+                    let c1 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: v1, rhs: l1 });
+                    let v2 = get(self, vv); let h2 = get(self, hi);
+                    let c2 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt }, lhs: v2, rhs: h2 });
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: c1, rhs: c2 })
+                } else {
+                    // lo <= value  &&  value (< | <=) hi
+                    let l1 = get(self, lo); let v1 = get(self, vv);
+                    let c1 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: l1, rhs: v1 });
+                    let v2 = get(self, vv); let h2 = get(self, hi);
+                    let c2 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: if hi_strict { IrBinOp::Lt } else { IrBinOp::Le }, lhs: v2, rhs: h2 });
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::And, lhs: c1, rhs: c2 })
+                };
+                self.ir.add_expr(IrExpr::Block { stmts: vec![var_s, var_e, var_v], value: Some(cond) })
+            }
             Expr::As { operand, ty, nullable } => {
                 // `as?` (safe cast: null on mismatch) isn't modeled — only the throwing `as`.
                 if nullable {
@@ -2138,6 +2177,7 @@ fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
             | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
             Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
             | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+            Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
             Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
             Expr::Member { receiver, .. } => r(*receiver),
             Expr::Index { array, index } => r(*array) || r(*index),

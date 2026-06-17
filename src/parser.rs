@@ -1734,6 +1734,61 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
+            // `in` / `!in` membership — a "named check" at comparison precedence (bp 7). A range RHS
+            // (`a..b`, `a until b`, `a downTo b`) becomes `Expr::InRange`; any other RHS becomes
+            // `container.contains(value)` (`!in` wraps it in `!`).
+            if min_bp <= 7 {
+                let in_negated = if self.at(TokenKind::KwIn) {
+                    Some(false)
+                } else if self.at(TokenKind::Not)
+                    && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwIn)
+                {
+                    Some(true)
+                } else {
+                    None
+                };
+                if let Some(negated) = in_negated {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    if negated {
+                        self.bump(); // '!'
+                    }
+                    self.bump(); // 'in'
+                    self.skip_newlines();
+                    let rstart = self.parse_bp(8); // the range start binds tighter than `in`
+                    let kind = if self.eat(TokenKind::DotDot) {
+                        Some(RangeKind::Through)
+                    } else if self.eat(TokenKind::DotDotLt) {
+                        Some(RangeKind::Until)
+                    } else if self.at(TokenKind::Ident) && self.text() == "until" {
+                        self.bump();
+                        Some(RangeKind::Until)
+                    } else if self.at(TokenKind::Ident) && self.text() == "downTo" {
+                        self.bump();
+                        Some(RangeKind::DownTo)
+                    } else {
+                        None
+                    };
+                    match kind {
+                        Some(kind) => {
+                            let rend = self.parse_bp(8);
+                            let end = self.file.expr_spans[rend.0 as usize];
+                            lhs = self.file.add_expr(Expr::InRange { value: lhs, start: rstart, end: rend, kind, negated }, Span::new(lspan.lo, end.hi));
+                        }
+                        None => {
+                            // `value in container` → `container.contains(value)`.
+                            let cspan = self.file.expr_spans[rstart.0 as usize];
+                            let callee = self.file.add_expr(Expr::Member { receiver: rstart, name: "contains".to_string() }, Span::new(lspan.lo, cspan.hi));
+                            let call = self.file.add_expr(Expr::Call { callee, args: vec![lhs] }, Span::new(lspan.lo, cspan.hi));
+                            lhs = if negated {
+                                self.file.add_expr(Expr::Unary { op: UnOp::Not, operand: call }, Span::new(lspan.lo, cspan.hi))
+                            } else {
+                                call
+                            };
+                        }
+                    }
+                    continue;
+                }
+            }
             // Infix function call `a foo b` → `a.foo(b)`: a simple identifier between two operands.
             // Binds tighter than comparison (bp 7) and looser than additive (bp 9) — Kotlin's
             // `infixFunctionCall`. Resolution checks `foo` is actually an `infix`/member function.

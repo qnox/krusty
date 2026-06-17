@@ -908,6 +908,7 @@ fn expr_has_try(file: &File, e: ExprId) -> bool {
         | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
         Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
         | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+        Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
         Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
         Expr::Member { receiver, .. } => r(*receiver),
         Expr::Index { array, index } => r(*array) || r(*index),
@@ -936,6 +937,7 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
         Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit => false,
         Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. } => r(*operand),
         Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
+        Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
         Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
         Expr::Member { receiver, .. } => r(*receiver),
         Expr::Index { array, index } => r(*array) || r(*index),
@@ -963,6 +965,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
             |Expr::BoolLit(_)|Expr::StringLit(_)|Expr::CharLit(_)|Expr::NullLit => false,
             Expr::NotNull{operand}|Expr::Throw{operand}|Expr::Unary{operand,..} => r(*operand),
             Expr::Is{operand,..}|Expr::As{operand,..} => r(*operand),
+            Expr::InRange{value,start,end,..} => r(*value)||r(*start)||r(*end),
             Expr::Elvis{lhs,rhs}|Expr::Binary{lhs,rhs,..} => r(*lhs)||r(*rhs),
             Expr::Member{receiver,..} => r(*receiver),
             Expr::Index{array,index} => r(*array)||r(*index),
@@ -2212,6 +2215,22 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 tt
+            }
+            Expr::InRange { value, start, end, .. } => {
+                let vt = self.expr(value);
+                let st = self.expr(start);
+                let et = self.expr(end);
+                // Only primitive numeric/char ranges are lowered (to a comparison chain). Any other
+                // operand type (a range over user/reference types) is rejected so the file is skipped.
+                let prim = |t: &Ty| matches!(t, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte | Ty::Double | Ty::Float);
+                // Require uniform operand types — the lowering emits direct same-type comparisons, so a
+                // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
+                if prim(&vt) && vt == st && st == et {
+                    Ty::Boolean
+                } else {
+                    self.diags.error(self.span(e), "krusty: 'in' is only supported for primitive numeric ranges".to_string());
+                    Ty::Error
+                }
             }
             Expr::Elvis { lhs, rhs } => {
                 let lt = self.expr(lhs);
