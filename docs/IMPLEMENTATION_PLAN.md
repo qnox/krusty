@@ -1703,6 +1703,19 @@ private-field+accessors); **constructor default arguments**; the operator/`Char`
 to the AST checker (Phases 146/147 resolve typing survives, but `ir_lower`/`ir_emit` must lower it);
 broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward 558.
 
+- ✅ **Phase 154 — `enum class` in the IR backend** (112 → 128 box()=OK, 0 FAIL).
+  **`enum class`** is implemented end-to-end: `IrClass` gained a `superclass`
+  (`java/lang/Enum`) and `enum_entries`; `emit_enum_class` emits the entry static-finals, a `$VALUES`
+  array, a private `(String,int,…)` ctor → `super(name,ordinal)`, a `<clinit>` that builds them, and
+  synthetic `values()`/`valueOf(String)`; `E.ENTRY` → `getstatic`, `e.ordinal`/`e.name` →
+  `Enum.ordinal()`/`name()`, and the checker resolves `E.values()`/`E.valueOf()`. Two latent bugs
+  fixed along the way: a `val x: UserType` local was typed `Error` (broke reference `==` → wrong
+  primitive-compare path), and a smart-cast field receiver now gets a `checkcast`. Guards hold 0-FAIL
+  on shapes the flat emitter can't do yet (skip, never miscompile): no-`else` `when` used as a value
+  (exhaustiveness unproven), branchy enum-entry args (ambient-stack merge frames), enum entry bodies /
+  abstract enum methods. KNOWN shortcut to generalize: `e.ordinal`/`e.name` are emitted as intrinsics
+  rather than via general inherited-method resolution on the `java/lang/Enum` superclass.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
