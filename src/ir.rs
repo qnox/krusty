@@ -245,6 +245,9 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<String>,
+    /// Per-field `true` when the backing field is immutable (`val`) — emitted `final`. Parallel to
+    /// `fields` (empty ⇒ none final, for synthesized classes).
+    pub field_final: Vec<bool>,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

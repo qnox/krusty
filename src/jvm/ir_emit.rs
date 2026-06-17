@@ -118,9 +118,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     // Backing fields of a normal class are private; access goes through the synthesized
     // `getX()`/`setX()` accessors (kotlinc does the same). Objects don't get accessors yet, so their
     // fields stay public (direct access). (`final` for `val` is a follow-up byte-parity detail.)
-    let field_acc: u16 = if c.is_object { 0x0001 } else { 0x0002 };
-    for (name, ty) in &c.fields {
-        cw.add_field(field_acc, name, &ir_ty_to_jvm(ty).descriptor());
+    let base_field_acc: u16 = if c.is_object { 0x0001 } else { 0x0002 };
+    for (i, (name, ty)) in c.fields.iter().enumerate() {
+        // A `val` backing field is `final`.
+        let acc = base_field_acc | if c.field_final.get(i).copied().unwrap_or(false) { 0x0010 } else { 0 };
+        cw.add_field(acc, name, &ir_ty_to_jvm(ty).descriptor());
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
