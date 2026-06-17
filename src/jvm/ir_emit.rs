@@ -852,7 +852,7 @@ impl<'a> Emitter<'a> {
                 self.emit_value(recv.unwrap(), code);
                 code.arraylength();
             }
-            _ if fq.ends_with("Array.<init>") => {
+            _ if prim_array_elem_ty(fq).is_some() => {
                 self.emit_value(args[0], code);
                 let elem = prim_array_atype(fq);
                 code.newarray(elem);
@@ -1227,7 +1227,7 @@ impl<'a> Emitter<'a> {
                 Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
-                Callee::External(fq) if fq.ends_with("Array.<init>") => Ty::array(prim_array_elem_ty(fq)),
+                Callee::External(fq) if prim_array_elem_ty(fq).is_some() => Ty::array(prim_array_elem_ty(fq).unwrap()),
                 Callee::External(fq) => intrinsic_ret(fq),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
@@ -1333,32 +1333,32 @@ fn intrinsic_ret(fq: &str) -> Ty {
 /// `newarray` atype for a `kotlin/<Prim>Array.<init>` intrinsic.
 fn prim_array_atype(fq: &str) -> u8 {
     match prim_array_elem_ty(fq) {
-        Ty::Boolean => 4,
-        Ty::Char => 5,
-        Ty::Float => 6,
-        Ty::Double => 7,
-        Ty::Byte => 8,
-        Ty::Short => 9,
-        Ty::Int => 10,
-        Ty::Long => 11,
-        _ => 10,
+        Some(Ty::Boolean) => 4,
+        Some(Ty::Char) => 5,
+        Some(Ty::Float) => 6,
+        Some(Ty::Double) => 7,
+        Some(Ty::Byte) => 8,
+        Some(Ty::Short) => 9,
+        Some(Ty::Long) => 11,
+        _ => 10, // Int (the only remaining primitive-array element)
     }
 }
 
-/// Element `Ty` for a `kotlin/<Prim>Array.<init>` intrinsic FqName.
-fn prim_array_elem_ty(fq: &str) -> Ty {
-    let cls = fq.trim_start_matches("kotlin/").trim_end_matches(".<init>");
-    match cls {
-        "IntArray" => Ty::Int,
-        "LongArray" => Ty::Long,
-        "DoubleArray" => Ty::Double,
-        "FloatArray" => Ty::Float,
-        "BooleanArray" => Ty::Boolean,
-        "CharArray" => Ty::Char,
-        "ByteArray" => Ty::Byte,
-        "ShortArray" => Ty::Short,
-        _ => Ty::Int,
-    }
+/// Element `Ty` for a `kotlin/<Prim>Array.<init>` intrinsic FqName — `None` for any other call.
+/// Matches the full FqName exactly (not a suffix) so a user class named `…Array` can't be mistaken
+/// for a primitive-array constructor.
+fn prim_array_elem_ty(fq: &str) -> Option<Ty> {
+    Some(match fq {
+        "kotlin/IntArray.<init>" => Ty::Int,
+        "kotlin/LongArray.<init>" => Ty::Long,
+        "kotlin/DoubleArray.<init>" => Ty::Double,
+        "kotlin/FloatArray.<init>" => Ty::Float,
+        "kotlin/BooleanArray.<init>" => Ty::Boolean,
+        "kotlin/CharArray.<init>" => Ty::Char,
+        "kotlin/ByteArray.<init>" => Ty::Byte,
+        "kotlin/ShortArray.<init>" => Ty::Short,
+        _ => return None,
+    })
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
