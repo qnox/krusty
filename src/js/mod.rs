@@ -118,12 +118,25 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             indent(depth, out);
             out.push_str(&format!("{} = {};\n", ir.statics[*index as usize].name, emit_expr(ir, *value, inst)));
         }
-        IrExpr::While { cond, body } => {
+        IrExpr::While { cond, body, update } => {
             indent(depth, out);
-            out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond, inst)));
+            // `update` (a `for`-loop increment) goes in the loop header so `continue` runs it, matching
+            // a JS `for (; cond; update)`; a plain `while` has no update.
+            match update {
+                Some(u) => out.push_str(&format!("for (; {}; {}) {{\n", emit_expr(ir, *cond, inst), emit_expr(ir, *u, inst))),
+                None => out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond, inst))),
+            }
             emit_stmt(ir, *body, depth + 1, inst, out);
             indent(depth, out);
             out.push_str("}\n");
+        }
+        IrExpr::Break => {
+            indent(depth, out);
+            out.push_str("break;\n");
+        }
+        IrExpr::Continue => {
+            indent(depth, out);
+            out.push_str("continue;\n");
         }
         other => {
             indent(depth, out);

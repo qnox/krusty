@@ -80,7 +80,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
     for s in &ir.statics {
         cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
     }
-    let mut e = Emitter { ir, cw, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit };
+    let mut e = Emitter { ir, cw, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
     let mut code = CodeBuilder::new(0);
     for s in &ir.statics {
         e.emit_value(s.init, &mut code);
@@ -142,7 +142,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let max_slot;
     let mut init_diverges = false;
     {
-        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit };
+        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
@@ -405,7 +405,7 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8>
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     {
-        let mut e = Emitter { ir, cw: &mut cw, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit };
+        let mut e = Emitter { ir, cw: &mut cw, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
@@ -488,7 +488,7 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret };
+    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -545,7 +545,7 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret };
+    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -604,6 +604,8 @@ struct Emitter<'a> {
     slots: HashMap<u32, (u16, Ty)>,
     next_slot: u16,
     ret: Ty,
+    /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
+    loop_stack: Vec<(Label, Label)>,
 }
 
 impl<'a> Emitter<'a> {
@@ -676,19 +678,38 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.putstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::While { cond, body } => {
+            IrExpr::While { cond, body, update } => {
                 let start = code.new_label();
+                let cont = code.new_label();
                 let end = code.new_label();
                 self.frame(start, vec![], code);
                 code.bind(start);
                 self.emit_value(cond, code);
                 self.frame(end, vec![], code);
                 code.ifeq(end);
+                // `continue` targets `cont` (run the update, then re-test); `break` targets `end`.
+                self.loop_stack.push((cont, end));
                 self.emit(body, code);
+                self.loop_stack.pop();
+                // The body block restored the slot map, so framing `cont`/`start` here captures the
+                // loop's outer locals — a `continue` jumping in from a deeper scope stays compatible.
+                self.frame(cont, vec![], code);
+                code.bind(cont);
+                if let Some(u) = update {
+                    self.emit(u, code);
+                }
                 self.frame(start, vec![], code);
                 code.goto(start);
                 self.frame(end, vec![], code);
                 code.bind(end);
+            }
+            IrExpr::Break => {
+                let (_, end) = *self.loop_stack.last().expect("break outside loop");
+                code.goto(end);
+            }
+            IrExpr::Continue => {
+                let (cont, _) = *self.loop_stack.last().expect("continue outside loop");
+                code.goto(cont);
             }
             other => {
                 self.emit_value_node(&other, code);
@@ -704,6 +725,18 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_node(&mut self, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
+            // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
+            // — emit the jump and push nothing; the consuming branch is dead past this point.
+            IrExpr::Break => {
+                let (_, end) = *self.loop_stack.last().expect("break outside loop");
+                code.goto(end);
+                return;
+            }
+            IrExpr::Continue => {
+                let (cont, _) = *self.loop_stack.last().expect("continue outside loop");
+                code.goto(cont);
+                return;
+            }
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
                 IrConst::Int(v) => code.push_int(*v, self.cw),
@@ -1512,7 +1545,7 @@ impl<'a> Emitter<'a> {
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         match self.ir.expr(e) {
-            IrExpr::Return(_) | IrExpr::Throw { .. } => true,
+            IrExpr::Return(_) | IrExpr::Throw { .. } | IrExpr::Break | IrExpr::Continue => true,
             IrExpr::Block { stmts, value } => match value {
                 Some(v) => self.diverges(*v),
                 None => stmts.last().map_or(false, |s| self.diverges(*s)),
@@ -1686,7 +1719,7 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
-            IrExpr::Throw { .. } => Ty::Nothing,
+            IrExpr::Throw { .. } | IrExpr::Break | IrExpr::Continue => Ty::Nothing,
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
