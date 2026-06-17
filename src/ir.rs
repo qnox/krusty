@@ -128,6 +128,11 @@ pub enum IrExpr {
     /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
     /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
     NotNullAssert { operand: ExprId },
+    /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
+    /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
+    NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
+    /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
+    Throw { operand: ExprId },
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.

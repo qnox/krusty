@@ -1883,6 +1883,15 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   the duplicate is consumed by the null check) — matching kotlinc. On a non-null primitive operand `!!`
   is a no-op. `tests/not_null_assert_e2e.rs`.
 
+- ✅ **Phase 172 — classpath-class construction + `throw`** (236 → 245 box()=OK, 0 FAIL). `IrExpr::
+  NewExternal { internal, ctor_desc, args }` constructs a non-IR class (`new` + `dup` + args + `invoke
+  special <init>`); the constructor descriptor comes from the classpath (`resolve_java_ctor`), with a
+  fallback for `Throwable` types (every JDK throwable has `()`/`(String)` constructors) since the
+  classpath reader doesn't read jimage constructor descriptors yet. `IrExpr::Throw` emits `athrow` and
+  counts as diverging. Together these unblock `throw RuntimeException("…")` and exception/value
+  construction broadly (+9 — the largest single-phase jump since interfaces). Constructors whose
+  descriptors live only in the JDK jimage (e.g. `StringBuilder()`) still bail. `tests/throw_e2e.rs`.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

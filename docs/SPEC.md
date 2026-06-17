@@ -200,6 +200,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
   primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
+- Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
+  `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
+  classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader
+  doesn't read jimage constructor descriptors yet, so classes whose `<init>` lives only in the jimage —
+  e.g. `StringBuilder` — are skipped). `throw e` emits `athrow` (`tests/throw_e2e.rs`).
 
 ## 8. Success criteria for the PoC
 

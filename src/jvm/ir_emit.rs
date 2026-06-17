@@ -775,6 +775,39 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNull", "(Ljava/lang/Object;)V");
                 code.invokestatic(m, 1, 0);
             }
+            IrExpr::Throw { operand } => {
+                self.emit_value(*operand, code);
+                code.athrow();
+            }
+            IrExpr::NewExternal { internal, ctor_desc, args } => {
+                let owner = internal.clone();
+                let desc = ctor_desc.clone();
+                let args = args.clone();
+                // Arguments were coerced to the constructor's parameter types in lowering, so each
+                // argument's `value_ty` is its parameter — the descriptor's argument-word count.
+                let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                if args.iter().any(|&a| self.records_frame(a)) {
+                    // A branchy argument can't run with `[new, dup]` on the stack (its merge frame
+                    // would omit them) — evaluate args into temps first, then build.
+                    let temps = self.spill_to_temps(&args, code);
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for &(slot, t, _) in &temps { load(t, slot, code); }
+                    for &(_, _, key) in &temps { self.slots.remove(&key); }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                } else {
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for &a in &args {
+                        self.emit_value(a, code);
+                    }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                }
+            }
             IrExpr::InvokeFunction { func, args, ret } => {
                 let n = args.len();
                 self.emit_value(*func, code);
@@ -951,6 +984,8 @@ impl<'a> Emitter<'a> {
             IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => self.records_frame(*value),
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => self.records_frame(*arg),
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
+            IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::Throw { operand } => self.records_frame(*operand),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
             IrExpr::Block { stmts, value } =>
@@ -1115,7 +1150,7 @@ impl<'a> Emitter<'a> {
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         match self.ir.expr(e) {
-            IrExpr::Return(_) => true,
+            IrExpr::Return(_) | IrExpr::Throw { .. } => true,
             IrExpr::Block { stmts, value } => match value {
                 Some(v) => self.diverges(*v),
                 None => stmts.last().map_or(false, |s| self.diverges(*s)),
@@ -1281,6 +1316,8 @@ impl<'a> Emitter<'a> {
             IrExpr::Lambda { arity, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")),
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
+            IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
+            IrExpr::Throw { .. } => Ty::Nothing,
             _ => Ty::Error,
         }
     }
