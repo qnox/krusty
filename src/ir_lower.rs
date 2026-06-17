@@ -736,11 +736,19 @@ impl<'a> Lower<'a> {
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
                     let rt = self.info.ty(receiver);
-                    if let Some((index, _, _)) = self.class_of(rt).and_then(|ci| ci.methods.get(&name).copied()) {
+                    if let Some((index, fid, _)) = self.class_of(rt).and_then(|ci| ci.methods.get(&name).copied()) {
                         let class = self.class_of(rt)?.id;
+                        let params = self.ir.functions[fid as usize].params.clone();
+                        // Default/omitted arguments aren't modeled (would underflow the descriptor).
+                        if args.len() != params.len() {
+                            return None;
+                        }
                         let recv = self.expr(receiver)?;
+                        // Coerce each argument to its parameter type (numeric widening, boxing, …).
                         let mut a = Vec::new();
-                        for arg in args { a.push(self.expr(arg)?); }
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, pt)?);
+                        }
                         self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a })
                     } else if name == "toString" && args.is_empty() {
                         // `x.toString()` → stdlib intrinsic, `String`.
