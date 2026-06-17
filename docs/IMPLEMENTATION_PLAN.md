@@ -1768,6 +1768,18 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   `emit_compare` all share it. The branchy-operand-on-non-empty-stack VerifyError class is now fully
   closed.
 
+- ✅ **Phase 160 — class inheritance** (149 → 155 box()=OK, 0 FAIL). The biggest single lever
+  (the `class-nonsimple` bucket). A `class B(…) : A(args)` where `A` is a simple/open class in the same
+  file now lowers: `IrClass` gained `super_args`; `is_simple_class` allows a file base class; the ctor
+  emits `super(args)` (spill-aware) against the base's parameter descriptor instead of
+  `Object.<init>`; the class file's super_class is the base and an extended class is emitted non-`final`.
+  Inherited member access walks the superclass chain (`resolve_field`/`resolve_method`, returning the
+  *owning* class), and method calls keep `invokevirtual` so overrides dispatch dynamically. Guards
+  (skip, never miscompile) for what still needs more: an override with a **different erased signature**
+  (generic/covariant — needs a synthetic JVM **bridge**), and a **property override** (`override val`
+  — needs getter/setter dispatch, which krusty's direct-field model lacks). Base from a classpath/Java
+  type, secondary constructors, and `abstract` classes also stay out for now.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
