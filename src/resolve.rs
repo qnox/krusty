@@ -3099,10 +3099,42 @@ impl<'a> Checker<'a> {
                 }
                 // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
                 // primitive operator, which *beats* any same-named user extension (in Kotlin a
-                // member/builtin wins over an extension). krusty doesn't emit primitive
-                // operator-methods, so reject rather than dispatch to the extension — which would
-                // miscompile (e.g. `5.rem(2)` returning the extension's value instead of `1`).
+                // member/builtin wins over an extension). The arithmetic/compare/unary forms map
+                // directly to the equivalent operator bytecode (see the mirror in `emit_call`); the
+                // rest (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) aren't modeled → reject rather
+                // than dispatch to a user extension, which would miscompile.
                 if rt.is_primitive() && is_builtin_operator_method(&name) {
+                    // A user `infix`/`operator` extension with this name shadows the builtin for the
+                    // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin —
+                    // but krusty parses both to the same AST, so it can't tell them apart. When such
+                    // an extension exists, reject (skip) rather than risk picking the wrong one.
+                    let user_ext = self.syms.ext_funs.contains_key(&(rt.descriptor(), name.clone()));
+                    if rt.is_numeric() && !user_ext {
+                        // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
+                        let bin = match name.as_str() {
+                            "plus" => Some(BinOp::Add),
+                            "minus" => Some(BinOp::Sub),
+                            "times" => Some(BinOp::Mul),
+                            "div" => Some(BinOp::Div),
+                            "rem" => Some(BinOp::Rem),
+                            _ => None,
+                        };
+                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
+                            return self.check_binary(op, rt, *at, span);
+                        }
+                        // `a.compareTo(b)` → `Int` (emitted via `{Integer,Long,Float,Double}.compare`).
+                        if name == "compareTo" {
+                            if let [at] = arg_tys.as_slice() {
+                                if Ty::promote(rt, *at).is_some() {
+                                    return Ty::Int;
+                                }
+                            }
+                        }
+                        // Unary `a.unaryMinus()` / `a.unaryPlus()` → the receiver's numeric type.
+                        if matches!(name.as_str(), "unaryMinus" | "unaryPlus") && arg_tys.is_empty() {
+                            return rt;
+                        }
+                    }
                     self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
                     return Ty::Error;
                 }

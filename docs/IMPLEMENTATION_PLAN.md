@@ -1660,6 +1660,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   pushes incompatible stack shapes → `VerifyError`), now guarded (skip). Production drop-in: **539 →
   545 box()=OK, 0 FAIL** (+6).
 
+- ✅ **Explicit builtin operator-methods on numeric primitives** (leverage map: "builtin operator
+  method on a primitive", 26+ files, erasure-free). `a.plus(b)`/`minus`/`times`/`div`/`rem` now map
+  to the same numeric promotion + bytecode as `a + b` (reusing `check_binary` / `emit_arith`);
+  `a.compareTo(b)` → `Int` via `{Integer,Long,Float,Double}.compare` (IEEE-aware, so
+  `0f.compareTo(-0f) == 1`); `a.unaryMinus()`/`unaryPlus()`. The resolver and `emit_call` re-derive
+  from receiver type + name (no side-table). Correctness guard: krusty parses infix `a rem b` and the
+  dot form `a.rem(b)` to the **same** AST, but Kotlin routes infix to a user `operator`/`infix`
+  extension while the dot form keeps the builtin — so when a user extension of that name exists for
+  the receiver type, krusty rejects (skip) rather than guess (caught a miscompile in
+  `infixFunctionOverBuiltinMember.kt`). `mod` (floor-semantics), `rangeTo`, `inc`/`dec` stay rejected.
+  Production drop-in: **545 → 557 box()=OK, 0 FAIL** (+12).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.

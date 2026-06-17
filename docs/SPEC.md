@@ -152,6 +152,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
+- Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
+  `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
+  `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
+  `a rem b` to a user `operator`/`infix` extension but the *dot* form `a.rem(b)` to the builtin;
+  krusty can't tell them apart in the AST, so it skips when such a user extension exists
+  (`tests/cases`/box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
 
 ## 8. Success criteria for the PoC
 
