@@ -432,6 +432,79 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
     Some(())
 }
 
+/// The `(class, method)` a Methodref/InterfaceMethodref in `src_cp` names, for recognizing the
+/// reified marker call without relocating it.
+fn methodref_target(src_cp: &[C], idx: u16) -> Option<(&str, &str)> {
+    let (c, nt) = match src_cp.get(idx as usize)? {
+        C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) => (*c, *nt),
+        _ => return None,
+    };
+    let class = class_name(src_cp, c)?;
+    let (name, _) = name_and_type(src_cp, nt)?;
+    Some((class, name))
+}
+
+/// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
+/// `instanceof`, `multianewarray`.
+fn is_type_op(insn: &Insn) -> bool {
+    matches!(insn, Insn::Plain { op: 0xbd | 0xc0 | 0xc1 | 0xc5, .. })
+}
+
+/// Substitute Kotlin's `reifiedOperationMarker` pattern in an inline body: the call (preceded by its
+/// `iconst <mode>` and `ldc "<typeParam>"` argument pushes) is replaced with `nop`s, and the
+/// following type op (`anewarray`/`checkcast`/`instanceof`) is repointed at the concrete reified type
+/// from `type_map` (Kotlin type-parameter name → JVM internal name). Returns the `(insn index, target
+/// pool index)` repoints to apply *after* relocation (so the type op isn't re-relocated to `Object`).
+/// This is how `emptyArray<String>()` inlines to `anewarray java/lang/String`.
+pub fn substitute_reified(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter, type_map: &std::collections::HashMap<String, String>) -> Vec<(usize, u16)> {
+    let mut patches = Vec::new();
+    for i in 0..insns.len() {
+        // The marker is `invokestatic kotlin/jvm/internal/Intrinsics.reifiedOperationMarker`.
+        let is_marker = matches!(&insns[i], Insn::Plain { op: 0xb8, operands } if operands.len() == 2
+            && methodref_target(src_cp, (operands[0] as u16) << 8 | operands[1] as u16)
+                == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker")));
+        if !is_marker || i < 2 {
+            continue;
+        }
+        // The `ldc "<typeParam>"` immediately before names the reified parameter.
+        let name = match &insns[i - 1] {
+            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => match src_cp.get(operands[0] as usize) {
+                Some(C::String(u)) => utf8(src_cp, *u).map(|s| s.trim_end_matches('?').to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        // Erase the marker call and its two argument pushes (mode + type-name).
+        let nop = Insn::Plain { op: 0x00, operands: vec![] };
+        insns[i] = nop.clone();
+        insns[i - 1] = nop.clone();
+        insns[i - 2] = nop;
+        // Repoint the next type op at the concrete type.
+        if let Some(name) = name {
+            if let Some(concrete) = type_map.get(&name) {
+                if let Some(j) = (i + 1..insns.len()).find(|&j| is_type_op(&insns[j])) {
+                    patches.push((j, cw.class_ref(concrete)));
+                }
+            }
+        }
+    }
+    patches
+}
+
+/// Overwrite the 2-byte constant-pool operand of a pool-referencing instruction with `idx` (used to
+/// apply the reified repoints from [`substitute_reified`] after relocation).
+pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
+    if let Insn::Plain { op, operands } = insn {
+        if let Some((off, 2)) = pool_operand(*op) {
+            let o = off - 1;
+            if operands.len() > o + 1 {
+                operands[o] = (idx >> 8) as u8;
+                operands[o + 1] = (idx & 0xff) as u8;
+            }
+        }
+    }
+}
+
 /// Relocate every constant-pool reference in a disassembled body into `cw`'s pool (the insn-level
 /// counterpart of [`relocate_code`], so relocation composes with the local/return/reified transforms
 /// before reassembly). `None` on `invokedynamic` or an `ldc` whose relocated index needs a byte but
@@ -549,6 +622,51 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    #[test]
+    fn substitute_reified_empty_array() {
+        // Source pool for an emptyArray-shaped body.
+        let src_cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/internal/Intrinsics".into()), // 1
+            C::Class(1),                                       // 2
+            C::Utf8("reifiedOperationMarker".into()),          // 3
+            C::Utf8("(ILjava/lang/String;)V".into()),          // 4
+            C::NameAndType(3, 4),                              // 5
+            C::Methodref(2, 5),                                // 6
+            C::Utf8("T?".into()),                              // 7
+            C::String(7),                                      // 8
+            C::Utf8("java/lang/Object".into()),                // 9
+            C::Class(9),                                       // 10
+        ];
+        // iconst_0(size); iconst_0(mode); ldc "T?"; invokestatic marker; anewarray Object; areturn
+        let mut insns = vec![
+            Insn::Plain { op: 0x03, operands: vec![] },
+            Insn::Plain { op: 0x03, operands: vec![] },
+            Insn::Plain { op: 0x12, operands: vec![8] },
+            Insn::Plain { op: 0xb8, operands: vec![0, 6] },
+            Insn::Plain { op: 0xbd, operands: vec![0, 10] },
+            Insn::Plain { op: 0xb0, operands: vec![] },
+        ];
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let mut tm = std::collections::HashMap::new();
+        tm.insert("T".to_string(), "java/lang/String".to_string());
+        let patches = substitute_reified(&mut insns, &src_cp, &mut cw, &tm);
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].0, 4, "the anewarray is repointed");
+        // Marker call + its two arg pushes became nops; the size push (insn 0) is untouched.
+        assert!(matches!(insns[0], Insn::Plain { op: 0x03, .. }));
+        for k in 1..=3 {
+            assert!(matches!(insns[k], Insn::Plain { op: 0x00, .. }), "insn {k} nop");
+        }
+        set_pool_operand(&mut insns[4], patches[0].1);
+        if let Insn::Plain { op: 0xbd, operands } = &insns[4] {
+            assert_eq!((operands[0] as u16) << 8 | operands[1] as u16, patches[0].1, "anewarray now uses String");
+        } else {
+            panic!("expected anewarray");
+        }
+        assert_eq!(patches[0].1, cw.class_ref("java/lang/String"));
     }
 
     #[test]
