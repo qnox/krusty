@@ -924,6 +924,17 @@ impl<'a> Lower<'a> {
             let obj = ty_to_ir(Ty::obj("java/lang/Object"));
             self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body);
         }
+
+        // copy(f1, f2, …): `return P(f1, f2, …)`. (A `copy` call with named/omitted arguments — the
+        // common form — still needs the `$default` mechanism; this enables the full-positional call.)
+        {
+            let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
+            let args: Vec<u32> = (0..fields.len()).map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1))).collect();
+            let new = self.ir.add_expr(IrExpr::New { class: class_id, args });
+            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
+            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body);
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<(u32, Ty)> {
