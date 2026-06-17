@@ -1173,6 +1173,77 @@ impl<'a> Lower<'a> {
         false
     }
 
+    /// Lower `for (x in iterable)` over a non-array `iterable` via the Kotlin iterator protocol:
+    /// `val it = iterable.iterator(); while (it.hasNext()) { val x = it.next(); body }`. The element
+    /// type comes from the iterable's generic argument (`List<Int>` → `Int`); `next()` returns the
+    /// erased `Object`, so a primitive element unboxes and a specific reference checkcasts. Bails
+    /// (skip) if the iterator methods or the element type can't be resolved.
+    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty) -> Option<u32> {
+        let internal = it_ty.obj_internal()?;
+        let iter_m = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])?;
+        let iter_ty = iter_m.ret;
+        let iter_internal = iter_ty.obj_internal()?.to_string();
+        let hasnext_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "hasNext", &[])?;
+        let next_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "next", &[])?;
+        // The element is the receiver's type argument (`List<Int>` → `Int`), or the iterable type
+        // parameter's upper bound (`Any`) when no argument is present (e.g. a constructor-inferred
+        // `ArrayList()` not yet propagating `<String>`). The JVM `Object` realization + checkcast are
+        // the backend's concern, applied at the Ty→bytecode boundary, not here.
+        let elem = it_ty.type_args().first().copied().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        let it_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
+        let iter_iface = self.syms.libraries.resolve_type(&iter_internal).map_or(false, |t| t.is_interface);
+        let depth = self.scope.len();
+
+        // it = iterable.iterator()
+        let recv = self.expr(iterable)?;
+        let iter_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual { owner: internal.to_string(), name: "iterator".to_string(), descriptor: iter_m.descriptor, interface: it_iface },
+            dispatch_receiver: Some(recv), args: vec![],
+        });
+        let it_v = self.fresh_value();
+        let var_it = self.ir.add_expr(IrExpr::Variable { index: it_v, ty: ty_to_ir(iter_ty), init: Some(iter_call) });
+
+        // cond: it.hasNext()
+        let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let cond = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual { owner: iter_internal.clone(), name: "hasNext".to_string(), descriptor: hasnext_m.descriptor, interface: iter_iface },
+            dispatch_receiver: Some(it_g), args: vec![],
+        });
+
+        // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
+        let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
+        let next_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual { owner: iter_internal.clone(), name: "next".to_string(), descriptor: next_m.descriptor, interface: iter_iface },
+            dispatch_receiver: Some(it_g2), args: vec![],
+        });
+        let x_init = if elem.is_primitive() {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: next_call, type_operand: ty_to_ir(elem) })
+        } else if elem != Ty::obj("kotlin/Any") {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: next_call, type_operand: ty_to_ir(elem) })
+        } else {
+            next_call
+        };
+        let x_v = self.fresh_value();
+        self.scope.push((name.to_string(), x_v, elem));
+        let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(x_init) });
+
+        let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else {
+            self.scope.truncate(depth);
+            return None;
+        };
+        let mut out = vec![var_x];
+        for s in stmts {
+            out.push(self.stmt(s)?);
+        }
+        if let Some(t) = trailing {
+            out.push(self.expr(t)?);
+        }
+        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: None, post_test: false });
+        self.scope.truncate(depth);
+        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_it, wh], value: None }))
+    }
+
     fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
         let at = self.info.ty(arg);
         // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
@@ -1489,7 +1560,10 @@ impl<'a> Lower<'a> {
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach { name, iterable, body } => {
                 let it_ty = self.info.ty(iterable);
-                let elem = it_ty.array_elem()?; // only array iteration is modeled
+                // A non-array iterable (`List`, `Set`, a range value, …) uses the iterator protocol.
+                let Some(elem) = it_ty.array_elem() else {
+                    return self.lower_foreach_iterator(&name, iterable, body, it_ty);
+                };
                 let depth = self.scope.len();
                 // Evaluate the array once into a temp.
                 let arr_v = self.fresh_value();
