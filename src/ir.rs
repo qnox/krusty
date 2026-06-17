@@ -52,6 +52,9 @@ pub enum Callee {
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
     Static { owner: String, name: String, descriptor: String },
+    /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
+    /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
+    Virtual { owner: String, name: String, descriptor: String, interface: bool },
 }
 
 /// A compile-time constant (`IrConst` in Kotlin IR).

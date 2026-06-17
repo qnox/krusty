@@ -53,6 +53,11 @@ impl ClassInfo {
         self.access & ACC_PUBLIC != 0
     }
 
+    /// `ACC_INTERFACE` — call sites dispatch through it with `invokeinterface`, not `invokevirtual`.
+    pub fn is_interface(&self) -> bool {
+        self.access & 0x0200 != 0
+    }
+
     pub fn method(&self, name: &str, descriptor: &str) -> Option<&MethodSig> {
         self.methods.iter().find(|m| m.name == name && m.descriptor == descriptor)
     }

@@ -345,15 +345,34 @@ pub fn resolve_java_static(cp: &Classpath, internal: &str, method: &str, arg_tys
 /// Resolve an *instance* method on a classpath Java type by name + exact param descriptors.
 /// Returns `(method descriptor, return type)` for `invokevirtual`.
 pub fn resolve_java_instance(cp: &Classpath, internal: &str, method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
-    let ci = cp.find(internal)?;
-    if !ci.is_public() {
+    // The receiver's static type must be public (the call site references it); the method itself may be
+    // inherited from a (possibly non-public) superclass or interface — walk the chain to find it, as the
+    // JVM does for `invokevirtual`/`invokeinterface`.
+    if !cp.find(internal)?.is_public() {
         return None;
     }
     let params: String = arg_tys.iter().map(|t| t.descriptor()).collect();
     let prefix = format!("({params})");
-    let m = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix))?;
-    let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
-    Some((m.descriptor.clone(), desc_to_ty(&ret)))
+    let mut seen = std::collections::HashSet::new();
+    let mut q = std::collections::VecDeque::new();
+    q.push_back(internal.to_string());
+    while let Some(name) = q.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(ci) = cp.find(&name) else { continue };
+        if let Some(m) = ci.methods.iter().find(|m| m.name == method && !m.is_static() && m.is_public() && m.descriptor.starts_with(&prefix)) {
+            let ret = m.descriptor[m.descriptor.find(')').unwrap() + 1..].to_string();
+            return Some((m.descriptor.clone(), desc_to_ty(&ret)));
+        }
+        for i in &ci.interfaces {
+            q.push_back(i.clone());
+        }
+        if let Some(s) = &ci.super_class {
+            q.push_back(s.clone());
+        }
+    }
+    None
 }
 
 /// Resolve a constructor on a classpath Java type by argument descriptors. Returns its descriptor.

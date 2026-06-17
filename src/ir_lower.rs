@@ -2217,6 +2217,26 @@ impl<'a> Lower<'a> {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                    } else if let Some((internal, desc, is_iface)) = {
+                        // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
+                        // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
+                        // hardcoded names). Enables stdlib member calls (iterators, collections, …).
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.class_of(rt).map(|ci| ci.internal.clone())
+                            .or_else(|| if let Ty::Obj(i) = rt { Some(i.to_string()) } else { None })
+                            .and_then(|internal| {
+                                crate::resolve::resolve_java_instance(&self.syms.classpath, &internal, &name, &arg_tys).map(|(d, _)| {
+                                    let is_iface = self.syms.classpath.find(&internal).map_or(false, |c| c.is_interface());
+                                    (internal, d, is_iface)
+                                })
+                            })
+                    } {
+                        let recv = self.expr(receiver)?;
+                        let mut a = Vec::new();
+                        for &arg in &args {
+                            a.push(self.expr(arg)?);
+                        }
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a })
                     } else if let Some((owner, jvm_name, desc, _)) = {
                         // A classpath-resolved extension/stdlib function `recv.name(args)` →
                         // `invokestatic facade.name(recv, args)`. Owner + descriptor come from the

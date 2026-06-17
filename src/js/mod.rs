@@ -212,6 +212,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}({})", name, a.join(", "))
             }
+            // A resolved JVM instance call → `receiver.name(args)`.
+            Callee::Virtual { name, .. } => {
+                let recv = dispatch_receiver.map(|r| emit_expr(ir, r, inst)).unwrap_or_default();
+                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
+                format!("{}.{}({})", recv, name, a.join(", "))
+            }
             Callee::External(fq) => match fq.as_str() {
                 "kotlin/String.plus" => {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);

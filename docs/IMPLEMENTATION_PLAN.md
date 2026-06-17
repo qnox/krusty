@@ -2085,6 +2085,19 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   bytes (jimage, or the simpler `jmods/*.jmod` zips) is the next prerequisite for `String`/`CharSequence`
   extension calls.
 
+- ✅ **Phase 191 — classpath instance-method resolution + lowering** (317 box()=OK, 0 FAIL;
+  foundational). `resolve_java_instance` now walks the receiver type's **super/interface chain** (an
+  instance method may be inherited — `IntRange.iterator()` is on `IntProgression`/`Iterable`). Added
+  `Callee::Virtual { owner, name, descriptor, interface }` and a member-call lowering fallback: a call on
+  a classpath-class receiver resolves to a real instance method and emits `invokevirtual`/
+  `invokeinterface recvType.name:descriptor` (descriptor from the classpath — no hardcoded names). This
+  is the mechanism the **for-loop iterator protocol** needs (`e.iterator()`/`hasNext()`/`next()`).
+  +0 box for now because most instance-method receivers are **JDK types** (`String`, `StringBuilder`,
+  `List`) whose bytes krusty can't read — `Classpath::find` returns `None` for the jimage. **Reading JDK
+  class bytes (jimage `lib/modules`, or the `jmods/*.jmod` zips) is the one prerequisite now blocking:
+  String/CharSequence supertype matching, JDK instance calls, and the general iterator-protocol for-loop
+  that replaces the parser-hardcoded range path.**
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
