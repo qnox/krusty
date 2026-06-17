@@ -4757,6 +4757,56 @@ impl<'a> MethodEmitter<'a> {
                 }
             }
         }
+        // Builtin arithmetic / compare / unary operator-methods on a numeric primitive:
+        // `a.plus(b)` ≡ `a + b`; `a.compareTo(b)` ≡ `{Integer,Long,Float,Double}.compare`;
+        // `a.unaryMinus()` ≡ `-a`. Mirror of the resolver branch — the result type is the checker's.
+        if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
+            let rt = self.info.ty(receiver);
+            if rt.is_numeric() {
+                let bin = match name.as_str() {
+                    "plus" => Some(BinOp::Add),
+                    "minus" => Some(BinOp::Sub),
+                    "times" => Some(BinOp::Mul),
+                    "div" => Some(BinOp::Div),
+                    "rem" => Some(BinOp::Rem),
+                    _ => None,
+                };
+                if let (Some(op), 1) = (bin, args.len()) {
+                    let result = self.info.ty(e);
+                    self.emit_expr_as(receiver, result, code, cw);
+                    self.emit_expr_as(args[0], result, code, cw);
+                    self.emit_arith(op, result, code);
+                    return;
+                }
+                if name == "compareTo" && args.len() == 1 {
+                    let ct = Ty::promote(rt, self.info.ty(args[0])).unwrap_or(Ty::Int);
+                    self.emit_expr_as(receiver, ct, code, cw);
+                    self.emit_expr_as(args[0], ct, code, cw);
+                    let (owner, desc, argw) = match ct {
+                        Ty::Long => ("java/lang/Long", "(JJ)I", 4),
+                        Ty::Float => ("java/lang/Float", "(FF)I", 2),
+                        Ty::Double => ("java/lang/Double", "(DD)I", 4),
+                        _ => ("java/lang/Integer", "(II)I", 2),
+                    };
+                    let m = cw.methodref(owner, "compare", desc);
+                    code.invokestatic(m, argw, 1);
+                    return;
+                }
+                if matches!(name.as_str(), "unaryMinus" | "unaryPlus") && args.is_empty() {
+                    let result = self.info.ty(e);
+                    self.emit_expr_as(receiver, result, code, cw);
+                    if name == "unaryMinus" {
+                        match result {
+                            Ty::Long => code.lneg(),
+                            Ty::Float => code.fneg(),
+                            Ty::Double => code.dneg(),
+                            _ => code.ineg(),
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // Inlined scope functions: `recv.let { … }` / `recv.also { … }`.
         if let Expr::Member { receiver, name } = self.file.expr(callee).clone() {
             if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
