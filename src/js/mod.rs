@@ -261,6 +261,12 @@ fn js_op(op: IrBinOp) -> &'static str {
         IrBinOp::Ne => "!==",
         IrBinOp::And => "&&",
         IrBinOp::Or => "||",
+        IrBinOp::BitAnd => "&",
+        IrBinOp::BitOr => "|",
+        IrBinOp::BitXor => "^",
+        IrBinOp::Shl => "<<",
+        IrBinOp::Shr => ">>",
+        IrBinOp::Ushr => ">>>",
     }
 }
 

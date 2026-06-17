@@ -1892,6 +1892,32 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // `Int`/`Long` bitwise/shift members are stdlib functions the compiler treats as
+                    // intrinsics (kotlinc maps `Int.and` → `iand`, etc.). This is an ordinary method
+                    // call `a.and(b)` — `a and b` is just its infix spelling, already desugared by the
+                    // parser — so both spellings land here. Recognize them by (receiver type, name).
+                    {
+                        let rty = self.info.ty(receiver);
+                        if matches!(rty, Ty::Int | Ty::Long) {
+                            let shift = matches!(name.as_str(), "shl" | "shr" | "ushr");
+                            let bop = match name.as_str() {
+                                "and" => Some(IrBinOp::BitAnd), "or" => Some(IrBinOp::BitOr), "xor" => Some(IrBinOp::BitXor),
+                                "shl" => Some(IrBinOp::Shl), "shr" => Some(IrBinOp::Shr), "ushr" => Some(IrBinOp::Ushr),
+                                _ => None,
+                            };
+                            if let (Some(op), 1) = (bop, args.len()) {
+                                let l = self.expr(receiver)?;
+                                let rt = if shift { Ty::Int } else { rty };
+                                let r = self.lower_arg(args[0], &ty_to_ir(rt))?;
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }));
+                            }
+                            if name == "inv" && args.is_empty() {
+                                let l = self.expr(receiver)?;
+                                let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long { IrConst::Long(-1) } else { IrConst::Int(-1) }));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::BitXor, lhs: l, rhs: neg1 }));
+                            }
+                        }
+                    }
                     // `EnumClass.values()` / `EnumClass.valueOf(s)` — static enum methods.
                     if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                         let internal = class_internal(self.afile, &rn);
