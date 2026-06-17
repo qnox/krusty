@@ -1893,6 +1893,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
+        // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
+        // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
+        let mut pending_targs: Vec<TypeRef> = Vec::new();
         loop {
             // `as T` / `as? T` cast — binds tighter than the binary operators (postfix level).
             if self.at(TokenKind::Ident) && self.text() == "as" {
@@ -1993,6 +1996,9 @@ impl<'a> Parser<'a> {
                     if names.iter().any(|n| n.is_some()) {
                         self.file.call_arg_names.insert(call.0, names);
                     }
+                    if !pending_targs.is_empty() {
+                        self.file.call_type_args.insert(call.0, std::mem::take(&mut pending_targs));
+                    }
                     lhs = call;
                 }
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
@@ -2031,8 +2037,8 @@ impl<'a> Parser<'a> {
                 // Disambiguate from `a < b > c` (two comparisons) by checking whether a balanced
                 // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
                 TokenKind::Lt if self.lookahead_is_type_args_call() => {
-                    // Skip the type argument list — krusty erases generics.
-                    self.parse_type_args();
+                    // Capture the explicit type arguments for the call that follows.
+                    pending_targs = self.parse_type_args();
                 }
                 _ => break,
             }
