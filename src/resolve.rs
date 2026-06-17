@@ -2506,6 +2506,36 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // Method references on a user class: bound `obj::m` (receiver is a value, captured →
+                // arity = method args) or unbound `Type::m` (receiver is the class → first parameter).
+                if let Some(r) = receiver {
+                    if let Expr::Name(rn) = self.file.expr(r).clone() {
+                        // bound: `obj::m` where `obj` is an in-scope value
+                        if let Some(loc) = self.lookup(&rn) {
+                            if let Some(internal) = loc.ty.obj_internal() {
+                                if let Some(sig) = self.syms.method_of(internal, &name) {
+                                    if !sig.vararg && sig.params.len() == sig.required {
+                                        self.expr(r); // capture the receiver
+                                        return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                                    }
+                                }
+                            }
+                        }
+                        // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
+                        // emit doesn't model — it would be miscompiled as unbound).
+                        if self.lookup(&rn).is_none() && !self.syms.objects.contains(&rn) {
+                            if let Some(cls) = self.syms.classes.get(&rn).cloned() {
+                                if let Some(sig) = cls.methods.get(&name).cloned() {
+                                    if !sig.vararg && sig.params.len() == sig.required {
+                                        let mut params = vec![Ty::obj(&cls.internal)];
+                                        params.extend(sig.params.iter().copied());
+                                        return self.set(e, Ty::fun(params, sig.ret));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(recv) = receiver {
                     self.expr(recv);
                 }

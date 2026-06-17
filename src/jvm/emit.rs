@@ -3554,6 +3554,9 @@ impl<'a> MethodEmitter<'a> {
             Expr::CallableRef { receiver: None, name } if self.syms.funs.contains_key(&name) => {
                 self.emit_topfun_ref(&name, code, cw);
             }
+            Expr::CallableRef { receiver: Some(r), name } => {
+                self.emit_method_ref(r, &name, code, cw);
+            }
             Expr::CallableRef { .. } => {
                 // Other callable references are rejected by the resolver; codegen never reaches here.
                 code.aconst_null();
@@ -4415,6 +4418,115 @@ impl<'a> MethodEmitter<'a> {
         code.dup();
         let init = cw.methodref(&anon_name, "<init>", "()V");
         code.invokespecial(init, 0, 0);
+    }
+
+    /// A user-class method reference: bound `obj::m` (captures `obj`) or unbound `Type::m` (receiver
+    /// is the first parameter). Emits a `FunctionN` whose `invoke` calls `m` and boxes the result.
+    fn emit_method_ref(&mut self, recv: ExprId, name: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+        let rn = match self.file.expr(recv).clone() {
+            Expr::Name(n) => n,
+            _ => { code.aconst_null(); return; }
+        };
+        let bound = self.slots.contains_key(&rn);
+        let internal: String = if bound {
+            self.slots[&rn].1.obj_internal().unwrap_or("java/lang/Object").to_string()
+        } else {
+            self.syms.classes.get(&rn).map(|c| c.internal.clone()).unwrap_or_default()
+        };
+        let sig = match self.syms.method_of(&internal, name) {
+            Some(s) => s,
+            None => { code.aconst_null(); return; }
+        };
+        let is_iface = self.syms.class_by_internal(&internal).map_or(false, |c| c.is_interface);
+        let margs = sig.params.len();
+        let arity = (if bound { margs } else { margs + 1 }) as u8;
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        let iface = Ty::fun_interface(arity);
+        let anon_name = format!("{}$mref${n}", self.class);
+        let obj = Ty::obj("java/lang/Object");
+
+        let mut acw = ClassWriter::new(&anon_name, "java/lang/Object");
+        acw.add_interface(&iface);
+        if bound {
+            acw.add_field(ACC_PRIVATE | ACC_FINAL, "recv", &obj.descriptor());
+        }
+        {
+            let mut ic = CodeBuilder::new(2);
+            ic.aload(0);
+            let oi = acw.methodref("java/lang/Object", "<init>", "()V");
+            ic.invokespecial(oi, 0, 0);
+            if bound {
+                ic.aload(0);
+                ic.aload(1);
+                let f = acw.fieldref(&anon_name, "recv", &obj.descriptor());
+                ic.putfield(f, 1);
+            }
+            ic.ret_void();
+            ic.link();
+            let cd = if bound { "(Ljava/lang/Object;)V" } else { "()V" };
+            acw.add_method(ACC_PUBLIC, "<init>", cd, &ic);
+        }
+        {
+            let invoke_desc = format!("({})Ljava/lang/Object;", "Ljava/lang/Object;".repeat(arity as usize));
+            let mut ic = CodeBuilder::new(1 + arity as u16 + 4);
+            // Receiver: captured field (bound) or the first arg (unbound), cast to the class.
+            if bound {
+                ic.aload(0);
+                let f = acw.fieldref(&anon_name, "recv", &obj.descriptor());
+                ic.getfield(f, 1);
+            } else {
+                ic.aload(1);
+            }
+            let rci = acw.class_ref(&internal);
+            ic.checkcast(rci);
+            // Method arguments (slots after the receiver), each unboxed to the parameter type.
+            let arg_base = if bound { 1u16 } else { 2u16 };
+            for (i, pty) in sig.params.iter().enumerate() {
+                ic.aload(arg_base + i as u16);
+                if pty.is_primitive() {
+                    let (wrapper, _, unbox, unbox_desc) = box_wrapper(*pty).unwrap();
+                    let wci = acw.class_ref(wrapper);
+                    ic.checkcast(wci);
+                    let m = acw.methodref(wrapper, unbox, unbox_desc);
+                    ic.invokevirtual(m, 0, slot_words(*pty) as i32);
+                } else if *pty != obj {
+                    let pci = acw.class_ref(ref_internal(*pty));
+                    ic.checkcast(pci);
+                }
+            }
+            let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
+            let mdesc = format!("({pdesc}){}", sig.ret.descriptor());
+            let argw: i32 = sig.params.iter().map(|t| slot_words(*t) as i32).sum();
+            if is_iface {
+                let mref = acw.interface_methodref(&internal, name, &mdesc);
+                ic.invokeinterface(mref, argw, slot_words(sig.ret) as i32);
+            } else {
+                let mref = acw.methodref(&internal, name, &mdesc);
+                ic.invokevirtual(mref, argw, slot_words(sig.ret) as i32);
+            }
+            emit_box(sig.ret, &mut ic, &mut acw);
+            if sig.ret == Ty::Unit {
+                ic.aconst_null();
+            }
+            ic.areturn();
+            ic.ensure_locals(1 + arity as u16);
+            ic.link();
+            acw.add_method(ACC_PUBLIC, "invoke", &invoke_desc, &ic);
+        }
+        ensure_function_stub(arity);
+        push_lambda_class(anon_name.clone(), acw.finish());
+
+        let ci = cw.class_ref(&anon_name);
+        code.set_needs_stackmap();
+        code.new_obj(ci);
+        code.dup();
+        if bound {
+            self.emit_expr(recv, code, cw);
+        }
+        let cd = if bound { "(Ljava/lang/Object;)V" } else { "()V" };
+        let init = cw.methodref(&anon_name, "<init>", cd);
+        code.invokespecial(init, if bound { 1 } else { 0 }, 0);
     }
 
     fn emit_call(&mut self, e: ExprId, callee: ExprId, args: &[ExprId], code: &mut CodeBuilder, cw: &mut ClassWriter) {
