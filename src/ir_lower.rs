@@ -42,6 +42,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         lambda_seq: 0,
         cur_ret_ty: IrType::Unit,
         companions: HashMap::new(),
+        computed_props: HashMap::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -52,7 +53,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
             Decl::Class(c) if c.is_object && is_simple_object(c) => {}
-            Decl::Property(p) if is_plain_body_prop(p) => {}
+            Decl::Property(p) if is_plain_body_prop(p) || is_computed_prop(p) => {}
             _ => return None,
         }
     }
@@ -72,7 +73,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let is_type_param = c.type_params.contains(&p.ty.name);
                 if !p.ty.nullable && !is_type_param && ty.is_reference() { Some(p.name.clone()) } else { None }
             }).collect();
-            let body_fields: Vec<(String, Ty)> = c.body_props.iter()
+            // Computed body properties (custom getter, no backing field) become `getX()` methods, not
+            // fields — exclude them here.
+            let body_fields: Vec<(String, Ty)> = c.body_props.iter().filter(|p| !is_computed_prop(p))
                 .map(|p| {
                     let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
@@ -140,6 +143,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
             }
+            // Computed body properties → `getX()` instance methods (no backing field).
+            for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
+                let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap();
+                let gname = getter_name(&p.name);
+                let mi = method_fids.len() as u32;
+                let fid = lo.ir.add_fun(IrFunction {
+                    name: gname.clone(), params: vec![], ret: ty_to_ir(ty),
+                    body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![],
+                });
+                methods.insert(gname, (mi, fid, ty));
+                method_fids.push(fid);
+            }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
             lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods, super_internal });
@@ -199,8 +214,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
             let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
-            let idx = lo.statics.len() as u32;
-            lo.statics.insert(p.name.clone(), (idx, ty));
+            if is_computed_prop(p) {
+                // A computed property: a `getX()` accessor (static on the facade), no backing field.
+                let fid = lo.ir.add_fun(IrFunction {
+                    name: getter_name(&p.name), params: vec![], ret: ty_to_ir(ty),
+                    body: None, is_static: true, dispatch_receiver: None, param_checks: vec![],
+                });
+                lo.computed_props.insert(p.name.clone(), (fid, ty));
+            } else {
+                let idx = lo.statics.len() as u32;
+                lo.statics.insert(p.name.clone(), (idx, ty));
+            }
         }
     }
 
@@ -310,6 +334,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     lo.lower_body(&m.body, &ret_ty, fid)?;
                 }
+                // Computed body-property getter bodies → `getX()` methods on the class.
+                for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
+                    let gname = getter_name(&p.name);
+                    let (_, fid, _) = lo.classes[&internal].methods[&gname];
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    lo.cur_fn_name = gname;
+                    lo.lambda_seq = 0;
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+                    let body = p.getter.clone().unwrap();
+                    lo.lower_body(&body, &ret_ty, fid)?;
+                }
                 // Companion method bodies — lowered on the synthesized `C$Companion` class.
                 if let Some(comp_fq) = lo.companions.get(&internal).cloned() {
                     for m in &c.companion_methods {
@@ -377,7 +416,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     for step in &c.init_order {
                         match step {
                             ast::ClassInit::PropInit(i) => {
-                                let field_idx = ctor_count + *i as u32;
+                                // A computed body property has no backing field — nothing to initialize.
+                                if is_computed_prop(&c.body_props[*i as usize]) {
+                                    continue;
+                                }
+                                // Computed body properties are not fields, so the field index counts
+                                // only the non-computed body properties before this one.
+                                let body_offset = c.body_props[..*i as usize].iter().filter(|p| !is_computed_prop(p)).count();
+                                let field_idx = ctor_count + body_offset as u32;
                                 let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize].1.clone();
                                 let init_e = c.body_props[*i].init.unwrap();
                                 // A branchy body-property initializer (`val k = when { … }`) emits
@@ -433,10 +479,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
-                let (_, ty) = lo.statics[&p.name].clone();
-                let ir_ty = ty_to_ir(ty);
-                let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
-                lo.ir.statics.push(crate::ir::IrStatic { name: p.name.clone(), ty: ir_ty, init });
+                if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
+                    // A computed property: lower its custom getter into the `getX()` body.
+                    lo.cur_fn_name = getter_name(&p.name);
+                    lo.lambda_seq = 0;
+                    let ret_ty = ty_to_ir(ty);
+                    let body = p.getter.clone().unwrap();
+                    lo.lower_body(&body, &ret_ty, fid)?;
+                } else {
+                    let (_, ty) = lo.statics[&p.name].clone();
+                    let ir_ty = ty_to_ir(ty);
+                    let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
+                    lo.ir.statics.push(crate::ir::IrStatic { name: p.name.clone(), ty: ir_ty, init });
+                }
             }
             _ => {}
         }
@@ -464,7 +519,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
-        && c.body_props.iter().all(is_plain_body_prop)
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p))
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -511,6 +566,24 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none() && !p.is_lateinit && p.getter.is_none() && p.setter.is_none() && p.init.is_some()
 }
 
+/// A computed property `val x: T get() = expr` — a custom getter, no backing field (no initializer),
+/// immutable (no setter). Compiled to a `getX()` accessor; reads call it.
+fn is_computed_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_none() && !p.is_lateinit && !p.is_var
+        && p.init.is_none() && p.getter.is_some() && p.setter.is_none() && p.ty.is_some()
+}
+
+/// The JVM accessor name for a property: `x` → `getX`; an `is`-prefixed boolean keeps its name
+/// (`isEmpty` → `isEmpty`), matching kotlinc.
+fn getter_name(prop: &str) -> String {
+    let b = prop.as_bytes();
+    if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
+        return prop.to_string();
+    }
+    let mut c = prop.chars();
+    format!("get{}{}", c.next().unwrap().to_uppercase(), c.as_str())
+}
+
 struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
@@ -533,6 +606,9 @@ struct Lower<'a> {
     cur_ret_ty: IrType,
     /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
     companions: HashMap<String, String>,
+    /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
+    /// the property compiles to a call to the getter (there is no backing field).
+    computed_props: HashMap<String, (u32, Ty)>,
 }
 
 impl<'a> Lower<'a> {
@@ -1358,19 +1434,27 @@ impl<'a> Lower<'a> {
             Expr::Name(n) => {
                 if let Some((v, _)) = self.lookup(&n) {
                     self.ir.add_expr(IrExpr::GetValue(v))
+                } else if let Some(&(fid, _)) = self.computed_props.get(&n) {
+                    // A computed top-level property → call its `getX()` accessor.
+                    self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![] })
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
                 } else if let Some(class) = self.classes.get(&class_internal(self.afile, &n)).filter(|ci| self.ir.classes[ci.id as usize].is_object).map(|ci| ci.id) {
                     // A bare `object` name → its singleton instance.
                     self.ir.add_expr(IrExpr::ObjectInstance { class })
                 } else {
-                    // Unqualified field of the enclosing class (`this.<field>`).
+                    // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
+                    // computed property (`this.getX()`).
                     let (this_v, _) = self.lookup("this")?;
-                    let ci = self.cur_class.as_ref().and_then(|c| self.classes.get(c))?;
-                    let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == n)? as u32;
-                    let class = ci.id;
+                    let cur = self.cur_class.clone()?;
+                    let field = self.classes.get(&cur).and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == n).map(|i| (ci.id, i as u32)));
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                    if let Some((class, idx)) = field {
+                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                    } else {
+                        let (class, index, _, _) = self.resolve_method(&cur, &getter_name(&n))?;
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                    }
                 }
             }
             // `a[i]` read → an intrinsic; `String[i]` is `kotlin/String.get` (a `Char`), else
@@ -1410,17 +1494,24 @@ impl<'a> Lower<'a> {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
                     let recv_internal = rci.internal.clone();
-                    let (class, idx, _) = self.resolve_field(&recv_internal, &name)?;
-                    let owner_internal = self.ir.classes[class as usize].fq_name.clone();
-                    let recv = self.expr(receiver)?;
-                    // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
-                    // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
-                    let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
-                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&owner_internal)));
-                    let recv = if needs_cast {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&owner_internal)) })
-                    } else { recv };
-                    self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                    if let Some((class, idx, _)) = self.resolve_field(&recv_internal, &name) {
+                        let owner_internal = self.ir.classes[class as usize].fq_name.clone();
+                        let recv = self.expr(receiver)?;
+                        // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
+                        // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
+                        let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
+                            if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&owner_internal)));
+                        let recv = if needs_cast {
+                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&owner_internal)) })
+                        } else { recv };
+                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                    } else if let Some((class, index, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
+                        // A computed property → `recv.getX()`.
+                        let recv = self.expr(receiver)?;
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                    } else {
+                        return None;
+                    }
                 } else if rt == Ty::String && name == "length" {
                     // `s.length` → stdlib intrinsic (0-arg), `Int`.
                     let recv = self.expr(receiver)?;
