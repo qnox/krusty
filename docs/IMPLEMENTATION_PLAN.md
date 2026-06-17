@@ -1649,6 +1649,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   e.g. the `format` diamond); a differing primitive return is left out. Production drop-in: **493 →
   526 box()=OK, 0 FAIL** (+33, the biggest single-phase gain).
 
+- ✅ **`String` classpath-supertype assignability** (leverage map: "inferred String but CharSequence
+  expected", 16 files). `expect_assignable` now accepts `String` where `CharSequence`/`Comparable`/
+  `Serializable` is expected (krusty's `obj_is_subtype` only knew *user*-class hierarchies). One rule,
+  **526 → 539 box()=OK, 0 FAIL** (+13).
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
