@@ -257,7 +257,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "Z" => Ty::Boolean,
         "C" => Ty::Char,
         "V" => Ty::Unit,
-        "Ljava/lang/String;" => Ty::String,
+        s if s == Ty::String.descriptor() => Ty::String,
         s if s.starts_with('[') => {
             let elem = desc_to_ty(&s[1..]);
             Ty::array(elem)
@@ -271,67 +271,39 @@ pub fn desc_to_ty(d: &str) -> Ty {
     }
 }
 
-/// Resolve a `java.lang.String` *instance* method by name + argument types. Returns
-/// `(jvm descriptor, return type)` for `invokevirtual java/lang/String`. This is a curated subset
-/// of real `java.lang.String` methods (the JDK lives in jimage, which the classpath reader doesn't
-/// read yet); each entry matches what kotlinc emits for the same call.
-pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<(&'static str, Ty)> {
+/// Resolve the *result type* of a `kotlin.String` instance method by name + argument types — a
+/// curated subset matching what the backend supports. The JVM method/descriptor it lowers to is the
+/// backend's concern (the emitter uses Kotlin-named external calls), so only the Kotlin `Ty` lives
+/// here; this keeps `java/lang/String` out of the front end.
+pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
     Some(match (method, arg_tys) {
-        ("length", []) => ("()I", Ty::Int),
-        ("isEmpty", []) => ("()Z", Ty::Boolean),
-        ("isBlank", []) => ("()Z", Ty::Boolean),
-        ("substring", [Ty::Int]) => ("(I)Ljava/lang/String;", Ty::String),
-        ("substring", [Ty::Int, Ty::Int]) => ("(II)Ljava/lang/String;", Ty::String),
-        ("indexOf", [Ty::String]) => ("(Ljava/lang/String;)I", Ty::Int),
-        ("indexOf", [Ty::Char]) => ("(I)I", Ty::Int),
-        ("lastIndexOf", [Ty::String]) => ("(Ljava/lang/String;)I", Ty::Int),
-        ("lastIndexOf", [Ty::Char]) => ("(I)I", Ty::Int),
-        ("contains", [Ty::String]) => ("(Ljava/lang/CharSequence;)Z", Ty::Boolean),
-        ("startsWith", [Ty::String]) => ("(Ljava/lang/String;)Z", Ty::Boolean),
-        ("endsWith", [Ty::String]) => ("(Ljava/lang/String;)Z", Ty::Boolean),
-        ("concat", [Ty::String]) => ("(Ljava/lang/String;)Ljava/lang/String;", Ty::String),
-        ("replace", [Ty::String, Ty::String]) => ("(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", Ty::String),
-        ("uppercase", []) | ("toUpperCase", []) => ("()Ljava/lang/String;", Ty::String),
-        ("lowercase", []) | ("toLowerCase", []) => ("()Ljava/lang/String;", Ty::String),
-        ("trim", []) => ("()Ljava/lang/String;", Ty::String),
-        ("toString", []) => ("()Ljava/lang/String;", Ty::String),
-        ("toCharArray", []) => ("()[C", Ty::array(Ty::Char)),
+        ("length", []) => Ty::Int,
+        ("isEmpty", []) | ("isBlank", []) => Ty::Boolean,
+        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => Ty::String,
+        ("indexOf", [Ty::String]) | ("indexOf", [Ty::Char]) => Ty::Int,
+        ("lastIndexOf", [Ty::String]) | ("lastIndexOf", [Ty::Char]) => Ty::Int,
+        ("contains", [Ty::String]) => Ty::Boolean,
+        ("startsWith", [Ty::String]) | ("endsWith", [Ty::String]) => Ty::Boolean,
+        ("concat", [Ty::String]) => Ty::String,
+        ("replace", [Ty::String, Ty::String]) => Ty::String,
+        ("uppercase", []) | ("toUpperCase", []) => Ty::String,
+        ("lowercase", []) | ("toLowerCase", []) => Ty::String,
+        ("trim", []) => Ty::String,
+        ("toString", []) => Ty::String,
+        ("toCharArray", []) => Ty::array(Ty::Char),
         _ => return None,
     })
 }
 
-/// Map a Kotlin String method name to its JVM `java/lang/String` method name.
-/// Most are identical; Kotlin 1.5 introduced `uppercase`/`lowercase` as aliases.
-pub fn string_kotlin_to_jvm(kotlin_name: &str) -> &'static str {
-    match kotlin_name {
-        "uppercase" | "toUpperCase" => "toUpperCase",
-        "lowercase" | "toLowerCase" => "toLowerCase",
-        other => crate::types::intern(other),
-    }
-}
-
-/// Resolve an instance method on `java.lang.StringBuilder` (a curated subset). `append` accepts any
-/// primitive/String/reference and returns the builder (chainable); `toString`/`length` as expected.
-pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<(String, Ty)> {
+/// Resolve the *result type* of a `kotlin.text.StringBuilder` instance method (a curated subset).
+/// `append`/`appendLine` return the builder (chainable); `toString`/`length` as expected.
+pub fn resolve_stringbuilder_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
     let sb = Ty::obj("java/lang/StringBuilder");
     Some(match (method, arg_tys) {
-        ("toString", []) => ("()Ljava/lang/String;".to_string(), Ty::String),
-        ("length", []) => ("()I".to_string(), Ty::Int),
-        ("append", [a]) => {
-            let argdesc = match a {
-                Ty::Int | Ty::Byte | Ty::Short => "I",
-                Ty::Long => "J",
-                Ty::Float => "F",
-                Ty::Double => "D",
-                Ty::Boolean => "Z",
-                Ty::Char => "C",
-                Ty::String => "Ljava/lang/String;",
-                _ => "Ljava/lang/Object;",
-            };
-            (format!("({argdesc})Ljava/lang/StringBuilder;"), sb)
-        }
-        // `appendLine(x)` / `appendLine()` (Kotlin extension) — emitted as append(x) + append('\n').
-        ("appendLine", [_] | []) => ("()Ljava/lang/StringBuilder;".to_string(), sb),
+        ("toString", []) => Ty::String,
+        ("length", []) => Ty::Int,
+        ("append", [_]) => sb,
+        ("appendLine", [_] | []) => sb,
         _ => return None,
     })
 }
@@ -396,7 +368,7 @@ pub fn resolve_java_ctor(cp: &Classpath, internal: &str, arg_tys: &[Ty]) -> Opti
     // Widening fallback: replace each reference-type arg with Object (e.g. String → Object).
     // Needed because e.g. AssertionError has no public (String) ctor, only public (Object).
     let widened: String = arg_tys.iter().map(|t| match t {
-        Ty::String | Ty::Obj(..) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => "Ljava/lang/Object;".to_string(),
+        Ty::String | Ty::Obj(..) | Ty::Array(_) | Ty::Null | Ty::Fun(_) => Ty::obj("kotlin/Any").descriptor(),
         _ => t.descriptor(),
     }).collect();
     let widened_exact = format!("({widened})V");
@@ -1801,11 +1773,11 @@ impl<'a> Checker<'a> {
             if let Some(t) = Ty::from_name(name) {
                 t.descriptor()
             } else if self.tparams.contains(name) || extra.contains(name) {
-                "Ljava/lang/Object;".to_string()
+                Ty::obj("kotlin/Any").descriptor()
             } else if let Some(cs) = self.syms.classes.get(name) {
                 Ty::obj(&cs.internal).descriptor()
             } else {
-                "Ljava/lang/Object;".to_string()
+                Ty::obj("kotlin/Any").descriptor()
             }
         };
         let params: String = f.params.iter().map(|p| descr(&p.ty.name)).collect();
@@ -2474,7 +2446,7 @@ impl<'a> Checker<'a> {
                         } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                             Ty::Int // Int (not a reference), so safe-call rejection fires below
                         } else if rt == Ty::String {
-                            resolve_string_instance(&name, &arg_tys).map(|(_, r)| r).unwrap_or(Ty::Error)
+                            resolve_string_instance(&name, &arg_tys).unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = rt {
                             self.lookup_method(internal, &name).map(|s| s.ret)
                                 .or_else(|| resolve_java_instance(&self.syms.classpath, internal, &name, &arg_tys).map(|(_, r)| r))
@@ -3300,7 +3272,7 @@ impl<'a> Checker<'a> {
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {
-                    if let Some((_, ret)) = resolve_string_instance(&name, &arg_tys) {
+                    if let Some(ret) = resolve_string_instance(&name, &arg_tys) {
                         return ret;
                     }
                     // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
@@ -3317,7 +3289,7 @@ impl<'a> Checker<'a> {
                 }
                 // Curated `java.lang.StringBuilder` instance methods (append/toString/length).
                 if rt == Ty::obj("java/lang/StringBuilder") {
-                    if let Some((_, ret)) = resolve_stringbuilder_instance(&name, &arg_tys) {
+                    if let Some(ret) = resolve_stringbuilder_instance(&name, &arg_tys) {
                         return ret;
                     }
                 }
@@ -4185,8 +4157,8 @@ mod tests {
 
     #[test]
     fn string_method_table() {
-        assert_eq!(resolve_string_instance("substring", &[Ty::Int]), Some(("(I)Ljava/lang/String;", Ty::String)));
-        assert_eq!(resolve_string_instance("indexOf", &[Ty::String]), Some(("(Ljava/lang/String;)I", Ty::Int)));
+        assert_eq!(resolve_string_instance("substring", &[Ty::Int]), Some(Ty::String));
+        assert_eq!(resolve_string_instance("indexOf", &[Ty::String]), Some(Ty::Int));
         assert_eq!(resolve_string_instance("substring", &[Ty::String]), None);
     }
 }
