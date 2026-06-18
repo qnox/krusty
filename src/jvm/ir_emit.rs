@@ -761,6 +761,15 @@ impl<'a> Emitter<'a> {
         }
         let lam_tys: Vec<Ty> = impl_f.params.iter().map(ir_ty_to_jvm).collect();
         let impl_ret = ir_ty_to_jvm(&impl_f.ret);
+        // v1: only a single-expression *value* lambda — body `{ Return(Some(ve)) }`. A multi-statement,
+        // Unit, or early-`return` body would leave the operand stack inconsistent under the `inlining`
+        // flag (every `Return` leaves its value + falls through); those fall back to a normal call.
+        let single_value_return = matches!(impl_f.body, Some(b)
+            if matches!(self.ir.expr(b), IrExpr::Block { stmts, value: None }
+                if stmts.len() == 1 && matches!(self.ir.expr(stmts[0]), IrExpr::Return(Some(_)))));
+        if !single_value_return {
+            return false;
+        }
 
         // Prologue: emit each NON-lambda argument and store it into its parameter slot (the lambda param
         // has no value — its loads were elided from the body segments).
