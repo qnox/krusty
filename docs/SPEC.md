@@ -243,7 +243,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
   body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
-  skipped, as is a nested `try` inside a `finally`.
+  skipped. **Nested `try`/`catch` is supported** (a `try` in another `try`'s body or catch — verified
+  end-to-end), **except when a `finally` is involved in the nesting**: a `finally` is inlined at every
+  exit of its protected region, so when it sits inside (or wraps) another `try` the duplicated code lands
+  in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
+  rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
   casts are a plain `checkcast`/coercion. A literal-boolean `if` condition (`if (false) { … }`) is
