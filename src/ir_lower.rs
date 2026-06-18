@@ -1788,6 +1788,19 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: params.len() as u8, captures, sam: None, inline_body: None }))
     }
 
+    /// For an unqualified call inside an inner class, resolve `name` as an ENCLOSING method (reached
+    /// through `this$0`). Returns `(method_class, method_index, method_fid, inner_class_id)`.
+    fn inner_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
+        let cur = self.cur_class.as_ref()?;
+        let cur_id = self.classes.get(cur)?.id;
+        let outer = match self.ir.classes[cur_id as usize].fields.first() {
+            Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
+            _ => return None,
+        };
+        let (c, i, f, _) = self.resolve_method(&outer, name)?;
+        Some((c, i, f, cur_id))
+    }
+
     fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
         let mut cur = Some(internal.to_string());
         while let Some(ci_name) = cur {
@@ -3775,6 +3788,19 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
                         self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a.into_iter().map(Some).collect() })
+                    } else if let Some((class, index, mfid, cur_id)) = self.inner_outer_method(&fname) {
+                        // Unqualified call to an enclosing method from an inner class: `this.this$0.foo()`.
+                        let params = self.ir.functions[mfid as usize].params.clone();
+                        if args.len() != params.len() {
+                            return None;
+                        }
+                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let this0 = self.ir.add_expr(IrExpr::GetField { receiver: this, class: cur_id, index: 0 });
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, pt)?);
+                        }
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: a.into_iter().map(Some).collect() })
                     } else if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| !self.classes.contains_key(*i)) {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
                         // `StringBuilder()`. The constructor descriptor comes from the classpath.
