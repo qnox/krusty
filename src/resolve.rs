@@ -2833,6 +2833,13 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
+                                // bound property reference `obj::prop` → `KProperty0`/`KMutableProperty0`.
+                                let internal = internal.to_string();
+                                if let Some(is_var) = self.syms.class_by_internal(&internal).and_then(|c| c.props.iter().find(|(n, _, _)| *n == name).map(|(_, _, v)| *v)) {
+                                    self.expr(r); // capture the receiver
+                                    let iface = if is_var { "kotlin/reflect/KMutableProperty0" } else { "kotlin/reflect/KProperty0" };
+                                    return self.set(e, Ty::obj(iface));
+                                }
                             }
                         }
                         // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
@@ -2845,6 +2852,12 @@ impl<'a> Checker<'a> {
                                         params.extend(sig.params.iter().copied());
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
+                                }
+                                // unbound property reference `Type::prop` → `KProperty1<Type, V>`
+                                // (`KMutableProperty1` for a `var`), erased to the reflection interface.
+                                if let Some(is_var) = cls.props.iter().find(|(n, _, _)| *n == name).map(|(_, _, v)| *v) {
+                                    let iface = if is_var { "kotlin/reflect/KMutableProperty1" } else { "kotlin/reflect/KProperty1" };
+                                    return self.set(e, Ty::obj(iface));
                                 }
                             }
                         }

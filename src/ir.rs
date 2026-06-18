@@ -274,6 +274,11 @@ pub struct IrClass {
     /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
     /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
     pub enum_entry_of: Option<Vec<IrType>>,
+    /// `Some(..)` marks this class as a synthesized property-reference singleton: a `final class
+    /// extends kotlin/jvm/internal/PropertyReference1Impl` (the `superclass`) with a `public static
+    /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
+    /// Object` override that reads the referenced property via its getter.
+    pub prop_ref: Option<PropRef>,
     /// Synthetic bridge methods: an override whose erased signature differs from the supertype's
     /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
     /// that adapts arguments and delegates to the concrete override.
@@ -300,6 +305,18 @@ pub struct IrClass {
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
+}
+
+/// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
+/// property's owner, name, getter, and value type. The backend emits the `PropertyReference1Impl`
+/// subclass from this — the `super(owner.class, name, "getName()desc", 0)` constructor and the
+/// `get(Object)` override that reads `((Owner) it).getName()` (boxing a primitive result).
+#[derive(Clone, Debug)]
+pub struct PropRef {
+    pub owner_internal: String,
+    pub prop_name: String,
+    pub getter_name: String,
+    pub prop_ty: IrType,
 }
 
 /// A secondary constructor delegating to the primary: `<init>(params)` evaluates `delegate_args`,
