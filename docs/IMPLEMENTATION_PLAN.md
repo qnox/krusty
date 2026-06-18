@@ -2216,6 +2216,28 @@ bodies exist only as jar bytecode):
   carries `is_inline` (decoded with the signature); the IR `Callee::Static` carries `inline: bool`; and
   the emitter routes an inline call to `Emitter::try_inline_static` (the splice decision point) with a
   hard fallback to `invokestatic`. Build order for the splice itself:
+  **DONE:** branchless splice (phases 290–291); StackMapTable read (`MethodCode.stackmap`/`has_handlers`,
+  292); `inline::decode_stackmap` (delta→absolute `Frame`s, unit-tested, 293).
+  **Branchy splice — remaining integration (the hard sub-problems):**
+  - **Offset remap after `shift_locals`.** Shifting locals by `base` grows instructions whose slot > 3
+    (`iload_0`→`iload base`), so the body's byte layout changes. The decoded frame offsets (and every
+    branch target) are byte offsets into the *original* layout → must be remapped old-byte-offset →
+    instruction-index → new-byte-offset. `disassemble`/`assemble` already track instruction indices;
+    expose the per-index old/new byte offsets to remap frames.
+  - **Caller locals prefix.** A frame's locals must cover slots `0..base` (caller) then the body's
+    locals. Reuse `Emitter::verif_locals` but a non-trimmed `0..base` variant; append the relocated
+    body locals.
+  - **Empty incoming stack only (first cut).** A frame's stack must be prefixed by the caller's operand
+    stack at the splice point; krusty tracks stack *height* not *types*. So only splice branchy bodies
+    when the baseline stack is empty (`cur_stack - arg_words == 0`: statement / `val x = f(...)`), else
+    fall back. Sub-expression branchy inline calls stay on the call path.
+  - **Type conversion + bail.** `VType::Object(cp)` → relocate the `Class` into `cw` → `VerifType::Object`;
+    bail on `UninitThis`/`Uninit` (not modeled). The join-point frame (after the body's `goto end`):
+    caller locals + the return value on the stack.
+  - **Frame-add API.** Need to bind a label at an absolute byte offset within the appended body bytes
+    (CodeBuilder.bind is "here"); add a `bind_at(label, offset)` or add frames keyed by absolute offset.
+  Validate with a branchy kotlinc-lib e2e test (e.g. `inline fun atLeast(x,lo)=if(x<lo)lo else x`) +
+  the conformance 0-FAIL gate (a botched frame → VerifyError → surfaces as a FAIL, so the gate catches it).
   1. **Branchless splice** through `try_inline_static`, behind the fallback (0-FAIL by construction).
      ⚠️ NOTE: `redirect_returns` rewrites even a single trailing `ireturn` into a `goto end`, which is a
      branch needing a StackMapTable frame — so the branchless path must instead *drop* the trailing
