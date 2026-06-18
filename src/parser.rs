@@ -2097,6 +2097,14 @@ impl<'a> Parser<'a> {
         };
         if let Some(op) = unop {
             self.bump();
+            // Kotlin: `-2147483648` is `Int.MIN_VALUE` (an `Int`), even though the bare literal
+            // `2147483648` overflows `Int` and is otherwise a `Long`. Fold this one case so the
+            // negation keeps `Int` type (a `when (x: Int)` branch / `val i: Int = -2147483648`).
+            if matches!(op, UnOp::Neg) && self.at(TokenKind::IntLit) && parse_int_literal(self.text()) == 2147483648 {
+                let lit_span = self.tok().span;
+                self.bump();
+                return self.file.add_expr(Expr::IntLit(i32::MIN as i64), Span::new(start.lo, lit_span.hi));
+            }
             let operand = self.parse_bp(BP_PREFIX);
             let end = self.file.expr_spans[operand.0 as usize];
             return self.file.add_expr(Expr::Unary { op, operand }, Span::new(start.lo, end.hi));

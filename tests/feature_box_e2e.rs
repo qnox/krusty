@@ -112,6 +112,34 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Unbound member property reference `A::x` — a synthesized `PropertyReference1Impl` singleton;
+    // `.get(receiver)` reads the property via its getter, `.name` is the property name.
+    ("PropertyRef", r#"
+class A(val x: Int)
+fun box(): String {
+    val p = A::x
+    if (p.get(A(42)) != 42) return "f1"
+    if (p.get(A(-1)) != -1) return "f2"
+    if (p.name != "x") return "f3"
+    return "OK"
+}
+"#),
+    // The literal `-2147483648` is `Int.MIN_VALUE` (an Int), not a Long — usable as an Int `when`
+    // branch and in an Int context (the bare `2147483648` overflows Int and is a Long).
+    ("IntMinLiteral", r#"
+fun cls(x: Int): String = when (x) {
+    2147483647 -> "MAX"
+    -2147483648 -> "MIN"
+    else -> "other"
+}
+fun box(): String {
+    val i: Int = -2147483648
+    if (i != -2147483648) return "f1"
+    if (cls(-2147483648) != "MIN") return "f2"
+    if (cls(2147483647) != "MAX") return "f3"
+    return "OK"
+}
+"#),
     // Method references: bound `obj::m` (receiver captured) and unbound `Type::m` (receiver is the
     // first argument) — each a closure over a synthesized `(receiver, args) -> receiver.m(args)`.
     ("MethodRef", r#"

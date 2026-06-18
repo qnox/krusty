@@ -121,6 +121,9 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     if let Some(user_tys) = &c.enum_entry_of {
         return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
     }
+    if c.prop_ref.is_some() {
+        return emit_prop_ref_class(c);
+    }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
@@ -377,6 +380,68 @@ fn emit_enum_entry_subclass(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, b
     for &fid in &c.methods {
         emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
     }
+    cw.finish()
+}
+
+/// Emit a synthesized property-reference singleton (`Type$prop$N extends PropertyReference1Impl`):
+/// a package-private `final` class with a `public static final INSTANCE`, a constructor
+/// `super(owner.class, name, "getName()desc", 0)`, a `get(Object)Object` override that reads
+/// `((Owner) it).getName()` (boxing a primitive), and a `<clinit>` that builds the singleton. `.name`
+/// is inherited from `PropertyReference1Impl` (returns the constructor's name argument).
+fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
+    let pr = c.prop_ref.as_ref().unwrap();
+    let fq = c.fq_name.clone();
+    let self_desc = format!("L{fq};");
+    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
+    cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+
+    let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
+    let getter_desc = format!("(){}", prop_jvm.descriptor());
+    let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getX()I"
+
+    // `<init>()V`: super(owner.class, "name", "getName()desc", 0).
+    let mut ctor = CodeBuilder::new(1);
+    ctor.aload(0);
+    ctor.ldc_class(&pr.owner_internal, &mut cw);
+    ctor.push_string(&pr.prop_name, &mut cw);
+    ctor.push_string(&signature, &mut cw);
+    ctor.push_int(0, &mut cw);
+    let sup = cw.methodref(&c.superclass, "<init>", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
+    ctor.invokespecial(sup, 4, 0);
+    ctor.ret_void();
+    ctor.ensure_locals(1);
+    ctor.link();
+    cw.add_method(0x0000, "<init>", "()V", &ctor);
+
+    // `get(Object)Object`: ((Owner) it).getName(), boxed if primitive.
+    let mut get = CodeBuilder::new(2);
+    get.aload(1);
+    let owner_ref = cw.class_ref(&pr.owner_internal);
+    get.checkcast(owner_ref);
+    let gref = cw.methodref(&pr.owner_internal, &pr.getter_name, &getter_desc);
+    get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
+    if prop_jvm.is_primitive() {
+        box_prim_free(&mut cw, &mut get, prop_jvm);
+    }
+    get.areturn();
+    get.ensure_locals(2);
+    get.link();
+    cw.add_method(0x0001, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", &get);
+
+    // `<clinit>`: INSTANCE = new.
+    let mut clinit = CodeBuilder::new(0);
+    let cls = cw.class_ref(&fq);
+    clinit.new_obj(cls);
+    clinit.dup();
+    let init = cw.methodref(&fq, "<init>", "()V");
+    clinit.invokespecial(init, 0, 0);
+    let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
+    clinit.putstatic(fref, 1);
+    clinit.ret_void();
+    clinit.ensure_locals(0);
+    clinit.link();
+    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     cw.finish()
 }
 

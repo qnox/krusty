@@ -135,7 +135,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
                 enum_entry_subclass: vec![None; c.enum_entries.len()],
-                enum_entry_of: None,
+                enum_entry_of: None, prop_ref: None,
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object,
@@ -260,7 +260,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     ctor_args: vec![],
                     init_body: None, methods: vec![], is_interface: false,
                     superclass: "kotlin/Any".to_string(), super_args: vec![],
-                    enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None, bridges: vec![], interfaces: vec![],
+                    enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None, prop_ref: None, bridges: vec![], interfaces: vec![],
                     is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
                     field_final: vec![], secondary_ctors: vec![],
                 });
@@ -756,7 +756,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             fq_name: sub_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
                             ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
                             superclass: internal.clone(), super_args: vec![],
-                            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: Some(field_tys.clone()),
+                            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: Some(field_tys.clone()), prop_ref: None,
                             bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
                             is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
                         });
@@ -1618,6 +1618,37 @@ impl<'a> Lower<'a> {
 
     /// Resolve a method by name, walking the superclass chain. Returns the *owning* class id, the
     /// method index within that class, its FunId, and its return type.
+    /// Lower an unbound property reference `Type::prop` (typed `KProperty1`) to a synthesized
+    /// `PropertyReference1Impl` singleton, read as its `INSTANCE`. Bound (`obj::prop`) and mutable
+    /// (`KMutableProperty*`) references aren't modeled yet (`None` ⇒ skip).
+    fn lower_prop_ref(&mut self, e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
+        if self.info.ty(e).obj_internal() != Some("kotlin/reflect/KProperty1") {
+            return None;
+        }
+        let Expr::Name(rn) = self.afile.expr(recv).clone() else { return None };
+        let owner = class_internal(self.afile, &rn);
+        let owner_id = self.classes.get(&owner)?.id;
+        let prop_ty = {
+            let cls = &self.ir.classes[owner_id as usize];
+            let idx = cls.fields.iter().position(|(n, _)| n == name)?;
+            cls.fields[idx].1.clone()
+        };
+        let synth_fq = class_internal(self.afile, &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq));
+        self.lambda_seq += 1;
+        let synth_id = self.ir.add_class(IrClass {
+            fq_name: synth_fq, supertypes: vec![], fields: vec![], ctor_param_count: 0,
+            ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
+            superclass: "kotlin/jvm/internal/PropertyReference1Impl".to_string(), super_args: vec![],
+            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None,
+            prop_ref: Some(crate::ir::PropRef {
+                owner_internal: owner, prop_name: name.to_string(), getter_name: getter_name(name), prop_ty,
+            }),
+            bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
+            is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
+        });
+        Some(self.ir.add_expr(IrExpr::StaticInstance { owner: synth_id, ty: synth_id, field: "INSTANCE" }))
+    }
+
     /// Lower a method reference `obj::m` (bound — the receiver is an in-scope value, captured) or
     /// `Type::m` (unbound — the receiver is a user class, supplied as the first argument) to a
     /// synthesized static impl `(receiver, args…) -> receiver.m(args)` wrapped in a closure, exactly
@@ -2604,6 +2635,13 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
+                // A property reference (`Type::prop`) is typed as a `KProperty*`, not a function type;
+                // handle it before the `Fun` guard below.
+                if let Some(recv) = receiver {
+                    if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
+                        return Some(pr);
+                    }
+                }
                 let Ty::Fun(sig) = self.info.ty(e) else { return None };
                 let arity = sig.params.len();
                 if let Some(recv) = receiver {
