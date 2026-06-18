@@ -752,6 +752,23 @@ pub fn decode_stackmap(bytes: &[u8], frame0_locals: Vec<VType>) -> Option<Vec<Fr
     Some(frames)
 }
 
+/// Instruction indices of the `FunctionN.invoke(...)` calls in a (disassembled) inline body — the
+/// call sites of a lambda *parameter*. Lambda-argument splicing replaces each with the caller's
+/// inlined lambda body. The body's only `kotlin/jvm/functions/Function*.invoke` calls are its lambda
+/// parameters, so matching the methodref target identifies them without dataflow.
+pub fn function_invoke_sites(insns: &[Insn], src_cp: &[C]) -> Vec<usize> {
+    insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| {
+            let Insn::Plain { op: 0xb9, operands } = insn else { return None };
+            let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+            let (cls, name) = methodref_target(src_cp, idx)?;
+            (name == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")).then_some(i)
+        })
+        .collect()
+}
+
 /// Byte offset of each instruction in `code` (index → offset), plus a trailing `code.len()`. `None`
 /// on malformed bytecode.
 fn old_offsets(code: &[u8]) -> Option<Vec<usize>> {
@@ -953,6 +970,35 @@ mod tests {
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(assemble(&insns), vec![0x3e, 0x1d, 0x06, 0x68]);
+    }
+
+    #[test]
+    fn finds_function_invoke_sites() {
+        // pool: Function1.invoke(Object)Object as an InterfaceMethodref, + an unrelated Methodref.
+        let cp = vec![
+            C::Other,
+            C::Utf8("kotlin/jvm/functions/Function1".into()), // 1
+            C::Class(1),                                       // 2
+            C::Utf8("invoke".into()),                          // 3
+            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()), // 4
+            C::NameAndType(3, 4),                              // 5
+            C::InterfaceMethodref(2, 5),                       // 6
+            C::Utf8("java/util/Iterator".into()),              // 7
+            C::Class(7),                                       // 8
+            C::Utf8("next".into()),                            // 9
+            C::Utf8("()Ljava/lang/Object;".into()),            // 10
+            C::NameAndType(9, 10),                             // 11
+            C::InterfaceMethodref(8, 11),                      // 12
+        ];
+        // aload_1 ; invokeinterface Iterator.next #12 ; aload_2 ; invokeinterface Function1.invoke #6 ; pop
+        let insns = vec![
+            Insn::Plain { op: 0x2b, operands: vec![] },
+            Insn::Plain { op: 0xb9, operands: vec![0x00, 0x0c, 0x01, 0x00] },
+            Insn::Plain { op: 0x2c, operands: vec![] },
+            Insn::Plain { op: 0xb9, operands: vec![0x00, 0x06, 0x02, 0x00] },
+            Insn::Plain { op: 0x57, operands: vec![] },
+        ];
+        assert_eq!(function_invoke_sites(&insns, &cp), vec![3]);
     }
 
     #[test]
