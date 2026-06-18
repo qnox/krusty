@@ -64,6 +64,9 @@ pub struct ExtCandidate {
 struct ExtIndex {
     /// `by_recv[recv_desc][method_name]` = list of candidates.
     by_recv: HashMap<String, HashMap<String, Vec<ExtCandidate>>>,
+    /// `by_name[method_name]` = every public static method of that name (top-level functions and
+    /// extensions alike), regardless of arity — for resolving receiver-less top-level calls (`listOf`).
+    by_name: HashMap<String, Vec<ExtCandidate>>,
 }
 
 /// Full type index from the classpath: class names and Kotlin type aliases.
@@ -281,6 +284,18 @@ impl Classpath {
             .unwrap_or_default()
     }
 
+    /// Every public static method named `method_name` across the classpath (top-level functions and
+    /// extensions), for resolving a receiver-less call.
+    pub fn find_top_level(&self, method_name: &str) -> Vec<ExtCandidate> {
+        self.ensure_ext_index();
+        self.ext
+            .borrow()
+            .as_ref()
+            .and_then(|idx| idx.by_name.get(method_name))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn ensure_ext_index(&self) {
         if self.ext.borrow().is_some() {
             return;
@@ -314,19 +329,23 @@ impl Classpath {
                 }
                 let Some(c) = all.get(&cn) else { break };
                 for (mname, mdesc) in &c.statics {
-                    let Some(first_param) = first_descriptor_param(mdesc) else { continue };
                     let Some(ret_desc) = descriptor_ret(mdesc) else { continue };
-                    idx.by_recv
-                        .entry(first_param)
-                        .or_default()
-                        .entry(mname.clone())
-                        .or_default()
-                        .push(ExtCandidate {
-                            owner: name.clone(),
-                            name: mname.clone(),
-                            descriptor: mdesc.clone(),
-                            ret_desc,
-                        });
+                    let cand = ExtCandidate {
+                        owner: name.clone(),
+                        name: mname.clone(),
+                        descriptor: mdesc.clone(),
+                        ret_desc,
+                    };
+                    // A receiver-less top-level function (no first param) is by_name-only.
+                    if let Some(first_param) = first_descriptor_param(mdesc) {
+                        idx.by_recv
+                            .entry(first_param)
+                            .or_default()
+                            .entry(mname.clone())
+                            .or_default()
+                            .push(cand.clone());
+                    }
+                    idx.by_name.entry(mname.clone()).or_default().push(cand);
                 }
                 cur = c.super_class.clone();
             }

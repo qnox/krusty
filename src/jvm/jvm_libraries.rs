@@ -155,9 +155,32 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty]) -> Option<LibraryCallable> {
-        // Top-level (receiver-less) functions are not resolved from the classpath yet — only
-        // extensions, whose declared receiver is the callable's first parameter.
-        let receiver = receiver?;
+        let Some(receiver) = receiver else {
+            // Receiver-less top-level function (`listOf(…)`): find every static method of this name
+            // and pick the overload matching `args` — an exact-arity match (boxing-aware), else a
+            // vararg match (the final reference-array parameter absorbs the trailing arguments).
+            let cands = self.cp.find_top_level(name);
+            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands.into_iter().map(|c| {
+                let (params, ret) = parse_method_desc(&c.descriptor);
+                (c, params, ret)
+            }).collect();
+            let assignable = |p: &Ty, a: &Ty| p == a || *p == Ty::obj("kotlin/Any");
+            // Exact arity first.
+            let pick = parsed.iter().find(|(_, params, _)| {
+                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| assignable(p, a))
+            }).or_else(|| parsed.iter().find(|(_, params, _)| {
+                // Vararg: fixed leading params match positionally, the last (array) param's element
+                // type absorbs the rest.
+                if params.is_empty() { return args.len() == 0; }
+                let fixed = params.len() - 1;
+                let Some(elem) = params[fixed].array_elem() else { return false };
+                args.len() >= fixed
+                    && params[..fixed].iter().zip(args).all(|(p, a)| assignable(p, a))
+                    && args[fixed..].iter().all(|a| assignable(&elem, a))
+            }));
+            let (c, params, ret) = pick?;
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: *ret, descriptor: c.descriptor.clone() });
+        };
         let rest_params: String = args.iter().map(|t| t.descriptor()).collect();
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension).
