@@ -259,6 +259,18 @@ fun box(): String {
     return "f3"
 }
 "#),
+    // Elvis on a nullable primitive (`Int? ?: 0`): the result is the unboxed primitive — the non-null
+    // lhs unboxes and the default coerces to it.
+    ("NullableElvis", r#"
+fun box(): String {
+    val a: Int? = 5
+    if ((a ?: 9) != 5) return "f1"
+    val n: Int? = null
+    if ((n ?: 9) != 9) return "f2"
+    if ((a ?: 0) + 10 != 15) return "f3"
+    return "OK"
+}
+"#),
     // A nullable primitive compares with a primitive (`a == 5`): the primitive is boxed for structural
     // equality. A generic constructor with a primitive type argument coerces a literal to that type.
     ("NullableEqAndGenericCtor", r#"

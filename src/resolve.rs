@@ -2641,8 +2641,11 @@ impl<'a> Checker<'a> {
                 tt
             }
             Expr::Elvis { lhs, rhs } => {
-                let lt = self.expr(lhs);
+                let lt0 = self.expr(lhs);
                 let rt = self.expr(rhs);
+                // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
+                // unboxed primitive, so `intNullable ?: 0` is `Int`.
+                let lt = lt0.obj_internal().and_then(prim_of_wrapper).unwrap_or(lt0);
                 // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
                 // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
                 if rt == Ty::Unit {
