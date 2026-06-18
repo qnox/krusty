@@ -2282,6 +2282,16 @@ bodies exist only as jar bytecode):
      (additive, no regression), prove mutable capture works, THEN migrate `let`/`also`/`forEach` off the
      desugars and delete them. Branchy lambda fns (`forEach`/`map` loops) reuse the `splice_branchy` frame
      machinery with the invoke sites interleaved — after the branchless case works.
+     **OBSTACLE (precise, traced phase 298):** the caller's lambda is already a *separate IR function* —
+     `IrExpr::Lambda { impl_fn, captures, .. }`, `impl_fn` params = `[captures…, lambda_params…]` (see
+     `lower_lambda_sam`). So "emit the lambda body inline" = **emit `impl_fn`'s body under a remapped
+     value→slot environment** (capture indices → caller capture slots; param indices → fresh slots with
+     the on-stack invoke args; `impl_fn` locals → fresh slots). krusty has **no "inline-emit an IR
+     function body"** primitive — building `Emitter::emit_fn_body_inline(fid, slot_map)` is the core of
+     route (b). Also: the checker must permit mutable capture for any inline-fn lambda arg (today only the
+     named desugar set), since a by-value `impl_fn` capture param can't write the outer local — mutable
+     capture needs the body emitted against the caller's *actual* slot, which inline-emit gives. Major
+     multi-part feature; foundations (296–298) done; `emit_fn_body_inline` is the next concrete step.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
