@@ -74,6 +74,22 @@ pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8
 
 /// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
 /// their initializers in declaration order.
+/// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
+/// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_branchy` bails on them).
+fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
+    use crate::jvm::inline::VType;
+    match v {
+        VType::Top => VerifType::Top,
+        VType::Int => VerifType::Integer,
+        VType::Float => VerifType::Float,
+        VType::Long => VerifType::Long,
+        VType::Double => VerifType::Double,
+        VType::Null => VerifType::Null,
+        VType::Object(idx) => VerifType::Object(*idx),
+        VType::UninitThis | VType::Uninit(_) => VerifType::Top,
+    }
+}
+
 fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
     if ir.statics.is_empty() {
         return;
@@ -680,18 +696,61 @@ impl<'a> Emitter<'a> {
         // high-water mark, so the spliced temporaries can never collide with a caller local (live or
         // reserved-but-unstored).
         let base = self.next_slot.max(code.max_locals);
-        // Branchless single-exit bodies only (no StackMapTable relocation needed yet); any other shape
-        // returns `None` and the caller emits a normal `invokestatic` — never a miscompile.
-        let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw) else {
+        let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
+        let top_local = base + body.max_locals;
+        // Branchless single-exit body: append the spliced bytes, no frames needed.
+        if let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw) {
+            self.emit_operands(args, code);
+            let arg_words: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+            let bytes = crate::jvm::inline::assemble(&insns);
+            code.splice_inline(&bytes, body.max_stack, top_local, arg_words, ret_words);
+            return true;
+        }
+        // Branchy body: relocate the callee's StackMapTable frames into the caller. Requires an empty
+        // operand-stack baseline (so frames need no operand-stack prefix); a sub-expression inline call
+        // (non-empty stack) falls back to a normal call.
+        if code.stack_height() != 0 {
+            return false;
+        }
+        let Some(bs) = crate::jvm::inline::splice_branchy(&body, descriptor, base, self.cw) else {
             return false;
         };
-        // Commit: arguments on the stack, then the spliced (relocated) body bytes.
         self.emit_operands(args, code);
         let arg_words: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
-        let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
-        let bytes = crate::jvm::inline::assemble(&insns);
-        code.splice_inline(&bytes, body.max_stack, base + body.max_locals, arg_words, ret_words);
+        let splice_start = code.bytes.len();
+        let prefix = self.verif_locals_upto(base);
+        for (rel, body_locals, stack) in &bs.frames {
+            let mut locals = prefix.clone();
+            locals.extend(body_locals.iter().map(vtype_to_verif));
+            let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
+            let l = code.new_label();
+            code.bind_at(l, splice_start + rel);
+            code.add_frame_if_new(l, locals, st);
+        }
+        code.set_needs_stackmap();
+        code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
         true
+    }
+
+    /// Caller-local verification types for slots `0..upto` (collapsing `long`/`double` to one entry),
+    /// NOT trimming trailing `Top` — the prefix a spliced branchy body's frames are concatenated onto
+    /// (the body's own locals occupy slots `upto..`).
+    fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
+        let mut raw = vec![VerifType::Top; upto as usize];
+        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        for (slot, ty) in entries {
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = self.verif_single(ty);
+            }
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < raw.len() {
+            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
+            out.push(raw[i].clone());
+            i += if wide { 2 } else { 1 };
+        }
+        out
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {

@@ -310,9 +310,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (lambda) parameter — `inline::splice_branchless` drops the trailing return (leaving the result on the
   stack to fall through) rather than rewriting it to a `goto`, so the spliced region needs no
   StackMapTable frame. Proven end-to-end against a real kotlinc-compiled library inline fn
-  (`tests/inline_splice_e2e.rs`: the call is spliced, no `invokestatic` to the callee survives). Pending:
-  StackMapTable relocation (branchy bodies) → lambda-argument splicing (retires the `forEach`/`let`/`also`
-  desugars). Tested by the `UserInline` snippet in `tests/feature_box_e2e.rs`.
+  (`tests/inline_splice_e2e.rs`: the call is spliced, no `invokestatic` to the callee survives). **Branchy
+  bodies** also splice: the callee's `StackMapTable` is decoded (`inline::decode_stackmap`) and relocated
+  into the caller (`inline::splice_branchy`) — frame offsets remapped past the `shift_locals` resize and
+  the prologue, the body locals prefixed with the caller's locals (`Emitter::verif_locals_upto`), pool
+  refs re-interned, the join frame added where the redirected returns land. Restricted (v1) to primitive
+  parameters and an empty operand-stack baseline (statement / `val x = f(...)`); else falls back. Proven
+  against a real kotlinc `if/else` inline fn (`inline_splice_e2e`). Pending: lambda-argument splicing
+  (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
+  `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
+  `UserInline` snippet in `tests/feature_box_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 

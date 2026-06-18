@@ -278,9 +278,10 @@ fn insn_size(insn: &Insn, at: usize) -> usize {
 /// Re-encode instructions to bytecode, computing every branch/switch offset from the final layout.
 /// Instruction-index targets make this robust to size-changing transforms. A round-trip of an
 /// untransformed body reproduces it byte-for-byte (switch padding is position-stable).
-pub fn assemble(insns: &[Insn]) -> Vec<u8> {
-    // Iterate offsets to a fixpoint: a switch's padding depends on its byte position, which depends
-    // on earlier sizes. Converges (sizes only depend on positions monotonically).
+/// The byte offset of each instruction (index `i` → its offset; the final entry is the total byte
+/// length), computed to a fixpoint since a switch's padding depends on its position. Lets a transform
+/// map an instruction index to its byte offset in the assembled layout.
+pub fn insn_offsets(insns: &[Insn]) -> Vec<usize> {
     let mut offs = vec![0usize; insns.len() + 1];
     loop {
         let mut at = 0;
@@ -300,6 +301,11 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
             break;
         }
     }
+    offs
+}
+
+pub fn assemble(insns: &[Insn]) -> Vec<u8> {
+    let offs = insn_offsets(insns);
     let mut out = Vec::with_capacity(offs[insns.len()]);
     for (i, insn) in insns.iter().enumerate() {
         let here = offs[i];
@@ -744,6 +750,139 @@ pub fn decode_stackmap(bytes: &[u8], frame0_locals: Vec<VType>) -> Option<Vec<Fr
         frames.push(Frame { offset: offset as usize, locals: locals.clone(), stack });
     }
     Some(frames)
+}
+
+/// Byte offset of each instruction in `code` (index → offset), plus a trailing `code.len()`. `None`
+/// on malformed bytecode.
+fn old_offsets(code: &[u8]) -> Option<Vec<usize>> {
+    let mut offs = Vec::new();
+    let mut pc = 0;
+    while pc < code.len() {
+        offs.push(pc);
+        pc += instruction_len(code, pc)?;
+    }
+    offs.push(code.len());
+    Some(offs)
+}
+
+/// Shift every branch/switch target instruction index by `delta` (used after prepending the prologue,
+/// whose instructions push every body target forward).
+fn shift_targets(insns: &mut [Insn], delta: usize) {
+    for insn in insns {
+        match insn {
+            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target += delta,
+            Insn::TableSwitch { default, targets, .. } => {
+                *default += delta;
+                for t in targets {
+                    *t += delta;
+                }
+            }
+            Insn::LookupSwitch { default, pairs, .. } => {
+                *default += delta;
+                for (_, t) in pairs {
+                    *t += delta;
+                }
+            }
+            Insn::Plain { .. } => {}
+        }
+    }
+}
+
+/// The implicit frame-0 locals of a *static* method: one [`VType`] per parameter (`long`/`double` are
+/// a single entry). `None` if any parameter is a reference/array type — the frame-0 `Object` type
+/// isn't modeled yet, so such a body is not branchy-spliced (v1).
+fn param_vtypes(descriptor: &str) -> Option<Vec<VType>> {
+    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'I' | b'B' | b'S' | b'C' | b'Z' => out.push(VType::Int),
+            b'J' => out.push(VType::Long),
+            b'F' => out.push(VType::Float),
+            b'D' => out.push(VType::Double),
+            _ => return None,
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+/// The method's return value as a [`VType`] (`None` value ⇒ `void`), relocating a reference return's
+/// class into `cw`. The outer `None` is a parse error.
+fn ret_vtype(descriptor: &str, cw: &mut ClassWriter) -> Option<Option<VType>> {
+    let ret = descriptor.split(')').nth(1)?;
+    Some(match *ret.as_bytes().first()? {
+        b'V' => None,
+        b'I' | b'B' | b'S' | b'C' | b'Z' => Some(VType::Int),
+        b'J' => Some(VType::Long),
+        b'F' => Some(VType::Float),
+        b'D' => Some(VType::Double),
+        b'L' => Some(VType::Object(cw.class_ref(&ret[1..ret.len() - 1]))),
+        b'[' => Some(VType::Object(cw.class_ref(ret))),
+        _ => return None,
+    })
+}
+
+/// Relocate a frame's verification type into `cw` (an `Object`'s `Class` pool ref). `None` for an
+/// `Uninitialized`/`UninitializedThis` type (not modeled).
+fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType> {
+    Some(match v {
+        VType::Object(idx) => VType::Object(relocate_const(src_cp, *idx, cw)?),
+        VType::Uninit(_) | VType::UninitThis => return None,
+        other => other.clone(),
+    })
+}
+
+/// The result of splicing a **branchy** body: the spliced bytes plus the relocated `StackMapTable`
+/// frames the caller must add (each: byte offset within `bytes`, the *body* locals at that point, and
+/// the operand stack). The caller prepends its own locals (slots `0..base`) and supplies the absolute
+/// code position. The final entry is the **join** frame (where the body's returns land): empty body
+/// locals + the return value on the stack.
+pub struct BranchySplice {
+    pub bytes: Vec<u8>,
+    pub frames: Vec<(usize, Vec<VType>, Vec<VType>)>,
+}
+
+/// Splice a **branchy** inline body, relocating its `StackMapTable` frames. Restricted (v1) to a body
+/// with primitive parameters, no exception handlers, and no reified marker; the caller must have an
+/// empty operand-stack baseline (so the frames need no operand-stack prefix). `None` ⇒ fall back to a
+/// real call (never a miscompile).
+pub fn splice_branchy(body: &MethodCode, descriptor: &str, base: u16, cw: &mut ClassWriter) -> Option<BranchySplice> {
+    if body.has_handlers || is_reified_inline(body) {
+        return None;
+    }
+    let stackmap = body.stackmap.as_ref()?;
+    let frame0 = param_vtypes(descriptor)?;
+    let ret = ret_vtype(descriptor, cw)?;
+    let decoded = decode_stackmap(stackmap, frame0)?;
+    let mut insns = disassemble(&body.code)?;
+    let old_off = old_offsets(&body.code)?;
+    // Each decoded frame's (index-stable) instruction index, before prepending the prologue.
+    let frame_idx: Vec<usize> = decoded
+        .iter()
+        .map(|f| old_off.iter().position(|&o| o == f.offset))
+        .collect::<Option<Vec<_>>>()?;
+    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    shift_locals(&mut insns, base)?;
+    redirect_returns(&mut insns); // returns → `goto end` (target = body insn count)
+    let params = param_store_ops(descriptor, base)?;
+    let prologue: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    let p = prologue.len();
+    shift_targets(&mut insns, p); // body targets move past the prologue
+    let mut final_insns = prologue;
+    final_insns.extend(insns);
+    let offs = insn_offsets(&final_insns);
+    let mut frames = Vec::with_capacity(decoded.len() + 1);
+    for (f, &idx) in decoded.iter().zip(&frame_idx) {
+        let locals = f.locals.iter().map(|v| relocate_vtype(v, &body.source_cp, cw)).collect::<Option<Vec<_>>>()?;
+        let stack = f.stack.iter().map(|v| relocate_vtype(v, &body.source_cp, cw)).collect::<Option<Vec<_>>>()?;
+        frames.push((offs[p + idx], locals, stack));
+    }
+    // Join frame at the end (the redirected returns' `goto end` target).
+    frames.push((offs[final_insns.len()], vec![], ret.into_iter().collect()));
+    Some(BranchySplice { bytes: assemble(&final_insns), frames })
 }
 
 pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap<String, String>, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
