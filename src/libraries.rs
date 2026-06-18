@@ -168,11 +168,14 @@ pub trait LibrarySet {
         None
     }
 
-    /// For a generic extension `recv.name(lambda…)` taking function arguments, the *element-typed*
+    /// For a generic extension `recv.name(args…)` taking function arguments, the *element-typed*
     /// parameter types of each call argument that is a lambda — `List<Int>.map { … }` → `[[Int]]` (the
-    /// single lambda's parameter is the element `Int`). Lets the checker type the lambda body before
-    /// resolving the call. Empty inner vec for a non-lambda argument; `None` if no such extension.
-    fn extension_lambda_param_types(&self, _recv: Ty, _name: &str) -> Option<Vec<Vec<Ty>>> {
+    /// single lambda's parameter is the element `Int`). The type variables bind from the receiver and
+    /// from the already-typed non-lambda arguments (`fold(0) { acc, x -> … }` binds the accumulator `R`
+    /// from the `0`), so `arg_tys[i]` is `Some` for a typed non-lambda argument and `None` for a lambda
+    /// not yet typed. Lets the checker type lambda bodies before resolving the call. Empty inner vec for
+    /// a non-lambda argument; `None` if no such extension.
+    fn extension_lambda_param_types(&self, _recv: Ty, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         None
     }
 }
