@@ -3513,6 +3513,13 @@ impl<'a> Checker<'a> {
                             return self.set(call, Ty::obj(&cls.internal));
                         }
                     }
+                    // A classpath functional interface (`Runnable`, `Comparator`, …).
+                    if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
+                        if let Some(sam) = self.syms.libraries.sam_method(&internal) {
+                            self.check_lambda_with_types(args[0], &sam.params);
+                            return self.set(call, Ty::obj(&internal));
+                        }
+                    }
                 }
                 // Type-directed lambda checking: if we know the target function's signature and a
                 // parameter is a function type with known inner param types, check lambda args with
