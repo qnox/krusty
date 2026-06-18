@@ -56,6 +56,155 @@ fn split_one(s: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// A node of a parsed JVM generic *type signature* (the grammar behind the `Signature` attribute):
+/// a type variable (`TT;`), a class type with type arguments (`Ljava/util/List<TT;>;`), an array, or
+/// a primitive. Enough to recover a generic method's parameterized return from its erased descriptor.
+#[derive(Clone, Debug)]
+enum GSig {
+    Var(String),
+    Class(String, Vec<GSig>),
+    Arr(Box<GSig>),
+    Prim(Ty),
+}
+
+/// Parse one type signature off the front of `s`, returning `(node, rest)`.
+fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
+    let b = s.as_bytes();
+    match *b.first()? {
+        b'T' => {
+            let end = s.find(';')?;
+            Some((GSig::Var(s[1..end].to_string()), &s[end + 1..]))
+        }
+        b'[' => {
+            let (inner, rest) = parse_gsig(&s[1..])?;
+            Some((GSig::Arr(Box::new(inner)), rest))
+        }
+        b'L' => {
+            // Class name up to `<` (type args) or `;`. Type args (if any) are parsed, then `;`.
+            let lt = s.find('<');
+            let semi = s.find(';')?;
+            let name_end = match lt {
+                Some(i) if i < semi => i,
+                _ => semi,
+            };
+            let internal = to_kotlin_internal(&s[1..name_end]).to_string();
+            if let Some(i) = lt.filter(|&i| i < semi) {
+                let mut rest = &s[i + 1..];
+                let mut args = Vec::new();
+                while !rest.starts_with('>') {
+                    // A wildcard prefix (`+`/`-`) or unbounded `*` argument — treat as opaque (`Any`).
+                    if let Some(stripped) = rest.strip_prefix('*') {
+                        args.push(GSig::Class("kotlin/Any".to_string(), vec![]));
+                        rest = stripped;
+                        continue;
+                    }
+                    let r2 = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-')).unwrap_or(rest);
+                    let (a, tail) = parse_gsig(r2)?;
+                    args.push(a);
+                    rest = tail;
+                }
+                let after = rest.strip_prefix('>')?.strip_prefix(';')?;
+                Some((GSig::Class(internal, args), after))
+            } else {
+                Some((GSig::Class(internal, vec![]), &s[semi + 1..]))
+            }
+        }
+        c => {
+            let t = match c {
+                b'I' | b'B' | b'S' => Ty::Int,
+                b'J' => Ty::Long,
+                b'F' => Ty::Float,
+                b'D' => Ty::Double,
+                b'Z' => Ty::Boolean,
+                b'C' => Ty::Char,
+                b'V' => Ty::Unit,
+                _ => return None,
+            };
+            Some((GSig::Prim(t), &s[1..]))
+        }
+    }
+}
+
+/// Parse a method generic signature `<formals>(params)ret` into the parameter and return nodes,
+/// skipping the leading `<…>` formal-type-parameter block.
+fn parse_method_gsig(sig: &str) -> Option<(Vec<GSig>, GSig)> {
+    let mut s = sig;
+    if s.starts_with('<') {
+        // Skip the balanced `<…>` formal block.
+        let mut depth = 0;
+        let mut end = 0;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if end == 0 {
+            return None;
+        }
+        s = &s[end..];
+    }
+    let inner = s.strip_prefix('(')?;
+    let close = inner.find(')')?;
+    let mut params_s = &inner[..close];
+    let mut params = Vec::new();
+    while !params_s.is_empty() {
+        let (p, rest) = parse_gsig(params_s)?;
+        params.push(p);
+        params_s = rest;
+    }
+    let (ret, _) = parse_gsig(&inner[close + 1..])?;
+    Some((params, ret))
+}
+
+/// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
+fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut std::collections::HashMap<String, Ty>) {
+    match sig {
+        GSig::Var(n) => {
+            binds.entry(n.clone()).or_insert(actual);
+        }
+        GSig::Arr(inner) => {
+            if let Some(elem) = actual.array_elem() {
+                unify_gsig(inner, elem, binds);
+            }
+        }
+        GSig::Class(_, args) => {
+            // Unify the type arguments positionally against the actual's carried arguments, if any.
+            if let Ty::Obj(_, targs) = actual {
+                for (a, t) in args.iter().zip(targs.iter()) {
+                    unify_gsig(a, *t, binds);
+                }
+            }
+        }
+        GSig::Prim(_) => {}
+    }
+}
+
+/// Realize a signature node to a `Ty` under the current bindings — an unbound variable erases to
+/// `Any`, a class becomes `Ty::obj_args` carrying its (substituted) type arguments.
+fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
+    match sig {
+        GSig::Var(n) => binds.get(n).copied().unwrap_or_else(|| Ty::obj("kotlin/Any")),
+        GSig::Prim(t) => *t,
+        GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
+        GSig::Class(internal, args) => {
+            if args.is_empty() {
+                Ty::obj(internal)
+            } else {
+                let targs: Vec<Ty> = args.iter().map(|a| gsig_to_ty(a, binds)).collect();
+                Ty::obj_args(internal, &targs)
+            }
+        }
+    }
+}
+
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     let close = desc.find(')').unwrap_or(0);
@@ -179,7 +328,32 @@ impl LibrarySet for JvmLibraries {
                     && args[fixed..].iter().all(|a| assignable(&elem, a))
             }));
             let (c, params, ret) = pick?;
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: *ret, descriptor: c.descriptor.clone() });
+            // Recover the parameterized return from the generic signature: bind the type variables
+            // from the actual arguments (the vararg element unifies with each trailing arg) and
+            // substitute into the return node. Falls back to the erased return when absent.
+            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(psigs, rsig)| {
+                let mut binds = std::collections::HashMap::new();
+                let vararg = params.len() != args.len();
+                if vararg && !psigs.is_empty() {
+                    let fixed = psigs.len() - 1;
+                    for (i, ps) in psigs.iter().take(fixed).enumerate() {
+                        if let Some(a) = args.get(i) {
+                            unify_gsig(ps, *a, &mut binds);
+                        }
+                    }
+                    if let GSig::Arr(inner) = &psigs[fixed] {
+                        for a in &args[fixed..] {
+                            unify_gsig(inner, *a, &mut binds);
+                        }
+                    }
+                } else {
+                    for (ps, a) in psigs.iter().zip(args) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                }
+                gsig_to_ty(&rsig, &binds)
+            }).unwrap_or(*ret);
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, descriptor: c.descriptor.clone() });
         };
         let rest_params: String = args.iter().map(|t| t.descriptor()).collect();
         // Try the receiver type and its supertypes, most specific first — the extension's declared
