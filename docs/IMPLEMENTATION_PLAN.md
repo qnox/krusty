@@ -2262,11 +2262,13 @@ bodies exist only as jar bytecode):
        relocated stdlib bytecode. Removes the closure (matches kotlinc) and handles mutable capture, so the
        `forEach`/`let`/`also` desugars can be deleted. Hard: interleave IR emission with byte-splicing at
        `function_invoke_sites`, drop the dead `aload action`, and thread the lambda IR to the emitter.
-     Plan: route (b) is the chosen path (owner: delete the desugars). EVIDENCE: non-mutable-capture
-     lambda inline fns already work via closure+call (`map { it*2 }` compiles to `invokestatic
-     CollectionsKt.map(Iterable, Function1)` passing a closure, runs correctly); the desugars exist only
-     for **mutable capture** (the closure can't write an outer mutable local). So (b)'s payoff is the
-     no-hardcode win + mutable-capture cases of non-desugared fns — NOT broad coverage.
+     Plan: route (b) is the chosen path (owner: delete the desugars). EVIDENCE: krusty does NOT inline
+     lambda inline fns today. A *regular* inline fn (`map`/`filter`/`fold`) is **called** — `map { it*2 }`
+     → `invokestatic CollectionsKt.map(Iterable, Function1)` passing a closure (behaviorally correct but
+     NOT inlined and NOT byte-equal: kotlinc emits the loop inline, no `CollectionsKt.map` call). An
+     **@InlineOnly** fn (`let`/`also`/`run`/`apply`) is not callable from outside, so krusty desugars the
+     few hardcoded ones (and bails on the rest). So route (b) is the path to **bytecode equality** for ALL
+     lambda inline fns — the regular "called-not-inlined" ones too, not just @InlineOnly/mutable-capture.
      **Route (b) progress:** `function_invoke_sites` (296) locates the lambda calls; `branchless_lambda_segments`
      (297) prepares a branchless single-invoke body (`let`/`also`/`run`/`apply`) — relocate, shift locals,
      split at the invoke, elide the dead `aload <lambda-param>`, drop the trailing return → `(before, after)`
