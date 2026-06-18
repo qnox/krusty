@@ -43,12 +43,12 @@ fun box(): String {
     ++n
     if (n != 2) return "f9:$n"
     // Byte/Short/Char wrap in their own width (statement + value forms)
-    var b: Byte = 127
-    b++
-    if (b.toInt() != -128) return "f10:${b.toInt()}"
-    var b2: Byte = 127
-    val ob = b2++
-    if (ob.toInt() != 127 || b2.toInt() != -128) return "f11"
+    var by1: Byte = 127
+    by1++
+    if (by1.toInt() != -128) return "f10:${by1.toInt()}"
+    var by2: Byte = 127
+    val ob = by2++
+    if (ob.toInt() != 127 || by2.toInt() != -128) return "f11"
     var sh: Short = 32767
     sh++
     if (sh.toInt() != -32768) return "f12"
