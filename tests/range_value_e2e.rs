@@ -31,6 +31,14 @@ fun box(): String {
     var t = 0
     for (z in 5..7) t += z
     if (t != 18) return "f6"
+    // a Char counted for-range
+    var cs = 0
+    for (c in 'a'..'e') cs += c.code
+    if (cs != 'a'.code + 'b'.code + 'c'.code + 'd'.code + 'e'.code) return "f7"
+    // a Long counted for-range
+    var lt = 0L
+    for (y in 1L..4L) lt += y
+    if (lt != 10L) return "f8"
     return "OK"
 }
 "#;

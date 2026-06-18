@@ -4001,7 +4001,7 @@ impl<'a> Checker<'a> {
                 let et = self.expr(range.end);
                 // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
                 // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
-                let elem = if st == et && matches!(st, Ty::Int | Ty::Long | Ty::UInt | Ty::ULong) {
+                let elem = if st == et && matches!(st, Ty::Int | Ty::Long | Ty::UInt | Ty::ULong | Ty::Char) {
                     st
                 } else {
                     self.expect_assignable(Ty::Int, st, self.span(range.start), "range start");
