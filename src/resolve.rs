@@ -527,7 +527,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
+                                    let t = infer_lit_ty_p(file, *e, &class_names, &fun_rets, &props);
                                     if t != Ty::Error { t } else { Ty::Unit }
                                 } else { Ty::Unit }
                             });
@@ -1062,6 +1062,12 @@ fn is_builtin_operator_method(name: &str) -> bool {
 }
 
 fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>) -> Ty {
+    infer_lit_ty_p(file, e, class_names, fun_rets, &[])
+}
+
+/// As [`infer_lit_ty`], but with the enclosing class's properties in scope so an expression-bodied
+/// member (`fun get() = v`, where `v` is a constructor property) infers the property's type.
+fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>, props: &[(String, Ty, bool)]) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -1070,6 +1076,8 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, f
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        // A bare name referring to one of the enclosing class's properties.
+        Expr::Name(n) => props.iter().find(|(pn, _, _)| pn == n).map(|(_, t, _)| *t).unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(prim) = file.expr(*receiver) {
                 prim_companion_ty(prim, name).unwrap_or(Ty::Error)
@@ -1079,10 +1087,10 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, f
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg => infer_lit_ty(file, *operand, class_names, fun_rets),
+            UnOp::Neg => infer_lit_ty_p(file, *operand, class_names, fun_rets, props),
         },
         Expr::Binary { op, lhs, rhs } => {
-            let (lt, rt) = (infer_lit_ty(file, *lhs, class_names, fun_rets), infer_lit_ty(file, *rhs, class_names, fun_rets));
+            let (lt, rt) = (infer_lit_ty_p(file, *lhs, class_names, fun_rets, props), infer_lit_ty_p(file, *rhs, class_names, fun_rets, props));
             match op {
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
                 BinOp::Add if lt == Ty::String || rt == Ty::String => Ty::String,

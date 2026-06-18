@@ -335,6 +335,10 @@ pub struct PropDecl {
     pub getter: Option<FunBody>,
     /// A custom setter (`var x … set(v) { field = … }`) or a visibility-only setter (`private set`).
     pub setter: Option<PropAccessor>,
+    /// `true` if declared `const val` — a compile-time constant. kotlinc inlines its value at use
+    /// sites; krusty doesn't model that, so a const read across declaration order (a member reading a
+    /// later const) would observe the uninitialized field. Used to bail such cases.
+    pub is_const: bool,
     pub span: Span,
 }
 
