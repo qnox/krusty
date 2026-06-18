@@ -2785,8 +2785,14 @@ impl<'a> Lower<'a> {
                 let get1 = self.ir.add_expr(IrExpr::GetValue(v));
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
-                let get2 = self.ir.add_expr(IrExpr::GetValue(v));
-                let rv = self.expr(rhs)?;
+                // When the elvis result is a primitive (a nullable-primitive lhs, `Int? ?: 0`), the
+                // non-null lhs unboxes to the primitive and the rhs coerces to it too.
+                let result_ty = self.info.ty(e);
+                let mut get2 = self.ir.add_expr(IrExpr::GetValue(v));
+                if result_ty.is_primitive() && lty.is_reference() {
+                    get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(result_ty) });
+                }
+                let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
                 let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), get2), (None, rv)] });
                 self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) })
             }
