@@ -1711,11 +1711,21 @@ impl<'a> Lower<'a> {
     /// `PropertyReference1Impl` singleton, read as its `INSTANCE`. Bound (`obj::prop`) and mutable
     /// (`KMutableProperty*`) references aren't modeled yet (`None` ⇒ skip).
     fn lower_prop_ref(&mut self, e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
-        if self.info.ty(e).obj_internal() != Some("kotlin/reflect/KProperty1") {
-            return None;
-        }
+        // Unbound `Type::prop` (a `KProperty1` singleton) or bound `obj::prop` (a `KProperty0` carrying
+        // the captured receiver).
+        let bound = match self.info.ty(e).obj_internal()? {
+            "kotlin/reflect/KProperty1" => false,
+            "kotlin/reflect/KProperty0" => true,
+            _ => return None,
+        };
         let Expr::Name(rn) = self.afile.expr(recv).clone() else { return None };
-        let owner = class_internal(self.afile, &rn);
+        // Bound: the receiver is an in-scope value; its type gives the owner. Unbound: `rn` is the class.
+        let (owner, recv_val) = if bound {
+            let (v, ty) = self.lookup(&rn)?;
+            (ty.obj_internal()?.to_string(), Some(v))
+        } else {
+            (class_internal(self.afile, &rn), None)
+        };
         let owner_id = self.classes.get(&owner)?.id;
         let prop_ty = {
             let cls = &self.ir.classes[owner_id as usize];
@@ -1724,18 +1734,25 @@ impl<'a> Lower<'a> {
         };
         let synth_fq = class_internal(self.afile, &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq));
         self.lambda_seq += 1;
+        let superclass = if bound { "kotlin/jvm/internal/PropertyReference0Impl" } else { "kotlin/jvm/internal/PropertyReference1Impl" };
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq, supertypes: vec![], fields: vec![], ctor_param_count: 0,
             ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
-            superclass: "kotlin/jvm/internal/PropertyReference1Impl".to_string(), super_args: vec![],
+            superclass: superclass.to_string(), super_args: vec![],
             enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: owner, prop_name: name.to_string(), getter_name: getter_name(name), prop_ty,
+                owner_internal: owner, prop_name: name.to_string(), getter_name: getter_name(name), prop_ty, bound,
             }),
             bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
             is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
         });
-        Some(self.ir.add_expr(IrExpr::StaticInstance { owner: synth_id, ty: synth_id, field: "INSTANCE" }))
+        if let Some(v) = recv_val {
+            // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
+            let recv_e = self.ir.add_expr(IrExpr::GetValue(v));
+            Some(self.ir.add_expr(IrExpr::New { class: synth_id, args: vec![recv_e], ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]) }))
+        } else {
+            Some(self.ir.add_expr(IrExpr::StaticInstance { owner: synth_id, ty: synth_id, field: "INSTANCE" }))
+        }
     }
 
     /// Lower a method reference `obj::m` (bound — the receiver is an in-scope value, captured) or
