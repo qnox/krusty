@@ -1534,13 +1534,14 @@ impl<'a> Lower<'a> {
             Stmt::For { name, range, body } => {
                 use crate::ast::RangeKind;
                 let depth = self.scope.len();
-                // loop var = start
-                let start = self.expr(range.start)?;
+                // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
+                // counter's primitive type so the value is unboxed before the int-typed slot store.
+                let start = self.lower_arg(range.start, &ty_to_ir(Ty::Int))?;
                 let i_v = self.fresh_value();
                 self.scope.push((name.clone(), i_v, Ty::Int));
                 let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(start) });
                 // hoisted bound
-                let end_e = self.expr(range.end)?;
+                let end_e = self.lower_arg(range.end, &ty_to_ir(Ty::Int))?;
                 let end_v = self.fresh_value();
                 let var_end = self.ir.add_expr(IrExpr::Variable { index: end_v, ty: ty_to_ir(Ty::Int), init: Some(end_e) });
                 // condition
@@ -1836,7 +1837,21 @@ impl<'a> Lower<'a> {
             // `a[i]` read → an intrinsic; `String[i]` is `kotlin/String.get` (a `Char`), else
             // `kotlin/Array.get` (backend reads element from the receiver type).
             Expr::Index { array, index } => {
-                let fq = if self.info.ty(array) == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
+                let at = self.info.ty(array);
+                // `coll[i]` on a library type (`List`, `Map`) → its `get(index)` operator member.
+                if let Ty::Obj(internal, _) = at {
+                    if at.array_elem().is_none() {
+                        let it = self.info.ty(index);
+                        if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "get", &[it]) {
+                            let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
+                            let a = self.expr(array)?;
+                            let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
+                            let read = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: "get".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i] });
+                            return Some(self.coerce_generic_read(read, e, m.ret));
+                        }
+                    }
+                }
+                let fq = if at == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
                 self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: Some(a), args: vec![i] })

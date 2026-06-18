@@ -2176,16 +2176,21 @@ impl<'a> Checker<'a> {
             Expr::Index { array, index } => {
                 let at = self.expr(array);
                 let it = self.expr(index);
-                self.expect_assignable(Ty::Int, it, self.span(index), "array index");
-                match at.array_elem() {
-                    Some(elem) => elem,
-                    None => {
-                        if at != Ty::Error {
-                            self.diags.error(self.span(e), format!("'{}' is not an array (cannot index)", at.name()));
-                        }
-                        Ty::Error
+                if let Some(elem) = at.array_elem() {
+                    self.expect_assignable(Ty::Int, it, self.span(index), "array index");
+                    return self.set(e, elem);
+                }
+                // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
+                // `Map.get(K)`); the index type is checked against the member's parameter.
+                if let Ty::Obj(internal, _) = at {
+                    if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "get", &[it]) {
+                        return self.set(e, m.ret);
                     }
                 }
+                if at != Ty::Error {
+                    self.diags.error(self.span(e), format!("'{}' is not an array (cannot index)", at.name()));
+                }
+                Ty::Error
             }
             Expr::Try { body, catches, finally } => {
                 // Nested try/catch trips a StackMapTable frame bug in codegen — skip rather than
