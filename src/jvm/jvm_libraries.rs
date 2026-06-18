@@ -266,6 +266,27 @@ fn arg_fits(p: &Ty, a: &Ty) -> bool {
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
+/// Whether a parameter signature node is compatible with an actual `Ty`, used to disambiguate
+/// overloads by the receiver's type arguments — `Iterable<Double>` is rejected for a `List<Int>`
+/// receiver while `Iterable<T>` (a type variable) and `Iterable<Int>` are accepted. A type variable
+/// accepts anything; a concrete class type-argument must match the actual's (a primitive matches only
+/// its boxed wrapper). Conservative: anything it can't compare is accepted.
+fn sig_compatible(sig: &GSig, actual: Ty) -> bool {
+    match sig {
+        GSig::Var(_) => true,
+        GSig::Prim(t) => *t == actual,
+        GSig::Arr(inner) => actual.array_elem().map_or(true, |e| sig_compatible(inner, e)),
+        GSig::Class(name, args) => match actual {
+            Ty::Obj(_, targs) => args.iter().zip(targs.iter()).all(|(s, t)| sig_compatible(s, *t)),
+            t if t.is_primitive() => {
+                name == "kotlin/Any"
+                    || super::jvm_class_map::wrapper_internal(t).map_or(false, |w| w == name)
+            }
+            _ => true,
+        },
+    }
+}
+
 /// Like [`arg_fits`], but also accepts a reference argument that is a *subtype* of a reference
 /// parameter (`String` into a `CharSequence` parameter) by walking the classpath supertype chain.
 /// Used where overload selection must distinguish a real subtype from an unrelated type (a `Char`
@@ -537,9 +558,21 @@ impl LibrarySet for JvmLibraries {
                 if !params[1..].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
                     continue;
                 }
+                let gsig = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig));
+                // Disambiguate by the receiver's type arguments: reject an overload whose declared
+                // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
+                if !receiver.type_args().is_empty() {
+                    if let Some((_, psigs, _)) = &gsig {
+                        if let Some(recv_sig) = psigs.first() {
+                            if !sig_compatible(recv_sig, receiver) {
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
                 // type variables bind from the receiver (the first parameter) and the arguments.
-                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
+                let ret_ty = gsig.map(|(formals, psigs, rsig)| {
                     let mut binds = std::collections::HashMap::new();
                     // Explicit type arguments bind any formals the receiver/value args don't determine.
                     for (f, t) in formals.iter().zip(type_args) {
