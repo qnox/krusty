@@ -2282,12 +2282,17 @@ impl<'a> Checker<'a> {
             Expr::Is { operand, ty, negated: _ } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
-                // `instanceof` needs a reference operand and a *known* reference target. An unresolved
-                // target (`Number`, a value class, `Nothing`, …) must not silently become `Object`
-                // (which would make the test always true) — reject so the file is cleanly skipped.
-                // A *nullable* target (`x is T?`) is also rejected: `null is T?` is true, but plain
+                // `instanceof` needs a reference operand and a *known* target. An unresolved target
+                // (`Number`, a value class, `Nothing`, …) must not silently become `Object` (which
+                // would make the test always true) — reject so the file is cleanly skipped. A primitive
+                // target (`x is Int`) is allowed: it tests against the boxed wrapper (`Integer`). A
+                // *nullable* target (`x is T?`) is rejected: `null is T?` is true, but plain
                 // `instanceof` yields false, so it would miscompile.
-                if !tt.is_reference() || ty.nullable || (!ot.is_reference() && ot != Ty::Error) {
+                // A floating-point `is` target (`is Double`/`is Float`) would let the file reach
+                // boxed `==` whose IEEE-754 semantics (`-0.0`/`NaN`) krusty doesn't model — restrict to
+                // integral/boolean/char primitives.
+                let tt_known = tt.is_reference() || (tt.is_primitive() && !matches!(tt, Ty::Double | Ty::Float));
+                if !tt_known || ty.nullable || (!ot.is_reference() && ot != Ty::Error) {
                     self.diags.error(self.span(e), "krusty: 'is' on this type is not supported".to_string());
                     return Ty::Error;
                 }

@@ -2237,7 +2237,12 @@ impl<'a> Lower<'a> {
             Expr::Is { operand, ty, negated } => {
                 let arg = self.expr(operand)?;
                 let op = if negated { IrTypeOp::NotInstanceOf } else { IrTypeOp::InstanceOf };
-                let type_operand = ty_to_ir(self.ty_ref(&ty)?);
+                // A reference target, or a primitive (`x is Int` → `instanceof` the boxed wrapper, which
+                // the backend resolves from the primitive type_operand).
+                let target = self.ty_ref(&ty).or_else(|| {
+                    if ty.nullable { None } else { Ty::from_name(&ty.name).filter(|t| t.is_primitive() && !matches!(t, Ty::Double | Ty::Float)) }
+                })?;
+                let type_operand = ty_to_ir(target);
                 self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
             }
             Expr::InRange { value, start, end, kind, negated } => {
@@ -2331,6 +2336,20 @@ impl<'a> Lower<'a> {
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
                     return None;
+                }
+                // A value-position `when (s) { is T -> … s … }` whose `is`-arm body references the
+                // subject relies on smart-casting `s` to `T` inside the body — krusty types it (the
+                // checker) but doesn't emit the `checkcast`, so the merge frame would be inconsistent.
+                // Bail rather than miscompile. (`is`-arms with subject-free bodies are unaffected.)
+                if self.info.ty(e) != Ty::Unit {
+                    if let Some(Expr::Name(sn)) = subject.map(|s| self.afile.expr(s).clone()) {
+                        for arm in &arms {
+                            let is_arm = arm.conditions.iter().any(|&c| matches!(self.afile.expr(c), Expr::Is { .. }));
+                            if is_arm && crate::resolve::expr_uses_name_pub(self.afile, arm.body, &sn) {
+                                return None;
+                            }
+                        }
+                    }
                 }
                 // A no-`else` `when` used as a *value* is only accepted by the checker when it is
                 // exhaustive (every enum entry / both booleans / a sealed hierarchy covered). The flat
