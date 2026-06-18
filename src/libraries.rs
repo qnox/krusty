@@ -228,6 +228,14 @@ pub trait LibrarySet {
     fn can_inline_lambda(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
         false
     }
+
+    /// Resolve a scope-function extension call (`receiver.let { … }`) for the bytecode inliner — like
+    /// [`resolve_callable`](Self::resolve_callable) with a receiver, but ALSO matching `@InlineOnly`
+    /// package-private candidates (which `resolve_callable` hides, since they aren't callable). The
+    /// caller must inline the result, never emit a call. `None` for non-JVM platforms.
+    fn resolve_scope_inline(&self, _name: &str, _receiver: Ty, _args: &[Ty]) -> Option<LibraryCallable> {
+        None
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

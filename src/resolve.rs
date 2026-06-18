@@ -3203,12 +3203,16 @@ impl<'a> Checker<'a> {
                 // Inlined scope functions `recv.let { … }` / `recv.also { … }`: bind the lambda's
                 // parameter (default `it`) to the receiver; `let` yields the body, `also` the receiver.
                 if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
-                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
+                    if matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
                         let rt = self.expr(receiver);
-                        self.push_scope();
-                        self.declare(params.first().map(|s| s.as_str()).unwrap_or("it"), rt, false);
-                        let bt = self.expr(body);
-                        self.pop_scope();
+                        // Type the lambda via the shared path so its `Ty::Fun` is RECORDED in `TypeInfo`
+                        // (the lowerer needs it to route the call to the bytecode inliner). Inlined ⇒ a
+                        // mutable capture is fine.
+                        let prev = self.allow_lambda_mutation;
+                        self.allow_lambda_mutation = true;
+                        let lam_ty = self.check_lambda_with_types(args[0], &[rt]);
+                        self.allow_lambda_mutation = prev;
+                        let bt = match lam_ty { Ty::Fun(s) => s.ret, _ => Ty::Unit };
                         return if name == "let" { bt } else { rt };
                     }
                 }
