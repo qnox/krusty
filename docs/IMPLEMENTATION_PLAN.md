@@ -2262,7 +2262,24 @@ bodies exist only as jar bytecode):
        relocated stdlib bytecode. Removes the closure (matches kotlinc) and handles mutable capture, so the
        `forEach`/`let`/`also` desugars can be deleted. Hard: interleave IR emission with byte-splicing at
        `function_invoke_sites`, drop the dead `aload action`, and thread the lambda IR to the emitter.
-     Plan: ship (a) for the coverage win, then (b) to retire the desugars.
+     Plan: route (b) is the chosen path (owner: delete the desugars). EVIDENCE: non-mutable-capture
+     lambda inline fns already work via closure+call (`map { it*2 }` compiles to `invokestatic
+     CollectionsKt.map(Iterable, Function1)` passing a closure, runs correctly); the desugars exist only
+     for **mutable capture** (the closure can't write an outer mutable local). So (b)'s payoff is the
+     no-hardcode win + mutable-capture cases of non-desugared fns — NOT broad coverage.
+     **Route (b) progress:** `function_invoke_sites` (296) locates the lambda calls; `branchless_lambda_segments`
+     (297) prepares a branchless single-invoke body (`let`/`also`/`run`/`apply`) — relocate, shift locals,
+     split at the invoke, elide the dead `aload <lambda-param>`, drop the trailing return → `(before, after)`
+     instruction segments. **Emitter integration (next):** for an inline call with a lambda arg, emit the
+     prologue storing only the *non-lambda* args (skip the lambda param slot); append `before` (relocated)
+     bytes; emit the caller's lambda IR body inline (its params bound to whatever `before` left on the
+     stack — store into the lambda's param slots, then `self.emit(lambda_body)`); append `after`; the value
+     falls through. Captures (incl. mutable) resolve to the caller's own slots since the lambda IR emits in
+     the caller's frame — which is exactly what the desugar achieves and the closure can't. REGRESSION
+     GUARD: route only NOT-yet-desugared fns (`run`/`with`/`apply`/`takeIf`) through the splice first
+     (additive, no regression), prove mutable capture works, THEN migrate `let`/`also`/`forEach` off the
+     desugars and delete them. Branchy lambda fns (`forEach`/`map` loops) reuse the `splice_branchy` frame
+     machinery with the invoke sites interleaved — after the branchless case works.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
