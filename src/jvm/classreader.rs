@@ -166,6 +166,13 @@ pub struct MethodCode {
     pub code: Vec<u8>,
     /// The defining class's constant pool — needed to relocate `code`'s pool references on inlining.
     pub source_cp: Vec<C>,
+    /// The raw `StackMapTable` attribute body (the frame entries, without the attribute name/length
+    /// header), or `None` if the method has none (a branchless body needs no frames). Required to
+    /// splice a *branchy* body: its frames are relocated into the caller.
+    pub stackmap: Option<Vec<u8>>,
+    /// True if the body has a non-empty exception table — splicing must relocate the handlers (not yet
+    /// supported), so such a body is not spliced.
+    pub has_handlers: bool,
 }
 
 /// Lazily read one method's `Code` (bytecode body) from class `bytes`, without parsing every other
@@ -216,7 +223,20 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                 let max_locals = r.u2().ok()?;
                 let code_len = r.u4().ok()? as usize;
                 let code = r.take(code_len).ok()?.to_vec();
-                return Some(MethodCode { max_stack, max_locals, code, source_cp: cp });
+                let exc_len = r.u2().ok()?;
+                r.take(exc_len as usize * 8).ok()?; // each entry is 4 × u2
+                // Code-attribute attributes: find `StackMapTable` (the verifier frames).
+                let nca = r.u2().ok()?;
+                let mut stackmap = None;
+                for _ in 0..nca {
+                    let an = utf8(r.u2().ok()?).to_string();
+                    let al = r.u4().ok()? as usize;
+                    let body = r.take(al).ok()?;
+                    if an == "StackMapTable" {
+                        stackmap = Some(body.to_vec());
+                    }
+                }
+                return Some(MethodCode { max_stack, max_locals, code, source_cp: cp, stackmap, has_handlers: exc_len > 0 });
             }
             r.take(attr_len).ok()?;
         }

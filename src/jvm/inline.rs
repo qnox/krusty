@@ -646,6 +646,10 @@ pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap
 /// (caller emits a normal `invokestatic`) if the body has any branch/switch, isn't single-exit, or
 /// uses a pool entry `relocate_insns` can't relocate (`invokedynamic`).
 pub fn splice_branchless(body: &MethodCode, descriptor: &str, base: u16, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
+    // A body with exception handlers needs handler-table relocation (not supported) — bail.
+    if body.has_handlers {
+        return None;
+    }
     let mut insns = disassemble(&body.code)?;
     // Branchless: every instruction is `Plain` (no `goto`/conditional/`switch` target).
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
@@ -676,7 +680,7 @@ mod tests {
     #[test]
     fn splice_branchless_drops_return_and_stores_args() {
         // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
-        let body = MethodCode { max_stack: 2, max_locals: 1, code: vec![0x1a, 0x06, 0x68, 0xac], source_cp: vec![C::Other] };
+        let body = MethodCode { max_stack: 2, max_locals: 1, code: vec![0x1a, 0x06, 0x68, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let insns = splice_branchless(&body, "(I)I", 3, &mut cw).expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
@@ -687,7 +691,7 @@ mod tests {
     #[test]
     fn splice_branchless_bails_on_branch() {
         // `iload_0; ifeq +4; iconst_1; ireturn` — has a branch ⇒ not branchless.
-        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac], source_cp: vec![C::Other] };
+        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         assert!(splice_branchless(&body, "(I)I", 1, &mut cw).is_none());
     }
@@ -762,14 +766,14 @@ mod tests {
     #[test]
     fn is_reified_inline_negative() {
         // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
-        let body = MethodCode { max_stack: 1, max_locals: 0, code: vec![0x04, 0xac], source_cp: vec![C::Other] };
+        let body = MethodCode { max_stack: 1, max_locals: 0, code: vec![0x04, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
         assert!(!is_reified_inline(&body));
     }
 
     #[test]
     fn splice_identity_function() {
         // inline fun id(x: Int): Int = x  →  body: iload_0; ireturn
-        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0xac], source_cp: vec![C::Other] };
+        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();
         let insns = splice(&body, "(I)I", 1, &tm, &mut cw).expect("splice");
