@@ -56,6 +56,9 @@ pub struct ExtCandidate {
     pub name: String,
     pub descriptor: String,
     pub ret_desc: String,
+    /// The method's generic `Signature` attribute, if any — for recovering the parameterized return
+    /// type of a generic top-level function (`listOf<T>` → `List<T>`).
+    pub signature: Option<String>,
 }
 
 /// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
@@ -328,13 +331,14 @@ impl Classpath {
                     break;
                 }
                 let Some(c) = all.get(&cn) else { break };
-                for (mname, mdesc) in &c.statics {
+                for (mname, mdesc, msig) in &c.statics {
                     let Some(ret_desc) = descriptor_ret(mdesc) else { continue };
                     let cand = ExtCandidate {
                         owner: name.clone(),
                         name: mname.clone(),
                         descriptor: mdesc.clone(),
                         ret_desc,
+                        signature: msig.clone(),
                     };
                     // A receiver-less top-level function (no first param) is by_name-only.
                     if let Some(first_param) = first_descriptor_param(mdesc) {
@@ -359,8 +363,8 @@ impl Classpath {
 struct ClassLite {
     is_public: bool,
     super_class: Option<String>,
-    /// `(name, descriptor)` of each public static method (excluding `<init>`/`<clinit>`).
-    statics: Vec<(String, String)>,
+    /// `(name, descriptor, generic-signature)` of each public static method (excluding `<init>`/`<clinit>`).
+    statics: Vec<(String, String, Option<String>)>,
 }
 
 fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
@@ -369,7 +373,7 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
         .methods
         .iter()
         .filter(|m| m.is_static() && m.is_public() && !m.name.starts_with('<'))
-        .map(|m| (m.name.clone(), m.descriptor.clone()))
+        .map(|m| (m.name.clone(), m.descriptor.clone(), m.signature.clone()))
         .collect();
     all.insert(ci.this_class.clone(), ClassLite { is_public: ci.is_public(), super_class: ci.super_class, statics });
 }

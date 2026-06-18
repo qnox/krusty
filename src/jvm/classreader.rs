@@ -14,6 +14,10 @@ pub struct MethodSig {
     pub access: u16,
     pub name: String,
     pub descriptor: String,
+    /// The method's generic `Signature` attribute (JVM generics) if present, e.g. `listOf`'s
+    /// `<T:Ljava/lang/Object;>([TT;)Ljava/util/List<TT;>;`. Carries the type parameters and how the
+    /// parameter/return types use them — what the erased `descriptor` drops. `None` if non-generic.
+    pub signature: Option<String>,
 }
 
 impl MethodSig {
@@ -243,26 +247,26 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         interfaces.push(class_name(r.u2()?));
     }
 
-    let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String)>, ReadError> {
+    let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String, Option<String>)>, ReadError> {
         let n = r.u2()?;
         let mut v = Vec::new();
         for _ in 0..n {
             let access = r.u2()?;
             let name = utf8(r.u2()?);
             let desc = utf8(r.u2()?);
-            skip_attributes(r)?;
-            v.push((access, name, desc));
+            let sig = read_member_signature(r, &cp)?;
+            v.push((access, name, desc, sig));
         }
         Ok(v)
     };
 
     let fields = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor)| FieldSig { access, name, descriptor })
+        .map(|(access, name, descriptor, _)| FieldSig { access, name, descriptor })
         .collect();
     let methods = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor)| MethodSig { access, name, descriptor })
+        .map(|(access, name, descriptor, signature)| MethodSig { access, name, descriptor, signature })
         .collect();
 
     // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, and the generic `Signature` attr.
@@ -385,6 +389,27 @@ fn skip_attributes(r: &mut Reader) -> Result<(), ReadError> {
         r.take(len)?;
     }
     Ok(())
+}
+
+/// Read a field/method's attributes, returning its generic `Signature` attribute string if present
+/// (and skipping the rest). Same wire shape as [`skip_attributes`].
+fn read_member_signature(r: &mut Reader, cp: &[C]) -> Result<Option<String>, ReadError> {
+    let n = r.u2()?;
+    let mut signature = None;
+    for _ in 0..n {
+        let ni = r.u2()?;
+        let len = r.u4()? as usize;
+        let is_sig = matches!(cp.get(ni as usize), Some(C::Utf8(s)) if s == "Signature");
+        if is_sig && len == 2 {
+            let si = r.u2()?;
+            if let Some(C::Utf8(s)) = cp.get(si as usize) {
+                signature = Some(s.clone());
+            }
+        } else {
+            r.take(len)?;
+        }
+    }
+    Ok(signature)
 }
 
 struct Reader<'a> {
