@@ -46,6 +46,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         computed_props: HashMap::new(),
         expr_depth: 0,
         inline_lambdas: Vec::new(),
+        inline_active: Vec::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -862,6 +863,9 @@ struct Lower<'a> {
     /// inline calls compose. Each entry is `(param name, lambda parameter names, lambda body, lambda
     /// parameter types)`: a call `param(args)` in the inline body inlines the lambda body in place.
     inline_lambdas: Vec<(String, Vec<String>, AstExprId, Vec<Ty>)>,
+    /// Names of `inline fun`s currently being expanded — a (self- or mutually-) recursive inline call
+    /// would expand forever, so re-entering an active name bails (the file is skipped).
+    inline_active: Vec<String>,
 }
 
 impl<'a> Lower<'a> {
@@ -2099,6 +2103,12 @@ impl<'a> Lower<'a> {
         if sig.params.len() != args.len() || sig.params.len() != pnames.len() {
             return None;
         }
+        // A (self- or mutually-) recursive inline call would expand forever — bail.
+        if self.inline_active.iter().any(|n| n == fname) {
+            return None;
+        }
+        let active_depth = self.inline_active.len();
+        self.inline_active.push(fname.to_string());
         let depth = self.scope.len();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
@@ -2115,6 +2125,7 @@ impl<'a> Lower<'a> {
                     if body_has_return(self.afile, lbody) || params.len() != fnsig.params.len() {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
+                        self.inline_active.truncate(active_depth);
                         return None;
                     }
                     self.inline_lambdas.push((pnames[i].clone(), params, lbody, fnsig.params.clone()));
@@ -2131,6 +2142,7 @@ impl<'a> Lower<'a> {
                     None => {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
+                        self.inline_active.truncate(active_depth);
                         return None;
                     }
                 };
@@ -2142,6 +2154,7 @@ impl<'a> Lower<'a> {
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
+        self.inline_active.truncate(active_depth);
         let body_val = body_val?;
         if stmts.is_empty() {
             Some(body_val)
