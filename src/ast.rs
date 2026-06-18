@@ -65,6 +65,10 @@ pub enum Expr {
     /// (`IntRange`/`LongRange`) or progression (`IntProgression` for `downTo`). Distinct from the
     /// `for`/`in` forms, which lower to counted loops / membership without materializing the object.
     RangeTo { lo: ExprId, hi: ExprId, kind: RangeKind },
+    /// `target++` / `target--` / `++target` / `--target` in *expression* (value) position — yields the
+    /// old value (postfix) or new value (prefix) while updating the lvalue. Statement position keeps
+    /// `Stmt::IncDec` / the member-index desugar (value discarded). `target` is currently a `Name`.
+    IncDec { target: ExprId, dec: bool, prefix: bool },
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -436,6 +440,7 @@ impl File {
             | Expr::Is { operand, .. } | Expr::As { operand, .. } | Expr::Lambda { body: operand, .. } => fe(*operand),
             Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => fe(*lhs) || fe(*rhs),
             Expr::RangeTo { lo, hi, .. } => fe(*lo) || fe(*hi),
+            Expr::IncDec { target, .. } => fe(*target),
             Expr::InRange { value, start, end, .. } => fe(*value) || fe(*start) || fe(*end),
             Expr::Member { receiver, .. } => fe(*receiver),
             Expr::Index { array, index } => fe(*array) || fe(*index),
@@ -624,6 +629,12 @@ impl File {
                 self.write_expr(*lo, out);
                 out.push(' ');
                 self.write_expr(*hi, out);
+                out.push(')');
+            }
+            Expr::IncDec { target, dec, prefix } => {
+                out.push_str(if *prefix { "(pre" } else { "(post" });
+                out.push_str(if *dec { "-- " } else { "++ " });
+                self.write_expr(*target, out);
                 out.push(')');
             }
             Expr::SafeCall { receiver, name, args } => {
