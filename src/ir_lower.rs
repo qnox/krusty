@@ -2790,7 +2790,15 @@ impl<'a> Lower<'a> {
                 let result_ty = self.info.ty(e);
                 let mut get2 = self.ir.add_expr(IrExpr::GetValue(v));
                 if result_ty.is_primitive() && lty.is_reference() {
-                    get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(result_ty) });
+                    // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
+                    // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
+                    // unboxing `Integer` straight to `Double` would be an invalid checkcast.
+                    if let Some(lp) = lty.obj_internal().and_then(crate::resolve::prim_of_wrapper) {
+                        get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(lp) });
+                        if lp != result_ty {
+                            get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(result_ty) });
+                        }
+                    }
                 }
                 let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
                 let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), get2), (None, rv)] });
