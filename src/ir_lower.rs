@@ -3083,6 +3083,31 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
+                    // Inlined scope functions `recv.let { it -> body }` / `recv.also { it -> body }`:
+                    // bind the lambda parameter to the (once-evaluated) receiver; `let` yields the body
+                    // value, `also` yields the receiver. Inlined so a mutable capture works (no closure).
+                    if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
+                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                            let rty = self.info.ty(receiver);
+                            let recv = self.expr(receiver)?;
+                            let depth = self.scope.len();
+                            let p_slot = self.fresh_value();
+                            let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                            self.scope.push((pname, p_slot, rty));
+                            let var_p = self.ir.add_expr(IrExpr::Variable { index: p_slot, ty: ty_to_ir(rty), init: Some(recv) });
+                            let body_val = self.expr(lbody);
+                            self.scope.truncate(depth);
+                            let body_val = body_val?;
+                            let result = if name == "let" {
+                                self.ir.add_expr(IrExpr::Block { stmts: vec![var_p], value: Some(body_val) })
+                            } else {
+                                // `also`: run the body for effect, yield the receiver.
+                                let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+                                self.ir.add_expr(IrExpr::Block { stmts: vec![var_p, body_val], value: Some(recv_read) })
+                            };
+                            return Some(result);
+                        }
+                    }
                     // Nested-class construction `Outer.Inner(args)` — the receiver is a class name and
                     // the call's result type is the nested class. Emit `new Outer$Inner(args)`.
                     if let Expr::Name(root) = self.afile.expr(receiver).clone() {
