@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A non-`val`/`var` primary-constructor parameter is an argument only (no field), available in the
+    // constructor body for property initializers and `init` blocks — including interleaved with `val`s.
+    ("NonPropertyCtorParam", r#"
+class A(x: Int) { val y = x * 2 }
+class B(val a: Int, b: Int, val c: Int) { val sum = a + b + c }
+class C(x: Int) { var z = 0; init { z = x + 10 } }
+class D(name: String) { val greeting = "Hi " + name }
+fun box(): String {
+    if (A(3).y != 6) return "f1"
+    val b = B(1, 2, 3)
+    if (b.a != 1 || b.c != 3 || b.sum != 6) return "f2"
+    if (C(5).z != 15) return "f3"
+    if (D("Bob").greeting != "Hi Bob") return "f4"
+    return "OK"
+}
+"#),
     // A body property's type is inferred from its initializer with the preceding properties (and
     // val/var ctor params) in scope: `val b = a + 1` sees the earlier `a`.
     ("SequentialPropInfer", r#"

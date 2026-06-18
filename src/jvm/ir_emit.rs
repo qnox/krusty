@@ -144,8 +144,14 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
     // properties — not parameters — so the descriptor covers only the leading parameter fields.
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
-    let n_params = c.ctor_param_count as usize;
-    let param_tys: Vec<Ty> = field_tys[..n_params].to_vec();
+    // The constructor takes ALL primary-ctor params (`ctor_args`), in declaration order — `val`/`var`
+    // params back a field, plain params are arguments only. (Synthesized classes have empty `ctor_args`
+    // and fall back to the leading `ctor_param_count` fields.)
+    let param_tys: Vec<Ty> = if c.ctor_args.is_empty() {
+        field_tys[..c.ctor_param_count as usize].to_vec()
+    } else {
+        c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+    };
     let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + params_words);
     // The superclass constructor's parameter types (empty for the erased top type — the front end
@@ -154,7 +160,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         Vec::new()
     } else {
         ir.classes.iter().find(|sc| sc.fq_name == c.superclass)
-            .map(|sc| sc.fields[..sc.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect())
+            .map(|sc| if sc.ctor_args.is_empty() {
+                sc.fields[..sc.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect()
+            } else {
+                sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+            })
             .unwrap_or_default()
     };
     let max_slot;
@@ -194,13 +204,26 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
         let super_init = e.cw.methodref(&c.superclass, "<init>", &method_descriptor(&super_param_tys, Ty::Unit));
         ctor.invokespecial(super_init, aw, 0);
-        // Store this class's own primary-constructor parameter fields.
+        // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
+        // stored to its field (the property fields are `fields[0..]` in declaration order among params);
+        // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
+        // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
         let mut slot = 1u16;
-        for ((name, _), t) in c.fields[..n_params].iter().zip(&param_tys) {
-            ctor.aload(0);
-            load(*t, slot, &mut ctor);
-            let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
-            ctor.putfield(fref, slot_words(*t) as i32);
+        let mut field_i = 0usize;
+        let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+            vec![true; param_tys.len()]
+        } else {
+            c.ctor_args.iter().map(|(_, f)| *f).collect()
+        };
+        for (i, t) in param_tys.iter().enumerate() {
+            if is_field.get(i).copied().unwrap_or(true) {
+                let name = &c.fields[field_i].0;
+                ctor.aload(0);
+                load(*t, slot, &mut ctor);
+                let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
+                ctor.putfield(fref, slot_words(*t) as i32);
+                field_i += 1;
+            }
             slot += slot_words(*t);
         }
         if let Some(init_body) = c.init_body {
@@ -1097,6 +1120,7 @@ impl<'a> Emitter<'a> {
                 // constructor's explicit parameter types; body properties are set inside it.
                 let field_tys: Vec<Ty> = match ctor_params {
                     Some(ps) => ps.iter().map(ir_ty_to_jvm).collect(),
+                    None if !c.ctor_args.is_empty() => c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect(),
                     None => c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect(),
                 };
                 let args = args.clone();

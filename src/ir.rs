@@ -238,8 +238,16 @@ pub struct IrClass {
     /// parameters (stored directly from args, in order); any after them are class-body properties
     /// initialized by `init_body`.
     pub fields: Vec<(String, IrType)>,
-    /// How many leading `fields` are constructor parameters (the rest are body properties).
+    /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
+    /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
+    /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
     pub ctor_param_count: u32,
+    /// ALL primary-constructor parameters in declaration order: `(type, is_field)`. `is_field` ⇒ a
+    /// `val`/`var` property whose arg is stored to a field (the property fields are `fields[0..]` in the
+    /// same relative order); `!is_field` ⇒ a plain parameter, an argument only, available as a local in
+    /// `<init>` for property initializers / `init` blocks. Empty for synthesized/enum/object classes
+    /// (then the constructor arity is `ctor_param_count`).
+    pub ctor_args: Vec<(IrType, bool)>,
     /// Constructor body run after the parameter fields are stored: an effect `Block` (body-property
     /// initializers as `SetField`, `init { … }` blocks) lowered with `this` = value 0 and the
     /// constructor parameters as values `1..=ctor_param_count`. `None` when there's nothing to run.
