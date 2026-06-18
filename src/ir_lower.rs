@@ -1044,18 +1044,27 @@ impl<'a> Lower<'a> {
         // runs its body for effect then returns the `kotlin/Unit` singleton; a value lambda returns its
         // (boxed) body value; a diverging body falls through to its own `throw`/`return`.
         let sam_void = matches!(&sam, Some((_, _, true)));
-        let (ret_ty, block) = if diverges {
-            (ty_to_ir(sig.ret), self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None }))
+        // `block` is the impl-method body (with a synthetic `return`); `inline_body` is the equivalent
+        // *value-producing* form (no synthetic return) the bytecode inliner emits directly — so a
+        // user `return` in the lambda becomes a real return from the *enclosing* method (a correct
+        // non-local return), not the lambda.
+        let (ret_ty, block, inline_body) = if diverges {
+            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None });
+            (ty_to_ir(sig.ret), b, ve)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
-            (ty_to_ir(Ty::Unit), self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None }))
+            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None });
+            (ty_to_ir(Ty::Unit), b, ve)
         } else if sig.ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             let ret = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            (ty_to_ir(Ty::obj("kotlin/Unit")), self.ir.add_expr(IrExpr::Block { stmts: vec![ve, ret], value: None }))
+            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve, ret], value: None });
+            let inline_b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: Some(unit) });
+            (ty_to_ir(Ty::obj("kotlin/Unit")), b, inline_b)
         } else {
             let ret = self.ir.add_expr(IrExpr::Return(Some(ve)));
-            (ty_to_ir(sig.ret), self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None }))
+            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            (ty_to_ir(sig.ret), b, ve)
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
@@ -1071,7 +1080,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam: sam.map(|(i, m, _)| (i, m)) }))
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam: sam.map(|(i, m, _)| (i, m)), inline_body: Some(inline_body) }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -1339,17 +1348,9 @@ impl<'a> Lower<'a> {
             return None;
         }
         let lam = self.expr(lam_arg)?;
-        // The lambda body must be single-exit (`{ effects…; Return(Some(_)) }`, no early/nested return) —
-        // the same shape the emitter inlines (captures and Unit lambdas allowed).
-        let inlinable = matches!(self.ir.expr(lam), IrExpr::Lambda { impl_fn, .. }
-            if {
-                let b = self.ir.functions[*impl_fn as usize].body;
-                matches!(b, Some(bb) if matches!(self.ir.expr(bb), IrExpr::Block { stmts, value: None }
-                    if stmts.last().map_or(false, |&l| matches!(self.ir.expr(l), IrExpr::Return(Some(_))))
-                        && stmts[..stmts.len().saturating_sub(1)].iter().all(|&s| !matches!(self.ir.expr(s),
-                            IrExpr::Return(_) | IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. }))))
-            });
-        if !inlinable {
+        // The argument must be a real lambda (with an `inline_body` to splice) — a callable reference
+        // (`::foo`) has none. The emitter handles any lambda body, incl. captures and non-local return.
+        if !matches!(self.ir.expr(lam), IrExpr::Lambda { inline_body: Some(_), .. }) {
             return None;
         }
         let recv = self.expr(receiver)?;
@@ -2418,7 +2419,7 @@ impl<'a> Lower<'a> {
                 if self.top_fun_decl(&name).map_or(false, |f| !f.type_params.is_empty()) {
                     return None;
                 }
-                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None }));
+                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
             }
             Expr::Name(n) => {
                 if let Some((v, slot_ty)) = self.lookup(&n) {
@@ -3306,11 +3307,12 @@ impl<'a> Lower<'a> {
                             return Some(call);
                         }
                     }
-                    // `let`/`also` are normally INLINED from their real stdlib bytecode by the
-                    // metadata-driven route above (no hardcode). This per-function desugar remains ONLY as
-                    // the fallback for the lambda shapes that route can't yet splice — a NON-LOCAL/early
-                    // `return` in the lambda body. Deleting it outright costs one box test until non-local
-                    // return inlining lands (route 3 in IMPLEMENTATION_PLAN); then this block goes away.
+                    // `let`/`also` fall back to this desugar when the metadata-driven route above can't
+                    // resolve/splice them (the stdlib scope fns are Object-keyed @InlineOnly extensions
+                    // that `resolve_callable` doesn't yet resolve, and this-capturing lambdas have no
+                    // closure form). The route already inlines the cases it does resolve (e.g. custom-lib
+                    // inline fns) from real bytecode; deleting this fully needs resolve_callable to resolve
+                    // these extensions (route 3 in IMPLEMENTATION_PLAN).
                     if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);
