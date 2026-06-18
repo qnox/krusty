@@ -620,8 +620,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         match step {
                             ast::ClassInit::PropInit(i) => {
                                 // A computed or abstract body property has no backing field here —
-                                // nothing to initialize.
-                                if !is_backing_field_prop(&c.body_props[*i as usize]) {
+                                // nothing to initialize. A deferred `val` (`val a: Int`, no initializer)
+                                // is assigned later in an `init` block, not at its declaration — skip it
+                                // here too (it has no init expression).
+                                if !is_backing_field_prop(&c.body_props[*i as usize])
+                                    || c.body_props[*i as usize].init.is_none()
+                                {
                                     continue;
                                 }
                                 // Computed body properties are not fields, so the field index counts
@@ -643,6 +647,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ast::ClassInit::Block(e) => {
                                 // An `init { … }` block: lower its statements for effect.
                                 let Expr::Block { stmts: bs, trailing } = lo.afile.expr(*e).clone() else { return None };
+                                // A branchy VALUE assignment in `init` (`a = if(…) … else …`) emits merge
+                                // frames in the constructor the flat emitter doesn't reconcile (a
+                                // verify/runtime error) — bail. A branchy *statement* (`if (c) { … }`) is
+                                // fine. (Pre-existing limitation, surfaced by deferred-`val` init.)
+                                for &s in &bs {
+                                    let branchy = match lo.afile.stmt(s) {
+                                        Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } => body_contains_branch(lo.afile, *value),
+                                        Stmt::Local { init, .. } => body_contains_branch(lo.afile, *init),
+                                        _ => false,
+                                    };
+                                    if branchy {
+                                        return None;
+                                    }
+                                }
                                 for s in bs {
                                     stmts.push(lo.stmt(s)?);
                                 }
@@ -774,7 +792,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract)
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p))
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -826,6 +844,14 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
 /// initializer and no custom getter/setter and not `lateinit`.
 fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none() && !p.is_lateinit && p.getter.is_none() && p.setter.is_none() && p.init.is_some()
+}
+
+/// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
+/// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
+/// in the constructor body rather than at the declaration.
+fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
+    !p.is_var && p.receiver.is_none() && !p.is_lateinit && p.init.is_none()
+        && p.getter.is_none() && p.setter.is_none() && !p.is_abstract && p.ty.is_some()
 }
 
 /// A computed property `val x: T get() = expr` — a custom getter, no backing field (no initializer),
