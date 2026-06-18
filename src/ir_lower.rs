@@ -1509,6 +1509,21 @@ impl<'a> Lower<'a> {
                 Some(self.ir.add_expr(IrExpr::SetField { receiver: r, class, index: idx, value: v }))
             }
             Stmt::AssignIndex { array, index, value } => {
+                let at = self.info.ty(array);
+                // `coll[i] = v` on a library type → its `set(index, value)` operator member, discarding
+                // the returned previous element (an array set stays the `kotlin/Array.set` intrinsic).
+                if let Ty::Obj(internal, _) = at {
+                    if at.array_elem().is_none() {
+                        let (it, vt) = (self.info.ty(index), self.info.ty(value));
+                        if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]) {
+                            let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
+                            let a = self.expr(array)?;
+                            let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
+                            let v = self.lower_arg(value, &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)))?;
+                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: "set".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i, v] }));
+                        }
+                    }
+                }
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
                 let v = self.expr(value)?;

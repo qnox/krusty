@@ -3794,9 +3794,15 @@ impl<'a> Checker<'a> {
                 let it = self.expr(index);
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];
-                self.expect_assignable(Ty::Int, it, span, "array index");
                 match at.array_elem() {
-                    Some(elem) => self.expect_assignable(elem, vt, span, "array element assignment"),
+                    Some(elem) => {
+                        self.expect_assignable(Ty::Int, it, span, "array index");
+                        self.expect_assignable(elem, vt, span, "array element assignment");
+                    }
+                    // `coll[i] = v` on a library type → its `set(index, value)` operator member
+                    // (`MutableList.set(Int, E)`, `MutableMap.put(K, V)`).
+                    None if matches!(at, Ty::Obj(internal, _)
+                        if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()) => {}
                     None => {
                         if at != Ty::Error {
                             self.diags.error(span, format!("'{}' is not an array (cannot index-assign)", at.name()));
