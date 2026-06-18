@@ -53,6 +53,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    ("RepeatInline", r#"
+fun box(): String {
+    var s = 0
+    repeat(4) { s += it }
+    if (s != 6) return "f1: $s"
+    var c = 0
+    repeat(5) { c++ }
+    if (c != 5) return "f2: $c"
+    val sb = StringBuilder()
+    repeat(3) { sb.append("x") }
+    if (sb.toString() != "xxx") return "f3"
+    return "OK"
+}
+"#),
     ("ForeachInline", r#"
 fun box(): String {
     var s = 0
