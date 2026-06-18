@@ -128,6 +128,10 @@ fun box(): String {
     var x = 10
     val r = call { x = x * 2; x }
     if (x != 20 || r != 20) return "f3"
+    var c = 0
+    twice { c++ }
+    twice { c-- ; c-- }
+    if (c != -2) return "f4:$c"
     return "OK"
 }
 "#),
