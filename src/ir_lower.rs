@@ -2417,7 +2417,7 @@ impl<'a> Lower<'a> {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
-                    } else if let Some((internal, desc, is_iface)) = {
+                    } else if let Some((internal, desc, is_iface, mparams)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
@@ -2427,14 +2427,19 @@ impl<'a> Lower<'a> {
                             .and_then(|internal| {
                                 crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys).map(|m| {
                                     let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
-                                    (internal, m.descriptor, is_iface)
+                                    (internal, m.descriptor, is_iface, m.params)
                                 })
                             })
                     } {
                         let recv = self.expr(receiver)?;
+                        // Coerce each argument to the resolved parameter type so a primitive flowing into
+                        // an erased `Any` parameter (`List<Int>.add(E)` → `add(Object)`) autoboxes.
                         let mut a = Vec::new();
-                        for &arg in &args {
-                            a.push(self.expr(arg)?);
+                        for (i, &arg) in args.iter().enumerate() {
+                            match mparams.get(i) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
                         }
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a })
                     } else if let Some(c) = {
