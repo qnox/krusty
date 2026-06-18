@@ -2168,6 +2168,27 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
   unlocked: `listOf<Short>(1, 2)` would box `Int` literals as `Integer` and `ClassCastException` on a
   narrowing read — now cleanly skipped (the erased logical-vs-physical element type isn't tracked yet).
   `tests/range_value_e2e.rs`; SPEC §7.
+- ✅ **Phase 266 — function types as generic arguments** (442 box()=OK). `ArrayList<() -> Unit>()`: the
+  call-site generic-argument detector accepts the `(`/`)`/`->` of a function-type argument.
+- ✅ **Phase 267 — `++`/`--` as expression values** (441 → 447 box()=OK). `Expr::IncDec` value node (no
+  temp slot: old = new ∓ 1); also fixed an empty-`when` subject side-effect bug. `tests/incdec_expr_e2e.rs`.
+- ✅ **Phase 268 — property type inference from a primitive conversion call** (447 → 448). `val b =
+  2.toByte()` infers `Byte`; `x.toString()` infers `String`.
+- ✅ **Phases 269–272, 275–276 — unsigned types `UInt`/`ULong`** (448 → 453 box()=OK). Literals, arithmetic,
+  `Integer.{divide,remainder,compare}Unsigned`, `toUnsignedString`, boxing (`box-impl`/`unbox-impl`/
+  `is UInt`), and `for`-ranges. The syntactic `for`-loop is generalized to `Int`/`Long`/`UInt`/`ULong`/`Char`
+  counters. `tests/unsigned_e2e.rs`. (Reverted within 269: a hardcoded `Int.MAX_VALUE` table — kotlinc reads
+  it from the stdlib `const val`, so it must come from the classpath, not krusty source.)
+- ✅ **Phase 273 — reject mutable capture in extension-call lambdas** (a silent miscompile fix).
+  `listOf(…).forEach { s += it }` was typed by a path that skipped the capture guard, lowering to a closure
+  whose mutation was lost; now it bails (skip), never miscompiles.
+- ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
+  is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
+
+> Note: the next coverage levers (stdlib higher-order-function inlining for mutable-capture `forEach`/`map`;
+> classpath companion-constants via `ConstantValue`; `UIntRange` value iteration with inline-class mangled
+> getters; coroutines; inner classes; nullable primitives `Int?`) are each multi-file, infrastructure-scale
+> efforts — see the coverage-roadmap notes for entry points. The 0-FAIL never-miscompile invariant holds.
 
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.

@@ -253,8 +253,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the library set like any extension call. A `for (x in r)` over a stored `IntRange`/`LongRange` value
   iterates as a counted loop (`last = r.getLast(); i = r.getFirst(); while (i <= last) { x = i; …; i++ }`),
   matching kotlinc's specialized loop and avoiding per-element boxing; `Char` ranges and progressions use
-  the iterator protocol. The syntactic `for (i in a..b)` form is unchanged (a direct counted loop, `Int`
-  only — it never materializes a range object). `tests/range_value_e2e.rs`.
+  the iterator protocol. The syntactic `for (i in a..b)` counted loop now spans `Int`/`Long`/`UInt`/
+  `ULong`/`Char` counters (not just `Int`): the counter takes the uniform bound type, signed/`Long`/`Char`
+  compare with the direct opcode, and the unsigned case compares with `Integer.compareUnsigned`/
+  `Long.compareUnsigned` (a signed `<=` would misorder values past the sign bit). `tests/range_value_e2e.rs`.
+- **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
+  a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
+  anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
+  The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
+  new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
+  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
+  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
+  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
+  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
+  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
+  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
+  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
+  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
+  `when` subjects are not yet modeled — they cleanly skip.)
+- **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
+  skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
+  This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
+  — previously the latter bypassed the check and silently miscompiled). A primitive lambda parameter is
+  unboxed from the erased generic `FunctionN` signature (`mapIndexed`'s index is `Int`, not boxed `Integer`).
 - `companion object` (methods only): a synthesized `C$Companion` class holds the companion methods as
   instance methods; the outer class `C` gets a `public static final Companion` field of that type, built
   in `C`'s `<clinit>`; `C.foo()` compiles to `getstatic C.Companion; invokevirtual`. The companion
