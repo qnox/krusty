@@ -1351,9 +1351,15 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 // Body-property initializers and `init` blocks see the properties (implicit `this`)
                 // and the primary-constructor parameters (including non-property ones).
+                // A *deferred* `val` (declared with no initializer/getter — `val a: Int`) is assigned
+                // exactly once in an `init` block, so it is treated as assignable WITHIN the constructor
+                // body (kotlinc's definite-assignment allows it; a normal `val` stays immutable).
+                let deferred_val: std::collections::HashSet<&str> = cl.body_props.iter()
+                    .filter(|bp| !bp.is_var && bp.init.is_none() && bp.getter.is_none() && bp.ty.is_some())
+                    .map(|bp| bp.name.as_str()).collect();
                 c.push_scope();
                 for (n, t, is_var) in &props {
-                    c.declare(n, *t, *is_var);
+                    c.declare(n, *t, *is_var || deferred_val.contains(n.as_str()));
                 }
                 for p in &cl.props {
                     let ty = c.resolve_ty(&p.ty);

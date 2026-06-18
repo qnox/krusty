@@ -112,6 +112,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A deferred `val` (declared with a type, no initializer) is assigned exactly once in an `init`
+    // block — a real backing field initialized in the constructor body.
+    ("DeferredValInit", r#"
+class C(x: Int) {
+    val a: Int
+    val b: Int
+    init {
+        a = x
+        b = x + 1
+    }
+}
+fun box(): String {
+    val o = C(5)
+    if (o.a != 5) return "f1"
+    if (o.b != 6) return "f2"
+    return "OK"
+}
+"#),
     // A non-`val`/`var` primary-constructor parameter is an argument only (no field), available in the
     // constructor body for property initializers and `init` blocks — including interleaved with `val`s.
     ("NonPropertyCtorParam", r#"
