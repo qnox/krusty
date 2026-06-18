@@ -112,6 +112,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // An expression-bodied extension function with no explicit return type infers it from the body,
+    // with `this` bound to the receiver (`fun Int.double() = this * 2` → return Int).
+    ("ExtThisInfer", r#"
+fun Int.double() = this * 2
+fun String.shout() = this + "!"
+fun Int.isPos() = this > 0
+fun box(): String {
+    if (5.double() != 10) return "f1"
+    if ("hi".shout() != "hi!") return "f2"
+    if (!4.isPos()) return "f3"
+    return "OK"
+}
+"#),
     // A deferred `val` (declared with a type, no initializer) is assigned exactly once in an `init`
     // block — a real backing field initialized in the constructor body.
     ("DeferredValInit", r#"
