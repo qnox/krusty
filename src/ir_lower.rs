@@ -1333,12 +1333,21 @@ impl<'a> Lower<'a> {
         if !c.is_inline {
             return None;
         }
+        // The platform must be able to splice this body (branchless, single lambda-invoke, single exit) —
+        // else the emitter would fall back to a real call, which is broken for an `@InlineOnly` callee.
+        if !self.syms.libraries.can_inline_lambda(&c.owner, &c.name, &c.descriptor) {
+            return None;
+        }
         let lam = self.expr(lam_arg)?;
-        let inlinable = matches!(self.ir.expr(lam), IrExpr::Lambda { captures, impl_fn, .. }
-            if captures.is_empty() && {
+        // The lambda body must be single-exit (`{ effects…; Return(Some(_)) }`, no early/nested return) —
+        // the same shape the emitter inlines (captures and Unit lambdas allowed).
+        let inlinable = matches!(self.ir.expr(lam), IrExpr::Lambda { impl_fn, .. }
+            if {
                 let b = self.ir.functions[*impl_fn as usize].body;
                 matches!(b, Some(bb) if matches!(self.ir.expr(bb), IrExpr::Block { stmts, value: None }
-                    if stmts.len() == 1 && matches!(self.ir.expr(stmts[0]), IrExpr::Return(Some(_)))))
+                    if stmts.last().map_or(false, |&l| matches!(self.ir.expr(l), IrExpr::Return(Some(_))))
+                        && stmts[..stmts.len().saturating_sub(1)].iter().all(|&s| !matches!(self.ir.expr(s),
+                            IrExpr::Return(_) | IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. }))))
             });
         if !inlinable {
             return None;

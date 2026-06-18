@@ -793,6 +793,48 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
 /// the dead `aload <lambda-param>` loads elided (no closure object is passed). The lambda's arguments
 /// are whatever the `before` segment leaves on the stack; `after` runs on the lambda's result. The
 /// trailing return is dropped (the value falls through). `None` if the shape isn't supported.
+/// Whether a body is shaped so the lambda-argument splice will succeed: branchless, no exception
+/// handlers, exactly one `FunctionN.invoke` call, and a single trailing return (after stripping the
+/// entry `checkNotNullParameter` null-checks). Lets the front end route a call to the inliner ONLY
+/// when the emitter is guaranteed to splice it — required because an `@InlineOnly` callee has no
+/// runtime body to fall back to.
+pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
+    if body.has_handlers {
+        return false;
+    }
+    let Some(mut insns) = disassemble(&body.code) else { return false };
+    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
+        return false;
+    }
+    strip_param_null_checks(&mut insns, &body.source_cp);
+    if function_invoke_sites(&insns, &body.source_cp).len() != 1 {
+        return false;
+    }
+    let returns = insns.iter().filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))).count();
+    returns == 1 && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
+}
+
+/// Remove kotlinc's entry `Intrinsics.checkNotNullParameter`/`checkNotNullExpressionValue` null-checks
+/// (the value push + name `ldc` + the call). Shared by the splice and the spliceability check.
+fn strip_param_null_checks(insns: &mut Vec<Insn>, src_cp: &[C]) {
+    let mut drop = vec![false; insns.len()];
+    for (i, insn) in insns.iter().enumerate() {
+        if let Insn::Plain { op: 0xb8, operands } = insn {
+            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8 | operands.get(1).copied().unwrap_or(0) as u16;
+            if let Some(("kotlin/jvm/internal/Intrinsics", n)) = methodref_target(src_cp, idx) {
+                if n == "checkNotNullParameter" || n == "checkNotNullExpressionValue" {
+                    drop[i] = true;
+                    if i >= 1 { drop[i - 1] = true; }
+                    if i >= 2 { drop[i - 2] = true; }
+                }
+            }
+        }
+    }
+    if drop.iter().any(|&d| d) {
+        *insns = std::mem::take(insns).into_iter().zip(drop).filter(|(_, d)| !d).map(|(x, _)| x).collect();
+    }
+}
+
 pub fn branchless_lambda_segments(
     body: &MethodCode,
     base: u16,
@@ -806,25 +848,9 @@ pub fn branchless_lambda_segments(
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
         return None; // branchless only (loops handled later)
     }
-    // Strip kotlinc's entry `Intrinsics.checkNotNullParameter(param, "name")` null-checks (the value
-    // push + name `ldc` + the call): they guard the original parameters (incl. the lambda object),
-    // which don't exist once inlined. Branchless ⇒ no branch targets into the removed region.
-    let mut drop = vec![false; insns.len()];
-    for (i, insn) in insns.iter().enumerate() {
-        if let Insn::Plain { op: 0xb8, operands } = insn {
-            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8 | operands.get(1).copied().unwrap_or(0) as u16;
-            if let Some(("kotlin/jvm/internal/Intrinsics", n)) = methodref_target(&body.source_cp, idx) {
-                if n == "checkNotNullParameter" || n == "checkNotNullExpressionValue" {
-                    drop[i] = true;
-                    if i >= 1 { drop[i - 1] = true; }
-                    if i >= 2 { drop[i - 2] = true; }
-                }
-            }
-        }
-    }
-    if drop.iter().any(|&d| d) {
-        insns = insns.into_iter().zip(drop).filter(|(_, d)| !d).map(|(x, _)| x).collect();
-    }
+    // Strip kotlinc's entry `checkNotNullParameter` null-checks (they guard the original parameters,
+    // incl. the lambda object, which don't exist once inlined). Branchless ⇒ no branch targets removed.
+    strip_param_null_checks(&mut insns, &body.source_cp);
     let sites = function_invoke_sites(&insns, &body.source_cp);
     if sites.len() != 1 {
         return None; // exactly one lambda call (let/also/run/apply/…)
