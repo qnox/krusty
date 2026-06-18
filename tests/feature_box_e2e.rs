@@ -98,6 +98,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A bare-value lambda types its parameters from its own annotations (`{ x: Int -> … }`), even with
+    // no expected function type — so the body and a direct call both check correctly.
+    ("LambdaParamType", r#"
+fun box(): String {
+    val dbl = { x: Int -> x * 2 }
+    if (dbl(3) != 6) return "f1"
+    val add = { a: Int, b: Int -> a + b }
+    if (add(2, 5) != 7) return "f2"
+    val len = { s: String -> s.length }
+    if (len("abcd") != 4) return "f3"
+    return "OK"
+}
+"#),
     // Labeled loops: `break@label`/`continue@label` target the named enclosing loop.
     ("LabeledLoops", r#"
 fun box(): String {

@@ -1461,6 +1461,9 @@ impl<'a> Parser<'a> {
                 j += 1;
             }
         };
+        // Parameter type annotations, parallel to `params` — kept (in a side-table) so a bare-value
+        // lambda `{ x: Int -> … }` types its own parameters even without an expected function type.
+        let mut param_types: Vec<Option<TypeRef>> = Vec::new();
         let params = if has_params {
             let mut ps = Vec::new();
             loop {
@@ -1470,7 +1473,9 @@ impl<'a> Parser<'a> {
                     self.bump();
                     if self.at(TokenKind::Colon) {
                         self.bump();
-                        let _ = self.parse_type();
+                        param_types.push(Some(self.parse_type()));
+                    } else {
+                        param_types.push(None);
                     }
                 }
                 if self.at(TokenKind::Comma) {
@@ -1502,7 +1507,11 @@ impl<'a> Parser<'a> {
             }
         }
         let body = self.file.add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi));
-        self.file.add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi))
+        let lam = self.file.add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));
+        if param_types.iter().any(|t| t.is_some()) {
+            self.file.lambda_param_types.insert(lam.0, param_types);
+        }
+        lam
     }
 
     fn parse_block_expr(&mut self) -> ExprId {
