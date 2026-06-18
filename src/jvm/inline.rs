@@ -622,6 +622,130 @@ fn param_store_ops(descriptor: &str, base: u16) -> Option<Vec<(u16, u8)>> {
 /// pool, with locals shifted by `base`, returns redirected to the end, and `reifiedOperationMarker`s
 /// resolved against `type_map`. `None` if the body uses a not-yet-relocatable construct
 /// (`invokedynamic`, byte-index `ldc` overflow), so the caller emits a real call instead.
+/// A JVM verification type (`verification_type_info`), as carried by a `StackMapTable` frame. Pool and
+/// bytecode-offset operands stay in the *source* class's terms until relocation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VType {
+    Top,
+    Int,
+    Float,
+    Long,
+    Double,
+    Null,
+    UninitThis,
+    /// `Object` — a `cpool_index` of a `Class` entry in the source pool.
+    Object(u16),
+    /// `Uninitialized` — the bytecode `offset` of the `new` that produced the value.
+    Uninit(u16),
+}
+
+/// One decoded `StackMapTable` frame: the absolute bytecode `offset` it applies to, plus the full
+/// (absolute, not delta-encoded) local and operand-stack verification types at that point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub offset: usize,
+    pub locals: Vec<VType>,
+    pub stack: Vec<VType>,
+}
+
+/// Read one `verification_type_info` at `*i`, advancing the cursor. `None` on truncation.
+fn read_vtype(b: &[u8], i: &mut usize) -> Option<VType> {
+    let tag = *b.get(*i)?;
+    *i += 1;
+    Some(match tag {
+        0 => VType::Top,
+        1 => VType::Int,
+        2 => VType::Float,
+        3 => VType::Double,
+        4 => VType::Long,
+        5 => VType::Null,
+        6 => VType::UninitThis,
+        7 => {
+            let idx = (*b.get(*i)? as u16) << 8 | *b.get(*i + 1)? as u16;
+            *i += 2;
+            VType::Object(idx)
+        }
+        8 => {
+            let off = (*b.get(*i)? as u16) << 8 | *b.get(*i + 1)? as u16;
+            *i += 2;
+            VType::Uninit(off)
+        }
+        _ => return None,
+    })
+}
+
+fn u2_at(b: &[u8], i: &mut usize) -> Option<u16> {
+    let v = (*b.get(*i)? as u16) << 8 | *b.get(*i + 1)? as u16;
+    *i += 2;
+    Some(v)
+}
+
+/// Decode a raw `StackMapTable` attribute body into the absolute [`Frame`]s it describes, given the
+/// method's implicit frame-0 locals (its parameters, `this` first for an instance method). Resolves
+/// the delta-encoded `same`/`same_locals_1_stack`/`chop`/`append`/`full` forms to absolute frames.
+/// `None` on a malformed table. Offsets/pool refs stay in the source class's terms (relocated later).
+pub fn decode_stackmap(bytes: &[u8], frame0_locals: Vec<VType>) -> Option<Vec<Frame>> {
+    let mut i = 0;
+    let count = u2_at(bytes, &mut i)?;
+    let mut locals = frame0_locals;
+    let mut offset: i64 = -1; // first frame's absolute offset = its delta (prev = -1)
+    let mut frames = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let tag = *bytes.get(i)?;
+        i += 1;
+        let (delta, stack) = if tag <= 63 {
+            // SAME
+            (tag as u16, vec![])
+        } else if tag <= 127 {
+            // SAME_LOCALS_1_STACK_ITEM
+            let s = read_vtype(bytes, &mut i)?;
+            ((tag - 64) as u16, vec![s])
+        } else if tag == 247 {
+            // SAME_LOCALS_1_STACK_ITEM_EXTENDED
+            let d = u2_at(bytes, &mut i)?;
+            let s = read_vtype(bytes, &mut i)?;
+            (d, vec![s])
+        } else if (248..=250).contains(&tag) {
+            // CHOP: remove (251 - tag) locals from the end
+            let d = u2_at(bytes, &mut i)?;
+            let n = (251 - tag) as usize;
+            for _ in 0..n {
+                locals.pop()?;
+            }
+            (d, vec![])
+        } else if tag == 251 {
+            // SAME_FRAME_EXTENDED
+            (u2_at(bytes, &mut i)?, vec![])
+        } else if (252..=254).contains(&tag) {
+            // APPEND: add (tag - 251) locals
+            let d = u2_at(bytes, &mut i)?;
+            let n = (tag - 251) as usize;
+            for _ in 0..n {
+                locals.push(read_vtype(bytes, &mut i)?);
+            }
+            (d, vec![])
+        } else {
+            // FULL_FRAME (255)
+            let d = u2_at(bytes, &mut i)?;
+            let nl = u2_at(bytes, &mut i)?;
+            let mut ls = Vec::with_capacity(nl as usize);
+            for _ in 0..nl {
+                ls.push(read_vtype(bytes, &mut i)?);
+            }
+            let ns = u2_at(bytes, &mut i)?;
+            let mut st = Vec::with_capacity(ns as usize);
+            for _ in 0..ns {
+                st.push(read_vtype(bytes, &mut i)?);
+            }
+            locals = ls;
+            (d, st)
+        };
+        offset += delta as i64 + 1;
+        frames.push(Frame { offset: offset as usize, locals: locals.clone(), stack });
+    }
+    Some(frames)
+}
+
 pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap<String, String>, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
     let mut insns = disassemble(&body.code)?;
     // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
@@ -686,6 +810,40 @@ mod tests {
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(assemble(&insns), vec![0x3e, 0x1d, 0x06, 0x68]);
+    }
+
+    #[test]
+    fn decode_stackmap_append_and_full() {
+        // count=2:
+        //   APPEND(252) delta=5, +1 local Integer
+        //   FULL(255)  delta=3, locals=[Object #9, Long], stack=[Int]
+        let bytes = vec![
+            0x00, 0x02,
+            252, 0x00, 0x05, 0x01,
+            255, 0x00, 0x03, 0x00, 0x02, 0x07, 0x00, 0x09, 0x04, 0x00, 0x01, 0x01,
+        ];
+        let frames = decode_stackmap(&bytes, vec![VType::Int]).unwrap();
+        assert_eq!(frames[0].offset, 5); // -1 + 5 + 1
+        assert_eq!(frames[0].locals, vec![VType::Int, VType::Int]);
+        assert_eq!(frames[0].stack, vec![]);
+        assert_eq!(frames[1].offset, 9); // 5 + 3 + 1
+        assert_eq!(frames[1].locals, vec![VType::Object(9), VType::Long]);
+        assert_eq!(frames[1].stack, vec![VType::Int]);
+    }
+
+    #[test]
+    fn decode_stackmap_chop_and_same_stack() {
+        // count=2:
+        //   SAME_LOCALS_1_STACK_ITEM tag=66 (delta=2), stack=Float
+        //   CHOP(250) delta=4 → remove 1 local
+        let bytes = vec![0x00, 0x02, 66, 0x02, 250, 0x00, 0x04];
+        let frames = decode_stackmap(&bytes, vec![VType::Int, VType::Long]).unwrap();
+        assert_eq!(frames[0].offset, 2);
+        assert_eq!(frames[0].locals, vec![VType::Int, VType::Long]);
+        assert_eq!(frames[0].stack, vec![VType::Float]);
+        assert_eq!(frames[1].offset, 7); // 2 + 4 + 1
+        assert_eq!(frames[1].locals, vec![VType::Int]); // chopped the Long
+        assert_eq!(frames[1].stack, vec![]);
     }
 
     #[test]
