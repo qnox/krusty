@@ -1844,9 +1844,11 @@ impl<'a> Parser<'a> {
                 // `>=` closes the last `<` if depth == 1 (e.g. `Foo<Bar>=` — not valid type args).
                 // Treat as "not type args" to stay safe.
                 Some(TokenKind::GtEq) => return false,
-                // Tokens valid inside type argument lists:
+                // Tokens valid inside type argument lists — including a function-type argument
+                // (`Foo<(A) -> B>`): its parens and arrow.
                 Some(TokenKind::Ident) | Some(TokenKind::Dot) | Some(TokenKind::Comma) |
-                Some(TokenKind::Star) | Some(TokenKind::Question) | Some(TokenKind::Colon) => {
+                Some(TokenKind::Star) | Some(TokenKind::Question) | Some(TokenKind::Colon) |
+                Some(TokenKind::LParen) | Some(TokenKind::RParen) | Some(TokenKind::Arrow) => {
                     j += 1;
                 }
                 _ => return false,
@@ -2837,6 +2839,16 @@ mod tests {
     fn member_call() {
         assert_eq!(tree("fun f(a: Int, b: String): String = a.toString() + b"),
             "(fun f (param a Int) (param b String) :String (+ (call (. a toString)) b))\n");
+    }
+
+    #[test]
+    fn function_type_as_generic_arg() {
+        // `Foo<() -> Unit>()` — a function type as a generic type argument must be recognized as a
+        // generic call (not parsed as a `<` comparison). `tree` asserts no parse errors.
+        let t = tree("fun f() { val xs = ArrayList<() -> Unit>() }");
+        assert!(t.contains("ArrayList"), "tree: {t}");
+        // Also the two-arg form `Map<String, (Int) -> Int>`.
+        let _ = tree("fun g() { val m = HashMap<String, (Int) -> Int>() }");
     }
 
     #[test]
