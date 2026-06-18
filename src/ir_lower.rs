@@ -42,6 +42,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_fn_name: String::new(),
         lambda_seq: 0,
         boxed_elem: HashMap::new(),
+        local_fun_ids: HashMap::new(),
         cur_ret_ty: IrType::Unit,
         companions: HashMap::new(),
         computed_props: HashMap::new(),
@@ -328,6 +329,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let param_checks = param_checks_for(f, &sig.params);
                 let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks });
                 lo.fun_ids.insert(f.name.clone(), id);
+            }
+        }
+    }
+    // Pass 1b': register lifted local functions (`fun` inside a function body) as private static
+    // methods on the facade. The checker mangled each to `$local$<stmtid>` and rejected captures, so
+    // only non-capturing local functions reach here. A call to one routes to its `FunId` in pass 2.
+    for (i, s) in file.stmt_arena.iter().enumerate() {
+        if let Stmt::LocalFun(_) = s {
+            let stmt_id = crate::ast::StmtId(i as u32);
+            if let Some((mangled, sig)) = info.local_fun_sigs.get(&stmt_id) {
+                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let ret = ty_to_ir(sig.ret);
+                let id = lo.ir.add_fun(IrFunction { name: mangled.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks: vec![] });
+                lo.local_fun_ids.insert(stmt_id, id);
             }
         }
     }
@@ -812,6 +827,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             _ => {}
         }
     }
+    // Pass 2': lower the lifted local-function bodies. A non-capturing local function lowers like a
+    // top-level static method: its parameters are values `0..n`, no captured outer scope.
+    let local_funs: Vec<(crate::ast::StmtId, ast::FunDecl)> = file.stmt_arena.iter().enumerate()
+        .filter_map(|(i, s)| match s { Stmt::LocalFun(f) => Some((crate::ast::StmtId(i as u32), f.clone())), _ => None })
+        .collect();
+    for (stmt_id, f) in &local_funs {
+        let Some(&fid) = lo.local_fun_ids.get(stmt_id) else { continue };
+        lo.scope.clear();
+        lo.next_value = 0;
+        lo.cur_class = None;
+        lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
+        lo.lambda_seq = 0;
+        let sig = info.local_fun_sigs.get(stmt_id)?.1.clone();
+        for (p, t) in f.params.iter().zip(&sig.params) {
+            let v = lo.fresh_value();
+            lo.scope.push((p.name.clone(), v, *t));
+        }
+        let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+        lo.lower_body(&f.body, &ret_ty, fid)?;
+    }
     Some(lo.ir)
 }
 
@@ -973,6 +1008,9 @@ struct Lower<'a> {
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
     /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
     boxed_elem: HashMap<String, Ty>,
+    /// A local function's `StmtId` → its lifted static `FunId` (a private method on the facade). A call
+    /// to it (via `info.local_call_map`) lowers to `Callee::Local(fid)`.
+    local_fun_ids: HashMap<crate::ast::StmtId, u32>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: IrType,
@@ -2338,6 +2376,9 @@ impl<'a> Lower<'a> {
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach { name, iterable, body, label } => self.lower_for_each(&name, iterable, body, label),
+            // A local-function declaration emits no code here — its body is lifted to a separate static
+            // method (pass 2'); a call to it routes to that method.
+            Stmt::LocalFun(_) => Some(self.ir.add_expr(IrExpr::Block { stmts: vec![], value: None })),
             _ => None,
         }
     }
@@ -3421,6 +3462,19 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // A call to a lifted local function — the checker mapped this call to its decl.
+                    if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
+                        if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
+                            let params = self.ir.functions[fid as usize].params.clone();
+                            if args.len() == params.len() {
+                                let mut a = Vec::new();
+                                for (arg, pt) in args.iter().zip(&params) {
+                                    a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                            }
+                        }
+                    }
                     // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
                     // currently being expanded: inline the passed lambda's body in place.
                     if self.lookup(&fname).is_none() {
