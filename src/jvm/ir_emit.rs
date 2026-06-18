@@ -754,6 +754,9 @@ impl<'a> Emitter<'a> {
         let Some((before, after)) = crate::jvm::inline::branchless_lambda_segments(body, base, lambda_off, self.cw) else {
             return false;
         };
+        // Reserve the spliced body's own local range (`base..base+max_locals`, e.g. kotlinc's `$i$f`
+        // inline-marker store) so the fresh lambda-param slots sit above it and `max_locals` covers all.
+        self.next_slot = self.next_slot.max(base + body.max_locals);
         // The lambda impl's typed parameters (no captures) and return.
         let impl_f = &self.ir.functions[impl_fn as usize];
         if impl_f.params.len() != arity {

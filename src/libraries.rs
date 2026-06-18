@@ -212,6 +212,14 @@ pub trait LibrarySet {
     fn extension_lambda_param_types(&self, _recv: Ty, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         None
     }
+
+    /// The same as [`extension_lambda_param_types`](Self::extension_lambda_param_types) but for a
+    /// *receiver-less top-level* library function (`applyIt(5) { it + 1 }`): the lambda parameter types
+    /// come from the function's generic `Signature` (`it: Int` from `f: (Int) -> Int`), which the erased
+    /// `Function1` descriptor hides. Lets the checker type a lib fn's lambda argument before resolving.
+    fn toplevel_lambda_param_types(&self, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+        None
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

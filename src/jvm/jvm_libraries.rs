@@ -519,6 +519,27 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
+    fn toplevel_lambda_param_types(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+        for c in self.cp.find_top_level(name) {
+            let Some(sig) = c.signature.as_deref() else { continue };
+            let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
+            if psigs.len() != arg_tys.len() {
+                continue;
+            }
+            let mut binds = std::collections::HashMap::new();
+            for (ps, at) in psigs.iter().zip(arg_tys) {
+                if let Some(t) = at {
+                    unify_gsig(ps, *t, &mut binds);
+                }
+            }
+            let out: Vec<Vec<Ty>> = psigs.iter().map(|ps| function_input_types(ps, &binds)).collect();
+            if out.iter().any(|v| !v.is_empty()) {
+                return Some(out);
+            }
+        }
+        None
+    }
+
     fn extension_lambda_param_types(&self, recv: Ty, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         // Find a generic extension named `name` on the receiver (or a supertype) that takes a function
         // argument; bind its type variables from the receiver and the already-typed non-lambda
