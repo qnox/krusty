@@ -62,6 +62,9 @@ pub struct ClassSig {
     /// fill omitted trailing arguments at a constructor call site (box tests are single-file, so the
     /// `ExprId`s are valid where the constructor is called).
     pub ctor_defaults: Vec<Option<ExprId>>,
+    /// Secondary-constructor parameter-type lists (`constructor(p…) : this(…)`) — a construction call
+    /// resolves to one of these when its arguments don't match the primary.
+    pub secondary_ctors: Vec<Vec<Ty>>,
     /// This class's own type parameters, in declaration order (`class Box<T, U>` → `["T", "U"]`).
     /// Lets a member read substitute the receiver's type arguments for a property whose declared
     /// type is one of these parameters.
@@ -650,9 +653,12 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             }
                         }
                     }
+                    let secondary_ctors: Vec<Vec<Ty>> = c.secondary_ctors.iter()
+                        .map(|sc| sc.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags)).collect())
+                        .collect();
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults, tparam_names, generic_props },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults, secondary_ctors, tparam_names, generic_props },
                     );
                 }
                 Decl::Property(p) => {
@@ -1260,11 +1266,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Class(cl) => {
-                // Secondary constructors are parsed (real grammar), but krusty doesn't yet emit the
-                // extra `<init>` overloads + delegation — a call to one would resolve to a missing
-                // constructor. Reject the class until emission lands, rather than miscompile.
-                if !cl.secondary_ctors.is_empty() {
-                    c.diags.error(cl.span, "krusty: secondary constructors are not supported".to_string());
+                // Secondary constructors (`constructor(p) : this(args) { body }`) delegating to the
+                // primary are supported; `super(…)` delegation isn't emitted, so reject those.
+                for sc in &cl.secondary_ctors {
+                    if !matches!(sc.delegation, CtorDelegation::This(_)) {
+                        c.diags.error(sc.span, "krusty: a secondary constructor must delegate to the primary (this(…))".to_string());
+                    }
                 }
                 // `@JvmInline value class` needs kotlinc's unboxed `-impl`/`box-impl`/`unbox-impl`
                 // codegen + use-site name mangling; compiling it as a normal class miscompiles
@@ -1294,6 +1301,36 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 for m in &cl.methods {
                     c.check_method(m, &props);
+                }
+                // Secondary constructors: their parameters + the class properties are in scope; the
+                // `this(args)` delegation is checked against the primary constructor, then the body.
+                let primary_params = c.syms.classes.get(&cl.name).map(|s| s.ctor_params.clone()).unwrap_or_default();
+                for sc in &cl.secondary_ctors {
+                    c.push_scope();
+                    for (n, t, is_var) in &props {
+                        c.declare(n, *t, *is_var);
+                    }
+                    for p in &sc.params {
+                        let ty = c.resolve_ty(&p.ty);
+                        c.declare(&p.name, ty, false);
+                    }
+                    if let CtorDelegation::This(args) = &sc.delegation {
+                        let ats: Vec<Ty> = args.iter().map(|a| c.expr(*a)).collect();
+                        if ats.len() != primary_params.len() {
+                            c.diags.error(sc.span, format!("krusty: this(…) expects {} args, got {}", primary_params.len(), ats.len()));
+                        } else {
+                            for (i, (p, a)) in primary_params.iter().zip(&ats).enumerate() {
+                                c.expect_assignable(*p, *a, c.span(args[i]), "this() argument");
+                            }
+                        }
+                    }
+                    if let Some(body) = sc.body {
+                        let prev = c.ret_ty;
+                        c.ret_ty = Ty::Unit;
+                        c.expr(body);
+                        c.ret_ty = prev;
+                    }
+                    c.pop_scope();
                 }
                 // Body-property initializers and `init` blocks see the properties (implicit `this`)
                 // and the primary-constructor parameters (including non-property ones).
@@ -3496,7 +3533,14 @@ impl<'a> Checker<'a> {
                                 }
                                 None => false,
                             });
+                        // The arguments don't match the primary — try a secondary constructor.
                         if !ok_arity {
+                            if let Some(sparams) = cls.secondary_ctors.iter().find(|sp| sp.len() == got) {
+                                for (i, (p, a)) in sparams.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                                return self.ctor_result(call, &cls.internal);
+                            }
                             self.diags.error(span, format!("constructor '{fname}' expects {} args, got {}", ctor_params.len(), got));
                         } else {
                             for (i, (p, a)) in ctor_params.iter().zip(&arg_tys).enumerate() {
