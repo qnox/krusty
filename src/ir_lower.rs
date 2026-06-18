@@ -2470,6 +2470,36 @@ impl<'a> Lower<'a> {
                     RangeKind::DownTo => return None,
                 }
             }
+            Expr::IncDec { target, dec, prefix } => {
+                // `var++`/`++var` as a value. Only a simple local/captured variable; anything else bails.
+                // No temp slot: the update is `i = i ± 1`; the value is the new `i` (prefix) or, for a
+                // postfix, the new `i` minus the step (the old value) — valid for every numeric type.
+                let Expr::Name(name) = self.afile.expr(target).clone() else { return None };
+                let (v, ty) = self.lookup(&name)?;
+                let one = match ty {
+                    Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+                    Ty::Long => IrConst::Long(1),
+                    Ty::Double => IrConst::Double(1.0),
+                    Ty::Float => IrConst::Float(1.0),
+                    _ => return None,
+                };
+                let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                // i = i ± 1
+                let cur = self.ir.add_expr(IrExpr::GetValue(v));
+                let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
+                let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one1 });
+                let set = self.ir.add_expr(IrExpr::SetValue { var: v, value: nv });
+                // value: new `i` (prefix), or new `i` ∓ 1 = old `i` (postfix).
+                let read = self.ir.add_expr(IrExpr::GetValue(v));
+                let value = if prefix {
+                    read
+                } else {
+                    let one2 = self.ir.add_expr(IrExpr::Const(one));
+                    let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: undo, lhs: read, rhs: one2 })
+                };
+                self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) })
+            }
             Expr::As { operand, ty, nullable } => {
                 // `as?` (safe cast: null on mismatch) isn't modeled — only the throwing `as`.
                 if nullable {
@@ -2545,13 +2575,14 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                // A *branchy* subject (`when (when …)`) is evaluated ONCE into a temp so it runs on a
-                // clean stack and isn't re-emitted per condition. A plain subject (a name/field) is
-                // cheaply re-evaluated per comparison instead — that path also stays correct for a
-                // smart-cast local (whose slot type differs from its static type), which a temp store
-                // would mis-frame.
+                // Any subject other than a bare `Name` is evaluated ONCE into a temp: a branchy subject
+                // (`when (when …)`) so it runs on a clean stack, and a side-effecting one (`when (a++)`,
+                // a call) so its effect happens exactly once — never zero times (an empty `when`) nor
+                // once per comparison. A bare `Name` stays on the cheap re-evaluate path, which is
+                // side-effect-free and also correct for a smart-cast local (whose slot type differs
+                // from its static type, and which a temp store would mis-frame).
                 let subj_tmp = match subject {
-                    Some(subj) if is_branchy(self.afile, subj) => {
+                    Some(subj) if !matches!(self.afile.expr(subj), Expr::Name(_)) => {
                         let sv = self.expr(subj)?;
                         let v = self.fresh_value();
                         let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(self.info.ty(subj)), init: Some(sv) });

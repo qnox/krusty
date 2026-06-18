@@ -1644,24 +1644,15 @@ impl<'a> Parser<'a> {
                 let f = self.parse_fun(false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
-            // Prefix increment/decrement statement: `++target` / `--target`. In statement position the
-            // produced value is discarded, so prefix and postfix are identical — parse the lvalue and
-            // desugar to `target = target ± 1` via the shared helper.
-            TokenKind::PlusPlus | TokenKind::MinusMinus => {
-                let dec = self.at(TokenKind::MinusMinus);
-                let op_span = self.tok().span;
-                self.bump();
-                let e = self.parse_expr();
-                return self.incdec_target(e, dec, op_span, start);
-            }
             _ => {
                 let e = self.parse_expr();
-                // Postfix increment/decrement statement: `target++` / `target--`.
-                if self.at(TokenKind::PlusPlus) || self.at(TokenKind::MinusMinus) {
-                    let dec = self.at(TokenKind::MinusMinus);
-                    let op_span = self.tok().span;
-                    self.bump();
-                    return self.incdec_target(e, dec, op_span, start);
+                // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
+                // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
+                // discarded, so re-route to the statement helper (which desugars a `Name` to
+                // `Stmt::IncDec` and a member/index target to an assignment).
+                if let Expr::IncDec { target, dec, .. } = self.file.expr(e).clone() {
+                    let op_span = self.file.expr_spans[e.0 as usize];
+                    return self.incdec_target(target, dec, op_span, start);
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
@@ -2045,6 +2036,15 @@ impl<'a> Parser<'a> {
             let end = self.file.expr_spans[operand.0 as usize];
             return self.file.add_expr(Expr::Unary { op, operand }, Span::new(start.lo, end.hi));
         }
+        // Prefix `++target` / `--target` as a value (the new value). Statement position is intercepted
+        // in `parse_stmt` before reaching here, so this fires only when used as a value.
+        if self.at(TokenKind::PlusPlus) || self.at(TokenKind::MinusMinus) {
+            let dec = self.at(TokenKind::MinusMinus);
+            self.bump();
+            let target = self.parse_bp(BP_PREFIX);
+            let end = self.file.expr_spans[target.0 as usize];
+            return self.file.add_expr(Expr::IncDec { target, dec, prefix: true }, Span::new(start.lo, end.hi));
+        }
         let primary = self.parse_primary();
         self.parse_postfix(primary)
     }
@@ -2065,6 +2065,15 @@ impl<'a> Parser<'a> {
                 continue;
             }
             match self.kind() {
+                // Postfix `target++` / `target--` as a value (the old value). In statement position
+                // `parse_stmt` re-routes the resulting `IncDec` to the statement path.
+                TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    let dec = self.at(TokenKind::MinusMinus);
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let end = self.tok().span;
+                    self.bump();
+                    lhs = self.file.add_expr(Expr::IncDec { target: lhs, dec, prefix: false }, Span::new(lspan.lo, end.hi));
+                }
                 // `!!` not-null assertion in postfix position = two consecutive `Not` tokens.
                 TokenKind::Not if self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Not) => {
                     let lspan = self.file.expr_spans[lhs.0 as usize];

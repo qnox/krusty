@@ -2282,6 +2282,27 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Expr::IncDec { target, .. } => {
+                // `target++`/`++target` as a value: only a simple mutable numeric/Char variable (the
+                // built-in `inc`/`dec`); the result type is the variable's type.
+                let tt = self.expr(target);
+                if let Expr::Name(name) = self.file.expr(target).clone() {
+                    match self.lookup(&name).map(|l| (l.ty, l.is_var)).or_else(|| self.syms.props.get(&name).copied()) {
+                        Some((_, is_var)) => {
+                            if !is_var {
+                                self.diags.error(self.span(e), "val cannot be reassigned".to_string());
+                            }
+                            if !tt.is_numeric() && tt != Ty::Char {
+                                self.diags.error(self.span(e), "krusty: '++'/'--' is only supported on a numeric variable".to_string());
+                            }
+                        }
+                        None => self.diags.error(self.span(e), format!("unresolved reference: {name}")),
+                    }
+                } else {
+                    self.diags.error(self.span(e), "krusty: '++'/'--' as a value is only supported on a simple variable".to_string());
+                }
+                tt
+            }
             Expr::Elvis { lhs, rhs } => {
                 let lt = self.expr(lhs);
                 let rt = self.expr(rhs);
