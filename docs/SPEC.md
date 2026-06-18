@@ -225,6 +225,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter with an *implicit* receiver (the builder pattern `instructions()` / `recv.block()`) needs
   receiver-rebinding the checker does not yet model, so those still skip cleanly rather than
   miscompile (0-FAIL preserved).
+- Labeled loops `l@ for/while/do { … break@l / continue@l }`: the `l@` label is parsed onto the loop
+  (AST + IR carry an `Option<String>` label); the emitter's loop stack keeps each loop's source label, so
+  a `break@l`/`continue@l` targets the nearest enclosing loop carrying `l` (an unlabeled `break`/`continue`
+  still targets the innermost). Works across all loop forms — counted `for`, collection `for-each`,
+  `while`, `do…while` (`LabeledLoops` in `tests/feature_box_e2e.rs`).
 - Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null

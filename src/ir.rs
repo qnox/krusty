@@ -101,11 +101,11 @@ pub enum IrExpr {
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than
     /// skipping it. A plain `while` has `update: None` (then `continue` re-tests `cond`). `post_test`
     /// ⇒ a `do…while` (the body runs once before `cond` is first tested).
-    While { cond: ExprId, body: ExprId, update: Option<ExprId>, post_test: bool },
-    /// `break` — exit the innermost enclosing loop.
-    Break,
-    /// `continue` — jump to the innermost enclosing loop's `update`/condition.
-    Continue,
+    While { cond: ExprId, body: ExprId, update: Option<ExprId>, post_test: bool, label: Option<String> },
+    /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
+    Break { label: Option<String> },
+    /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
+    Continue { label: Option<String> },
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
     Variable { index: u32, ty: IrType, init: Option<ExprId> },
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One

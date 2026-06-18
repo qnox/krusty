@@ -131,16 +131,17 @@ pub enum Stmt {
     /// `array[index] = value` — array element store.
     AssignIndex { array: ExprId, index: ExprId, value: ExprId },
     Return(Option<ExprId>),
-    /// `break` / `continue` — loop control (unlabeled).
-    Break,
-    Continue,
-    While { cond: ExprId, body: ExprId }, // body is a Block expr
+    /// `break` / `continue` — loop control. `Some(label)` targets the enclosing loop carrying that
+    /// `label@` (`break@outer`); `None` targets the innermost loop.
+    Break(Option<String>),
+    Continue(Option<String>),
+    While { cond: ExprId, body: ExprId, label: Option<String> }, // body is a Block expr
     /// `do { body } while (cond)` — post-test loop (body runs at least once).
-    DoWhile { body: ExprId, cond: ExprId },
+    DoWhile { body: ExprId, cond: ExprId, label: Option<String> },
     /// `for (name in start <op> end (step s)?) body` over an integer range.
-    For { name: String, range: ForRange, body: ExprId },
+    For { name: String, range: ForRange, body: ExprId, label: Option<String> },
     /// `for (name in iterable) body` over an array (element iteration).
-    ForEach { name: String, iterable: ExprId, body: ExprId },
+    ForEach { name: String, iterable: ExprId, body: ExprId, label: Option<String> },
     Expr(ExprId),
     /// A local function declaration: `fun name(params): Ret { body }` inside a function body.
     /// Emitted as a private static method on the file/class with a mangled name.
@@ -464,12 +465,12 @@ impl File {
     /// by [`any_child_expr`](Self::any_child_expr).) Companion to that method.
     pub fn any_child_stmt(&self, s: StmtId, fe: &mut impl FnMut(ExprId) -> bool) -> bool {
         match self.stmt(s) {
-            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::IncDec { .. } => false,
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) | Stmt::IncDec { .. } => false,
             Stmt::Local { init, .. } | Stmt::Destructure { init, .. } | Stmt::Assign { value: init, .. }
             | Stmt::Return(Some(init)) | Stmt::Expr(init) => fe(*init),
             Stmt::AssignMember { receiver, value, .. } => fe(*receiver) || fe(*value),
             Stmt::AssignIndex { array, index, value } => fe(*array) || fe(*index) || fe(*value),
-            Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => fe(*cond) || fe(*body),
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => fe(*cond) || fe(*body),
             Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || range.step.map_or(false, |st| fe(st)) || fe(*body),
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
@@ -785,8 +786,8 @@ impl File {
                 self.write_expr(*value, out);
                 out.push(')');
             }
-            Stmt::Break => out.push_str("(break)"),
-            Stmt::Continue => out.push_str("(continue)"),
+            Stmt::Break(l) => out.push_str(&format!("(break{})", l.as_ref().map(|s| format!("@{s}")).unwrap_or_default())),
+            Stmt::Continue(l) => out.push_str(&format!("(continue{})", l.as_ref().map(|s| format!("@{s}")).unwrap_or_default())),
             Stmt::Return(e) => {
                 out.push_str("(return");
                 if let Some(e) = e {
@@ -795,21 +796,21 @@ impl File {
                 }
                 out.push(')');
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 out.push_str("(while ");
                 self.write_expr(*cond, out);
                 out.push(' ');
                 self.write_expr(*body, out);
                 out.push(')');
             }
-            Stmt::DoWhile { body, cond } => {
+            Stmt::DoWhile { body, cond, .. } => {
                 out.push_str("(do ");
                 self.write_expr(*body, out);
                 out.push_str(" while ");
                 self.write_expr(*cond, out);
                 out.push(')');
             }
-            Stmt::For { name, range, body } => {
+            Stmt::For { name, range, body, .. } => {
                 let op = match range.kind {
                     crate::ast::RangeKind::Through => "..",
                     crate::ast::RangeKind::Until => "until",
@@ -827,7 +828,7 @@ impl File {
                 self.write_expr(*body, out);
                 out.push(')');
             }
-            Stmt::ForEach { name, iterable, body } => {
+            Stmt::ForEach { name, iterable, body, .. } => {
                 out.push_str(&format!("(for-each {name} "));
                 self.write_expr(*iterable, out);
                 out.push(' ');

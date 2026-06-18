@@ -98,6 +98,27 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Labeled loops: `break@label`/`continue@label` target the named enclosing loop.
+    ("LabeledLoops", r#"
+fun box(): String {
+    var s = 0
+    outer@ for (i in 0 until 3) {
+        for (j in 0 until 3) {
+            if (j == 2) continue@outer
+            if (i == 2) break@outer
+            s += 1
+        }
+    }
+    if (s != 4) return "f1:$s"
+    var t = 0
+    loop@ for (x in listOf(1, 2, 3, 4)) {
+        if (x == 3) break@loop
+        t += x
+    }
+    if (t != 3) return "f2:$t"
+    return "OK"
+}
+"#),
     // The array creators are intrinsics keyed on the resolved stdlib symbol: a user function of the
     // same name must shadow the intrinsic (as in kotlinc), not be silently lowered to an array.
     ("ArrayOfUserShadow", r#"

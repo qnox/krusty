@@ -1512,7 +1512,7 @@ impl<'a> Lower<'a> {
     /// `for (x in range)` over an `IntRange`/`LongRange`/`CharRange` value → a counted loop:
     /// `last = range.getLast(); i = range.getFirst(); while (i <= last) { x = i; …; i++ }` (step +1).
     /// The bounds are read once via the virtual getters; element/counter are the unboxed primitive.
-    fn lower_foreach_range(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, elem: Ty, prim_desc: &str) -> Option<u32> {
+    fn lower_foreach_range(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, elem: Ty, prim_desc: &str, label: Option<String>) -> Option<u32> {
         let internal = it_ty.obj_internal()?.to_string();
         let depth = self.scope.len();
         let elem_ir = ty_to_ir(elem);
@@ -1549,12 +1549,12 @@ impl<'a> Lower<'a> {
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
         let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label });
         self.scope.truncate(depth);
         Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_r, var_i, var_n, wh], value: None }))
     }
 
-    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, index: Option<&str>) -> Option<u32> {
+    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, index: Option<&str>, label: Option<String>) -> Option<u32> {
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
@@ -1647,7 +1647,7 @@ impl<'a> Lower<'a> {
             self.ir.add_expr(IrExpr::SetValue { var: iv, value: inc })
         });
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update, post_test: false });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update, post_test: false, label });
         self.scope.truncate(depth);
         let mut stmts = Vec::new();
         if let Some(vi) = var_idx { stmts.push(vi); }
@@ -1979,16 +1979,16 @@ impl<'a> Lower<'a> {
                 let v = self.expr(value)?;
                 Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.set".to_string()), dispatch_receiver: Some(a), args: vec![i, v] }))
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, label } => {
                 let c = self.expr(cond)?;
                 let depth = self.scope.len();
                 let mut out = Vec::new();
                 self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
                 let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: false }))
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: false, label }))
             }
-            Stmt::DoWhile { body, cond } => {
+            Stmt::DoWhile { body, cond, label } => {
                 let depth = self.scope.len();
                 let mut out = Vec::new();
                 self.append_body_stmts(body, &mut out)?;
@@ -1997,13 +1997,13 @@ impl<'a> Lower<'a> {
                 // can't see body-local declarations (Kotlin scopes them to the body).
                 let c = self.expr(cond)?;
                 let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: true }))
+                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: true, label }))
             }
-            Stmt::Break => Some(self.ir.add_expr(IrExpr::Break)),
-            Stmt::Continue => Some(self.ir.add_expr(IrExpr::Continue)),
+            Stmt::Break(label) => Some(self.ir.add_expr(IrExpr::Break { label })),
+            Stmt::Continue(label) => Some(self.ir.add_expr(IrExpr::Continue { label })),
             // `for (i in a..b [step s])` over an `Int` range → a counted `while`. The bound is
             // hoisted to a local (evaluated once, per Kotlin); the step defaults to 1.
-            Stmt::For { name, range, body } => {
+            Stmt::For { name, range, body, label } => {
                 use crate::ast::RangeKind;
                 let depth = self.scope.len();
                 // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`).
@@ -2055,34 +2055,34 @@ impl<'a> Lower<'a> {
                 let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
                 let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: ic, rhs: ec });
-                let brk = self.ir.add_expr(IrExpr::Break);
+                let brk = self.ir.add_expr(IrExpr::Break { label: None });
                 let if_break = self.ir.add_expr(IrExpr::When { branches: vec![(Some(at_end), brk)] });
                 let update = self.ir.add_expr(IrExpr::Block { stmts: vec![if_break, inc], value: None });
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false });
+                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false, label });
                 self.scope.truncate(depth);
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
-            Stmt::ForEach { name, iterable, body } => self.lower_for_each(&name, iterable, body),
+            Stmt::ForEach { name, iterable, body, label } => self.lower_for_each(&name, iterable, body, label),
             _ => None,
         }
     }
 
     /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
     /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
-    fn lower_for_each(&mut self, name: &str, iterable: AstExprId, body: AstExprId) -> Option<u32> {
+    fn lower_for_each(&mut self, name: &str, iterable: AstExprId, body: AstExprId, label: Option<String>) -> Option<u32> {
         let it_ty = self.info.ty(iterable);
         // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted loop over
         // its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc and avoiding per-element boxing.
         if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
-            return self.lower_foreach_range(name, iterable, body, it_ty, elem, prim_desc);
+            return self.lower_foreach_range(name, iterable, body, it_ty, elem, prim_desc, label);
         }
         // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other iterable
         // (`List`, `Set`, a progression value, …) uses the iterator protocol.
         let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
         let Some(elem) = elem else {
-            return self.lower_foreach_iterator(name, iterable, body, it_ty, None);
+            return self.lower_foreach_iterator(name, iterable, body, it_ty, None, label);
         };
         let depth = self.scope.len();
         // Evaluate the array once into a temp.
@@ -2118,7 +2118,7 @@ impl<'a> Lower<'a> {
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
         let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label });
         self.scope.truncate(depth);
         Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
     }
@@ -3066,7 +3066,7 @@ impl<'a> Lower<'a> {
                             let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
                             let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
                             let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                            let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
+                            let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label: None });
                             self.scope.truncate(depth);
                             return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_n, wh], value: None }));
                         }
@@ -3308,7 +3308,7 @@ impl<'a> Lower<'a> {
                                     || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
                             if iterable {
                                 let param = params.first().cloned().unwrap_or_else(|| "it".to_string());
-                                return self.lower_for_each(&param, receiver, lbody);
+                                return self.lower_for_each(&param, receiver, lbody, None);
                             }
                         }
                     }
@@ -3324,7 +3324,7 @@ impl<'a> Lower<'a> {
                             if iterable && params.len() == 2 {
                                 let idx = params[0].clone();
                                 let elem = params[1].clone();
-                                return self.lower_foreach_iterator(&elem, receiver, lbody, rty, Some(&idx));
+                                return self.lower_foreach_iterator(&elem, receiver, lbody, rty, Some(&idx), None);
                             }
                         }
                     }
@@ -3741,11 +3741,11 @@ fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
     fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32) -> bool {
         match file.stmt(s) {
             Stmt::Return(_) => true,
-            Stmt::Break | Stmt::Continue => ld == 0,
+            Stmt::Break(_) | Stmt::Continue(_) => ld == 0,
             Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld),
             // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
-            Stmt::While { cond, body } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
-            Stmt::DoWhile { body, cond } => ex(file, *body, ld + 1) || ex(file, *cond, ld),
+            Stmt::While { cond, body, .. } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
+            Stmt::DoWhile { body, cond, .. } => ex(file, *body, ld + 1) || ex(file, *cond, ld),
             Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1),
             _ => false,
         }

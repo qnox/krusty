@@ -118,7 +118,11 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             indent(depth, out);
             out.push_str(&format!("{} = {};\n", ir.statics[*index as usize].name, emit_expr(ir, *value, inst)));
         }
-        IrExpr::While { cond, body, update, post_test } => {
+        IrExpr::While { cond, body, update, post_test, label } => {
+            if let Some(l) = label {
+                indent(depth, out);
+                out.push_str(&format!("{l}:\n"));
+            }
             indent(depth, out);
             if *post_test {
                 // `do { body } while (cond)` — post-test loop.
@@ -138,13 +142,13 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                 out.push_str("}\n");
             }
         }
-        IrExpr::Break => {
+        IrExpr::Break { label } => {
             indent(depth, out);
-            out.push_str("break;\n");
+            out.push_str(&label.as_ref().map(|l| format!("break {l};\n")).unwrap_or_else(|| "break;\n".to_string()));
         }
-        IrExpr::Continue => {
+        IrExpr::Continue { label } => {
             indent(depth, out);
-            out.push_str("continue;\n");
+            out.push_str(&label.as_ref().map(|l| format!("continue {l};\n")).unwrap_or_else(|| "continue;\n".to_string()));
         }
         other => {
             indent(depth, out);

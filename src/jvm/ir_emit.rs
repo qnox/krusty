@@ -674,7 +674,10 @@ struct Emitter<'a> {
     next_slot: u16,
     ret: Ty,
     /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
-    loop_stack: Vec<(Label, Label)>,
+    /// Stack of enclosing loops: `(continue_label, break_label, source_label)`. A labeled
+    /// `break@l`/`continue@l` targets the entry whose `source_label == Some(l)`; an unlabeled one
+    /// targets the innermost (top).
+    loop_stack: Vec<(Label, Label, Option<String>)>,
 }
 
 /// Parse a method descriptor's parameter types (in order) to `Ty`s.
@@ -981,7 +984,7 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.putstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::While { cond, body, update, post_test } => {
+            IrExpr::While { cond, body, update, post_test, label } => {
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
@@ -995,7 +998,7 @@ impl<'a> Emitter<'a> {
                     code.ifeq(end);
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
-                self.loop_stack.push((cont, end));
+                self.loop_stack.push((cont, end, label.clone()));
                 self.emit(body, code);
                 // The body block restored the slot map, so framing `cont`/`start` here captures the
                 // loop's outer locals — a `continue` jumping in from a deeper scope stays compatible.
@@ -1020,12 +1023,12 @@ impl<'a> Emitter<'a> {
                 self.frame(end, vec![], code);
                 code.bind(end);
             }
-            IrExpr::Break => {
-                let (_, end) = *self.loop_stack.last().expect("break outside loop");
+            IrExpr::Break { label } => {
+                let (_, end) = self.loop_target(&label);
                 code.goto(end);
             }
-            IrExpr::Continue => {
-                let (cont, _) = *self.loop_stack.last().expect("continue outside loop");
+            IrExpr::Continue { label } => {
+                let (cont, _) = self.loop_target(&label);
                 code.goto(cont);
             }
             other => {
@@ -1044,13 +1047,13 @@ impl<'a> Emitter<'a> {
         match node {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
-            IrExpr::Break => {
-                let (_, end) = *self.loop_stack.last().expect("break outside loop");
+            IrExpr::Break { label } => {
+                let (_, end) = self.loop_target(label);
                 code.goto(end);
                 return;
             }
-            IrExpr::Continue => {
-                let (cont, _) = *self.loop_stack.last().expect("continue outside loop");
+            IrExpr::Continue { label } => {
+                let (cont, _) = self.loop_target(label);
                 code.goto(cont);
                 return;
             }
@@ -1925,10 +1928,23 @@ impl<'a> Emitter<'a> {
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
+    /// Resolve a `break`/`continue` target to `(continue_label, break_label)`. `None` → the innermost
+    /// loop; `Some(l)` → the nearest enclosing loop carrying `l@`. Falls back to the innermost if the
+    /// label isn't found (a compilable program always has the labeled loop in scope).
+    fn loop_target(&self, label: &Option<String>) -> (Label, Label) {
+        let entry = match label {
+            Some(l) => self.loop_stack.iter().rev().find(|(_, _, sl)| sl.as_deref() == Some(l.as_str()))
+                .or_else(|| self.loop_stack.last()),
+            None => self.loop_stack.last(),
+        };
+        let (cont, end, _) = entry.expect("break/continue outside loop");
+        (*cont, *end)
+    }
+
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         match self.ir.expr(e) {
-            IrExpr::Return(_) | IrExpr::Throw { .. } | IrExpr::Break | IrExpr::Continue => true,
+            IrExpr::Return(_) | IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
             IrExpr::Block { stmts, value } => match value {
                 Some(v) => self.diverges(*v),
                 None => stmts.last().map_or(false, |s| self.diverges(*s)),
@@ -2108,7 +2124,7 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
-            IrExpr::Throw { .. } | IrExpr::Break | IrExpr::Continue => Ty::Nothing,
+            IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
