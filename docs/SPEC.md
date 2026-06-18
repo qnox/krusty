@@ -407,3 +407,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the function only *reads* is rejected (it could be reassigned in the enclosing scope after the call,
   making the by-value capture stale) — the checker records `local_fun_captures` as ordered `(name,
   type)` and the lowerer passes each captured value (or holder) at the call site.
+
+- **Captured-`var` boxing rule** (precise): a captured `var` is boxed into a `Ref$XxxRef` iff it is
+  *reassigned somewhere in the function* (`fn_reassigned`, scanned over the whole body including nested
+  closures). A captured `var` that's never reassigned is effectively final and passed by value, like a
+  `val` — matching kotlinc and avoiding needless boxing. This covers a `var` a closure only reads but
+  the enclosing scope reassigns after the closure is built (KT-4656). Unsigned `UInt`/`ULong` share the
+  signed `Ref$IntRef`/`Ref$LongRef` holder (their unboxed JVM representation).

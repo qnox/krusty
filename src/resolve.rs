@@ -1018,6 +1018,45 @@ fn collect_lambda_outer_writes(file: &File, e: ExprId, outer_names: &std::collec
     ce(file, e, outer_names, out);
 }
 
+/// Collect every name reassigned (`=`, `+=`-style, `++`/`--`) anywhere in `e`'s subtree — INCLUDING
+/// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
+/// box). Used to decide which captured `var`s must be boxed.
+fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
+    fn ce(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
+        match file.expr(e) {
+            Expr::Block { stmts, trailing } => { for &s in stmts { cs(file, s, out); } if let Some(t) = trailing { ce(file, *t, out); } }
+            Expr::If { cond, then_branch, else_branch } => { ce(file, *cond, out); ce(file, *then_branch, out); if let Some(x) = else_branch { ce(file, *x, out); } }
+            Expr::Try { body, catches, finally } => { ce(file, *body, out); for c in catches { ce(file, c.body, out); } if let Some(f) = finally { ce(file, *f, out); } }
+            Expr::When { subject, arms } => { if let Some(s) = subject { ce(file, *s, out); } for a in arms { for &c in &a.conditions { ce(file, c, out); } ce(file, a.body, out); } }
+            Expr::Lambda { body, .. } => ce(file, *body, out),
+            Expr::Binary { lhs, rhs, .. } => { ce(file, *lhs, out); ce(file, *rhs, out); }
+            Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Throw { operand } => ce(file, *operand, out),
+            Expr::Call { callee, args } => { ce(file, *callee, out); for &a in args { ce(file, a, out); } }
+            Expr::Member { receiver, .. } => ce(file, *receiver, out),
+            Expr::Index { array, index } => { ce(file, *array, out); ce(file, *index, out); }
+            Expr::IncDec { target, .. } => { if let Expr::Name(n) = file.expr(*target) { out.insert(n.clone()); } ce(file, *target, out); }
+            _ => {}
+        }
+    }
+    fn cs(file: &File, s: StmtId, out: &mut std::collections::HashSet<String>) {
+        match file.stmt(s) {
+            Stmt::Assign { name, value } => { out.insert(name.clone()); ce(file, *value, out); }
+            Stmt::IncDec { name, .. } => { out.insert(name.clone()); }
+            Stmt::LocalFun(f) => { if let FunBody::Expr(b) | FunBody::Block(b) = &f.body { ce(file, *b, out); } }
+            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => ce(file, *init, out),
+            Stmt::AssignMember { receiver, value, .. } => { ce(file, *receiver, out); ce(file, *value, out); }
+            Stmt::AssignIndex { array, index, value } => { ce(file, *array, out); ce(file, *index, out); ce(file, *value, out); }
+            Stmt::Return(Some(e)) => ce(file, *e, out),
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => { ce(file, *cond, out); ce(file, *body, out); }
+            Stmt::For { range, body, .. } => { ce(file, range.start, out); ce(file, range.end, out); if let Some(st) = range.step { ce(file, st, out); } ce(file, *body, out); }
+            Stmt::ForEach { iterable, body, .. } => { ce(file, *iterable, out); ce(file, *body, out); }
+            Stmt::Expr(e) => ce(file, *e, out),
+            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
+        }
+    }
+    ce(file, e, out);
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -1318,6 +1357,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         bridges: HashMap::new(),
         boxed_vars: std::collections::HashSet::new(),
         local_fun_captures: std::collections::HashMap::new(),
+        fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         loop_labels: Vec::new(),
@@ -1630,6 +1670,10 @@ struct Checker<'a> {
     bridges: HashMap<String, Vec<BridgeSpec>>,
     boxed_vars: std::collections::HashSet<String>,
     local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
+    /// Names reassigned anywhere in the function body currently being checked (including inside its
+    /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
+    /// reassigned `var` as effectively final (passed by value).
+    fn_reassigned: std::collections::HashSet<String>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -1677,6 +1721,21 @@ impl<'a> Checker<'a> {
     fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
         if let Some(frame) = self.local_funs.last_mut() {
             frame.insert(name.to_string(), (stmt_id, sig));
+        }
+    }
+
+    /// Record the enclosing locals a closure (`body`) captures that must be boxed: a `var` it WRITES,
+    /// or a `var` it reads that is REASSIGNED somewhere in the function (`fn_reassigned`) — both need a
+    /// shared `Ref$XxxRef` cell. A captured `val`, or a captured `var` never reassigned, stays by value.
+    fn record_captured_vars(&mut self, body: ExprId, outer_names: &std::collections::HashSet<String>) {
+        collect_lambda_outer_writes(self.file, body, outer_names, &mut self.boxed_vars);
+        for n in outer_names {
+            if self.fn_reassigned.contains(n) && self.lookup(n).map_or(false, |l| l.is_var) {
+                let single: std::collections::HashSet<String> = std::iter::once(n.clone()).collect();
+                if local_fun_body_uses_any(self.file, body, &single) {
+                    self.boxed_vars.insert(n.clone());
+                }
+            }
         }
     }
 
@@ -2007,6 +2066,11 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
+        // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
+        self.fn_reassigned.clear();
+        if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
+            collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
+        }
         // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
         // so the body is checked here but never emitted standalone. A lambda *parameter* of an
         // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
@@ -2076,6 +2140,10 @@ impl<'a> Checker<'a> {
         if f.is_inline {
             self.diags.error(f.span, "krusty: inline functions are not supported");
             return;
+        }
+        self.fn_reassigned.clear();
+        if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
+            collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
         }
         let added: Vec<String> = f.type_params.iter().filter(|t| self.tparams.insert((*t).clone())).cloned().collect();
         self.ret_ty = f.ret.as_ref().map(|r| self.resolve_ty(r)).unwrap_or_else(|| {
@@ -2307,7 +2375,7 @@ impl<'a> Checker<'a> {
                 // still checks normally below.
                 let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
                 if !outer_names.is_empty() {
-                    collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
+                    self.record_captured_vars(body, &outer_names);
                 }
                 // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
                 // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
@@ -3179,7 +3247,7 @@ impl<'a> Checker<'a> {
             if !self.allow_lambda_mutation {
                 let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
                 if !outer_names.is_empty() {
-                    collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
+                    self.record_captured_vars(body, &outer_names);
                 }
             }
             self.push_scope();
@@ -4387,20 +4455,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 captured.sort_by(|a, b| a.0.cmp(&b.0));
-                // A captured var the local function WRITES is boxed (a shared `Ref` cell); a captured
-                // `val` is safely passed by value. A captured `var` the function only READS could be
-                // reassigned in the enclosing scope after the call (the lift would see a stale value) —
-                // box it only when it's written here, else bail (skip) rather than risk a stale read.
-                let mut written = std::collections::HashSet::new();
-                collect_lambda_outer_writes(self.file, *e, &outer_names, &mut written);
-                let read_captured_var = captured.iter().any(|(n, _)| {
-                    self.lookup(n).map_or(false, |l| l.is_var) && !written.contains(n)
-                });
-                if read_captured_var {
-                    self.diags.error(span, "krusty: a local function that reads a captured mutable variable is not supported".to_string());
-                    return;
-                }
-                self.boxed_vars.extend(written);
+                // Box the captures that need a shared cell (a `var` written here, or a `var` reassigned
+                // elsewhere in the function) — `record_captured_vars` adds them to `boxed_vars`; the
+                // lift passes each captured holder/value accordingly. A captured `val` (or a never-
+                // reassigned `var`) is passed by value.
+                self.record_captured_vars(*e, &outer_names);
                 if !captured.is_empty() {
                     self.local_fun_captures.insert(stmt_id, captured);
                 }
