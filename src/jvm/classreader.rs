@@ -29,11 +29,24 @@ impl MethodSig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FieldSig {
     pub access: u16,
     pub name: String,
     pub descriptor: String,
+    /// The compile-time `ConstantValue` of a `static final` field, if present (e.g.
+    /// `IntCompanionObject.MAX_VALUE` → `Int(2147483647)`). What kotlinc inlines at a use site.
+    pub const_value: Option<ConstVal>,
+}
+
+/// A field's compile-time constant value (from the `ConstantValue` attribute).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstVal {
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    Str(String),
 }
 
 #[derive(Clone, Debug)]
@@ -247,26 +260,26 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         interfaces.push(class_name(r.u2()?));
     }
 
-    let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String, Option<String>)>, ReadError> {
+    let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String, Option<String>, Option<ConstVal>)>, ReadError> {
         let n = r.u2()?;
         let mut v = Vec::new();
         for _ in 0..n {
             let access = r.u2()?;
             let name = utf8(r.u2()?);
             let desc = utf8(r.u2()?);
-            let sig = read_member_signature(r, &cp)?;
-            v.push((access, name, desc, sig));
+            let (sig, cval) = read_member_signature(r, &cp)?;
+            v.push((access, name, desc, sig, cval));
         }
         Ok(v)
     };
 
     let fields = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, _)| FieldSig { access, name, descriptor })
+        .map(|(access, name, descriptor, _, const_value)| FieldSig { access, name, descriptor, const_value })
         .collect();
     let methods = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, signature)| MethodSig { access, name, descriptor, signature })
+        .map(|(access, name, descriptor, signature, _)| MethodSig { access, name, descriptor, signature })
         .collect();
 
     // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, and the generic `Signature` attr.
@@ -391,25 +404,40 @@ fn skip_attributes(r: &mut Reader) -> Result<(), ReadError> {
     Ok(())
 }
 
-/// Read a field/method's attributes, returning its generic `Signature` attribute string if present
-/// (and skipping the rest). Same wire shape as [`skip_attributes`].
-fn read_member_signature(r: &mut Reader, cp: &[C]) -> Result<Option<String>, ReadError> {
+/// Read a field/method's attributes, returning its generic `Signature` attribute string and (for a
+/// field) its `ConstantValue` if present (and skipping the rest). Same wire shape as [`skip_attributes`].
+fn read_member_signature(r: &mut Reader, cp: &[C]) -> Result<(Option<String>, Option<ConstVal>), ReadError> {
     let n = r.u2()?;
     let mut signature = None;
+    let mut const_value = None;
     for _ in 0..n {
         let ni = r.u2()?;
         let len = r.u4()? as usize;
-        let is_sig = matches!(cp.get(ni as usize), Some(C::Utf8(s)) if s == "Signature");
-        if is_sig && len == 2 {
-            let si = r.u2()?;
-            if let Some(C::Utf8(s)) = cp.get(si as usize) {
-                signature = Some(s.clone());
+        match cp.get(ni as usize) {
+            Some(C::Utf8(s)) if s == "Signature" && len == 2 => {
+                let si = r.u2()?;
+                if let Some(C::Utf8(s)) = cp.get(si as usize) {
+                    signature = Some(s.clone());
+                }
             }
-        } else {
-            r.take(len)?;
+            Some(C::Utf8(s)) if s == "ConstantValue" && len == 2 => {
+                let ci = r.u2()? as usize;
+                const_value = match cp.get(ci) {
+                    Some(C::Integer(v)) => Some(ConstVal::Int(*v)),
+                    Some(C::Long(v)) => Some(ConstVal::Long(*v)),
+                    Some(C::Float(bits)) => Some(ConstVal::Float(f32::from_bits(*bits))),
+                    Some(C::Double(bits)) => Some(ConstVal::Double(f64::from_bits(*bits))),
+                    Some(C::String(ui)) => match cp.get(*ui as usize) {
+                        Some(C::Utf8(s)) => Some(ConstVal::Str(s.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
+            _ => { r.take(len)?; }
         }
     }
-    Ok(signature)
+    Ok((signature, const_value))
 }
 
 struct Reader<'a> {

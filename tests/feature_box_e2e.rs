@@ -53,6 +53,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    ("CompanionConst", r#"
+const val M = Int.MIN_VALUE
+fun box(): String {
+    if (Int.MAX_VALUE != 2147483647) return "f1"
+    if (Int.MIN_VALUE != -2147483648) return "f2"
+    if (Long.MAX_VALUE != 9223372036854775807L) return "f3"
+    if (Byte.MAX_VALUE.toInt() != 127) return "f4"
+    if (Short.MIN_VALUE.toInt() != -32768) return "f5"
+    if (Int.MAX_VALUE * 2L + 1 != 4294967295L) return "f6"
+    // non-overflowing loops at the type boundary
+    var c1 = 0
+    for (i in M downTo M) c1++
+    if (c1 != 1) return "f7: $c1"
+    var c2 = 0
+    for (i in (Int.MAX_VALUE - 2)..Int.MAX_VALUE) c2++
+    if (c2 != 3) return "f8: $c2"
+    return "OK"
+}
+"#),
     ("ScopeFns", r#"
 fun box(): String {
     val r = "abc".let { it.length }

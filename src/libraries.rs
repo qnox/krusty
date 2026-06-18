@@ -143,10 +143,28 @@ impl LibraryType {
 /// What the front end asks of the target's library set. Results are in Kotlin terms (`Ty`, internal
 /// names); any backend-specific encoding (a JVM method descriptor) is an opaque string the matching
 /// backend emitter consumes. Default methods resolve nothing, for an empty library set.
+/// A primitive constant value read from a library (a `const`/`static final` field's compile-time
+/// value), platform-agnostic so the front end can inline it like the reference compiler does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LibConst {
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+}
+
 pub trait LibrarySet {
     /// The seed type universe (classpath/klib types + intrinsic built-in mappings).
     fn seed(&self) -> LibrarySeed {
         LibrarySeed::default()
+    }
+
+    /// The compile-time value of a primitive companion constant (`Int.MAX_VALUE`, `Double.NaN`, …),
+    /// read from the library (e.g. the JVM `IntCompanionObject.MAX_VALUE` `ConstantValue`). The
+    /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a
+    /// known constant / not in the library.
+    fn prim_companion_const(&self, _prim: &str, _field: &str) -> Option<LibConst> {
+        None
     }
 
     /// The shape of the library type named `internal`, or `None` if the library has no such type.
