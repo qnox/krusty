@@ -217,6 +217,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) is boxed into a
+  `kotlin/jvm/internal/Ref$XxxRef` (`IntRef`/`ObjectRef`/… by element type), exactly as kotlinc does:
+  the local holds the holder, every read/write goes through its `element` field, and the closure
+  captures the shared holder by value (a reference) so its writes are visible to the enclosing scope
+  and vice versa. The checker records which vars a closure writes (`TypeInfo.boxed_vars`); the lowerer
+  boxes any matching `var` it declares (over-boxing an uncaptured same-named `var` is harmless — an
+  extra indirection). An inlined scope function (`let`/`also`/`run`/`apply`) needs no box (its body is
+  inlined), and a closure that writes a *field* (capturing `this`) is still skipped.
 - Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
   impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
   closure. Only the simple primary-constructor positional case (the reference's arity matches the

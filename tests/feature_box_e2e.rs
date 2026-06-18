@@ -112,6 +112,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A mutable local captured and written by a non-inlined lambda (a closure) is boxed into a
+    // `kotlin/jvm/internal/Ref$XxxRef` so the closure and the enclosing scope share the cell.
+    ("MutableCapture", r#"
+fun twice(f: () -> Unit) { f(); f() }
+fun call(f: () -> Int): Int = f()
+fun box(): String {
+    var sum = 0
+    twice { sum += 1 }
+    twice { sum += 10 }
+    if (sum != 22) return "f1:$sum"
+    var s = "a"
+    twice { s = s + "b" }
+    if (s != "abb") return "f2:$s"
+    var x = 10
+    val r = call { x = x * 2; x }
+    if (x != 20 || r != 20) return "f3"
+    return "OK"
+}
+"#),
     // Unbound member property reference `A::x` — a synthesized `PropertyReference1Impl` singleton;
     // `.get(receiver)` reads the property via its getter, `.name` is the property name.
     ("PropertyRef", r#"

@@ -445,6 +445,23 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
     cw.finish()
 }
 
+/// The `kotlin/jvm/internal/Ref$XxxRef` holder class and its `element` field descriptor for a boxed
+/// mutable local of element type `elem` (a primitive picks its specialized `Ref`, any reference uses
+/// `Ref$ObjectRef` whose `element` is `Object`).
+fn ref_class(elem: &IrType) -> (&'static str, &'static str) {
+    match ir_ty_to_jvm(elem) {
+        Ty::Int => ("kotlin/jvm/internal/Ref$IntRef", "I"),
+        Ty::Long => ("kotlin/jvm/internal/Ref$LongRef", "J"),
+        Ty::Float => ("kotlin/jvm/internal/Ref$FloatRef", "F"),
+        Ty::Double => ("kotlin/jvm/internal/Ref$DoubleRef", "D"),
+        Ty::Boolean => ("kotlin/jvm/internal/Ref$BooleanRef", "Z"),
+        Ty::Char => ("kotlin/jvm/internal/Ref$CharRef", "C"),
+        Ty::Byte => ("kotlin/jvm/internal/Ref$ByteRef", "B"),
+        Ty::Short => ("kotlin/jvm/internal/Ref$ShortRef", "S"),
+        _ => ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;"),
+    }
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (checkcast / unbox / numeric convert), delegates to the concrete override, and adapts
 /// the return value back (box / numeric convert). Bridges are straight-line — no frames.
@@ -1567,6 +1584,51 @@ impl<'a> Emitter<'a> {
                     code.invokespecial(m, aw, 0);
                 }
             }
+            IrExpr::RefNew { elem, init } => {
+                let (cls, fdesc) = ref_class(elem);
+                let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
+                // A branchy initializer can't run with `[holder, holder]` on the stack — spill it.
+                if self.records_frame(*init) {
+                    let temps = self.spill_to_temps(&[*init], code);
+                    let ci = self.cw.class_ref(cls);
+                    code.new_obj(ci);
+                    code.dup();
+                    let m = self.cw.methodref(cls, "<init>", "()V");
+                    code.invokespecial(m, 0, 0);
+                    code.dup();
+                    for &(slot, t, _) in &temps { load(t, slot, code); }
+                    for &(_, _, key) in &temps { self.slots.remove(&key); }
+                } else {
+                    let ci = self.cw.class_ref(cls);
+                    code.new_obj(ci);
+                    code.dup();
+                    let m = self.cw.methodref(cls, "<init>", "()V");
+                    code.invokespecial(m, 0, 0);
+                    code.dup();
+                    self.emit_value(*init, code);
+                }
+                let f = self.cw.fieldref(cls, "element", fdesc);
+                code.putfield(f, ew);
+            }
+            IrExpr::RefGet { holder, elem } => {
+                self.emit_value(*holder, code);
+                let (cls, fdesc) = ref_class(elem);
+                let f = self.cw.fieldref(cls, "element", fdesc);
+                let ejvm = ir_ty_to_jvm(elem);
+                code.getfield(f, slot_words(ejvm) as i32);
+                // An `ObjectRef.element` is typed `Object`; narrow to the boxed value's reference type.
+                if ejvm.is_reference() && ref_internal(ejvm) != "java/lang/Object" {
+                    let cc = self.cw.class_ref(&ref_internal(ejvm));
+                    code.checkcast(cc);
+                }
+            }
+            IrExpr::RefSet { holder, elem, value } => {
+                self.emit_value(*holder, code);
+                self.emit_value(*value, code);
+                let (cls, fdesc) = ref_class(elem);
+                let f = self.cw.fieldref(cls, "element", fdesc);
+                code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);
+            }
             IrExpr::InvokeFunction { func, args, ret } => {
                 let n = args.len();
                 if args.iter().any(|&a| self.records_frame(a)) {
@@ -1783,6 +1845,9 @@ impl<'a> Emitter<'a> {
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => self.records_frame(*arg),
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
+            IrExpr::RefSet { holder, value, .. } => self.records_frame(*holder) || self.records_frame(*value),
+            IrExpr::RefNew { init, .. } => self.records_frame(*init),
             IrExpr::Throw { operand } => self.records_frame(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
@@ -2259,6 +2324,9 @@ impl<'a> Emitter<'a> {
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
+            IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
+            IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
+            IrExpr::RefSet { .. } => Ty::Unit,
             IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp { op, type_operand, .. } => match op {

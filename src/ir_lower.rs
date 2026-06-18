@@ -41,6 +41,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_class: None,
         cur_fn_name: String::new(),
         lambda_seq: 0,
+        boxed_elem: HashMap::new(),
         cur_ret_ty: IrType::Unit,
         companions: HashMap::new(),
         computed_props: HashMap::new(),
@@ -969,6 +970,9 @@ struct Lower<'a> {
     cur_fn_name: String,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
+    /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
+    /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
+    boxed_elem: HashMap<String, IrType>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: IrType,
@@ -2086,6 +2090,21 @@ impl<'a> Lower<'a> {
                     }
                     _ => init_ty,
                 };
+                // A mutable local captured (and written) by a closure is boxed into a `Ref$XxxRef`:
+                // the local holds the holder, reads/writes go through `element`, and the closure
+                // captures the shared holder (so its writes are visible here and vice versa).
+                if self.info.boxed_vars.contains(&name) {
+                    let elem = ty_to_ir(kty);
+                    let it = self.lower_arg(init, &elem)?;
+                    let holder = self.fresh_value();
+                    let holder_ty = Ty::obj(ref_holder_internal(kty));
+                    self.scope.push((name.clone(), holder, holder_ty));
+                    self.boxed_elem.insert(name.clone(), elem.clone());
+                    // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
+                    // scope — the closure's capture reads it later.
+                    let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
+                    return Some(self.ir.add_expr(IrExpr::Variable { index: holder, ty: ty_to_ir(holder_ty), init: Some(new_ref) }));
+                }
                 // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
                 // typed `val` gets the `checkcast` kotlinc inserts).
                 let it = self.lower_arg(init, &ty_to_ir(kty))?;
@@ -2101,6 +2120,13 @@ impl<'a> Lower<'a> {
                 Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
             }
             Stmt::Assign { name, value } => {
+                // A boxed mutable-capture local: write through its `Ref` holder's `element`.
+                if let Some(elem) = self.boxed_elem.get(&name).cloned() {
+                    let (holder, _) = self.lookup(&name)?;
+                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let val = self.lower_arg(value, &elem)?;
+                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv, elem, value: val }));
+                }
                 if let Some((v, _)) = self.lookup(&name) {
                     let val = self.expr(value)?;
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
@@ -2710,6 +2736,12 @@ impl<'a> Lower<'a> {
                 return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
             }
             Expr::Name(n) => {
+                // A boxed mutable-capture local: read through its `Ref` holder's `element`.
+                if let Some(elem) = self.boxed_elem.get(&n).cloned() {
+                    let (holder, _) = self.lookup(&n)?;
+                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    return Some(self.ir.add_expr(IrExpr::RefGet { holder: hv, elem }));
+                }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
                     let read = self.ir.add_expr(IrExpr::GetValue(v));
                     // Smart-cast: the checker narrowed this read (`if (s is String) s` → `String`) below
@@ -4071,6 +4103,21 @@ fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
         Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
         | Expr::DoubleLit(_) | Expr::FloatLit(_)
         | Expr::BoolLit(_) | Expr::CharLit(_))
+}
+
+/// The `kotlin/jvm/internal/Ref$XxxRef` holder class for a boxed mutable local of (erased) type `t`.
+fn ref_holder_internal(t: Ty) -> &'static str {
+    match t {
+        Ty::Int => "kotlin/jvm/internal/Ref$IntRef",
+        Ty::Long => "kotlin/jvm/internal/Ref$LongRef",
+        Ty::Float => "kotlin/jvm/internal/Ref$FloatRef",
+        Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
+        Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
+        Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
+        Ty::Byte => "kotlin/jvm/internal/Ref$ByteRef",
+        Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
+        _ => "kotlin/jvm/internal/Ref$ObjectRef",
+    }
 }
 
 fn class_internal(file: &ast::File, name: &str) -> String {

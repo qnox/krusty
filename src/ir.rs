@@ -164,6 +164,15 @@ pub enum IrExpr {
     /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
     /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
     NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
+    /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a
+    /// new `Ref$IntRef`/`Ref$ObjectRef`/… whose `element` field is initialized to `init`. `elem` is
+    /// the boxed value's type (selects the `Ref` subclass + the `element` field descriptor). Evaluates
+    /// to the holder, so it's the initializer of the local that holds the box.
+    RefNew { elem: IrType, init: ExprId },
+    /// Read a boxed mutable local: `holder.element` (`getfield Ref$XxxRef.element`).
+    RefGet { holder: ExprId, elem: IrType },
+    /// Write a boxed mutable local: `holder.element = value` (`putfield`), evaluating to `value`.
+    RefSet { holder: ExprId, elem: IrType, value: ExprId },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
     Throw { operand: ExprId },
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
