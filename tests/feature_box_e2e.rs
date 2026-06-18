@@ -112,6 +112,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Class member operators: `a + b` → `a.plus(b)` (and minus/times/div/rem); `a < b` →
+    // `a.compareTo(b) < 0`.
+    ("ClassOperators", r#"
+class V(val x: Int) {
+    operator fun plus(o: V) = V(x + o.x)
+    operator fun minus(o: V) = V(x - o.x)
+    operator fun times(o: V) = V(x * o.x)
+    operator fun compareTo(o: V): Int = x - o.x
+}
+fun box(): String {
+    if ((V(1) + V(2)).x != 3) return "f1"
+    if ((V(7) - V(3)).x != 4) return "f2"
+    if ((V(4) * V(5)).x != 20) return "f3"
+    if (!(V(2) < V(5))) return "f4"
+    if (!(V(9) >= V(9))) return "f5"
+    if ((V(1) + V(2) + V(3)).x != 6) return "f6"
+    return "OK"
+}
+"#),
     // An expression-bodied extension function with no explicit return type infers it from the body,
     // with `this` bound to the receiver (`fun Int.double() = this * 2` → return Int).
     ("ExtThisInfer", r#"
