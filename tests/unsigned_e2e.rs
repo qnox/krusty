@@ -58,6 +58,13 @@ fun box(): String {
     if (anyBig.toString() != "4294967295") return "f20"
     val anyL: Any = 7uL
     if (anyL !is ULong) return "f21"
+    // unsigned for-range (counted loop with Integer.compareUnsigned condition)
+    var rs = 0u
+    for (u in 1u..6u) rs += u
+    if (rs != 21u) return "f22"
+    var cnt = 0
+    for (u in 0u..<4u) cnt++
+    if (cnt != 4) return "f23"
     return "OK"
 }
 "#;
