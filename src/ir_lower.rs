@@ -2000,8 +2000,23 @@ impl<'a> Lower<'a> {
                 return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }));
             }
             Expr::Name(n) => {
-                if let Some((v, _)) = self.lookup(&n) {
-                    self.ir.add_expr(IrExpr::GetValue(v))
+                if let Some((v, slot_ty)) = self.lookup(&n) {
+                    let read = self.ir.add_expr(IrExpr::GetValue(v));
+                    // Smart-cast: the checker narrowed this read (`if (s is String) s` → `String`) below
+                    // the variable's declared slot type. Insert the `checkcast` (a more specific
+                    // reference) or unbox (a nullable primitive narrowed to the primitive) kotlinc emits.
+                    let narrowed = self.info.ty(e);
+                    if narrowed != slot_ty && narrowed != Ty::Error {
+                        if narrowed.is_primitive() && slot_ty.is_reference() {
+                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(narrowed) })
+                        } else if narrowed.is_reference() && slot_ty.is_reference() && !matches!(narrowed, Ty::Null) {
+                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(narrowed) })
+                        } else {
+                            read
+                        }
+                    } else {
+                        read
+                    }
                 } else if let Some(&(fid, _)) = self.computed_props.get(&n) {
                     // A computed top-level property → call its `getX()` accessor.
                     self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![] })
@@ -2336,20 +2351,6 @@ impl<'a> Lower<'a> {
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
                     return None;
-                }
-                // A value-position `when (s) { is T -> … s … }` whose `is`-arm body references the
-                // subject relies on smart-casting `s` to `T` inside the body — krusty types it (the
-                // checker) but doesn't emit the `checkcast`, so the merge frame would be inconsistent.
-                // Bail rather than miscompile. (`is`-arms with subject-free bodies are unaffected.)
-                if self.info.ty(e) != Ty::Unit {
-                    if let Some(Expr::Name(sn)) = subject.map(|s| self.afile.expr(s).clone()) {
-                        for arm in &arms {
-                            let is_arm = arm.conditions.iter().any(|&c| matches!(self.afile.expr(c), Expr::Is { .. }));
-                            if is_arm && crate::resolve::expr_uses_name_pub(self.afile, arm.body, &sn) {
-                                return None;
-                            }
-                        }
-                    }
                 }
                 // A no-`else` `when` used as a *value* is only accepted by the checker when it is
                 // exhaustive (every enum entry / both booleans / a sealed hierarchy covered). The flat
