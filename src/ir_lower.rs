@@ -3306,6 +3306,11 @@ impl<'a> Lower<'a> {
                             return Some(call);
                         }
                     }
+                    // `let`/`also` are normally INLINED from their real stdlib bytecode by the
+                    // metadata-driven route above (no hardcode). This per-function desugar remains ONLY as
+                    // the fallback for the lambda shapes that route can't yet splice — a NON-LOCAL/early
+                    // `return` in the lambda body. Deleting it outright costs one box test until non-local
+                    // return inlining lands (route 3 in IMPLEMENTATION_PLAN); then this block goes away.
                     if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);
@@ -3321,7 +3326,6 @@ impl<'a> Lower<'a> {
                             let result = if name == "let" {
                                 self.ir.add_expr(IrExpr::Block { stmts: vec![var_p], value: Some(body_val) })
                             } else {
-                                // `also`: run the body for effect, yield the receiver.
                                 let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
                                 self.ir.add_expr(IrExpr::Block { stmts: vec![var_p, body_val], value: Some(recv_read) })
                             };
