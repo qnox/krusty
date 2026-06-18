@@ -246,10 +246,30 @@ fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
 fn function_input_types(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Vec<Ty> {
     if let GSig::Class(internal, targs) = sig {
         if internal.starts_with("kotlin/jvm/functions/Function") && !targs.is_empty() {
-            return targs[..targs.len() - 1].iter().map(|a| gsig_to_ty(a, binds)).collect();
+            // A `FunctionN` is generic, so a primitive-typed lambda parameter appears boxed in the
+            // signature (`(index: Int, …)` → `Function2<Integer, …>`). The Kotlin lambda parameter is
+            // the *unboxed* primitive, so map a known wrapper type argument back to it.
+            return targs[..targs.len() - 1].iter().map(|a| unbox_wrapper(gsig_to_ty(a, binds))).collect();
         }
     }
     Vec::new()
+}
+
+/// Map a JVM boxed-primitive wrapper type back to its primitive (`java/lang/Integer` → `Int`); a no-op
+/// for any other type. Recovers unboxed Kotlin lambda-parameter types from an erased `FunctionN`
+/// signature (whose type arguments are always boxed).
+fn unbox_wrapper(t: Ty) -> Ty {
+    match t.obj_internal() {
+        Some("java/lang/Integer") => Ty::Int,
+        Some("java/lang/Long") => Ty::Long,
+        Some("java/lang/Short") => Ty::Short,
+        Some("java/lang/Byte") => Ty::Byte,
+        Some("java/lang/Character") => Ty::Char,
+        Some("java/lang/Boolean") => Ty::Boolean,
+        Some("java/lang/Double") => Ty::Double,
+        Some("java/lang/Float") => Ty::Float,
+        _ => t,
+    }
 }
 
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
