@@ -125,32 +125,39 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
     }
 }
 
-/// Parse a method generic signature `<formals>(params)ret` into the parameter and return nodes,
-/// skipping the leading `<…>` formal-type-parameter block.
-fn parse_method_gsig(sig: &str) -> Option<(Vec<GSig>, GSig)> {
-    let mut s = sig;
-    if s.starts_with('<') {
-        // Skip the balanced `<…>` formal block.
-        let mut depth = 0;
-        let mut end = 0;
-        for (i, ch) in s.char_indices() {
-            match ch {
-                '<' => depth += 1,
-                '>' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = i + 1;
-                        break;
-                    }
-                }
-                _ => {}
+/// Parse a leading `<Name:Bound…>` formal-type-parameter block, returning the formal names and the
+/// remaining signature. No block → empty names, input unchanged.
+fn parse_formals(s: &str) -> (Vec<String>, &str) {
+    let Some(rest) = s.strip_prefix('<') else { return (Vec::new(), s) };
+    let mut depth = 1;
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    let mut at_name_start = true;
+    let mut formals = Vec::new();
+    while i < bytes.len() && depth > 0 {
+        match bytes[i] {
+            b'<' => { depth += 1; at_name_start = false; }
+            b'>' => { depth -= 1; }
+            b':' => { at_name_start = false; }
+            _ if depth == 1 && at_name_start => {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b':' { i += 1; }
+                formals.push(rest[start..i].to_string());
+                at_name_start = false;
+                continue;
             }
+            b';' if depth == 1 => { at_name_start = true; }
+            _ => {}
         }
-        if end == 0 {
-            return None;
-        }
-        s = &s[end..];
+        i += 1;
     }
+    (formals, &rest[i..])
+}
+
+/// Parse a method generic signature `<formals>(params)ret` into the formal type-parameter names, the
+/// parameter nodes, and the return node.
+fn parse_method_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>, GSig)> {
+    let (formals, s) = parse_formals(sig);
     let inner = s.strip_prefix('(')?;
     let close = inner.find(')')?;
     let mut params_s = &inner[..close];
@@ -161,7 +168,7 @@ fn parse_method_gsig(sig: &str) -> Option<(Vec<GSig>, GSig)> {
         params_s = rest;
     }
     let (ret, _) = parse_gsig(&inner[close + 1..])?;
-    Some((params, ret))
+    Some((formals, params, ret))
 }
 
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
@@ -170,33 +177,7 @@ fn parse_method_gsig(sig: &str) -> Option<(Vec<GSig>, GSig)> {
 /// Collection<E>]`). The supertypes carry their own type arguments (in terms of this class's formals),
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
 fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>)> {
-    let mut s = sig;
-    let mut formals = Vec::new();
-    if let Some(rest) = s.strip_prefix('<') {
-        // Each formal is `Name:Bound...` up to the matching `>`; collect names at depth 1.
-        let mut depth = 1;
-        let bytes = rest.as_bytes();
-        let mut i = 0;
-        let mut at_name_start = true;
-        while i < bytes.len() && depth > 0 {
-            match bytes[i] {
-                b'<' => { depth += 1; at_name_start = false; }
-                b'>' => { depth -= 1; }
-                b':' => { at_name_start = false; }
-                _ if depth == 1 && at_name_start => {
-                    let start = i;
-                    while i < bytes.len() && bytes[i] != b':' { i += 1; }
-                    formals.push(rest[start..i].to_string());
-                    at_name_start = false;
-                    continue;
-                }
-                b';' if depth == 1 => { at_name_start = true; }
-                _ => {}
-            }
-            i += 1;
-        }
-        s = &rest[i..];
-    }
+    let (formals, mut s) = parse_formals(sig);
     let mut supers = Vec::new();
     while !s.is_empty() {
         let (g, rest) = parse_gsig(s)?;
@@ -416,7 +397,7 @@ impl LibrarySet for JvmLibraries {
             });
             if let Some(m) = found {
                 let sig = m.signature.as_deref()?;
-                let (_, rsig) = parse_method_gsig(sig)?;
+                let (_, _, rsig) = parse_method_gsig(sig)?;
                 return Some(gsig_to_ty(&rsig, &binds));
             }
             // Propagate type arguments up each supertype edge (substituting this class's bindings).
@@ -444,7 +425,7 @@ impl LibrarySet for JvmLibraries {
         for recv_desc in supertype_descriptors(&self.cp, recv) {
             for c in self.cp.find_extensions(&recv_desc, name) {
                 let Some(sig) = c.signature.as_deref() else { continue };
-                let Some((psigs, _)) = parse_method_gsig(sig) else { continue };
+                let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
                 if psigs.is_empty() {
                     continue;
                 }
@@ -459,7 +440,7 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
-    fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty]) -> Option<LibraryCallable> {
+    fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty], type_args: &[Ty]) -> Option<LibraryCallable> {
         let Some(receiver) = receiver else {
             // Receiver-less top-level function (`listOf(…)`): find every static method of this name
             // and pick the overload matching `args` — an exact-arity match (boxing-aware), else a
@@ -486,8 +467,13 @@ impl LibrarySet for JvmLibraries {
             // Recover the parameterized return from the generic signature: bind the type variables
             // from the actual arguments (the vararg element unifies with each trailing arg) and
             // substitute into the return node. Falls back to the erased return when absent.
-            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(psigs, rsig)| {
+            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
                 let mut binds = std::collections::HashMap::new();
+                // Explicit type arguments (`emptyList<Int>()`) bind the formals positionally first, so
+                // a call with no value arguments still parameterizes the return.
+                for (f, t) in formals.iter().zip(type_args) {
+                    binds.insert(f.clone(), *t);
+                }
                 let vararg = params.len() != args.len();
                 if vararg && !psigs.is_empty() {
                     let fixed = psigs.len() - 1;
@@ -526,8 +512,12 @@ impl LibrarySet for JvmLibraries {
                 }
                 // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
                 // type variables bind from the receiver (the first parameter) and the arguments.
-                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(psigs, rsig)| {
+                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
                     let mut binds = std::collections::HashMap::new();
+                    // Explicit type arguments bind any formals the receiver/value args don't determine.
+                    for (f, t) in formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
                     let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
                     for (ps, a) in psigs.iter().zip(&actuals) {
                         unify_gsig(ps, *a, &mut binds);

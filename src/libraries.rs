@@ -152,8 +152,10 @@ pub trait LibrarySet {
     }
 
     /// Resolve a package-level callable: a top-level function (`receiver == None`) or an extension
-    /// (`receiver == Some(t)`, passed as the callable's first argument).
-    fn resolve_callable(&self, _name: &str, _receiver: Option<Ty>, _args: &[Ty]) -> Option<LibraryCallable> {
+    /// (`receiver == Some(t)`, passed as the callable's first argument). `type_args` are the call's
+    /// explicit type arguments (`emptyList<Int>()`), bound to the callable's formal type parameters
+    /// when the value arguments don't determine them; empty when none are written.
+    fn resolve_callable(&self, _name: &str, _receiver: Option<Ty>, _args: &[Ty], _type_args: &[Ty]) -> Option<LibraryCallable> {
         None
     }
 

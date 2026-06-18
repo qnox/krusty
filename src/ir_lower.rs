@@ -2316,7 +2316,7 @@ impl<'a> Lower<'a> {
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
                         // stdlib facade or descriptor is hardcoded.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys)
+                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &[])
                     } {
                         let last_is_array = c.params.last().map_or(false, |p| p.array_elem().is_some());
                         let vararg = !c.params.is_empty() && last_is_array
@@ -2561,7 +2561,7 @@ impl<'a> Lower<'a> {
                         // facade.name(recv, args)`. Owner + descriptor come from the library
                         // (`resolve_callable` with the receiver), so no stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys)
+                        self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys, &[])
                     } {
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
