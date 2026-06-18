@@ -9,6 +9,8 @@ use krusty::lexer::lex;
 use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures};
 
+mod common;
+
 /// Run the checker only, returning its diagnostics (for the rejection test).
 fn check(src: &str) -> Vec<String> {
     let mut d = DiagSink::new();
@@ -46,6 +48,12 @@ fn destructuring_runs_correctly() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
+    // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the runtime classpath.
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping destructure_e2e: no kotlin-stdlib jar found");
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
     let dir = std::env::temp_dir().join(format!("krusty_destr_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -58,7 +66,8 @@ fn destructuring_runs_correctly() {
     fs::write(dir.join("M.java"), main).unwrap();
     let jc = Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap();
     assert!(jc.status.success(), "javac: {}", String::from_utf8_lossy(&jc.stderr));
-    let run = Command::new(&java).args(["-Xverify:all", "-cp", dir.to_str().unwrap(), "M"]).output().unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let run = Command::new(&java).args(["-Xverify:all", "-cp", &cp, "M"]).output().unwrap();
     assert!(run.status.success(), "java: {}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
