@@ -25,6 +25,10 @@ fun box(): String {
     val sb = StringBuilder()
     listOf("a", "b", "c").forEach { sb.append(it) }
     if (sb.toString() != "abc") return "f3: $sb"
+    // forEachIndexed (inlined with an index counter) + mutable capture
+    var w = 0
+    listOf(10, 20, 30).forEachIndexed { i, x -> w += (i + 1) * x }
+    if (w != 140) return "f4: $w"
     return "OK"
 }
 "#;

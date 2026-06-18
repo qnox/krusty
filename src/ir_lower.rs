@@ -1494,7 +1494,7 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_r, var_i, var_n, wh], value: None }))
     }
 
-    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty) -> Option<u32> {
+    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, index: Option<&str>) -> Option<u32> {
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
@@ -1520,6 +1520,16 @@ impl<'a> Lower<'a> {
         let it_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
         let iter_iface = self.syms.libraries.resolve_type(&iter_internal).map_or(false, |t| t.is_interface);
         let depth = self.scope.len();
+        // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
+        // first parameter, incremented at the end of each iteration.
+        let (idx_v, var_idx) = if let Some(iname) = index {
+            let v = self.fresh_value();
+            self.scope.push((iname.to_string(), v, Ty::Int));
+            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            (Some(v), Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(Ty::Int), init: Some(zero) })))
+        } else {
+            (None, None)
+        };
 
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
@@ -1569,10 +1579,21 @@ impl<'a> Lower<'a> {
             self.scope.truncate(depth);
             return None;
         }
+        // index += 1 (forEachIndexed)
+        let update = idx_v.map(|iv| {
+            let g = self.ir.add_expr(IrExpr::GetValue(iv));
+            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: g, rhs: one });
+            self.ir.add_expr(IrExpr::SetValue { var: iv, value: inc })
+        });
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: None, post_test: false });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update, post_test: false });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_it, wh], value: None }))
+        let mut stmts = Vec::new();
+        if let Some(vi) = var_idx { stmts.push(vi); }
+        stmts.push(var_it);
+        stmts.push(wh);
+        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
     }
 
     fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
@@ -1979,7 +2000,7 @@ impl<'a> Lower<'a> {
         // (`List`, `Set`, a progression value, …) uses the iterator protocol.
         let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
         let Some(elem) = elem else {
-            return self.lower_foreach_iterator(name, iterable, body, it_ty);
+            return self.lower_foreach_iterator(name, iterable, body, it_ty, None);
         };
         let depth = self.scope.len();
         // Evaluate the array once into a temp.
@@ -2979,6 +3000,22 @@ impl<'a> Lower<'a> {
                             if iterable {
                                 let param = params.first().cloned().unwrap_or_else(|| "it".to_string());
                                 return self.lower_for_each(&param, receiver, lbody);
+                            }
+                        }
+                    }
+                    // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose
+                    // body is `var i = 0; for (x in this) { action(i, x); i++ }`. Inline it via the
+                    // iterator path with an index counter (Obj iterables only, same as `forEach`).
+                    if name == "forEachIndexed" && args.len() == 1 {
+                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                            let rty = self.info.ty(receiver);
+                            let iterable = rty.obj_internal().map_or(false, |i|
+                                crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
+                                || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
+                            if iterable && params.len() == 2 {
+                                let idx = params[0].clone();
+                                let elem = params[1].clone();
+                                return self.lower_foreach_iterator(&elem, receiver, lbody, rty, Some(&idx));
                             }
                         }
                     }
