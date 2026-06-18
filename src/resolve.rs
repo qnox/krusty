@@ -3706,7 +3706,15 @@ impl<'a> Checker<'a> {
                         self.diags.error(span, format!("krusty: local '{name}' shadows an existing variable (not supported)"));
                     }
                     let comp = format!("component{}", idx + 1);
-                    let ty = internal.and_then(|i| self.syms.method_of(i, &comp)).map(|sig| sig.ret);
+                    // A user class's `componentN` (data class), else a library member (`Pair.component1`,
+                    // `Map.Entry.component1`) — with the receiver's type arguments substituted into the
+                    // result (`Pair<Int, String>.component1()` → `Int`).
+                    let ty = internal.and_then(|i| {
+                        self.syms.method_of(i, &comp).map(|sig| sig.ret).or_else(|| {
+                            crate::libraries::resolve_instance(&*self.syms.libraries, i, &comp, &[])
+                                .map(|m| self.syms.libraries.member_return(it, &comp, &[]).unwrap_or(m.ret))
+                        })
+                    });
                     match ty {
                         Some(t) => self.declare(name, t, *is_var),
                         None => {
