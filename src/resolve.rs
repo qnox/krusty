@@ -3597,18 +3597,22 @@ impl<'a> Checker<'a> {
                 // A receiver-less top-level *library* function with a lambda argument (`applyIt(5){ it+1 }`):
                 // recover the lambda parameter types from its generic signature so `it` types correctly
                 // (the erased `Function1` descriptor hides them), mirroring the extension-call path.
-                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = if known_sig.is_none()
+                // Non-lambda argument types, computed once here for a top-level lib fn with a lambda
+                // argument (to recover the lambda's parameter types from the fn's generic signature) and
+                // reused in the `arg_tys` loop below so they aren't re-typed (no duplicate diagnostics).
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if known_sig.is_none()
                     && self.lookup(&fname).is_none()
                     && !array_init_lambda && !repeat_lambda
                     && args.iter().any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                 {
-                    let partial: Vec<Option<Ty>> = args.iter()
+                    Some(args.iter()
                         .map(|&a| if matches!(self.file.expr(a), Expr::Lambda { .. }) { None } else { Some(self.expr(a)) })
-                        .collect();
-                    self.syms.libraries.toplevel_lambda_param_types(&fname, &partial)
+                        .collect())
                 } else {
                     None
                 };
+                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_partial.as_ref()
+                    .and_then(|partial| self.syms.libraries.toplevel_lambda_param_types(&fname, partial));
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if array_init_lambda && i == 1 {
                         return self.check_lambda_with_types(a, &[Ty::Int]);
@@ -3624,6 +3628,10 @@ impl<'a> Checker<'a> {
                         if matches!(self.file.expr(a), Expr::Lambda { .. }) && i < pts.len() && !pts[i].is_empty() {
                             return self.check_lambda_with_types(a, &pts[i]);
                         }
+                    }
+                    // Reuse the already-computed non-lambda argument type (avoid re-typing).
+                    if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
+                        return *t;
                     }
                     if let Some(ref sig) = known_sig {
                         // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
