@@ -61,7 +61,7 @@ fn branchless_inline_fn_is_spliced_not_called() {
     // slot, `a + b` below would be wrong. Exercises the splice-base (no slot collision).
     fs::write(
         &main_kt,
-        "import lib.triple\nimport lib.atLeast\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    return if (a == 5 && b == 15 && c == 20 && d == 15) \"OK\" else \"fail:a=$a b=$b c=$c d=$d\"\n}\n",
+        "import lib.triple\nimport lib.atLeast\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    return if (a == 5 && b == 15 && c == 20 && d == 15 ) \"OK\" else \"fail:a=$a b=$b c=$c d=$d\"\n}\n",
     )
     .unwrap();
     let compile_cp = format!("{libout}:{stdlib}:{jdk_modules}", libout = libout.to_str().unwrap());
