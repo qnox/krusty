@@ -168,6 +168,26 @@ fun box(): String {
     return "OK"
 }
 "#),
+    ("UserInline", r#"
+inline fun twice(block: () -> Unit) { block(); block() }
+inline fun applyN(n: Int, block: (Int) -> Unit) { var i = 0; while (i < n) { block(i); i++ } }
+inline fun pick(c: Boolean, a: () -> Int, b: () -> Int): Int = if (c) a() else b()
+fun box(): String {
+    var s = 0
+    twice { s += 3 }
+    if (s != 6) return "f1: $s"
+    var acc = 0
+    applyN(4) { acc += it }
+    if (acc != 6) return "f2: $acc"
+    val r = pick(true, { 10 }, { 20 })
+    if (r != 10) return "f3: $r"
+    // nested inline calls + mutable capture across both
+    var t = 0
+    twice { applyN(3) { t += it } }
+    if (t != 6) return "f4: $t"
+    return "OK"
+}
+"#),
     ("RangeValue", r#"
 fun box(): String {
     val r = 0..3

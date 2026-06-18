@@ -30,6 +30,9 @@ pub struct Signature {
     /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
     /// `it` / parameter types. Parallel to `params`.
     pub lambda_param_types: Vec<Vec<Ty>>,
+    /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
+    /// argument may capture a mutable local), instead of forming a closure.
+    pub is_inline: bool,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -459,7 +462,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             Vec::new()
                         }
                     }).collect();
-                    let sig = Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types };
+                    let sig = Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: f.is_inline };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (receiver_descriptor, method_name).
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
@@ -542,7 +545,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false }
                             })
                         })
                         .collect();
@@ -550,13 +553,13 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new() });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new(), is_inline: false });
                         }
                         // Every `copy` parameter has a default (the receiver's property) — so `required`
                         // is 0 and any subset may be passed, by name or position.
                         methods.insert(
                             "copy".into(),
-                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: 0, param_names: props.iter().map(|(n, _, _)| n.clone()).collect(), lambda_param_types: Vec::new() },
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: 0, param_names: props.iter().map(|(n, _, _)| n.clone()).collect(), lambda_param_types: Vec::new(), is_inline: false },
                         );
                     }
                     if c.is_object {
@@ -601,7 +604,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false }
                             })
                         })
                         .collect();
@@ -1878,9 +1881,13 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, f: &FunDecl) {
+        // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
+        // so the body is checked here but never emitted standalone. A lambda *parameter* of an
+        // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
+        // so permit mutation while checking the body.
+        let prev_allow = self.allow_lambda_mutation;
         if f.is_inline {
-            self.diags.error(f.span, "krusty: inline functions are not supported");
-            return;
+            self.allow_lambda_mutation = true;
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
         let prev_this = self.this_ty;
@@ -1934,6 +1941,7 @@ impl<'a> Checker<'a> {
         self.pop_scope();
         self.pop_local_funs();
         self.this_ty = prev_this;
+        self.allow_lambda_mutation = prev_allow;
     }
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
@@ -3598,11 +3606,18 @@ impl<'a> Checker<'a> {
                         return t;
                     }
                     if let Some(ref sig) = known_sig {
-                        if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty() {
-                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                let pt = sig.lambda_param_types[i].clone();
-                                return self.check_lambda_with_types(a, &pt);
-                            }
+                        // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
+                        // is inlined into the caller, so it may capture a mutable local (like the stdlib
+                        // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
+                        // whose `lambda_param_types[i]` is empty.
+                        if i < sig.params.len() && matches!(sig.params[i], Ty::Fun(_))
+                            && matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            let pt = sig.lambda_param_types.get(i).cloned().unwrap_or_default();
+                            let prev = self.allow_lambda_mutation;
+                            self.allow_lambda_mutation = sig.is_inline;
+                            let t = self.check_lambda_with_types(a, &pt);
+                            self.allow_lambda_mutation = prev;
+                            return t;
                         }
                     }
                     self.expr(a)
@@ -4169,6 +4184,7 @@ impl<'a> Checker<'a> {
             required: params.len(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
+            is_inline: false,
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.
