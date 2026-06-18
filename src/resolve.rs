@@ -3881,7 +3881,8 @@ impl<'a> Checker<'a> {
                     // `coll[i] = v` on a library type → its `set(index, value)` operator member
                     // (`MutableList.set(Int, E)`, `MutableMap.put(K, V)`).
                     None if matches!(at, Ty::Obj(internal, _)
-                        if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()) => {}
+                        if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()
+                            || crate::libraries::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).is_some()) => {}
                     None => {
                         if at != Ty::Error {
                             self.diags.error(span, format!("'{}' is not an array (cannot index-assign)", at.name()));
