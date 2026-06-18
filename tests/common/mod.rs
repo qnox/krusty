@@ -184,7 +184,11 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
 fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
     let mut jars = Vec::new();
     let v = kotlin_version();
-    let with_stdlib = directive(src, "WITH_STDLIB") || directive(src, "WITH_RUNTIME") || directive(src, "WITH_REFLECT");
+    // `kotlinc` always puts kotlin-stdlib on the compile classpath (only `-no-stdlib` removes it), so a
+    // faithful drop-in must too — supply it unconditionally, not just for `// WITH_STDLIB` tests. The
+    // explicit directives still select the *extra* jars (reflect, jdk8, coroutines) below.
+    let _ = (directive(src, "WITH_STDLIB"), directive(src, "WITH_RUNTIME"));
+    let with_stdlib = true;
     if with_stdlib {
         if let Some(j) = stdlib_jar() { jars.push(j); }
         if let Some(j) = kotlin_test_jar() { jars.push(j); }
