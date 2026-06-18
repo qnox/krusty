@@ -2404,10 +2404,30 @@ impl<'a> Parser<'a> {
     fn parse_when(&mut self) -> ExprId {
         let start = self.tok().span;
         self.bump(); // 'when'
+        // `when (val v = e) { … }` — a subject variable. Desugar to `{ val v = e; when (v) { … } }`:
+        // parse the binding here, use a `Name(v)` reference as the subject, then wrap the whole `when`
+        // in a block holding the `val` so every downstream path (smart-casts, `is` arms) sees a local.
+        let mut subject_var: Option<(StmtId, ExprId)> = None;
         let subject = if self.eat(TokenKind::LParen) {
-            let e = self.parse_expr();
-            self.expect(TokenKind::RParen, "')'");
-            Some(e)
+            if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
+                let vstart = self.tok().span;
+                let is_var = self.at(TokenKind::KwVar);
+                self.bump(); // 'val' / 'var'
+                let name = self.ident_or_error("variable name");
+                let ty = if self.eat(TokenKind::Colon) { Some(self.parse_type()) } else { None };
+                self.expect(TokenKind::Eq, "'='");
+                let init = self.parse_expr();
+                self.expect(TokenKind::RParen, "')'");
+                let sp = Span::new(vstart.lo, self.file.expr_spans[init.0 as usize].hi);
+                let stmt = self.file.add_stmt(Stmt::Local { is_var, name: name.clone(), ty, init }, sp);
+                let nm = self.file.add_expr(Expr::Name(name), sp);
+                subject_var = Some((stmt, nm));
+                Some(nm)
+            } else {
+                let e = self.parse_expr();
+                self.expect(TokenKind::RParen, "')'");
+                Some(e)
+            }
         } else {
             None
         };
@@ -2436,7 +2456,12 @@ impl<'a> Parser<'a> {
         }
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
-        self.file.add_expr(Expr::When { subject, arms }, Span::new(start.lo, end.hi))
+        let span = Span::new(start.lo, end.hi);
+        let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
+        match subject_var {
+            Some((stmt, _)) => self.file.add_expr(Expr::Block { stmts: vec![stmt], trailing: Some(when_expr) }, span),
+            None => when_expr,
+        }
     }
 
     /// A single `when`-arm condition. In the subject form, `is T` / `!is T` becomes a type test
