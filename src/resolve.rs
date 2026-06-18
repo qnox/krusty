@@ -3661,8 +3661,13 @@ impl<'a> Checker<'a> {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
                 }
                 if self.lookup(&fname).is_none() {
-                    if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
-                        return t;
+                    // The array creators are compiler intrinsics keyed on the resolved stdlib symbol; a
+                    // user-defined function of the same name shadows them (as in kotlinc), so only treat
+                    // the name as the intrinsic when it isn't a user-declared top-level function.
+                    if !self.syms.funs.contains_key(&fname) {
+                        if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
+                            return t;
+                        }
                     }
                     if let Some(t) = self.check_precondition_intrinsic(&fname, args, &arg_tys, span) {
                         return t;

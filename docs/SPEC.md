@@ -268,7 +268,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; the checker rejects a *primitive* element — `arrayOf(1, 2)` — since `Array<Int>` is
-  `Integer[]` and would need per-element boxing krusty doesn't model yet). An element that lowers to a
+  `Integer[]` and would need per-element boxing krusty doesn't model yet). The array creators
+  (`arrayOf`/`intArrayOf`/…/`IntArray(n)`/`emptyArray`) are **compiler intrinsics** — they have no
+  callable body in `kotlin-stdlib` (kotlinc's backend lowers them to array bytecode by resolved symbol),
+  so krusty recognizes them the same way kotlinc does: by the **resolved stdlib symbol**, gated on the
+  name *not* being shadowed by a user-declared function or local (a user `fun arrayOf` wins, never the
+  intrinsic) — not by bare source name. An element that lowers to a
   branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
   mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).

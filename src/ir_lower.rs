@@ -3116,15 +3116,22 @@ impl<'a> Lower<'a> {
                         let ret = ty_to_ir(sig.ret);
                         return Some(self.ir.add_expr(IrExpr::InvokeFunction { func, args: a, ret }));
                     }
+                    // The array creators (`arrayOf`/`intArrayOf`/…/`IntArray(n)`) are compiler INTRINSICS
+                    // in kotlinc (they have no callable body — the backend lowers them to array bytecode by
+                    // resolved symbol). Honor that resolution: treat the name as the intrinsic ONLY when it
+                    // is not shadowed by a user-defined function or local of the same name (a user `fun
+                    // arrayOf` wins, exactly as in kotlinc) — never by bare source name alone.
+                    let array_intrinsic_ok = self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname);
                     // Primitive-array size constructor `IntArray(n)` → a per-element intrinsic that
                     // encodes the element type (so the backend picks the right allocation).
-                    if prim_array_elem(&fname).is_some() && args.len() == 1 {
+                    if array_intrinsic_ok && prim_array_elem(&fname).is_some() && args.len() == 1 {
                         let size = self.expr(args[0])?;
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
                     // Primitive-array literal `intArrayOf(1, 2, 3)` → a `Vararg` of that primitive type
                     // (the backend allocates `int[]`/`char[]`/… and stores each element).
-                    if let Some(elem) = prim_array_of_elem(&fname) {
+                    if array_intrinsic_ok {
+                      if let Some(elem) = prim_array_of_elem(&fname) {
                         let elem_ir = ty_to_ir(elem);
                         let mut elements = Vec::new();
                         for &arg in &args {
@@ -3134,12 +3141,13 @@ impl<'a> Lower<'a> {
                             elements.push(self.lower_arg(arg, &elem_ir)?);
                         }
                         return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                      }
                     }
                     // Reference array literal `arrayOf(a, b, c)` → a `Vararg` of the (reference) element
                     // type, which the backend allocates as `T[]` and fills — the same node `intArrayOf`
                     // uses. The element type is the array's erased element (the checker already typed the
                     // call `Array<T>` and rejected a primitive element, so this is always a reference).
-                    if fname == "arrayOf" {
+                    if array_intrinsic_ok && fname == "arrayOf" {
                         let elem = self.info.ty(e).array_elem()?;
                         if !elem.is_reference() {
                             return None;
