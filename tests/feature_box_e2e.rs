@@ -98,6 +98,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Legal nested-scope variable shadowing: an inner block's `val x` shadows an outer `x` (each gets
+    // its own slot; the outer is restored at block exit). Same-scope redeclaration is still an error.
+    ("Shadowing", r#"
+fun box(): String {
+    val x = 1
+    var sum = 0
+    for (i in 0..2) {
+        val x = i * 10
+        sum += x
+    }
+    if (sum != 30) return "f1:$sum"
+    if (x != 1) return "f2:$x"
+    if (true) {
+        val x = "abc"
+        if (x.length != 3) return "f3"
+    }
+    return if (x == 1) "OK" else "f4:$x"
+}
+"#),
     // Nested try/catch (without a finally in the nest) compiles and runs; only a nested-try combined
     // with a finally is rejected (skip), never miscompiled.
     ("NestedTry", r#"

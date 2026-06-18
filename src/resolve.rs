@@ -1564,6 +1564,11 @@ impl<'a> Checker<'a> {
     fn lookup(&self, name: &str) -> Option<&Local> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
+    /// Whether `name` is already declared in the *innermost* (current) scope — a conflicting
+    /// redeclaration (kotlinc rejects it). A declaration in an *outer* scope is legal shadowing.
+    fn declared_in_current_scope(&self, name: &str) -> bool {
+        self.scopes.last().map_or(false, |s| s.contains_key(name))
+    }
 
     fn push_local_funs(&mut self) { self.local_funs.push(HashMap::new()); }
     fn pop_local_funs(&mut self) { self.local_funs.pop(); }
@@ -3943,10 +3948,12 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, s: StmtId) {
         match self.file.stmt(s).clone() {
             Stmt::Local { is_var, name, ty, init } => {
-                // A local that shadows an in-scope name would alias the outer variable's slot in the
-                // emitter (block exit doesn't restore shadowed slot mappings), so reject shadowing.
-                if self.lookup(&name).is_some() {
-                    self.diags.error(self.file.stmt_spans[s.0 as usize], format!("krusty: local '{name}' shadows an existing variable (not supported)"));
+                // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
+                // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
+                // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
+                // rejected (kotlinc errors on it too — conflicting declarations).
+                if self.declared_in_current_scope(&name) {
+                    self.diags.error(self.file.stmt_spans[s.0 as usize], format!("krusty: conflicting local declaration '{name}'"));
                 }
                 let declared = ty.as_ref().map(|r| self.resolve_ty(r));
                 // A lambda initializer with a declared function type takes its parameter types from
@@ -3974,8 +3981,8 @@ impl<'a> Checker<'a> {
                 let internal = it.obj_internal();
                 for (idx, (name, is_var)) in entries.iter().enumerate() {
                     if name == "_" { continue; } // `_` skips this component (no binding, no call)
-                    if self.lookup(name).is_some() {
-                        self.diags.error(span, format!("krusty: local '{name}' shadows an existing variable (not supported)"));
+                    if self.declared_in_current_scope(name) {
+                        self.diags.error(span, format!("krusty: conflicting local declaration '{name}'"));
                     }
                     let comp = format!("component{}", idx + 1);
                     // A user class's `componentN` (data class), else a library member (`Pair.component1`,
@@ -4351,8 +4358,10 @@ mod tests {
 
     #[test]
     fn rejects_latent_miscompiles() {
-        // Local shadowing (slot aliasing in the emitter).
-        err_contains("fun box(): String { var x = 1; if (1>0) { var x = 2 }; return \"OK\" }", "shadows");
+        // Same-scope redeclaration is rejected (kotlinc errors too); legal nested-scope shadowing
+        // (`var x` inside a block) is accepted — each declaration gets its own slot.
+        err_contains("fun box(): String { var x = 1; var x = 2; return \"OK\" }", "conflicting local declaration");
+        ok("fun box(): String { var x = 1; if (1>0) { var x = 2; x.toString() }; return \"OK\" }");
         // Init block that calls a member method before a later property initializer (init order).
         err_contains(
             "class Foo(v: Int) { init { set(v) }\n fun set(x: Int) { field = x }\n var field: Int = 0 }\nfun box(): String = \"OK\"",
