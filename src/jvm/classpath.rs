@@ -255,7 +255,21 @@ impl Classpath {
         if let Some(hit) = self.bodies.borrow().get(&key) {
             return hit.clone();
         }
-        let code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
+        let mut code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
+        if code.is_none() {
+            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes
+            // (`StandardKt__StandardKt`), listed in the facade's `@Metadata` `d2`. Read from each part.
+            if let Some(ci) = self.find(internal) {
+                for part in &ci.kotlin_d2 {
+                    if part != internal && part.contains("__") {
+                        if let Some(mc) = self.class_bytes(part).and_then(|b| read_method_code(&b, name, descriptor)) {
+                            code = Some(mc);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         self.bodies.borrow_mut().insert(key, code.clone());
         code
     }
