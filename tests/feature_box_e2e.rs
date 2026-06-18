@@ -132,15 +132,18 @@ fun box(): String {
     // inner property initializer can combine outer + own members (`val z = x + y`).
     ("InnerOuterAccess", r#"
 class Outer(val x: String) {
+    fun shout(): String = x + "!"
     inner class Inner(val y: String) {
         val z = x + y
         fun outer(): String = x
+        fun callOuter(): String = shout()
     }
 }
 fun box(): String {
     val i = Outer("O").Inner("K")
     if (i.z != "OK") return "f1:${i.z}"
     if (i.outer() != "O") return "f2"
+    if (i.callOuter() != "O!") return "f3:${i.callOuter()}"
     return "OK"
 }
 "#),

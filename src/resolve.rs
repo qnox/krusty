@@ -4019,10 +4019,15 @@ impl<'a> Checker<'a> {
                         return Ty::obj("kotlin/Any");
                     }
                 }
-                // Unqualified call to a sibling instance method: `foo()` → `this.foo()`.
+                // Unqualified call to a sibling instance method: `foo()` → `this.foo()`. Inside an
+                // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
                 if !self.syms.funs.contains_key(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        if let Some(sig) = self.lookup_method(internal, &fname) {
+                        let sig = self.lookup_method(internal, &fname).or_else(|| {
+                            self.syms.class_by_internal(internal).and_then(|c| c.inner_of.clone())
+                                .and_then(|outer| self.lookup_method(&outer, &fname))
+                        });
+                        if let Some(sig) = sig {
                             for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
