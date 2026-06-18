@@ -1693,12 +1693,16 @@ impl<'a> Lower<'a> {
                 if let Ty::Obj(internal, _) = at {
                     if at.array_elem().is_none() {
                         let (it, vt) = (self.info.ty(index), self.info.ty(value));
-                        if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]) {
+                        // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
+                        // operator maps to `put` on a map.
+                        let resolved = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).map(|m| ("set", m))
+                            .or_else(|| crate::libraries::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).map(|m| ("put", m)));
+                        if let Some((mname, m)) = resolved {
                             let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
                             let a = self.expr(array)?;
                             let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
                             let v = self.lower_arg(value, &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)))?;
-                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: "set".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i, v] }));
+                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: mname.to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i, v] }));
                         }
                     }
                 }
