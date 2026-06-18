@@ -3495,6 +3495,29 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // A receiver-less top-level library function (`listOf(…)`): resolve it through the
+                // library set (vararg-aware), checking each argument against the resolved parameters.
+                if !self.syms.funs.contains_key(&fname) {
+                    if let Some(c) = self.syms.libraries.resolve_callable(&fname, None, &arg_tys) {
+                        let vararg = c.params.len() != arg_tys.len()
+                            || c.params.last().map_or(false, |p| p.array_elem().is_some() && arg_tys.last() != Some(p));
+                        if vararg && !c.params.is_empty() {
+                            let fixed = c.params.len() - 1;
+                            let elem = c.params[fixed].array_elem().unwrap_or(Ty::Error);
+                            for i in 0..fixed.min(arg_tys.len()) {
+                                self.expect_assignable(c.params[i], arg_tys[i], self.span(args[i]), "argument");
+                            }
+                            for i in fixed..arg_tys.len() {
+                                self.expect_assignable(elem, arg_tys[i], self.span(args[i]), "vararg argument");
+                            }
+                        } else {
+                            for (i, a) in arg_tys.iter().enumerate() {
+                                self.expect_assignable(c.params[i], *a, self.span(args[i]), "argument");
+                            }
+                        }
+                        return c.ret;
+                    }
+                }
                 match self.syms.funs.get(&fname) {
                     Some(sig) => {
                         let mut sig = sig.clone();

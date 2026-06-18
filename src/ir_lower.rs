@@ -2270,6 +2270,43 @@ impl<'a> Lower<'a> {
                             .unwrap_or_default();
                         let a = self.lower_args_defaulted(e, &meta, &args, &params)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
+                    } else if let Some(c) = {
+                        // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
+                        // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
+                        // stdlib facade or descriptor is hardcoded.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys)
+                    } {
+                        let last_is_array = c.params.last().map_or(false, |p| p.array_elem().is_some());
+                        let vararg = !c.params.is_empty() && last_is_array
+                            && (c.params.len() != args.len() || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
+                        let mut a = Vec::new();
+                        if vararg {
+                            let fixed = c.params.len() - 1;
+                            if args.len() < fixed {
+                                return None;
+                            }
+                            for i in 0..fixed {
+                                a.push(self.lower_arg(args[i], &ty_to_ir(c.params[i]))?);
+                            }
+                            let elem_ir = ty_to_ir(c.params[fixed].array_elem()?);
+                            let mut elements = Vec::new();
+                            for &arg in &args[fixed..] {
+                                if is_branchy(self.afile, arg) {
+                                    return None;
+                                }
+                                elements.push(self.lower_arg(arg, &elem_ir)?);
+                            }
+                            a.push(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                        } else {
+                            if c.params.len() != args.len() {
+                                return None;
+                            }
+                            for (i, &arg) in args.iter().enumerate() {
+                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                            }
+                        }
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a })
                     } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
