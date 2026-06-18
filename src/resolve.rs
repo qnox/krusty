@@ -3502,6 +3502,18 @@ impl<'a> Checker<'a> {
                       }
                     }
                 }
+                // SAM conversion `Pred { lambda }` — a (fun) interface with a single abstract method
+                // built from a lambda. Type the lambda from the SAM method's parameters; the result is
+                // the interface type.
+                if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) && self.lookup(&fname).is_none() {
+                    if let Some(cls) = self.syms.classes.get(&fname).cloned() {
+                        if cls.is_interface && cls.methods.len() == 1 {
+                            let pts = cls.methods.values().next().unwrap().params.clone();
+                            self.check_lambda_with_types(args[0], &pts);
+                            return self.set(call, Ty::obj(&cls.internal));
+                        }
+                    }
+                }
                 // Type-directed lambda checking: if we know the target function's signature and a
                 // parameter is a function type with known inner param types, check lambda args with
                 // the correct `it` type instead of always using Object.
