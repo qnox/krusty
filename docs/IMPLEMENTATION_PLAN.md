@@ -2212,13 +2212,21 @@ user function/local of the same name shadows them, exactly as kotlinc keys them 
 bails (skip). `println`, `StringBuilder`/`Any` construction are type/library-resolved (low risk).
 
 **C. Body-bearing stdlib INLINE functions desugared by name — VIOLATIONS to retire** (kotlinc inlines
-their real `@InlineOnly` bytecode; krusty hardcodes an equivalent desugar). `let`/`also` ✅ now route
-through the bytecode inliner (phase 310; desugar kept only as a this-capture fallback). **Still
-desugared, to route through the inliner:** `repeat`, `forEach`, `forEachIndexed` (branchy bodies — need
-the branchy lambda-splice), `run`/`with`/`apply` (this-receiver — need receiver-rebind in the splice).
-These are shadow-gated already (so no miscompile of a user fn), but remain hardcoded bodies; retiring
-them is the remaining work, blocked on completing branchy + this-receiver lambda splicing (steps 2-3
-of the inliner plan below).
+their real `@InlineOnly` bytecode; krusty hardcodes an equivalent desugar). Verified by inspection of the
+IR backend:
+- `let`/`also` ✅ now route through the bytecode inliner (phase 310; desugar kept only as a this-capture
+  fallback).
+- **Still desugared in `ir_lower` (the real remaining violations):** `repeat` → counted `while`,
+  `forEach`/`forEachIndexed` → for-each loop. Their stdlib bodies are *branchy* (a loop with the
+  `FunctionN.invoke` inside it), so retiring the desugar needs the **branchy lambda-splice** (inliner
+  step 2 below) — splicing the caller's lambda body at the invoke site *inside* a relocated branchy
+  body. These are shadow-gated (no miscompile of a user fn) but remain hardcoded bodies.
+- `run`/`with`/`apply` are **NOT desugared** — they bail (skip) in `ir_lower` ("not yet supported by the
+  IR backend"); the old direct-AST emitter handled them (phase 55) but the IR backend never did. So they
+  are an *unimplemented feature*, not a hardcode. Their bodies are *branchless* single-invoke (like
+  let/also), so the cleanest implementation is to route them through the existing branchless inline route
+  with this-receiver lambda lowering (receiver = the lambda's param 0) — a coverage gain done the
+  rule-compliant way, no new desugar.
 
 ## Inline functions — the two-inliner architecture (mirrors kotlinc-JVM)
 
