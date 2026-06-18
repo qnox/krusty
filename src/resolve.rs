@@ -996,6 +996,22 @@ fn infer_lit_ty(file: &File, e: ExprId, class_names: &HashMap<String, String>, f
 
 /// As [`infer_lit_ty`], but with the enclosing class's properties in scope so an expression-bodied
 /// member (`fun get() = v`, where `v` is a constructor property) infers the property's type.
+/// The primitive return type of a Kotlin primitive-conversion method (`toByte`/`toInt`/…), or `None`
+/// for any other name. The conversions are total and receiver-independent, so a property initializer
+/// `2.toByte()` infers to `Byte` without resolving the receiver.
+fn prim_conversion_ret(name: &str) -> Option<Ty> {
+    Some(match name {
+        "toByte" => Ty::Byte,
+        "toShort" => Ty::Short,
+        "toInt" => Ty::Int,
+        "toLong" => Ty::Long,
+        "toFloat" => Ty::Float,
+        "toDouble" => Ty::Double,
+        "toChar" => Ty::Char,
+        _ => return None,
+    })
+}
+
 fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>, fun_rets: &HashMap<String, Ty>, props: &[(String, Ty, bool)]) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -1029,15 +1045,25 @@ fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>,
         // Constructor call `Foo(args)` — infer type from callee name via class_names (seeded from
         // classpath scan + user-defined classes).
         Expr::Call { callee, .. } => {
-            if let Expr::Name(n) = file.expr(*callee) {
-                // A call to a top-level function with a known return type (`val v = mk()`).
-                if let Some(ret) = fun_rets.get(n.as_str()) {
-                    return *ret;
+            match file.expr(*callee) {
+                Expr::Name(n) => {
+                    // A call to a top-level function with a known return type (`val v = mk()`).
+                    if let Some(ret) = fun_rets.get(n.as_str()) {
+                        return *ret;
+                    }
+                    // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
+                    if let Some(internal) = class_names.get(n.as_str()) {
+                        return Ty::obj(internal);
+                    }
                 }
-                // A JDK/classpath type resolvable by simple name (`val sb = StringBuilder()`).
-                if let Some(internal) = class_names.get(n.as_str()) {
-                    return Ty::obj(internal);
+                // A primitive conversion method (`2.toByte()`, `n.toLong()`) returns its named
+                // primitive regardless of receiver — Kotlin's `Number`/`Char` conversion family.
+                Expr::Member { name, .. } => {
+                    if let Some(t) = prim_conversion_ret(name) {
+                        return t;
+                    }
                 }
+                _ => {}
             }
             Ty::Error
         }
