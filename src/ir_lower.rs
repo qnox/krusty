@@ -1593,8 +1593,10 @@ impl<'a> Lower<'a> {
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach { name, iterable, body } => {
                 let it_ty = self.info.ty(iterable);
-                // A non-array iterable (`List`, `Set`, a range value, …) uses the iterator protocol.
-                let Some(elem) = it_ty.array_elem() else {
+                // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other
+                // iterable (`List`, `Set`, a range value, …) uses the iterator protocol.
+                let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
+                let Some(elem) = elem else {
                     return self.lower_foreach_iterator(&name, iterable, body, it_ty);
                 };
                 let depth = self.scope.len();
@@ -1609,7 +1611,8 @@ impl<'a> Lower<'a> {
                 // n = arr.size (hoisted)
                 let n_v = self.fresh_value();
                 let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
+                let size_fq = if it_ty == Ty::String { "kotlin/String.length" } else { "kotlin/Array.size" };
+                let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External(size_fq.to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
                 let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(size) });
                 // condition: i < n
                 let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
