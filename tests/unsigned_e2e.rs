@@ -43,6 +43,12 @@ fun box(): String {
     if (la / lb != 2uL) return "f11"
     if (la % lb != 2uL) return "f12"
     if (la < lb) return "f13"
+    // unsigned toString / string templates (unsigned decimal, not signed)
+    val mx = 0u.dec()
+    if (mx.toString() != "4294967295") return "f14"
+    if ("$mx!" != "4294967295!") return "f15"
+    val lmx = 0uL.dec()
+    if (lmx.toString() != "18446744073709551615") return "f16"
     return "OK"
 }
 "#;

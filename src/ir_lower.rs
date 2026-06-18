@@ -1118,6 +1118,17 @@ impl<'a> Lower<'a> {
         Some(())
     }
 
+    /// Convert an unsigned value (`UInt`/`ULong`, represented as int/long) to its unsigned-decimal
+    /// `String` via `Integer.toUnsignedString`/`Long.toUnsignedString` — what kotlinc uses for an
+    /// unsigned `toString()`/string-template part (a signed `toString` would print the wrong value).
+    fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> u32 {
+        let (owner, prim) = if ty == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static { owner: owner.to_string(), name: "toUnsignedString".to_string(), descriptor: format!("({prim})Ljava/lang/String;") },
+            dispatch_receiver: None, args: vec![val],
+        })
+    }
+
     fn ir_const_str(&mut self, s: String) -> u32 { self.ir.add_expr(IrExpr::Const(IrConst::String(s))) }
     fn str_plus(&mut self, acc: u32, arg: u32) -> u32 {
         self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![arg] })
@@ -2682,7 +2693,12 @@ impl<'a> Lower<'a> {
                 for part in iter {
                     let rhs = match part {
                         TemplatePart::Str(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))),
-                        TemplatePart::Expr(e) => self.expr(*e)?,
+                        TemplatePart::Expr(e) => {
+                            let v = self.expr(*e)?;
+                            // An unsigned interpolated value prints in unsigned decimal.
+                            let ety = self.info.ty(*e);
+                            if ety.is_unsigned() { self.unsigned_to_string(v, ety) } else { v }
+                        }
                     };
                     acc = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![rhs] });
                 }
@@ -2929,6 +2945,10 @@ impl<'a> Lower<'a> {
                         let rty = self.info.ty(receiver);
                         if args.is_empty() && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong")) {
                             let repr = |t: Ty| t.unsigned_repr().unwrap_or(t);
+                            if rty.is_unsigned() && name == "toString" {
+                                let r = self.expr(receiver)?;
+                                return Some(self.unsigned_to_string(r, rty));
+                            }
                             if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
                                 let one = if rty == Ty::ULong { IrConst::Long(1) } else { IrConst::Int(1) };
                                 let r = self.expr(receiver)?;
