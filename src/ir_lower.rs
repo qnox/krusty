@@ -2301,13 +2301,34 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
-                // Unsigned `+`/`-`/`*`/`==`/`!=` match signed two's-complement opcodes, but unsigned
-                // `/`/`%`/`<`/`>`/`<=`/`>=` need `UnsignedKt`/`compareUnsigned` (not yet emitted) — bail
-                // so the file is skipped rather than miscompiled.
-                if self.info.ty(lhs).is_unsigned()
+                // Unsigned `+`/`-`/`*`/`==`/`!=` match the signed two's-complement opcodes, but
+                // `/`/`%`/`<`/`>`/`<=`/`>=` need the JDK unsigned intrinsics kotlinc calls:
+                // `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`). A comparison is
+                // `compareUnsigned(l, r) <op> 0`.
+                let lty = self.info.ty(lhs);
+                if lty.is_unsigned()
                     && matches!(op, BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                 {
-                    return None;
+                    let is_uint = lty == Ty::UInt;
+                    let owner = if is_uint { "java/lang/Integer" } else { "java/lang/Long" };
+                    let prim = if is_uint { "I" } else { "J" };
+                    let l = self.expr(lhs)?;
+                    let r = self.expr(rhs)?;
+                    let call = |this: &mut Self, name: &str, desc: String, args: Vec<u32>| {
+                        this.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static { owner: owner.to_string(), name: name.to_string(), descriptor: desc },
+                            dispatch_receiver: None, args,
+                        })
+                    };
+                    return Some(match op {
+                        BinOp::Div => call(self, "divideUnsigned", format!("({prim}{prim}){prim}"), vec![l, r]),
+                        BinOp::Rem => call(self, "remainderUnsigned", format!("({prim}{prim}){prim}"), vec![l, r]),
+                        _ => {
+                            let cmp = call(self, "compareUnsigned", format!("({prim}{prim})I"), vec![l, r]);
+                            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: bin_to_ir(op)?, lhs: cmp, rhs: zero })
+                        }
+                    });
                 }
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = match op {

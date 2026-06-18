@@ -29,6 +29,20 @@ fun box(): String {
     if (m.toInt() != 2) return "f5"
     val hex = 0xFFu
     if (hex.toInt() != 255) return "f6"
+    // unsigned compare / divide / remainder (JDK *Unsigned intrinsics)
+    val x = 5u
+    val y = 3u
+    if (x < y) return "f7"
+    if (x / y != 1u) return "f8"
+    if (x % y != 2u) return "f9"
+    // the unsigned max (0xFFFFFFFF) is greater than 5 — a signed compare would say less
+    val big = 0u.dec()
+    if (big < x) return "f10"
+    val la = 10uL
+    val lb = 4uL
+    if (la / lb != 2uL) return "f11"
+    if (la % lb != 2uL) return "f12"
+    if (la < lb) return "f13"
     return "OK"
 }
 "#;
