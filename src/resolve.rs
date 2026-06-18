@@ -1220,6 +1220,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         bridges: HashMap::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
+        loop_labels: Vec::new(),
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -1519,6 +1520,9 @@ struct Checker<'a> {
     /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
     /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
     allow_lambda_mutation: bool,
+    /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
+    /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
+    loop_labels: Vec<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -4066,7 +4070,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Break(_) | Stmt::Continue(_) => {} // loop control — validated structurally at codegen
+            Stmt::Break(label) | Stmt::Continue(label) => {
+                // A labeled `break@l`/`continue@l` must name an enclosing loop's label (kotlinc rejects
+                // an unknown label; krusty must too, else codegen would silently retarget a loop).
+                if let Some(l) = label {
+                    if !self.loop_labels.iter().any(|x| x.as_str() == l.as_str()) {
+                        self.diags.error(self.file.stmt_spans[s.0 as usize], format!("krusty: unresolved loop label '{l}'"));
+                    }
+                }
+            }
             Stmt::Return(e) => {
                 let rt = self.ret_ty;
                 match e {
@@ -4081,17 +4093,21 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::While { cond, body, .. } => {
+            Stmt::While { cond, body, label } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
+                if let Some(l) = &label { self.loop_labels.push(l.clone()); }
                 self.expr(body);
+                if label.is_some() { self.loop_labels.pop(); }
             }
-            Stmt::DoWhile { body, cond, .. } => {
+            Stmt::DoWhile { body, cond, label } => {
+                if let Some(l) = &label { self.loop_labels.push(l.clone()); }
                 self.expr(body);
+                if label.is_some() { self.loop_labels.pop(); }
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
             }
-            Stmt::For { name, range, body, .. } => {
+            Stmt::For { name, range, body, label } => {
                 let st = self.expr(range.start);
                 let et = self.expr(range.end);
                 // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
@@ -4109,10 +4125,12 @@ impl<'a> Checker<'a> {
                 }
                 self.push_scope();
                 self.declare(&name, elem, true); // loop variable (mutated by the lowering)
+                if let Some(l) = &label { self.loop_labels.push(l.clone()); }
                 self.expr(body);
+                if label.is_some() { self.loop_labels.pop(); }
                 self.pop_scope();
             }
-            Stmt::ForEach { name, iterable, body, .. } => {
+            Stmt::ForEach { name, iterable, body, label } => {
                 let it = self.expr(iterable);
                 let elem = match it {
                     Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
@@ -4143,7 +4161,9 @@ impl<'a> Checker<'a> {
                 };
                 self.push_scope();
                 self.declare(&name, elem, false);
+                if let Some(l) = &label { self.loop_labels.push(l.clone()); }
                 self.expr(body);
+                if label.is_some() { self.loop_labels.pop(); }
                 self.pop_scope();
             }
             Stmt::Expr(e) => {
