@@ -164,6 +164,48 @@ fn parse_method_gsig(sig: &str) -> Option<(Vec<GSig>, GSig)> {
     Some((params, ret))
 }
 
+/// Parse a class generic signature into its formal type-parameter names and its supertypes (the
+/// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
+/// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
+/// Collection<E>]`). The supertypes carry their own type arguments (in terms of this class's formals),
+/// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
+fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>)> {
+    let mut s = sig;
+    let mut formals = Vec::new();
+    if let Some(rest) = s.strip_prefix('<') {
+        // Each formal is `Name:Bound...` up to the matching `>`; collect names at depth 1.
+        let mut depth = 1;
+        let bytes = rest.as_bytes();
+        let mut i = 0;
+        let mut at_name_start = true;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'<' => { depth += 1; at_name_start = false; }
+                b'>' => { depth -= 1; }
+                b':' => { at_name_start = false; }
+                _ if depth == 1 && at_name_start => {
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != b':' { i += 1; }
+                    formals.push(rest[start..i].to_string());
+                    at_name_start = false;
+                    continue;
+                }
+                b';' if depth == 1 => { at_name_start = true; }
+                _ => {}
+            }
+            i += 1;
+        }
+        s = &rest[i..];
+    }
+    let mut supers = Vec::new();
+    while !s.is_empty() {
+        let (g, rest) = parse_gsig(s)?;
+        supers.push(g);
+        s = rest;
+    }
+    Some((formals, supers))
+}
+
 /// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
 fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut std::collections::HashMap<String, Ty>) {
     match sig {
@@ -301,6 +343,55 @@ impl LibrarySet for JvmLibraries {
             members,
             companion,
         })
+    }
+
+    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
+        let Ty::Obj(start, start_args) = recv else { return None };
+        if start_args.is_empty() {
+            return None; // no type arguments to propagate — the erased return is already correct
+        }
+        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
+        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
+        // member's generic return under the bindings reached there.
+        let assignable = |p: &Ty, a: &Ty| p == a || *p == Ty::obj("kotlin/Any");
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
+        while let Some((internal, targs)) = q.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&internal) else { continue };
+            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            let formals = formals.unwrap_or_default();
+            let binds: std::collections::HashMap<String, Ty> =
+                formals.iter().cloned().zip(targs.iter().copied()).collect();
+            // A member declared here whose parameters match the call.
+            let found = ci.methods.iter().filter(|m| m.is_public() && !m.is_static() && m.name == name).find(|m| {
+                let (params, _) = parse_method_desc(&m.descriptor);
+                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| assignable(p, a))
+            });
+            if let Some(m) = found {
+                let sig = m.signature.as_deref()?;
+                let (_, rsig) = parse_method_gsig(sig)?;
+                return Some(gsig_to_ty(&rsig, &binds));
+            }
+            // Propagate type arguments up each supertype edge (substituting this class's bindings).
+            if let Some(supers) = supers {
+                for sup in supers {
+                    if let GSig::Class(sup_internal, sup_args) = sup {
+                        let sup_targs: Vec<Ty> = sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                    }
+                }
+            } else {
+                // No generic class signature — follow raw supertypes (members there are non-generic).
+                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                    q.push_back((i.clone(), vec![]));
+                }
+            }
+        }
+        None
     }
 
     fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty]) -> Option<LibraryCallable> {
