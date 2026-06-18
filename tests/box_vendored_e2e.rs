@@ -63,8 +63,35 @@ fn vendored_kotlin_box_cases_return_ok() {
     cases.sort();
     assert!(!cases.is_empty(), "no vendored box cases found");
 
-    let mut ok = 0usize;
+    fs::create_dir_all(&work).unwrap();
+    // Compile a single reflective runner ONCE (instead of a `javac`+`java` per case): it loads each
+    // accepted case's classes through a per-case `URLClassLoader` and invokes its static `box()`,
+    // so all cases run in ONE JVM under `-Xverify:all` (every emitted class is still verified on
+    // load). This collapses dozens of subprocess spawns — the dominant cost — into one.
+    let runner = work.join("runner");
+    fs::create_dir_all(&runner).unwrap();
+    let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
+public class BoxRun {
+  public static void main(String[] args) throws Exception {
+    for (int i = 0; i + 1 < args.length; i += 2) {
+      String result;
+      try {
+        URLClassLoader cl = new URLClassLoader(new URL[]{ new File(args[i]).toURI().toURL() }, BoxRun.class.getClassLoader());
+        Object r = Class.forName(args[i+1], true, cl).getMethod("box").invoke(null);
+        result = String.valueOf(r);
+      } catch (Throwable t) { result = "EXC:" + t; }
+      System.out.println(args[i+1] + "\t" + result);
+    }
+  }
+}
+"#;
+    fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
+    let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
+    assert!(jc.status.success(), "javac(BoxRun) failed: {}", String::from_utf8_lossy(&jc.stderr));
+
+    // Compile every case with krusty; collect (output dir, box class) for the accepted ones.
     let mut skipped = 0usize;
+    let mut accepted: Vec<(String, String, &Path)> = Vec::new();
     for (i, kt) in cases.iter().enumerate() {
         let out = work.join(format!("o{i}"));
         fs::create_dir_all(&out).unwrap();
@@ -75,22 +102,28 @@ fn vendored_kotlin_box_cases_return_ok() {
             skipped += 1;
             continue;
         }
-
         let box_class = find_box_class(&out).unwrap_or_else(|| panic!("no box() class for {}", kt.display()));
-        let main = format!("public class M {{ public static void main(String[] a) {{ System.out.println({box_class}.box()); }} }}");
-        fs::write(out.join("M.java"), main).unwrap();
-        let jc = Command::new(&javac).args(["-cp", out.to_str().unwrap(), "-d", out.to_str().unwrap()]).arg(out.join("M.java")).output().unwrap();
-        assert!(jc.status.success(), "javac(Main) failed for {}: {}", kt.display(), String::from_utf8_lossy(&jc.stderr));
-        let run_cp = match &stdlib {
-            Some(s) => format!("{}:{}", out.to_str().unwrap(), s),
-            None => out.to_str().unwrap().to_string(),
-        };
-        let run = Command::new(&java).args(["-Xverify:all", "-cp", &run_cp, "M"]).output().unwrap();
-        let returned = String::from_utf8_lossy(&run.stdout).lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").trim().to_string();
-        assert!(run.status.success() && returned == "OK",
-            "box() did not return OK for {}: got {:?}, stderr={}", kt.display(), returned, String::from_utf8_lossy(&run.stderr));
-        ok += 1;
+        accepted.push((out.to_str().unwrap().to_string(), box_class, kt.as_path()));
+    }
+
+    // Run all accepted cases in a single JVM: classpath is the runner + stdlib (the parent loader,
+    // so `Intrinsics` resolves); each case's own classes load via its `URLClassLoader` argument.
+    let mut cp = runner.to_str().unwrap().to_string();
+    if let Some(s) = &stdlib { cp.push(':'); cp.push_str(s); }
+    let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
+    for (dir, class, _) in &accepted {
+        args.push(dir.clone());
+        args.push(class.clone());
+    }
+    let run = Command::new(&java).args(&args).output().unwrap();
+    assert!(run.status.success(), "BoxRun failed: {}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let results: std::collections::HashMap<&str, &str> = stdout.lines()
+        .filter_map(|l| l.split_once('\t')).collect();
+    for (_, class, kt) in &accepted {
+        let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
+        assert!(got == "OK", "box() did not return OK for {}: got {:?}", kt.display(), got);
     }
     let _ = fs::remove_dir_all(&work);
-    eprintln!("vendored Kotlin box conformance (IR backend): {ok} OK, {skipped} skipped (unsupported), {} total", cases.len());
+    eprintln!("vendored Kotlin box conformance (IR backend): {} OK, {skipped} skipped (unsupported), {} total", accepted.len(), cases.len());
 }
