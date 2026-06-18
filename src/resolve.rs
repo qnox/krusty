@@ -52,6 +52,9 @@ pub struct ClassSig {
     /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
     /// `when` without an `else`.
     pub is_sealed: bool,
+    /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
+    /// field of the outer type); constructed as `outerInstance.Inner(...)`.
+    pub inner_of: Option<String>,
     /// `companion object` functions, emitted as `static` methods and called as `ClassName.fn(...)`.
     pub static_methods: HashMap<String, Signature>,
     /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
@@ -687,9 +690,12 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                     let secondary_ctors: Vec<Vec<Ty>> = c.secondary_ctors.iter()
                         .map(|sc| sc.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags)).collect())
                         .collect();
+                    // An `inner class`'s outer internal name is its own internal minus the trailing
+                    // `$Inner` (it was hoisted as `Outer.Inner` → `Outer$Inner`).
+                    let inner_of = c.inner_of.as_ref().and_then(|_| internal.rsplit_once('$').map(|(o, _)| o.to_string()));
                     table.classes.insert(
                         c.name.clone(),
-                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults, secondary_ctors, tparam_names, generic_props },
+                        ClassSig { internal, props, ctor_params, methods, is_interface: c.is_interface, is_sealed: c.is_sealed, inner_of, static_methods, static_props, lateinit_props, interfaces, super_internal, is_annotation: c.is_annotation, ctor_defaults, secondary_ctors, tparam_names, generic_props },
                     );
                 }
                 Decl::Property(p) => {
@@ -3748,6 +3754,18 @@ impl<'a> Checker<'a> {
                         ("contentEquals", 1) => return Ty::Boolean,
                         ("contentHashCode", 0) => return Ty::Int,
                         _ => {}
+                    }
+                }
+                // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer, args)`.
+                if let Some(outer_internal) = rt.obj_internal() {
+                    let inner_internal = format!("{outer_internal}${name}");
+                    if let Some(inner) = self.syms.classes.values().find(|cs| cs.internal == inner_internal && cs.inner_of.as_deref() == Some(outer_internal)).cloned() {
+                        if inner.ctor_params.len() == arg_tys.len() {
+                            for (i, (p, a)) in inner.ctor_params.iter().zip(&arg_tys).enumerate() {
+                                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                            }
+                            return Ty::obj(&inner_internal);
+                        }
                     }
                 }
                 self.diags.error(span, format!("unresolved method '{name}' on '{}'", rt.name()));

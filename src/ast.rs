@@ -293,6 +293,9 @@ pub struct ClassDecl {
     /// `sealed` — abstract + open, and its subclasses are all known in this module (enabling
     /// exhaustive `when` without `else`).
     pub is_sealed: bool,
+    /// `inner class` — captures the enclosing instance: emitted with a synthetic `this$0` field of the
+    /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
+    pub inner_of: Option<String>,
     /// Implemented interface names from a supertype list (`class C : I1, I2`).
     pub supertypes: Vec<String>,
     /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name)`. The
