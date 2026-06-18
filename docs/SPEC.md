@@ -393,3 +393,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 > The ultimate compat test (criterion 3) is **round-trip**: compile a library with krusty, then
 > compile a *Kotlin consumer* of it with real kotlinc — if kotlinc accepts krusty's `@Metadata` and
 > resolves the API, the output is a genuine Kotlin library.
+
+- **Local functions** (`fun` inside a function body): a non-capturing local function is lifted to a
+  `private static` method on the facade, mangled `$local$<stmtId>` (the checker assigns the name and
+  rejects captures). Calls route through the checker's `local_call_map` to the lifted `FunId`
+  (`Callee::Local`). Recursion and multiple local functions in one body work. A local function that
+  captures an enclosing variable, or is generic, is still skipped.

@@ -112,6 +112,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A non-capturing local function is lifted to a private static method on the facade; calls route
+    // to it. Recursion and multiple local functions in one body are supported.
+    ("LocalFun", r#"
+fun box(): String {
+    fun dbl(x: Int) = x * 2
+    fun fib(n: Int): Int {
+        if (n < 2) return n
+        return fib(n - 1) + fib(n - 2)
+    }
+    if (dbl(21) != 42) return "f1"
+    if (fib(7) != 13) return "f2"
+    return "OK"
+}
+"#),
     // A mutable local captured and written by a non-inlined lambda (a closure) is boxed into a
     // `kotlin/jvm/internal/Ref$XxxRef` so the closure and the enclosing scope share the cell.
     ("MutableCapture", r#"
