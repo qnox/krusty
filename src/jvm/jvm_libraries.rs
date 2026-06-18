@@ -20,6 +20,55 @@ impl JvmLibraries {
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
         JvmLibraries { cp }
     }
+
+    /// Resolve an extension `receiver.name(args)` to a `LibraryCallable` (exact-arity match, generic
+    /// return recovered from the signature). `allow_non_public` includes `@InlineOnly` package-private
+    /// candidates — used ONLY by the inline route (which splices, emitting no call); normal resolution
+    /// passes `false`, so it never resolves a non-callable method (an `IllegalAccessError`).
+    fn extension_callable(&self, name: &str, receiver: Ty, args: &[Ty], type_args: &[Ty], allow_non_public: bool) -> Option<LibraryCallable> {
+        for recv_desc in supertype_descriptors(&self.cp, receiver) {
+            for c in self.cp.find_extensions(&recv_desc, name) {
+                if !c.public && !allow_non_public {
+                    continue;
+                }
+                let (params, ret) = parse_method_desc(&c.descriptor);
+                // params[0] is the receiver (keyed by `recv_desc`); the rest are the call arguments.
+                if params.len() != args.len() + 1 {
+                    continue;
+                }
+                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
+                    continue;
+                }
+                let gsig = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig));
+                // Disambiguate by the receiver's type arguments: reject an overload whose declared
+                // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
+                if !receiver.type_args().is_empty() {
+                    if let Some((_, psigs, _)) = &gsig {
+                        if let Some(recv_sig) = psigs.first() {
+                            if !sig_compatible(recv_sig, receiver) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+                // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
+                // type variables bind from the receiver (the first parameter) and the arguments.
+                let ret_ty = gsig.map(|(formals, psigs, rsig)| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
+                    for (ps, a) in psigs.iter().zip(&actuals) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&rsig, &binds)
+                }).unwrap_or(ret);
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
+            }
+        }
+        None
+    }
 }
 
 /// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
@@ -524,6 +573,10 @@ impl LibrarySet for JvmLibraries {
             .map_or(false, |body| crate::jvm::inline::is_lambda_spliceable(&body))
     }
 
+    fn resolve_scope_inline(&self, name: &str, receiver: Ty, args: &[Ty]) -> Option<LibraryCallable> {
+        self.extension_callable(name, receiver, args, &[], true)
+    }
+
     fn toplevel_lambda_param_types(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         for c in self.cp.find_top_level(name) {
             let Some(sig) = c.signature.as_deref() else { continue };
@@ -554,6 +607,12 @@ impl LibrarySet for JvmLibraries {
         // T, …>` on `List<Int>` → `[Int]`; `fold(0) { acc, x -> }` binds the accumulator from `0`).
         for recv_desc in supertype_descriptors(&self.cp, recv) {
             for c in self.cp.find_extensions(&recv_desc, name) {
+                // Public-only, like normal resolution: a non-public `@InlineOnly` candidate is for the
+                // inline route only and must not shadow the real generic overload here (it would type the
+                // lambda's `it` as the erased `Any`).
+                if !c.public {
+                    continue;
+                }
                 let Some(sig) = c.signature.as_deref() else { continue };
                 let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
                 if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
@@ -580,8 +639,11 @@ impl LibrarySet for JvmLibraries {
             // Receiver-less top-level function (`listOf(…)`): find every static method of this name
             // and pick the overload matching `args` — an exact-arity match (boxing-aware), else a
             // vararg match (the final reference-array parameter absorbs the trailing arguments).
+            // Public-only: normal resolution emits an `invokestatic`, so a non-public (`@InlineOnly`)
+            // candidate must never be picked here — it would fault with `IllegalAccessError` at runtime.
+            // (The inline route reaches non-public scope fns through `resolve_scope_inline`, not this.)
             let cands = self.cp.find_top_level(name);
-            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands.into_iter().map(|c| {
+            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands.into_iter().filter(|c| c.public).map(|c| {
                 let (params, ret) = parse_method_desc(&c.descriptor);
                 (c, params, ret)
             }).collect();
@@ -641,44 +703,8 @@ impl LibrarySet for JvmLibraries {
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
         // generic `T` erased to `Object` (`fun <T> T.to(…)`). Match by boxing-aware parameter
         // assignability (an `Any` parameter accepts any argument), not exact descriptor prefix.
-        for recv_desc in supertype_descriptors(&self.cp, receiver) {
-            for c in self.cp.find_extensions(&recv_desc, name) {
-                let (params, ret) = parse_method_desc(&c.descriptor);
-                // params[0] is the receiver (keyed by `recv_desc`); the rest are the call arguments.
-                if params.len() != args.len() + 1 {
-                    continue;
-                }
-                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
-                    continue;
-                }
-                let gsig = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig));
-                // Disambiguate by the receiver's type arguments: reject an overload whose declared
-                // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
-                if !receiver.type_args().is_empty() {
-                    if let Some((_, psigs, _)) = &gsig {
-                        if let Some(recv_sig) = psigs.first() {
-                            if !sig_compatible(recv_sig, receiver) {
-                                continue;
-                            }
-                        }
-                    }
-                }
-                // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
-                // type variables bind from the receiver (the first parameter) and the arguments.
-                let ret_ty = gsig.map(|(formals, psigs, rsig)| {
-                    let mut binds = std::collections::HashMap::new();
-                    // Explicit type arguments bind any formals the receiver/value args don't determine.
-                    for (f, t) in formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
-                    for (ps, a) in psigs.iter().zip(&actuals) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&rsig, &binds)
-                }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
-            }
+        if let Some(lc) = self.extension_callable(name, receiver, args, type_args, false) {
+            return Some(lc);
         }
         // No exact-arity match — try the `name$default` synthetic for an extension with default
         // parameters (`list.joinToString(",")` → `joinToString$default(list, ",", …, mask, null)`).
@@ -693,6 +719,11 @@ impl LibrarySet for JvmLibraries {
         let default_name = format!("{name}$default");
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
             for c in self.cp.find_extensions(&recv_desc, &default_name) {
+                // Public-only, like the exact-arity path: never emit an `invokestatic` to a non-public
+                // `$default` synthetic (`IllegalAccessError`).
+                if !c.public {
+                    continue;
+                }
                 let (params, ret) = parse_method_desc(&c.descriptor);
                 if params.len() < 3 {
                     continue; // need at least receiver + mask + marker

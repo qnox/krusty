@@ -59,6 +59,10 @@ pub struct ExtCandidate {
     /// The method's generic `Signature` attribute, if any — for recovering the parameterized return
     /// type of a generic top-level function (`listOf<T>` → `List<T>`).
     pub signature: Option<String>,
+    /// `true` for a public method. A non-public static (an `@InlineOnly` stdlib scope fn) is indexed so
+    /// the bytecode inliner can splice it, but `resolve_callable` returns it only for inlining, never as
+    /// a callable (an `invokestatic` to a package-private method would `IllegalAccessError`).
+    pub public: bool,
 }
 
 /// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
@@ -257,17 +261,18 @@ impl Classpath {
         }
         let mut code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
         if code.is_none() {
-            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes
-            // (`StandardKt__StandardKt`), listed in the facade's `@Metadata` `d2`. Read from each part.
-            if let Some(ci) = self.find(internal) {
-                for part in &ci.kotlin_d2 {
-                    if part != internal && part.contains("__") {
-                        if let Some(mc) = self.class_bytes(part).and_then(|b| read_method_code(&b, name, descriptor)) {
-                            code = Some(mc);
-                            break;
-                        }
-                    }
+            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
+            // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
+            let mut cur = self.find(internal).and_then(|ci| ci.super_class.clone());
+            while let Some(s) = cur {
+                if s == "java/lang/Object" {
+                    break;
                 }
+                if let Some(mc) = self.class_bytes(&s).and_then(|b| read_method_code(&b, name, descriptor)) {
+                    code = Some(mc);
+                    break;
+                }
+                cur = self.find(&s).and_then(|ci| ci.super_class.clone());
             }
         }
         self.bodies.borrow_mut().insert(key, code.clone());
@@ -281,7 +286,24 @@ impl Classpath {
         if let Some(set) = self.inline_names.borrow().get(internal) {
             return set.contains(name);
         }
-        let set = std::rc::Rc::new(self.find(internal).map(|ci| super::metadata::inline_method_names(&ci)).unwrap_or_default());
+        let ci = self.find(internal);
+        let mut names = ci.as_ref().map(super::metadata::inline_method_names).unwrap_or_default();
+        // A multifile facade has no function metadata — `inline` flags live in its part classes, which it
+        // *extends* (a superclass chain). Merge their inline names in.
+        let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
+        while let Some(s) = cur {
+            if s == "java/lang/Object" {
+                break;
+            }
+            match self.find(&s) {
+                Some(pci) => {
+                    names.extend(super::metadata::inline_method_names(&pci));
+                    cur = pci.super_class.clone();
+                }
+                None => break,
+            }
+        }
+        let set = std::rc::Rc::new(names);
         let hit = set.contains(name);
         self.inline_names.borrow_mut().insert(internal.to_string(), set);
         hit
@@ -301,8 +323,9 @@ impl Classpath {
             .unwrap_or_default()
     }
 
-    /// Every public static method named `method_name` across the classpath (top-level functions and
-    /// extensions), for resolving a receiver-less call.
+    /// Every static method named `method_name` across the classpath (top-level functions and
+    /// extensions), for resolving a receiver-less call. Includes non-public (`@InlineOnly`) candidates,
+    /// each tagged via `ExtCandidate.public`; the caller filters — normal resolution is public-only.
     pub fn find_top_level(&self, method_name: &str) -> Vec<ExtCandidate> {
         self.ensure_ext_index();
         self.ext
@@ -345,7 +368,7 @@ impl Classpath {
                     break;
                 }
                 let Some(c) = all.get(&cn) else { break };
-                for (mname, mdesc, msig) in &c.statics {
+                for (mname, mdesc, msig, public) in &c.statics {
                     let Some(ret_desc) = descriptor_ret(mdesc) else { continue };
                     let cand = ExtCandidate {
                         owner: name.clone(),
@@ -353,6 +376,7 @@ impl Classpath {
                         descriptor: mdesc.clone(),
                         ret_desc,
                         signature: msig.clone(),
+                        public: *public,
                     };
                     // A receiver-less top-level function (no first param) is by_name-only.
                     if let Some(first_param) = first_descriptor_param(mdesc) {
@@ -385,8 +409,9 @@ impl super::inline::MethodBodies for Classpath {
 struct ClassLite {
     is_public: bool,
     super_class: Option<String>,
-    /// `(name, descriptor, generic-signature)` of each public static method (excluding `<init>`/`<clinit>`).
-    statics: Vec<(String, String, Option<String>)>,
+    /// `(name, descriptor, generic-signature, is_public)` of each static method (excl `<init>`/`<clinit>`).
+    /// Non-public ones (`@InlineOnly`) are kept for the inliner; the flag gates normal resolution.
+    statics: Vec<(String, String, Option<String>, bool)>,
 }
 
 fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
@@ -394,8 +419,8 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
     let statics = ci
         .methods
         .iter()
-        .filter(|m| m.is_static() && m.is_public() && !m.name.starts_with('<'))
-        .map(|m| (m.name.clone(), m.descriptor.clone(), m.signature.clone()))
+        .filter(|m| m.is_static() && !m.name.starts_with('<'))
+        .map(|m| (m.name.clone(), m.descriptor.clone(), m.signature.clone(), m.is_public()))
         .collect();
     all.insert(ci.this_class.clone(), ClassLite { is_public: ci.is_public(), super_class: ci.super_class, statics });
 }

@@ -772,6 +772,12 @@ impl<'a> Emitter<'a> {
             let jt = *pty;
             if i != lam_idx {
                 self.emit_value(args[i], code);
+                // Box a primitive argument into a reference parameter (a generic `T` erased to `Object`,
+                // e.g. the receiver of `5.let { … }`) — else `astore` of an `int` fails the verifier.
+                let at = self.value_ty(args[i]);
+                if jt.is_reference() && at.is_primitive() {
+                    box_prim_free(self.cw, code, at);
+                }
                 store(jt, base + off, code);
             }
             off += slot_words(jt);

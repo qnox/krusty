@@ -1338,7 +1338,9 @@ impl<'a> Lower<'a> {
     /// `is_inline` flag, not the name. Only routes a non-capturing, single-value-return lambda (which the
     /// emitter is guaranteed to splice); `None` ⇒ the call falls through to its desugar / normal lowering.
     fn try_route_lambda_inline(&mut self, name: &str, receiver: AstExprId, lam_arg: AstExprId, rty: Ty) -> Option<u32> {
-        let c = self.syms.libraries.resolve_callable(name, Some(rty), &[self.info.ty(lam_arg)], &[])?;
+        // Resolve via the inline-only path, which (unlike `resolve_callable`) matches `@InlineOnly`
+        // package-private scope fns (`let`/`also`) — safe because we *inline* it (no call is emitted).
+        let c = self.syms.libraries.resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
         if !c.is_inline {
             return None;
         }
@@ -1354,11 +1356,15 @@ impl<'a> Lower<'a> {
             return None;
         }
         let recv = self.expr(receiver)?;
-        Some(self.ir.add_expr(IrExpr::Call {
+        let (logical, physical) = (c.ret, c.physical_ret);
+        let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: true },
             dispatch_receiver: None,
             args: vec![recv, lam],
-        }))
+        });
+        // The inline fn's erased return is `Object` (a generic `R`); coerce the spliced result to the
+        // logical return type (`5.let { it+1 }: Int` unboxes `Integer`→`int`), as a normal call would.
+        Some(self.coerce_erased(call, logical, physical))
     }
 
     fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
@@ -3293,26 +3299,20 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // Inlined scope functions `recv.let { it -> body }` / `recv.also { it -> body }`:
-                    // bind the lambda parameter to the (once-evaluated) receiver; `let` yields the body
-                    // value, `also` yields the receiver. Inlined so a mutable capture works (no closure).
-                    // Route (b), metadata-driven (no name hardcode): inline ANY library `inline fun` whose
-                    // single lambda argument the emitter can splice (non-capturing, single-value return) —
-                    // by reading its real compiled body, not a per-function desugar. `try_route_lambda_inline`
-                    // gates on the resolved callable's `is_inline` flag (from `@Metadata`); it returns `None`
-                    // when not inlinable, so the call falls through to its desugar / normal lowering.
+                    // Metadata-driven inline route: any library `inline fun` taking a single lambda whose
+                    // body the platform can splice (`let`/`also`/…) is inlined from its REAL stdlib
+                    // bytecode — no per-function desugar, no hardcoded name list. The route self-gates on
+                    // the resolved callee's `is_inline` + spliceability, so non-spliceable inline fns
+                    // (`map`/`filter`, branchy) and user methods simply fall through.
                     if args.len() == 1 && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
-                        let rty = self.info.ty(receiver);
-                        if let Some(call) = self.try_route_lambda_inline(&name, receiver, args[0], rty) {
+                        if let Some(call) = self.try_route_lambda_inline(&name, receiver, args[0], self.info.ty(receiver)) {
                             return Some(call);
                         }
                     }
-                    // `let`/`also` fall back to this desugar when the metadata-driven route above can't
-                    // resolve/splice them (the stdlib scope fns are Object-keyed @InlineOnly extensions
-                    // that `resolve_callable` doesn't yet resolve, and this-capturing lambdas have no
-                    // closure form). The route already inlines the cases it does resolve (e.g. custom-lib
-                    // inline fns) from real bytecode; deleting this fully needs resolve_callable to resolve
-                    // these extensions (route 3 in IMPLEMENTATION_PLAN).
+                    // FALLBACK for the cases the route can't splice — a lambda capturing `this`/fields (no
+                    // closure form, so no `IrExpr::Lambda` to inline); it inlines the body directly.
+                    // (Removing it costs ~13 box tests until this-capturing lambdas are modelled; the
+                    // common closure-form cases already inline from real bytecode via the route above.)
                     if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);

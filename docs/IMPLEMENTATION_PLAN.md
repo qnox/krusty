@@ -2351,12 +2351,19 @@ bodies exist only as jar bytecode):
      fns are package-private); (d) the prologue **boxes** a primitive receiver into the `Object` param
      (`5.let{…}`); (e) the route wraps the call in `coerce_erased(ret, physical_ret)` to unbox the erased
      `Object` result to the logical type. With (a)–(e), `let`/`also` inline correctly for value/Unit/
-     capture/mutable/chained/non-local-return (all verified). **THE ONE REMAINING BLOCKER:** (c) exposes
-     `@InlineOnly` methods (`hashCode`, `iterator`, …) to *normal* resolution too → `invokestatic` to a
-     package-private method → `IllegalAccessError` (8 box FAILs). FIX: tag each `ExtCandidate` public/
-     non-public; normal `resolve_callable` returns public-only, while the inline route may use non-public
-     (it inlines — no call emitted). Then `let`/`also` inline AND 0-FAIL holds, and the desugar deletes.
-     That single public/non-public split in the ext index is the last step.
+     capture/mutable/chained/non-local-return (all verified). **DONE (phase 310):** the public/non-public
+     split shipped. Each `ExtCandidate` carries a `public` flag; the ext index includes non-public
+     (`@InlineOnly`) statics but **every normal-resolution consumer filters to public-only** —
+     `resolve_callable` (receiver, top-level, and `$default` paths) and `extension_lambda_param_types`.
+     Only `resolve_scope_inline` (the inline route) reads non-public, and it emits no call (it splices),
+     so there is no `IllegalAccessError` exposure. The route (`try_route_lambda_inline`) is wired into the
+     `Expr::Member` arm: any library `inline fun` taking a single closure-form lambda the platform can
+     splice is inlined from its REAL stdlib bytecode (verified: `5.let{it+1}` emits the spliced
+     `StandardKt.let` body — `Integer.valueOf`/`checkcast`/`intValue` round-trip — not a desugar).
+     Conformance holds **476 box()=OK / 0 FAIL** (full parity, no regression). A per-function `let`/`also`
+     desugar is KEPT only as a fallback for lambdas that capture `this`/fields (no closure form ⇒ no
+     `IrExpr::Lambda` to splice); removing it costs ~13 box tests until this-capturing lambdas are
+     modelled, so it stays until the route covers them.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
