@@ -2296,9 +2296,15 @@ bodies exist only as jar bytecode):
      non-capturing lambda's body at a branchless single-invoke body's `FunctionN.invoke` (store non-lambda
      args, append `before`, unbox the boxed invoke args to the typed lambda params, inline the body, box
      the result, append `after`). 0-FAIL; reachable for any lambda-arg inline call (`map` → branchy → falls
-     back). **TO FIRE — front-end routing (the remaining blockers):** (i) krusty resolves NO custom-lib
-     top-level facade fn (`lib.LibKt.dbl` → "unresolved"), and types a top-level lib fn's lambda arg before
-     its sig is known (`it: Any`) — needs a resolver fix to use a custom-lib inline fn as the vehicle.
+     back). **TO FIRE — the ONE remaining front-end gap (precisely diagnosed):** custom-lib top-level fns
+     DO resolve (`dbl(5)` works — the earlier "unresolved" was a stdin-facade test artifact; a named
+     `Lib.kt`→`LibKt` resolves). The real gap: the resolver types a top-level lib fn's **lambda parameter**
+     from the *erased* descriptor (`Function1`), so `applyIt(5){ it+1 }` gives `it: Any` + "type mismatch:
+     Function vs Function1". FIX: parse the lib fn's generic `Signature` (jvm_libraries has
+     `parse_method_gsig`) → the `Function` param's `(Int)->Int` → a `lambda_param_types` on `LibraryCallable`
+     → `resolve.rs` (~3597 arg loop) types the lambda with it (as the user-fn `known_sig` path does). THEN
+     `applyIt` lowers to `Callee::Static(inline)` + lambda → the phase-299 emitter inlines it → route (b)
+     fires end-to-end via a custom lib (no stdlib @InlineOnly/multifile complications).
      (ii) stdlib `let`/`also` are IR-desugared (`ir_lower` ~3261, a clean IR true-inline) — route only
      *non-capturing* ones to `Callee::Static(inline)` (keep the desugar for capturing lambdas; detect free
      vars at the desugar site). (iii) an inlined `impl_fn` is still emitted as a dead method — skip it for
