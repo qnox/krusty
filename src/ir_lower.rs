@@ -1394,12 +1394,14 @@ impl<'a> Lower<'a> {
     }
 
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
-        if logical == physical || physical != Ty::obj("kotlin/Any") {
+        if logical == physical {
             return read;
         }
-        if logical.is_primitive() {
+        // A primitive flowing out of any erased reference (`Object`, or a type-parameter bound like
+        // `Comparable`/`Number` — `maxOrNull(): T`) unboxes; a reference erased to `Object` checkcasts.
+        if logical.is_primitive() && physical.is_reference() {
             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(logical) })
-        } else if logical.is_reference() && !matches!(logical, Ty::Null) {
+        } else if logical.is_reference() && !matches!(logical, Ty::Null) && physical == Ty::obj("kotlin/Any") {
             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(logical) })
         } else {
             read
@@ -1408,21 +1410,10 @@ impl<'a> Lower<'a> {
 
     fn coerce_generic_read(&mut self, read: u32, member: AstExprId, pty: Ty) -> u32 {
         let lt = self.info.ty(member);
-        if lt == pty || lt == Ty::Error {
+        if lt == Ty::Error {
             return read;
         }
-        // Only generic erasure (`Object` physical) warrants a synthesized coercion here; any other
-        // mismatch is the checker's concern and must not silently change the emitted read.
-        if pty != Ty::obj("kotlin/Any") {
-            return read;
-        }
-        if lt.is_primitive() {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(lt) })
-        } else if lt.is_reference() && !matches!(lt, Ty::Null) {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(lt) })
-        } else {
-            read
-        }
+        self.coerce_erased(read, lt, pty)
     }
 
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
