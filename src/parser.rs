@@ -1636,7 +1636,27 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self, start: Span) -> StmtId {
         self.bump(); // 'for'
         self.expect(TokenKind::LParen, "'('");
-        let name = self.ident_or_error("loop variable");
+        // A destructuring loop variable — `for ((a, b) in pairs)` — desugars to a synthetic temp plus
+        // `val (a, b) = temp` prepended to the body (reusing the `Stmt::Destructure` machinery).
+        let destructure: Option<Vec<(String, bool)>> = if self.at(TokenKind::LParen) {
+            self.bump();
+            let mut entries = Vec::new();
+            loop {
+                let n = self.ident_or_error("variable name");
+                if self.eat(TokenKind::Colon) { let _ = self.parse_type(); }
+                entries.push((n, false));
+                if !self.eat(TokenKind::Comma) { break; }
+                if self.at(TokenKind::RParen) { break; }
+            }
+            self.expect(TokenKind::RParen, "')'");
+            Some(entries)
+        } else {
+            None
+        };
+        let name = match &destructure {
+            Some(_) => format!("$dest${}", start.lo),
+            None => self.ident_or_error("loop variable"),
+        };
         self.expect(TokenKind::KwIn, "'in'");
         let rstart = self.parse_expr();
         let kind = if self.eat(TokenKind::DotDot) {
@@ -1653,6 +1673,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RParen, "')'");
             self.skip_newlines();
             let body = self.parse_branch();
+            let body = self.desugar_destructure_body(&name, destructure, body);
             // `for (i in X.indices)` → counted loop `0 until X.size`.
             if let Expr::Member { receiver, name: mname } = self.file.expr(rstart).clone() {
                 if mname == "indices" {
@@ -1677,6 +1698,23 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         let body = self.parse_branch();
         self.finish_stmt(Stmt::For { name, range: ForRange { start: rstart, end: rend, kind, step }, body }, start)
+    }
+
+    /// For a destructuring `for ((a, b) in …)`, prepend `val (a, b) = <temp>` to the loop body so the
+    /// component names are bound from the synthetic loop variable. A no-op when not destructuring.
+    fn desugar_destructure_body(&mut self, temp: &str, destructure: Option<Vec<(String, bool)>>, body: ExprId) -> ExprId {
+        let Some(entries) = destructure else { return body };
+        let sp = self.file.expr_spans[body.0 as usize];
+        let temp_expr = self.file.add_expr(Expr::Name(temp.to_string()), sp);
+        let dstmt = self.file.add_stmt(Stmt::Destructure { entries, init: temp_expr }, sp);
+        match self.file.expr(body).clone() {
+            Expr::Block { stmts, trailing } => {
+                let mut s2 = vec![dstmt];
+                s2.extend(stmts);
+                self.file.add_expr(Expr::Block { stmts: s2, trailing }, sp)
+            }
+            _ => self.file.add_expr(Expr::Block { stmts: vec![dstmt], trailing: Some(body) }, sp),
+        }
     }
 
     fn finish_stmt(&mut self, s: Stmt, start: Span) -> StmtId {

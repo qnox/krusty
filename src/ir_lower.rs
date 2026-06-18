@@ -766,13 +766,55 @@ impl<'a> Lower<'a> {
         match self.afile.expr(body).clone() {
             Expr::Block { stmts, trailing } => {
                 for s in stmts {
-                    out.push(self.stmt(s)?);
+                    self.append_stmt(s, out)?;
                 }
                 if let Some(t) = trailing {
                     out.push(self.expr(t)?);
                 }
             }
             _ => out.push(self.expr(body)?),
+        }
+        Some(())
+    }
+
+    /// Lower one statement into `out`. A destructuring declaration splices its bindings directly so the
+    /// component locals live in the enclosing scope (a nested `Block` would scope them away at emit).
+    fn append_stmt(&mut self, s: crate::ast::StmtId, out: &mut Vec<u32>) -> Option<()> {
+        if let Stmt::Destructure { entries, init } = self.afile.stmt(s).clone() {
+            return self.lower_destructure(&entries, init, out);
+        }
+        out.push(self.stmt(s)?);
+        Some(())
+    }
+
+    /// Lower `val (a, b, …) = init` into `out`: a temp bound to `init`, then one local per component
+    /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
+    /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
+    fn lower_destructure(&mut self, entries: &[(String, bool)], init: AstExprId, out: &mut Vec<u32>) -> Option<()> {
+        let it_ty = self.info.ty(init);
+        let internal = it_ty.obj_internal()?.to_string();
+        let init_v = self.expr(init)?;
+        let tmp = self.fresh_value();
+        out.push(self.ir.add_expr(IrExpr::Variable { index: tmp, ty: ty_to_ir(it_ty), init: Some(init_v) }));
+        for (idx, (name, _)) in entries.iter().enumerate() {
+            if name == "_" {
+                continue;
+            }
+            let comp = format!("component{}", idx + 1);
+            let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
+            let (call, log_ty) = if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
+                let ret = self.syms.method_of(&internal, &comp).map(|s| s.ret).unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                (self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] }), ret)
+            } else {
+                let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])?;
+                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                let log = self.syms.libraries.member_return(it_ty, &comp, &[]).unwrap_or(m.ret);
+                let c = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: comp.clone(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] });
+                (self.coerce_erased(c, log, m.ret), log)
+            };
+            let v = self.fresh_value();
+            self.scope.push((name.clone(), v, log_ty));
+            out.push(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(log_ty), init: Some(call) }));
         }
         Some(())
     }
@@ -1334,6 +1376,22 @@ impl<'a> Lower<'a> {
     /// *logical* type (`Box<Int>().x : Int`). Insert the coercion kotlinc emits on such a read: an
     /// unbox for a primitive target, a checkcast for a more specific reference target. A no-op when
     /// the logical and physical types already agree (every non-generic read).
+    /// Insert the unbox/checkcast bridging an erased physical type to a known logical type — the same
+    /// coercion as [`coerce_generic_read`] but with both types given directly (for synthesized reads,
+    /// e.g. a destructuring `componentN()` call whose erased `Object` becomes the element type).
+    fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
+        if logical == physical || physical != Ty::obj("kotlin/Any") {
+            return read;
+        }
+        if logical.is_primitive() {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(logical) })
+        } else if logical.is_reference() && !matches!(logical, Ty::Null) {
+            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(logical) })
+        } else {
+            read
+        }
+    }
+
     fn coerce_generic_read(&mut self, read: u32, member: AstExprId, pty: Ty) -> u32 {
         let lt = self.info.ty(member);
         if lt == pty || lt == Ty::Error {
@@ -1396,14 +1454,14 @@ impl<'a> Lower<'a> {
     }
 
     fn block_as_body(&mut self, block: AstExprId, ret_ty: &IrType) -> Option<u32> {
-        let Expr::Block { stmts, trailing } = self.afile.expr(block) else { return None };
+        let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else { return None };
         let depth = self.scope.len();
         let mut out = Vec::new();
-        for &s in stmts {
-            out.push(self.stmt(s)?);
+        for s in stmts {
+            self.append_stmt(s, &mut out)?;
         }
         if let Some(t) = trailing {
-            let tt = self.info.ty(*t);
+            let tt = self.info.ty(t);
             let diverges = tt == Ty::Nothing;
             // A value-less statement (e.g. a no-`else` `when`) can only be a value-returning
             // function's body if it's exhaustive (hence diverging). krusty doesn't prove
@@ -1412,7 +1470,7 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 return None;
             }
-            let ve = self.expr(*t)?;
+            let ve = self.expr(t)?;
             if *ret_ty == IrType::Unit || diverges {
                 out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
             } else {
@@ -1474,6 +1532,13 @@ impl<'a> Lower<'a> {
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
                 Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
+            }
+            Stmt::Destructure { entries, init } => {
+                // A direct `stmt()` call wraps the bindings in a Block; the block builders use
+                // `append_stmt` instead so the component locals live in the enclosing scope.
+                let mut out = Vec::new();
+                self.lower_destructure(&entries, init, &mut out)?;
+                Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
             }
             Stmt::Assign { name, value } => {
                 if let Some((v, _)) = self.lookup(&name) {
@@ -1810,9 +1875,9 @@ impl<'a> Lower<'a> {
                 let depth = self.scope.len();
                 let mut out = Vec::new();
                 for &s in &stmts {
-                    match self.stmt(s) {
-                        Some(v) => out.push(v),
-                        None => { self.scope.truncate(depth); return None; }
+                    if self.append_stmt(s, &mut out).is_none() {
+                        self.scope.truncate(depth);
+                        return None;
                     }
                 }
                 let value = match trailing {
