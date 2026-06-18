@@ -2537,12 +2537,18 @@ impl<'a> Lower<'a> {
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys)
                     } {
-                        let recv = self.expr(receiver)?;
+                        // Coerce the receiver + arguments to the extension's parameter types so a
+                        // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
+                        let recv = self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
                         let mut a = vec![recv];
-                        for &arg in &args {
-                            a.push(self.expr(arg)?);
+                        for (i, &arg) in args.iter().enumerate() {
+                            match c.params.get(i + 1) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
                         }
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a })
+                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a });
+                        self.coerce_generic_read(call, e, c.physical_ret)
                     } else {
                         return None;
                     }
