@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A `var` captured (even read-only) by a closure but reassigned later in the enclosing scope is
+    // boxed, so the closure observes the update (kotlinc's captured-var semantics; KT-4656 style).
+    ("CaptureReassigned", r#"
+fun eval(f: () -> Int): Int = f()
+fun box(): String {
+    var n = 1
+    val r1 = eval { n }
+    n = 5
+    fun getN() = n
+    val r2 = eval { n }
+    if (r1 != 1) return "f1:$r1"
+    if (r2 != 5) return "f2:$r2"
+    if (getN() != 5) return "f3"
+    return "OK"
+}
+"#),
     // A capturing local function is lifted with its captured locals prepended as parameters: a `val`
     // is passed by value, a `var` it writes is boxed into a shared `Ref` holder (so the mutation is
     // visible to the enclosing scope).

@@ -4252,8 +4252,10 @@ fn captured_param_ir(name: &str, ty: Ty, boxed: &std::collections::HashSet<Strin
 /// The `kotlin/jvm/internal/Ref$XxxRef` holder class for a boxed mutable local of (erased) type `t`.
 fn ref_holder_internal(t: Ty) -> &'static str {
     match t {
-        Ty::Int => "kotlin/jvm/internal/Ref$IntRef",
-        Ty::Long => "kotlin/jvm/internal/Ref$LongRef",
+        // Unboxed unsigned types ARE their signed primitive on the JVM (`UInt`=int, `ULong`=long), so
+        // they share the signed `Ref` holder — matching `ty_to_ir`'s erasure used by the emitter.
+        Ty::Int | Ty::UInt => "kotlin/jvm/internal/Ref$IntRef",
+        Ty::Long | Ty::ULong => "kotlin/jvm/internal/Ref$LongRef",
         Ty::Float => "kotlin/jvm/internal/Ref$FloatRef",
         Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
         Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
