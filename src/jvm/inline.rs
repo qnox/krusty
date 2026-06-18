@@ -798,6 +798,25 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
 /// entry `checkNotNullParameter` null-checks). Lets the front end route a call to the inliner ONLY
 /// when the emitter is guaranteed to splice it — required because an `@InlineOnly` callee has no
 /// runtime body to fall back to.
+/// Whether a NO-lambda `inline fun` body can be spliced at a call site (`String.uppercase()` →
+/// `toUpperCase(Locale.ROOT)`): branchless (all `Plain` insns, no handlers), no `FunctionN.invoke`
+/// (that's the lambda case), and a single trailing return. The splice relocates the body verbatim.
+pub fn is_call_spliceable(body: &MethodCode) -> bool {
+    if body.has_handlers {
+        return false;
+    }
+    let Some(mut insns) = disassemble(&body.code) else { return false };
+    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
+        return false;
+    }
+    strip_param_null_checks(&mut insns, &body.source_cp);
+    if !function_invoke_sites(&insns, &body.source_cp).is_empty() {
+        return false; // a lambda-bearing body — use `is_lambda_spliceable`/the lambda route instead
+    }
+    let returns = insns.iter().filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))).count();
+    returns == 1 && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
+}
+
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
     if body.has_handlers {
         return false;

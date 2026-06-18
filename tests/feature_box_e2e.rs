@@ -112,6 +112,16 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A private @InlineOnly String extension (`uppercase`/`lowercase` → `toUpperCase(Locale.ROOT)`) is
+    // inlined from its real stdlib bytecode (it has no callable body and no JDK member equivalent).
+    ("StringInlineExt", r#"
+fun box(): String {
+    if ("ab".uppercase() != "AB") return "f1"
+    if ("AB".lowercase() != "ab") return "f2"
+    if (" Ab ".trim().uppercase() != "AB") return "f3"
+    return "OK"
+}
+"#),
     // String members resolve to their java.lang.String JVM methods (a member wins over a same-named
     // private @InlineOnly extension like StringsKt.isEmpty).
     ("StringMembers", r#"
