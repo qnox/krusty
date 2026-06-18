@@ -1680,7 +1680,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-
     /// Build a class reference type, carrying any generic arguments from the syntactic type
     /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
     /// descriptors but let the front end recover member/element types.
