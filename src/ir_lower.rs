@@ -1920,9 +1920,34 @@ impl<'a> Lower<'a> {
                     }
                 }
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
-                    let l = self.expr(lhs)?;
-                    let r = self.expr(rhs)?;
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(l), args: vec![r] })
+                    // Flatten the left-nested concat chain (`a + b + c + …`) iteratively, then fold —
+                    // a deep chain (a stress test with hundreds of `+`) would otherwise recurse through
+                    // `expr` once per operator and overflow the stack. The emitted `String.plus` chain
+                    // is identical to the recursive lowering.
+                    let is_concat = |this: &Self, l: AstExprId, r: AstExprId| {
+                        this.info.ty(l) == Ty::String || this.info.ty(r) == Ty::String
+                    };
+                    let mut operands = vec![rhs];
+                    let mut cur = lhs;
+                    loop {
+                        match self.afile.expr(cur).clone() {
+                            Expr::Binary { op: BinOp::Add, lhs: l2, rhs: r2 } if is_concat(self, l2, r2) => {
+                                operands.push(r2);
+                                cur = l2;
+                            }
+                            _ => {
+                                operands.push(cur);
+                                break;
+                            }
+                        }
+                    }
+                    operands.reverse();
+                    let mut acc = self.expr(operands[0])?;
+                    for &op_e in &operands[1..] {
+                        let r = self.expr(op_e)?;
+                        acc = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![r] });
+                    }
+                    acc
                 } else {
                     let irop = bin_to_ir(op)?;
                     // A primitive op needs both operands in one type. For mixed numeric operands
