@@ -98,6 +98,15 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // The array creators are intrinsics keyed on the resolved stdlib symbol: a user function of the
+    // same name must shadow the intrinsic (as in kotlinc), not be silently lowered to an array.
+    ("ArrayOfUserShadow", r#"
+fun arrayOf(a: String): String = "user:$a"
+fun box(): String {
+    val r = arrayOf("x")
+    return if (r == "user:x") "OK" else "F:$r"
+}
+"#),
     ("RepeatInline", r#"
 fun box(): String {
     var s = 0
