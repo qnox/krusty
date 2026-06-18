@@ -141,6 +141,10 @@ pub enum IrExpr {
     /// `kotlin/jvm/functions/Function{arity}`. `impl_fn` is the synthesized static method holding the
     /// body; `captures` are the free-variable values bound into the call site (empty = non-capturing).
     Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId> },
+    /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic
+    /// kotlin/Unit.INSTANCE:Lkotlin/Unit;` — what a `Unit`-returning lambda body yields so its
+    /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
+    UnitInstance,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     InvokeFunction { func: ExprId, args: Vec<ExprId>, ret: IrType },

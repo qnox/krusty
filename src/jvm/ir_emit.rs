@@ -1015,6 +1015,10 @@ impl<'a> Emitter<'a> {
                 let indy = self.cw.invoke_dynamic(bsm, "invoke", &format!("()L{iface};"));
                 code.invokedynamic(indy, 0, 1);
             }
+            IrExpr::UnitInstance => {
+                let f = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                code.getstatic(f, 1);
+            }
             IrExpr::NotNullAssert { operand } => {
                 self.emit_value(*operand, code);
                 code.dup();

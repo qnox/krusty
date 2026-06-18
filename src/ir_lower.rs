@@ -766,9 +766,8 @@ impl<'a> Lower<'a> {
         if self.cur_class.is_some() {
             return None;
         }
-        // A `Unit`/`Nothing`-returning lambda must yield the `kotlin/Unit` singleton from its impl
-        // method (so `FunctionN.invoke` returns an Object); krusty doesn't emit that yet — bail.
-        if sig.ret == Ty::Unit || sig.ret == Ty::Nothing {
+        // A `Nothing`-returning lambda (every path throws) isn't modeled — bail.
+        if sig.ret == Ty::Nothing {
             return None;
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda.
@@ -803,15 +802,20 @@ impl<'a> Lower<'a> {
         self.scope = saved_scope;
         self.next_value = saved_next;
         let ve = ve?;
-        let ret_ty = ty_to_ir(sig.ret);
-        // Wrap the body value in a `Return` unless the lambda is `Unit`-valued or diverges.
         let diverges = self.info.ty(body) == Ty::Nothing;
-        let body_expr = if ret_ty == IrType::Unit || diverges {
-            ve
+        // The SAM's `invoke` returns `Object`, so the impl method returns a reference. A `Unit` lambda
+        // runs its body for effect then returns the `kotlin/Unit` singleton; a value lambda returns its
+        // (boxed) body value; a diverging body falls through to its own `throw`/`return`.
+        let (ret_ty, block) = if diverges {
+            (ty_to_ir(sig.ret), self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None }))
+        } else if sig.ret == Ty::Unit {
+            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let ret = self.ir.add_expr(IrExpr::Return(Some(unit)));
+            (ty_to_ir(Ty::obj("kotlin/Unit")), self.ir.add_expr(IrExpr::Block { stmts: vec![ve, ret], value: None }))
         } else {
-            self.ir.add_expr(IrExpr::Return(Some(ve)))
+            let ret = self.ir.add_expr(IrExpr::Return(Some(ve)));
+            (ty_to_ir(sig.ret), self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None }))
         };
-        let block = self.ir.add_expr(IrExpr::Block { stmts: vec![body_expr], value: None });
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
         let params_ir: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
