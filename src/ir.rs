@@ -139,10 +139,12 @@ pub enum IrExpr {
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues { class: ClassId },
     EnumValueOf { class: ClassId, arg: ExprId },
-    /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory` producing a
-    /// `kotlin/jvm/functions/Function{arity}`. `impl_fn` is the synthesized static method holding the
-    /// body; `captures` are the free-variable values bound into the call site (empty = non-capturing).
-    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId> },
+    /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
+    /// synthesized static method holding the body; `captures` are the free-variable values bound into
+    /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
+    /// `kotlin/jvm/functions/Function{arity}.invoke`), or `Some((interface, method))` for a SAM
+    /// conversion to a user functional interface (`Pred { … }` → `Pred.test`).
+    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId>, sam: Option<(String, String)> },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic
     /// kotlin/Unit.INSTANCE:Lkotlin/Unit;` — what a `Unit`-returning lambda body yields so its
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.

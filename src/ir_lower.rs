@@ -962,6 +962,10 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_lambda(&mut self, e: AstExprId, params: &[String], body: AstExprId) -> Option<u32> {
+        self.lower_lambda_sam(e, params, body, None)
+    }
+
+    fn lower_lambda_sam(&mut self, e: AstExprId, params: &[String], body: AstExprId, sam: Option<(String, String)>) -> Option<u32> {
         let Ty::Fun(sig) = self.info.ty(e) else { return None };
         let arity = sig.params.len();
         // A lambda inside a class method could capture `this`/fields — not modeled yet.
@@ -1046,7 +1050,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals }))
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -2067,7 +2071,7 @@ impl<'a> Lower<'a> {
                 if self.top_fun_decl(&name).map_or(false, |f| !f.type_params.is_empty()) {
                     return None;
                 }
-                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }));
+                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None }));
             }
             Expr::Name(n) => {
                 if let Some((v, slot_ty)) = self.lookup(&n) {
@@ -2520,6 +2524,23 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // SAM conversion `Pred { lambda }` — a functional interface built from a lambda;
+                    // lower the lambda as a `LambdaMetafactory` instance targeting the interface's
+                    // single abstract method (instead of `FunctionN.invoke`).
+                    if args.len() == 1 && self.lookup(&fname).is_none() && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
+                        if let Some(internal) = self.info.ty(e).obj_internal() {
+                            if let Some(ci) = self.classes.get(internal) {
+                                if self.ir.classes[ci.id as usize].is_interface && self.ir.classes[ci.id as usize].methods.len() == 1 {
+                                    let mfid = self.ir.classes[ci.id as usize].methods[0];
+                                    let method = self.ir.functions[mfid as usize].name.clone();
+                                    let iface = internal.to_string();
+                                    if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
+                                        return self.lower_lambda_sam(args[0], &params, body, Some((iface, method)));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // `f(args)` where `f` is a field/property of the enclosing class (not a local value or
                     // a top-level function) — invoking a function value through a field isn't modeled;
                     // bail rather than miscompile (it would emit a bogus constructor call).
