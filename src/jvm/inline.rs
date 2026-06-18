@@ -775,7 +775,12 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
     match insn {
         Insn::Plain { op, operands } => match *op {
             0x2a..=0x2d => (*op as u16 - 0x2a) == slot, // aload_0..aload_3
-            0x19 => operands.first().map(|&b| b as u16) == Some(slot),
+            0x19 => operands.first().map(|&b| b as u16) == Some(slot), // aload <byte index>
+            // wide aload: 0xc4 0x19 <2-byte index> (slot > 255 after the local shift).
+            0xc4 => {
+                operands.first() == Some(&0x19)
+                    && operands.get(1..3).map(|b| (b[0] as u16) << 8 | b[1] as u16) == Some(slot)
+            }
             _ => false,
         },
         _ => false,
@@ -817,6 +822,11 @@ pub fn branchless_lambda_segments(
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
     let shifted_lambda = base + lambda_slot;
+    // The lambda parameter must be loaded exactly once (to feed its single invoke); more loads mean it
+    // is used in a way we don't model (passed on, stored), so eliding them would corrupt the stack — bail.
+    if insns.iter().filter(|i| is_aload_of(i, shifted_lambda)).count() != 1 {
+        return None;
+    }
     // `before` = instructions up to the invoke, with the lambda-object loads elided; `after` =
     // instructions after the invoke, dropping the trailing return.
     let before: Vec<Insn> = insns[..invoke]
