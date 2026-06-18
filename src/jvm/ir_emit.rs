@@ -676,7 +676,10 @@ impl<'a> Emitter<'a> {
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
             return false;
         };
-        let base = code.max_locals;
+        // Splice the body's locals above BOTH the slot allocator's next free slot and the code's
+        // high-water mark, so the spliced temporaries can never collide with a caller local (live or
+        // reserved-but-unstored).
+        let base = self.next_slot.max(code.max_locals);
         // Branchless single-exit bodies only (no StackMapTable relocation needed yet); any other shape
         // returns `None` and the caller emits a normal `invokestatic` — never a miscompile.
         let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw) else {
