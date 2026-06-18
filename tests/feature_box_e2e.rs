@@ -72,6 +72,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A `let`/`also` body containing a branch (`if`/`when`) can't go through the branchless inline
+    // splice — it falls back to the per-function desugar, which lowers the branchy body normally.
+    ("ScopeFnsBranchy", r#"
+fun box(): String {
+    val a = 5.let { if (it > 3) "big" else "small" }
+    if (a != "big") return "f1:$a"
+    val b = 2.let { when { it > 3 -> "x"; else -> "y" } }
+    if (b != "y") return "f2:$b"
+    var c = ""
+    "z".also { c = if (it == "z") "yes" else "no" }
+    if (c != "yes") return "f3:$c"
+    return "OK"
+}
+"#),
     ("ScopeFns", r#"
 fun box(): String {
     val r = "abc".let { it.length }
