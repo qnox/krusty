@@ -3320,7 +3320,9 @@ impl<'a> Checker<'a> {
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
-                if let Some(c) = self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys) {
+                let call_targs: Vec<Ty> = self.file.call_type_args.get(&call.0).cloned()
+                    .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect()).unwrap_or_default();
+                if let Some(c) = self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys, &call_targs) {
                     self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
                     return c.ret;
                 }
@@ -3528,7 +3530,9 @@ impl<'a> Checker<'a> {
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
                 // library set (vararg-aware), checking each argument against the resolved parameters.
                 if !self.syms.funs.contains_key(&fname) {
-                    if let Some(c) = self.syms.libraries.resolve_callable(&fname, None, &arg_tys) {
+                    let call_targs: Vec<Ty> = self.file.call_type_args.get(&call.0).cloned()
+                        .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect()).unwrap_or_default();
+                    if let Some(c) = self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &call_targs) {
                         let vararg = c.params.len() != arg_tys.len()
                             || c.params.last().map_or(false, |p| p.array_elem().is_some() && arg_tys.last() != Some(p));
                         if vararg && !c.params.is_empty() {
