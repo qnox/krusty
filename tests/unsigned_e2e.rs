@@ -49,6 +49,15 @@ fun box(): String {
     if ("$mx!" != "4294967295!") return "f15"
     val lmx = 0uL.dec()
     if (lmx.toString() != "18446744073709551615") return "f16"
+    // boxing into Any + `is` (kotlin/UInt object, not Integer) + boxed unsigned toString via dispatch
+    val any: Any = 5u
+    if (any !is UInt) return "f17"
+    if (any is Int) return "f18"
+    if (any.toString() != "5") return "f19"
+    val anyBig: Any = 0u.dec()
+    if (anyBig.toString() != "4294967295") return "f20"
+    val anyL: Any = 7uL
+    if (anyL !is ULong) return "f21"
     return "OK"
 }
 "#;
