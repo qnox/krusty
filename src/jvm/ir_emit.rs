@@ -743,14 +743,17 @@ impl<'a> Emitter<'a> {
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
                 self.loop_stack.push((cont, end));
                 self.emit(body, code);
-                self.loop_stack.pop();
                 // The body block restored the slot map, so framing `cont`/`start` here captures the
                 // loop's outer locals — a `continue` jumping in from a deeper scope stays compatible.
                 self.frame(cont, vec![], code);
                 code.bind(cont);
+                // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
+                // non-overflowing counted loop puts its `if (i == end) break` here (before the increment)
+                // so a `continue` lands on it too, instead of skipping straight to the wrapping `i++`.
                 if let Some(u) = update {
                     self.emit(u, code);
                 }
+                self.loop_stack.pop();
                 if post_test {
                     // `do…while`: loop back while the condition holds, then fall through to `end`.
                     self.emit_value(cond, code);
