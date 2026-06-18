@@ -851,7 +851,8 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
 /// Per-entry bodies (`ENTRY { override fun m() = … }`) are emitted as anonymous subclasses; only
 /// method overrides are supported (a property override would need backing-field plumbing — deferred).
 fn is_simple_enum(c: &ast::ClassDecl) -> bool {
-    let has_abstract_method = c.methods.iter().any(|m| matches!(m.body, FunBody::None));
+    let abstract_names: std::collections::HashSet<&str> = c.methods.iter()
+        .filter(|m| matches!(m.body, FunBody::None)).map(|m| m.name.as_str()).collect();
     c.is_enum
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
@@ -862,9 +863,14 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         && c.methods.iter().all(|m| m.receiver.is_none())
         // Entry-body overrides: concrete, non-extension methods only.
         && c.enum_entry_bodies.iter().all(|b| b.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None)))
-        // If the enum declares an abstract method, every entry must override it (a bodyless entry would
-        // instantiate the abstract enum directly → a verify error). kotlinc requires this anyway.
-        && (!has_abstract_method || c.enum_entry_bodies.iter().all(|b| !b.is_empty()))
+        // Every entry must override EVERY abstract member: a bodyless entry would instantiate the
+        // abstract enum, and an entry that overrides only some members would leave its synthesized
+        // subclass with an unimplemented abstract method (AbstractMethodError). kotlinc requires full
+        // coverage; if any entry's overrides don't cover all abstract members, skip (never miscompile).
+        && (abstract_names.is_empty() || c.enum_entry_bodies.iter().all(|b| {
+            let overridden: std::collections::HashSet<&str> = b.iter().map(|m| m.name.as_str()).collect();
+            abstract_names.iter().all(|n| overridden.contains(n))
+        }))
 }
 
 /// An `object Foo` the IR can emit as a singleton: no primary-constructor params, plain body
