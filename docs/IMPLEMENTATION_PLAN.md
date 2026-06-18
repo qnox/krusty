@@ -2246,12 +2246,23 @@ bodies exist only as jar bytecode):
      (append relocated bytes + stack/local bookkeeping) and `inline::is_branchless`. Test: compile a
      tiny lib with kotlinc that has a branchless `inline fun`, put it on krusty's `-cp`, assert krusty
      splices it (verifier-clean + correct runtime result).
-  2. **Lambda-argument splicing (the crux).** The stdlib body calls `Function1.invoke(elem)` (an
-     invokeinterface), not the lambda directly. To inline, the caller's lambda body must be spliced at
-     each `FunctionN.invoke` site inside the relocated body (kotlinc inlines the lambda too). Needs:
-     identify the invoke sites, map the lambda's params to the invoke args (fresh slots above `base`),
-     splice the lambda's own compiled/relocated code, and handle the lambda's captures. This is what
-     unlocks `forEach`/`map`/… and retires those desugars.
+  2. **Lambda-argument splicing (the crux).** Branchless + branchy *non-lambda* splice are DONE
+     (290–295). The body calls `Function1.invoke(elem)` (invokeinterface); `inline::function_invoke_sites`
+     (296, unit-tested) locates those sites. Two routes to handle the lambda parameter:
+     - **(a) Closure route — tractable, high coverage, first cut.** Allow `Function`-typed params in the
+       (already-built) branchy splice: emit the caller's lambda as a normal closure object and pass it as
+       the action argument; the spliced body's `invoke` calls it. Needs: relax `param_vtypes` to admit
+       reference params (frame-0 `Object(FunctionN)`); allow the `Lkotlin/jvm/functions/Function` guard in
+       `try_inline_static`; thread the lambda arg through. Unlocks **all** stdlib lambda inline fns
+       generically for **non-mutable-capture** lambdas (`run`/`with`/`apply`/`map`/`filter`/`fold`/…) — real
+       coverage. NOT byte-equal to kotlinc (it inlines the lambda; we keep a closure), and **cannot**
+       handle a lambda that writes an outer mutable local (the closure can't) — those keep the desugar.
+     - **(b) True inline — retires the desugars fully.** At each invoke site, splice the caller's lambda
+       *body* inline (bind its params to the invoke args), emitting krusty IR into the middle of the
+       relocated stdlib bytecode. Removes the closure (matches kotlinc) and handles mutable capture, so the
+       `forEach`/`let`/`also` desugars can be deleted. Hard: interleave IR emission with byte-splicing at
+       `function_invoke_sites`, drop the dead `aload action`, and thread the lambda IR to the emitter.
+     Plan: ship (a) for the coverage win, then (b) to retire the desugars.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
