@@ -59,6 +59,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ **Exit met:** `tests/compile_e2e.rs` runs the full pipeline (parse→check→emit) on 8 functions;
   javac accepts, `java -Xverify:all` verifies + runs, all results semantically correct
   (`7,14,3,-5,8,11.0,42!,hi bob`). 38 tests green.
+### 4b — `@kotlin.Metadata` emitter (protobuf)  🚧 (load-bearing for Kotlin-library ABI)
+- ✅ `metadata/protobuf.rs`: protobuf wire writer, checked vs canonical vectors. 5 tests.
+- ✅ `metadata/encoding.rs`: `bytesToStrings` (byte→char identity — **matches kotlinc 1.9.24's exact
+  d1 payload** for `fun f(a:Int):Int=a`) + JVM modified-UTF-8; const pool now uses it. 5 tests.
+- ✅ `writeData` layout known: `d1 = stringTable.serializeTo(out); message.writeTo(out)`; reference
+  decoded as `mv=[1,9,0] k=2 xi=48 d2=[f,"",a]`.
+- ⬜ **Remaining (the large part):** faithfully build `ProtoBuf.Package/Function/Type/ValueParameter`
+  + `StringTableTypes` + the **qualified-name/builtins table** (so `kotlin/Int` etc. resolve) +
+  JVM signature extension + the `@kotlin.Metadata` annotation attribute. This is effectively a
+  re-implementation of `kotlinx-metadata-jvm`'s writer (~thousands of LOC) and is the single biggest
+  remaining sub-project. Correctness gate = Phase 5b round-trip (kotlinc consumes krusty output).
+  Note: a *Java* consumer needs none of this (it reads only the signatures, already matched in 5a);
+  `@Metadata` is required only for *Kotlin* consumers.
 ### 4c — branches (if/while/comparisons/`&&`/`||`) ✅
 - ✅ Label/branch support in `CodeBuilder` (if*/if_icmp*/goto/lcmp/dcmpg + offset linking).
 - ✅ Emitter: comparisons (Int/Long/Double), short-circuit `&&`/`||` via `emit_cond_jump`, `!`,
@@ -79,20 +92,6 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Divergence-aware codegen: `goto`/store after a `return`/`throw` branch is elided; frames for
   dead code are filtered to avoid "bad offset" errors; duplicate-offset frames deduped.
 - ✅ All `cargo test` green; `-Xverify:all` passes on all emitted class files.
-
-## Phase 4b — `@kotlin.Metadata` emitter (protobuf)  🚧 (load-bearing for Kotlin-library ABI)
-- ✅ `metadata/protobuf.rs`: protobuf wire writer, checked vs canonical vectors. 5 tests.
-- ✅ `metadata/encoding.rs`: `bytesToStrings` (byte→char identity — **matches kotlinc 1.9.24's exact
-  d1 payload** for `fun f(a:Int):Int=a`) + JVM modified-UTF-8; const pool now uses it. 5 tests.
-- ✅ `writeData` layout known: `d1 = stringTable.serializeTo(out); message.writeTo(out)`; reference
-  decoded as `mv=[1,9,0] k=2 xi=48 d2=[f,"",a]`.
-- ⬜ **Remaining (the large part):** faithfully build `ProtoBuf.Package/Function/Type/ValueParameter`
-  + `StringTableTypes` + the **qualified-name/builtins table** (so `kotlin/Int` etc. resolve) +
-  JVM signature extension + the `@kotlin.Metadata` annotation attribute. This is effectively a
-  re-implementation of `kotlinx-metadata-jvm`'s writer (~thousands of LOC) and is the single biggest
-  remaining sub-project. Correctness gate = Phase 5b round-trip (kotlinc consumes krusty output).
-  Note: a *Java* consumer needs none of this (it reads only the signatures, already matched in 5a);
-  `@Metadata` is required only for *Kotlin* consumers.
 
 ## Phase 5 — Differential harness vs kotlinc  🚧
 ### 5a — ABI signatures + execution ✅
@@ -125,14 +124,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   (`libx.Lib.sq` packaged with `jar cf`) → runs correctly (`15/[hi]/[12]`, `36`). 57 tests green.
 - Remaining: JDK classes via jimage (classpath reader reads dirs/jars only), overload widening,
   multi-jar resolution, instance methods on arbitrary classpath types (needs `Ty::Obj`).
+### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
+### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
 ### 6e — `java.lang.String` instance methods ✅
 - ✅ `resolve_string_instance` (curated `java.lang.String` subset: `length`/`isEmpty`/`substring`×2/
   `indexOf`/`concat`) drives typecheck + `invokevirtual` codegen. Interim until jimage gives the
   full JDK; each entry matches what kotlinc emits.
 - ✅ **Differential pass**: `tests/diff_kotlinc.rs` now includes `s.substring(1)`, `s.substring(1,3)`,
   `s.indexOf("b")` — krusty's bytecode + execution match kotlinc exactly. Unit tests in `resolve.rs`.
-### 6c — minimal Java *source* front end ⬜ (signatures only, for mixed kt+java)
-### 6d — scale benchmark ⬜ (peak RSS vs kotlinc on many_functions/multifile)
+
+## Phase 7 — Hardening  ⬜
+- Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
+- Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
 
 ## Phase 8 — Classes (language surface)  🚧
 ### 8a — primary-constructor properties ✅ (Java-consumer ABI matches kotlinc)
@@ -934,6 +937,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   representation + a resolution interface the `jvm` backend implements — is the next architectural
   step.
 
+## Phase 74 — Secondary constructors via real grammar; reject inner classes  ✅
+- ✅ **Secondary constructors parse through real productions.** Replaced the `skip_balanced(LParen,
+  RParen)` / `skip_balanced(LBrace, RBrace)` token-skipping with proper parsing: extracted
+  `parse_param_list` (the real parameter grammar, shared with `parse_fun`) and `parse_call_arguments`
+  (real argument expressions), and parse `constructor(params) : this/super(args) { body }` into a
+  real `SecondaryCtor` AST node (`CtorDelegation::{None,This,Super}`). Construction-overload emission
+  is the next step; until then the checker rejects a class with secondary ctors (parsed correctly,
+  not skipped → no miscompile). Fixes the secondaryConstructors/sealed-delegating box FAILs.
+- ✅ **`inner class` rejected** (was silently dropped → VerifyError when used): an inner class needs
+  the outer-instance capture (`Test this$0` + qualified `new`) krusty doesn't model.
+
 ## Phase 75 — Kill the remaining delimiter-skipping hacks  ✅
 - ✅ **`skip_type_args` → `parse_type_args`:** generic type-argument lists `< (out|in)? type | * ,+ >`
   now parse through the real grammar, recursing via `parse_type` (so `Map<K, List<V>>` parses
@@ -950,17 +964,6 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `inner class` cases now reject cleanly instead of miscompiling; OK 356→350 as a few annotation/
   nested-heavy tests that the old lenient skip tolerated now reject). Remaining 4 FAIL are unrelated
   pre-existing miscompiles (devirtualization, inc/dec-two-receivers, two VerifyErrors).
-
-## Phase 74 — Secondary constructors via real grammar; reject inner classes  ✅
-- ✅ **Secondary constructors parse through real productions.** Replaced the `skip_balanced(LParen,
-  RParen)` / `skip_balanced(LBrace, RBrace)` token-skipping with proper parsing: extracted
-  `parse_param_list` (the real parameter grammar, shared with `parse_fun`) and `parse_call_arguments`
-  (real argument expressions), and parse `constructor(params) : this/super(args) { body }` into a
-  real `SecondaryCtor` AST node (`CtorDelegation::{None,This,Super}`). Construction-overload emission
-  is the next step; until then the checker rejects a class with secondary ctors (parsed correctly,
-  not skipped → no miscompile). Fixes the secondaryConstructors/sealed-delegating box FAILs.
-- ✅ **`inner class` rejected** (was silently dropped → VerifyError when used): an inner class needs
-  the outer-instance capture (`Test this$0` + qualified `new`) krusty doesn't model.
 
 ## Phase 76 — Diverging property initializers + `TODO()` → `NotImplementedError`  ✅
 - ✅ **`expr_diverges` now recognises any `Nothing`-typed expression** (`TODO()`, `error(…)`, a call
@@ -2371,10 +2374,6 @@ bodies exist only as jar bytecode):
   Invariant throughout: any unhandled construct ⇒ fall back to the existing (working) call/desugar path;
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
-
-## Phase 7 — Hardening  ⬜
-- Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
-- Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
 
 ---
 
