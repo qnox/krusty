@@ -2481,6 +2481,19 @@ impl<'a> Lower<'a> {
                         let size = self.expr(args[0])?;
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
+                    // Primitive-array literal `intArrayOf(1, 2, 3)` → a `Vararg` of that primitive type
+                    // (the backend allocates `int[]`/`char[]`/… and stores each element).
+                    if let Some(elem) = prim_array_of_elem(&fname) {
+                        let elem_ir = ty_to_ir(elem);
+                        let mut elements = Vec::new();
+                        for &arg in &args {
+                            if is_branchy(self.afile, arg) {
+                                return None;
+                            }
+                            elements.push(self.lower_arg(arg, &elem_ir)?);
+                        }
+                        return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                    }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
@@ -2935,6 +2948,21 @@ fn prim_array_elem(name: &str) -> Option<Ty> {
         "CharArray" => Ty::Char,
         "ByteArray" => Ty::Byte,
         "ShortArray" => Ty::Short,
+        _ => return None,
+    })
+}
+
+/// The element type of a primitive-array literal builtin (`intArrayOf` → `Int`).
+fn prim_array_of_elem(name: &str) -> Option<Ty> {
+    Some(match name {
+        "intArrayOf" => Ty::Int,
+        "longArrayOf" => Ty::Long,
+        "doubleArrayOf" => Ty::Double,
+        "floatArrayOf" => Ty::Float,
+        "booleanArrayOf" => Ty::Boolean,
+        "charArrayOf" => Ty::Char,
+        "byteArrayOf" => Ty::Byte,
+        "shortArrayOf" => Ty::Short,
         _ => return None,
     })
 }
