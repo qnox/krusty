@@ -515,19 +515,26 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                         .collect();
                     // Body properties (`class C { val x = … }`) are also fields/accessors. A computed
                     // property (custom getter, no annotation) infers its type from the getter body.
+                    // Initializer scope: ALL primary-ctor params (property or not — they're in scope for a
+                    // property initializer) plus each preceding body property, so `val y = x*2` sees the
+                    // ctor param `x` and `val z = y+1` sees the earlier `y`.
+                    let mut init_scope: Vec<(String, Ty, bool)> = c.props.iter()
+                        .map(|p| (p.name.clone(), ty_of_ref(&p.ty, &class_names, &ctp, diags), p.is_var))
+                        .collect();
                     for bp in &c.body_props {
                         let ty = match (&bp.ty, &bp.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
                             (None, Some(FunBody::Expr(g))) => {
-                                let locals: HashMap<&str, Ty> = props.iter().map(|(n, t, _)| (n.as_str(), *t)).collect();
+                                let locals: HashMap<&str, Ty> = init_scope.iter().map(|(n, t, _)| (n.as_str(), *t)).collect();
                                 infer_getter_ty(file, *g, &locals)
                             }
-                            (None, _) => bp.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
+                            (None, _) => bp.init.map(|i| infer_lit_ty_p(file, i, &class_names, &fun_rets, &init_scope)).unwrap_or(Ty::Error),
                         };
                         if ty == Ty::Error && bp.init.is_some() && bp.ty.is_none() {
                             diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
                         }
                         props.push((bp.name.clone(), ty, bp.is_var));
+                        init_scope.push((bp.name.clone(), ty, bp.is_var));
                     }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
