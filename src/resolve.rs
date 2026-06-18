@@ -2980,6 +2980,16 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
+            // Same mutable-capture rejection as the `Expr::Lambda` arm: a non-inlined lambda (krusty
+            // doesn't inline `forEach`/`map`/…) becomes a closure class and can't write the enclosing
+            // function's locals. Without this, an extension-call lambda silently miscompiled.
+            let outer_names: std::collections::HashSet<String> = self.scopes.iter()
+                .flat_map(|s| s.keys().cloned()).collect();
+            if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
+                self.diags.error(self.file.expr_spans[e.0 as usize],
+                    "krusty: lambda captures a mutable local variable — not supported".to_string());
+                return self.set(e, Ty::fun(param_types.to_vec(), Ty::Unit));
+            }
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
                 let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
