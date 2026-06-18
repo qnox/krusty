@@ -953,7 +953,13 @@ impl<'a> Emitter<'a> {
                 }
             },
             IrExpr::TypeOp { op, arg, type_operand } => {
-                let internal = ref_internal(ir_ty_to_jvm(type_operand));
+                // A primitive target of `instanceof`/`checkcast` (`x is Int`) tests the boxed wrapper.
+                let jvm_ty = ir_ty_to_jvm(type_operand);
+                let internal = if jvm_ty.is_primitive() {
+                    crate::jvm::jvm_class_map::wrapper_internal(jvm_ty).map(|s| s.to_string()).unwrap_or_else(|| ref_internal(jvm_ty))
+                } else {
+                    ref_internal(jvm_ty)
+                };
                 self.emit_value(*arg, code);
                 match op {
                     IrTypeOp::InstanceOf => {
@@ -1713,12 +1719,17 @@ impl<'a> Emitter<'a> {
         if !branches.iter().any(|(c, _)| c.is_none()) {
             return Ty::Unit;
         }
-        let last = branches.last().map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit);
-        // A `null`/`Nothing` last branch (e.g. the no-receiver arm of a safe-call `a?.b`) carries no
-        // concrete type and would verify-type the merge stack as `top`. Use a concrete branch type so
-        // the merge frame is a reference — `null` is assignable to any reference.
+        // The value type comes from a branch that *falls through* — a diverging branch (`else ->
+        // return …`/`throw`) contributes nothing to the merge, so its `Unit`/`Nothing` must not make
+        // the whole `when` look like a statement.
+        let last = branches.iter().rev().find(|(_, b)| !self.diverges(*b)).map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit);
+        // A `null`/`Nothing` branch carries no concrete type and would verify-type the merge stack as
+        // `top`; use a concrete fall-through branch type instead (`null` is assignable to any reference).
         if matches!(last, Ty::Null | Ty::Nothing | Ty::Error) {
             for (_, b) in branches {
+                if self.diverges(*b) {
+                    continue;
+                }
                 let t = self.value_ty(*b);
                 if !matches!(t, Ty::Null | Ty::Nothing | Ty::Error) {
                     return t;
