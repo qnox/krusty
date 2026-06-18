@@ -842,7 +842,13 @@ fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType
 /// locals + the return value on the stack.
 pub struct BranchySplice {
     pub bytes: Vec<u8>,
+    /// Frames *inside* the body: (byte offset within `bytes`, body locals, stack). The caller prepends
+    /// its own locals and supplies the absolute position.
     pub frames: Vec<(usize, Vec<VType>, Vec<VType>)>,
+    /// The operand stack at the **join** (where the body's returns land = the continuation right after
+    /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
+    /// post-splice position (not a precomputed end offset, which could fall at `code.len()`).
+    pub join_stack: Vec<VType>,
 }
 
 /// Splice a **branchy** inline body, relocating its `StackMapTable` frames. Restricted (v1) to a body
@@ -880,9 +886,7 @@ pub fn splice_branchy(body: &MethodCode, descriptor: &str, base: u16, cw: &mut C
         let stack = f.stack.iter().map(|v| relocate_vtype(v, &body.source_cp, cw)).collect::<Option<Vec<_>>>()?;
         frames.push((offs[p + idx], locals, stack));
     }
-    // Join frame at the end (the redirected returns' `goto end` target).
-    frames.push((offs[final_insns.len()], vec![], ret.into_iter().collect()));
-    Some(BranchySplice { bytes: assemble(&final_insns), frames })
+    Some(BranchySplice { bytes: assemble(&final_insns), frames, join_stack: ret.into_iter().collect() })
 }
 
 pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap<String, String>, cw: &mut ClassWriter) -> Option<Vec<Insn>> {

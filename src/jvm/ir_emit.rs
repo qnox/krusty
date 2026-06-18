@@ -729,6 +729,13 @@ impl<'a> Emitter<'a> {
         }
         code.set_needs_stackmap();
         code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+        // Join frame: the redirected returns land at the continuation right after the spliced body.
+        // Bind it at the *live* position (now `code.bytes.len()`) so it can never fall at `code.len()`
+        // and be dropped — caller locals only (body locals are dead), with the return value on stack.
+        let join = code.new_label();
+        code.bind(join);
+        let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
+        code.add_frame_if_new(join, prefix, join_stack);
         true
     }
 
