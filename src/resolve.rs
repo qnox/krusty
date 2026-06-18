@@ -819,11 +819,12 @@ fn stmt_has_try(file: &File, s: StmtId) -> bool {
 /// trips a verify error, so the checker rejects a nested-try structure that contains any `finally`.
 fn expr_has_finally(file: &File, e: ExprId) -> bool {
     match file.expr(e) {
+        // `finally.is_some()` already covers a `finally` at this node; recurse only into the bodies that
+        // could hold a *deeper* `try`-with-`finally` (the `finally` block itself included via its own try).
         Expr::Try { body, catches, finally } => {
             finally.is_some()
                 || expr_has_finally(file, *body)
                 || catches.iter().any(|c| expr_has_finally(file, c.body))
-                || finally.map_or(false, |f| expr_has_finally(file, f))
         }
         Expr::Lambda { .. } => false,
         _ => file.any_child_expr(e, &mut |c| expr_has_finally(file, c),
