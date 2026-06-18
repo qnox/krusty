@@ -2572,6 +2572,33 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // A class MEMBER operator (`operator fun plus(o: V): V` on the receiver class): `a + b` →
+                // `a.plus(b)`. The body's own arithmetic is on the field types (no self-recursion). The
+                // lowering re-resolves the member, so only the result type is recorded here.
+                if let Ty::Obj(internal, _) = &lt {
+                    let op_name = match op {
+                        BinOp::Add => Some("plus"), BinOp::Sub => Some("minus"), BinOp::Mul => Some("times"),
+                        BinOp::Div => Some("div"), BinOp::Rem => Some("rem"), _ => None,
+                    };
+                    if let Some(fname) = op_name {
+                        if let Some(sig) = self.syms.method_of(internal, fname) {
+                            if sig.params.len() == 1 && rt != Ty::Error {
+                                self.expect_assignable(sig.params[0], rt, self.span(rhs), "operator argument");
+                                return self.set(e, sig.ret);
+                            }
+                        }
+                    }
+                    // A class `operator fun compareTo(o): Int` drives `<`/`<=`/`>`/`>=` (`a < b` →
+                    // `a.compareTo(b) < 0`), yielding `Boolean`.
+                    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && rt != Ty::Error {
+                        if let Some(sig) = self.syms.method_of(internal, "compareTo") {
+                            if sig.params.len() == 1 && sig.ret == Ty::Int {
+                                self.expect_assignable(sig.params[0], rt, self.span(rhs), "operator argument");
+                                return self.set(e, Ty::Boolean);
+                            }
+                        }
+                    }
+                }
                 self.check_binary(op, lt, rt, self.span(e))
             }
             Expr::Member { receiver, name } => {

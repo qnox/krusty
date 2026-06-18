@@ -2722,6 +2722,33 @@ impl<'a> Lower<'a> {
                             return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![l, r] }));
                         }
                     }
+                    // A class MEMBER operator (`operator fun plus(o: V)`): `a + b` → `a.plus(b)`.
+                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
+                        if let Some((class, index, mfid, _)) = self.resolve_method(&internal, opn) {
+                            let params = self.ir.functions[mfid as usize].params.clone();
+                            if params.len() == 1 {
+                                let l = self.expr(lhs)?;
+                                let r = self.lower_arg(rhs, &params[0])?;
+                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: l, args: vec![Some(r)] }));
+                            }
+                        }
+                    }
+                }
+                // A class `operator fun compareTo(o): Int` drives a comparison: `a < b` →
+                // `a.compareTo(b) < 0`.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
+                        if let Some((class, index, mfid, _)) = self.resolve_method(&internal, "compareTo") {
+                            let params = self.ir.functions[mfid as usize].params.clone();
+                            if params.len() == 1 {
+                                let l = self.expr(lhs)?;
+                                let r = self.lower_arg(rhs, &params[0])?;
+                                let cmp = self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: l, args: vec![Some(r)] });
+                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op: bin_to_ir(op)?, lhs: cmp, rhs: zero }));
+                            }
+                        }
+                    }
                 }
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
                     // Flatten the left-nested concat chain (`a + b + c + …`) iteratively, then fold —
