@@ -6,13 +6,14 @@ use std::collections::HashMap;
 
 use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
+use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::method_descriptor;
 use crate::types::Ty;
 
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
-pub fn emit_all(ir: &IrFile, facade: &str) -> Option<Vec<(String, Vec<u8>)>> {
+pub fn emit_all(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
     }
@@ -23,13 +24,13 @@ pub fn emit_all(ir: &IrFile, facade: &str) -> Option<Vec<(String, Vec<u8>)>> {
         if f.dispatch_receiver.is_some() || f.body.is_none() {
             continue;
         }
-        emit_method(ir, i as u32, facade, facade, &mut cw, false);
+        emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
     }
-    emit_statics(ir, facade, &mut cw);
+    emit_statics(ir, facade, &mut cw, bodies);
     out.push((facade.to_string(), cw.finish()));
     // Each class.
     for c in &ir.classes {
-        out.push((c.fq_name.clone(), emit_class(ir, c, facade)));
+        out.push((c.fq_name.clone(), emit_class(ir, c, facade, bodies)));
     }
     Some(out)
 }
@@ -60,27 +61,27 @@ fn jvm_can_emit(ir: &IrFile) -> bool {
 }
 
 /// Back-compat single-facade entry (used where a file has only functions).
-pub fn emit_file(ir: &IrFile, facade: &str) -> Vec<u8> {
+pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
     for (i, f) in ir.functions.iter().enumerate() {
         if f.dispatch_receiver.is_none() && f.body.is_some() {
-            emit_method(ir, i as u32, facade, facade, &mut cw, false);
+            emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
         }
     }
-    emit_statics(ir, facade, &mut cw);
+    emit_statics(ir, facade, &mut cw, bodies);
     cw.finish()
 }
 
 /// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
 /// their initializers in declaration order.
-fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
+fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
     if ir.statics.is_empty() {
         return;
     }
     for s in &ir.statics {
         cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
     }
-    let mut e = Emitter { ir, cw, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
     let mut code = CodeBuilder::new(0);
     for s in &ir.statics {
         e.emit_value(s.init, &mut code);
@@ -94,9 +95,9 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
     e.cw.add_method(0x0008 /* STATIC */, "<clinit>", "()V", &code);
 }
 
-fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
-        return emit_enum_class(ir, c, facade);
+        return emit_enum_class(ir, c, facade, bodies);
     }
     if c.is_interface {
         return emit_interface_class(ir, c);
@@ -143,7 +144,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let max_slot;
     let mut init_diverges = false;
     {
-        let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
@@ -213,7 +214,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         let sec_max;
         let mut sec_diverges = false;
         {
-            let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
+            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
             e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
             let mut s = 1u16;
             for (vi, t) in sc_param_tys.iter().enumerate() {
@@ -287,7 +288,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
-            emit_method(ir, fid, &c.fq_name, facade, &mut cw, true);
+            emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
         } else {
             let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
             let ret = ir_ty_to_jvm(&f.ret);
@@ -296,7 +297,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
         // synthetic stub (the JVM realization of default arguments).
         if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
-            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults);
+            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies);
         }
     }
     emit_bridges(c, &mut cw);
@@ -403,7 +404,7 @@ fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
 /// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →
 /// `super(name, ordinal)`, a `public static final` field per entry plus a `$VALUES` array, a
 /// `<clinit>` that constructs the entries and fills `$VALUES`, and synthetic `values()`/`valueOf`.
-fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name.clone();
@@ -451,7 +452,7 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8>
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     {
-        let mut e = Emitter { ir, cw: &mut cw, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
@@ -522,19 +523,19 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8>
 
     for &fid in &c.methods {
         if ir.functions[fid as usize].body.is_some() {
-            emit_method(ir, fid, &fq, facade, &mut cw, true);
+            emit_method(ir, fid, &fq, facade, &mut cw, true, bodies);
         }
     }
     cw.finish()
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
-fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, instance: bool) {
+fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, instance: bool, bodies: &dyn MethodBodies) {
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -586,7 +587,7 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
 /// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
 /// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
 /// 0. This is the JVM realization of default arguments — the `param_defaults` *meaning* is in the IR.
-fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, defaults: &[Option<u32>]) {
+fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, defaults: &[Option<u32>], bodies: &dyn MethodBodies) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
@@ -594,7 +595,7 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter { ir, cw, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -648,6 +649,11 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
+    /// The narrow bytecode provider — lets the emitter read a cross-module `inline fun`'s compiled
+    /// body (`bodies.body`) to splice it at the call site (the bytecode inliner). Consumed by the
+    /// splice path landing in the next phase.
+    #[allow(dead_code)]
+    bodies: &'a dyn MethodBodies,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,

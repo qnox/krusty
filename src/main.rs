@@ -47,12 +47,15 @@ fn main() {
         sources.push(src);
     }
 
-    let platform = Box::new(JvmLibraries::new(Classpath::new(opts.classpath.clone())));
+    let cp = std::rc::Rc::new(Classpath::new(opts.classpath.clone()));
+    let platform = Box::new(JvmLibraries::new(cp.clone()));
     let syms = collect_signatures_with_cp(&files, platform, &mut diags);
 
     // Common pipeline: front-end type-check each file, then lower through the selected backend
     // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.
-    let outputs = krusty::backend::compile(&files, &stems, &syms, &krusty::jvm::JvmBackend, &opts.module_name, &mut diags);
+    // The backend shares the same classpath instance (caches) as the library set, for the inliner.
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let outputs = krusty::backend::compile(&files, &stems, &syms, &backend, &opts.module_name, &mut diags);
 
     if diags.has_errors() {
         for (path, src) in opts.sources.iter().zip(&sources) {
