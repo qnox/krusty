@@ -259,6 +259,22 @@ fun box(): String {
     return "f3"
 }
 "#),
+    // A nullable primitive compares with a primitive (`a == 5`): the primitive is boxed for structural
+    // equality. A generic constructor with a primitive type argument coerces a literal to that type.
+    ("NullableEqAndGenericCtor", r#"
+class Box<T>(val value: T)
+fun box(): String {
+    val a: Int? = 5
+    if (a != 5) return "f1"
+    if (a == 6) return "f2"
+    val n: Int? = null
+    if (n == 5) return "f3"
+    val b = Box<Long>(-1)
+    val v: Long = b.value
+    if (v != -1L) return "f4:$v"
+    return "OK"
+}
+"#),
     // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
     // `.get()` (no args) reads `this.receiver`'s property.
     ("BoundPropertyRef", r#"

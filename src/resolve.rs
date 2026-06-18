@@ -3132,8 +3132,14 @@ impl<'a> Checker<'a> {
                 // `Any` compares with anything (Kotlin structural equality boxes a primitive operand);
                 // otherwise require equal/promotable primitives or two references.
                 let any = Ty::obj("kotlin/Any");
+                // A nullable-primitive wrapper (`Int?` = `Integer`) compares with its primitive (`a == 5`):
+                // the primitive operand is boxed at the emit site for structural equality. Excludes
+                // Float/Double — their `0.0 == -0.0` IEEE-754 semantics differ between primitive `==` and
+                // boxed `equals`, which needs a dedicated comparison krusty doesn't emit yet.
+                let wrapper_vs_prim = |w: Ty, p: Ty| w.obj_internal().and_then(prim_of_wrapper)
+                    .map_or(false, |pw| p.is_primitive() && !matches!(pw, Ty::Float | Ty::Double));
                 if lt == rt || Ty::promote(lt, rt).is_some() || (lt.is_reference() && rt.is_reference())
-                    || lt == any || rt == any
+                    || lt == any || rt == any || wrapper_vs_prim(lt, rt) || wrapper_vs_prim(rt, lt)
                 {
                     Ty::Boolean
                 } else {
