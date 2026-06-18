@@ -2193,6 +2193,33 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 > getters; coroutines; inner classes; nullable primitives `Int?`) are each multi-file, infrastructure-scale
 > efforts — see the coverage-roadmap notes for entry points. The 0-FAIL never-miscompile invariant holds.
 
+## Bare-name stdlib hardcode audit (no-hardcode policy)  🚧
+
+Standing rule: krusty may hardcode a value/desugar **only where kotlinc also intrinsifies it**; a
+body-bearing stdlib function must be **inlined from its real bytecode** (the two-inliner architecture
+below), not desugared by a hardcoded name. Every bare-name special-case in `ir_lower.rs`/`resolve.rs`,
+classified:
+
+**A. Receiver-TYPE-keyed member intrinsics — LEGITIMATE, keep** (a top-level name can't shadow them;
+this is how every compiler does built-in member access). `enum .ordinal/.name/.values()/.valueOf()`,
+`Char.code`, `Array.size`, `String.length`, `.equals/.hashCode/.toString`, and the unsigned/primitive
+operator methods (`shl/shr/ushr/and/or/xor/inv/inc/dec/unaryMinus/unaryPlus`, `toUInt/toULong`) — all
+genuine kotlinc backend intrinsics keyed on the operand type.
+
+**B. Compiler INTRINSIC functions (no callable body in the stdlib) — keep, but RESOLUTION-GATE** so a
+user function/local of the same name shadows them, exactly as kotlinc keys them on the resolved symbol:
+`arrayOf`/`intArrayOf`/…/`IntArray(n)`/`emptyArray` ✅ gated (phases 312b + this); `Array(n){}` reference
+bails (skip). `println`, `StringBuilder`/`Any` construction are type/library-resolved (low risk).
+
+**C. Body-bearing stdlib INLINE functions desugared by name — VIOLATIONS to retire** (kotlinc inlines
+their real `@InlineOnly` bytecode; krusty hardcodes an equivalent desugar). `let`/`also` ✅ now route
+through the bytecode inliner (phase 310; desugar kept only as a this-capture fallback). **Still
+desugared, to route through the inliner:** `repeat`, `forEach`, `forEachIndexed` (branchy bodies — need
+the branchy lambda-splice), `run`/`with`/`apply` (this-receiver — need receiver-rebind in the splice).
+These are shadow-gated already (so no miscompile of a user fn), but remain hardcoded bodies; retiring
+them is the remaining work, blocked on completing branchy + this-receiver lambda splicing (steps 2-3
+of the inliner plan below).
+
 ## Inline functions — the two-inliner architecture (mirrors kotlinc-JVM)
 
 kotlinc-JVM inlines from whatever form the callee body exists in; krusty does the same with two

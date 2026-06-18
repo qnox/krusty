@@ -1495,7 +1495,9 @@ impl<'a> Lower<'a> {
         if let Expr::Call { callee, args } = self.afile.expr(e) {
             if args.is_empty() {
                 if let Expr::Name(n) = self.afile.expr(*callee) {
-                    return n == "emptyArray";
+                    // `emptyArray` is a compiler intrinsic (no stdlib body) recognized by resolved symbol;
+                    // a user-defined function or local of that name shadows it, exactly as in kotlinc.
+                    return n == "emptyArray" && self.lookup(n).is_none() && !self.fun_ids.contains_key(n);
                 }
             }
         }
