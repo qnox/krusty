@@ -972,7 +972,7 @@ struct Lower<'a> {
     lambda_seq: u32,
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
     /// bound to the `Ref$XxxRef` HOLDER value; reads/writes go through `RefGet`/`RefSet` with this type.
-    boxed_elem: HashMap<String, IrType>,
+    boxed_elem: HashMap<String, Ty>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: IrType,
@@ -2099,7 +2099,7 @@ impl<'a> Lower<'a> {
                     let holder = self.fresh_value();
                     let holder_ty = Ty::obj(ref_holder_internal(kty));
                     self.scope.push((name.clone(), holder, holder_ty));
-                    self.boxed_elem.insert(name.clone(), elem.clone());
+                    self.boxed_elem.insert(name.clone(), kty);
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
@@ -2124,8 +2124,8 @@ impl<'a> Lower<'a> {
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
-                    let val = self.lower_arg(value, &elem)?;
-                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv, elem, value: val }));
+                    let val = self.lower_arg(value, &ty_to_ir(elem))?;
+                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv, elem: ty_to_ir(elem), value: val }));
                 }
                 if let Some((v, _)) = self.lookup(&name) {
                     let val = self.expr(value)?;
@@ -2150,6 +2150,27 @@ impl<'a> Lower<'a> {
             // position the pre/post distinction is irrelevant — the value isn't observed.) A built-in
             // numeric primitive only; a `var` field/property or a user `operator inc`/`dec` bails.
             Stmt::IncDec { name, dec } => {
+                // A boxed mutable-capture local: `x++`/`x--` reads/writes through its `Ref` holder.
+                if let Some(elem) = self.boxed_elem.get(&name).cloned() {
+                    let (holder, _) = self.lookup(&name)?;
+                    let one = match elem {
+                        Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+                        Ty::Long => IrConst::Long(1),
+                        Ty::Double => IrConst::Double(1.0),
+                        Ty::Float => IrConst::Float(1.0),
+                        _ => return None,
+                    };
+                    let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                    let hv = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let cur = self.ir.add_expr(IrExpr::RefGet { holder: hv, elem: ty_to_ir(elem) });
+                    let one = self.ir.add_expr(IrExpr::Const(one));
+                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one });
+                    let nv = if matches!(elem, Ty::Byte | Ty::Short | Ty::Char) {
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: sum, type_operand: ty_to_ir(elem) })
+                    } else { sum };
+                    let hv2 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv2, elem: ty_to_ir(elem), value: nv }));
+                }
                 let (v, ty) = self.lookup(&name)?;
                 let one = match ty {
                     Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
@@ -2740,7 +2761,7 @@ impl<'a> Lower<'a> {
                 if let Some(elem) = self.boxed_elem.get(&n).cloned() {
                     let (holder, _) = self.lookup(&n)?;
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
-                    return Some(self.ir.add_expr(IrExpr::RefGet { holder: hv, elem }));
+                    return Some(self.ir.add_expr(IrExpr::RefGet { holder: hv, elem: ty_to_ir(elem) }));
                 }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
                     let read = self.ir.add_expr(IrExpr::GetValue(v));
@@ -3156,6 +3177,37 @@ impl<'a> Lower<'a> {
                 // No temp slot: the update is `i = i ± 1`; the value is the new `i` (prefix) or, for a
                 // postfix, the new `i` minus the step (the old value) — valid for every numeric type.
                 let Expr::Name(name) = self.afile.expr(target).clone() else { return None };
+                // A boxed mutable-capture local: `var++`/`++var` as a value, through its `Ref` holder.
+                // (A `Byte`/`Short`/`Char` boxed inc-as-expression is rare — skip it rather than model
+                // the narrowing here.)
+                if let Some(elem) = self.boxed_elem.get(&name).cloned() {
+                    let one_c = match elem {
+                        Ty::Int => IrConst::Int(1),
+                        Ty::Long => IrConst::Long(1),
+                        Ty::Double => IrConst::Double(1.0),
+                        Ty::Float => IrConst::Float(1.0),
+                        _ => return None,
+                    };
+                    let (holder, _) = self.lookup(&name)?;
+                    let elem_ir = ty_to_ir(elem);
+                    let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                    let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
+                    let h1 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let cur = self.ir.add_expr(IrExpr::RefGet { holder: h1, elem: elem_ir.clone() });
+                    let one1 = self.ir.add_expr(IrExpr::Const(one_c.clone()));
+                    let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one1 });
+                    let h2 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let set = self.ir.add_expr(IrExpr::RefSet { holder: h2, elem: elem_ir.clone(), value: nv });
+                    let h3 = self.ir.add_expr(IrExpr::GetValue(holder));
+                    let read = self.ir.add_expr(IrExpr::RefGet { holder: h3, elem: elem_ir });
+                    let value = if prefix {
+                        read
+                    } else {
+                        let one2 = self.ir.add_expr(IrExpr::Const(one_c));
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: undo, lhs: read, rhs: one2 })
+                    };
+                    return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) }));
+                }
                 let (v, ty) = self.lookup(&name)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                 if matches!(ty, Ty::Byte | Ty::Short | Ty::Char) {
