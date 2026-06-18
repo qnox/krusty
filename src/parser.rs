@@ -1115,6 +1115,83 @@ impl<'a> Parser<'a> {
     }
 
     /// `object Name { fun … }` — a singleton with member functions (no primary constructor).
+    /// Parse an object/anonymous-object body `{ fun…/val…/init… }`, returning its members.
+    fn parse_object_body(&mut self) -> (Vec<FunDecl>, Vec<PropDecl>, Vec<ClassInit>) {
+        let mut methods = Vec::new();
+        let mut body_props: Vec<PropDecl> = Vec::new();
+        let mut init_order: Vec<ClassInit> = Vec::new();
+        self.skip_newlines();
+        if self.at(TokenKind::LBrace) {
+            self.bump();
+            loop {
+                self.skip_newlines();
+                let mut mods = Vec::new();
+                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                    mods = self.skip_decl_prefix();
+                    self.skip_newlines();
+                }
+                let lateinit = mods.iter().any(|m| m == "lateinit");
+                let fun_inline = mods.iter().any(|m| m == "inline");
+                let fun_final = mods.iter().any(|m| m == "final");
+                match self.kind() {
+                    TokenKind::RBrace | TokenKind::Eof => break,
+                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
+                    TokenKind::KwVal | TokenKind::KwVar => {
+                        let p = self.parse_top_property(lateinit, true);
+                        init_order.push(ClassInit::PropInit(body_props.len()));
+                        body_props.push(p);
+                    }
+                    TokenKind::Ident if self.text() == "init" && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LBrace) => {
+                        self.bump();
+                        let block = self.parse_block_expr();
+                        init_order.push(ClassInit::Block(block));
+                    }
+                    TokenKind::KwClass => { let _ = self.parse_nested_type_decl(); }
+                    TokenKind::Ident
+                        if matches!(self.text(), "object" | "interface")
+                            || (matches!(self.text(), "data" | "enum" | "annotation")
+                                && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwClass)) =>
+                    {
+                        let _ = self.parse_nested_type_decl();
+                    }
+                    TokenKind::Ident if self.text() == "typealias" => {
+                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
+                    }
+                    _ => {
+                        self.diags.error(self.tok().span, "krusty: object bodies support 'fun', 'val'/'var', and 'init' blocks");
+                        self.bump();
+                    }
+                }
+            }
+            self.expect(TokenKind::RBrace, "'}'");
+        }
+        (methods, body_props, init_order)
+    }
+
+    /// An anonymous object expression `object : Super(args)?, Iface… { members }` → a synthesized
+    /// (uniquely-named) class plus a no-argument construction of it. Capturing the enclosing scope is
+    /// not modelled — the checker/lowering reject a body that reads outer locals.
+    fn parse_anon_object(&mut self, span: Span) -> ExprId {
+        self.bump(); // 'object'
+        let (supertypes, base_class, base_args, delegations) = self.parse_supertypes();
+        let (methods, body_props, init_order) = self.parse_object_body();
+        let end = self.t[self.i.saturating_sub(1)].span;
+        let name = format!("Anon$anon${}", span.lo);
+        let synth = ClassDecl {
+            name: name.clone(), type_params: Vec::new(), props: Vec::new(), methods,
+            companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order,
+            is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false,
+            is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
+            supertypes, delegations, base_class, base_args, secondary_ctors: Vec::new(),
+            span: Span::new(span.lo, end.hi),
+        };
+        let did = self.file.add_decl(Decl::Class(synth));
+        self.file.decls.push(did);
+        let callee = self.file.add_expr(Expr::Name(name), span);
+        self.file.add_expr(Expr::Call { callee, args: Vec::new() }, Span::new(span.lo, end.hi))
+    }
+
     fn parse_object(&mut self) -> ClassDecl {
         let start = self.tok().span;
         self.bump(); // 'object'
@@ -2168,6 +2245,13 @@ impl<'a> Parser<'a> {
             TokenKind::KwNull => {
                 self.bump();
                 self.file.add_expr(Expr::NullLit, span)
+            }
+            // An anonymous object expression `object : Super(args)? { … }` (in value position).
+            TokenKind::Ident
+                if self.text() == "object"
+                    && self.t.get(self.i + 1).map_or(false, |t| matches!(t.kind, TokenKind::Colon | TokenKind::LBrace)) =>
+            {
+                self.parse_anon_object(span)
             }
             TokenKind::Ident => {
                 let n = self.text().to_string();
