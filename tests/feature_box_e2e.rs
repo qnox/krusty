@@ -112,6 +112,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // The overridable members compareTo/equals/hashCode have Kotlin-contract return types (Int/Boolean/
+    // Int), used when the body can't be inferred locally (`compareTo(o) = v - o.v` references `o`).
+    ("CompareToContract", r#"
+class N(val v: Int) {
+    operator fun compareTo(o: N) = v - o.v
+}
+fun box(): String {
+    if (!(N(3) < N(5))) return "f1"
+    if (!(N(7) > N(2))) return "f2"
+    if (!(N(4) <= N(4))) return "f3"
+    return "OK"
+}
+"#),
     // Class member operators: `a + b` → `a.plus(b)` (and minus/times/div/rem); `a < b` →
     // `a.compareTo(b) < 0`.
     ("ClassOperators", r#"

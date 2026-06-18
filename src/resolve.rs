@@ -551,8 +551,19 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
                                     let t = infer_lit_ty_p(file, *e, &class_names, &fun_rets, &props);
-                                    if t != Ty::Error { t } else { Ty::Unit }
-                                } else { Ty::Unit }
+                                    if t != Ty::Error { return t; }
+                                }
+                                // The overridable members `Comparable.compareTo`/`Any.equals`/`hashCode`
+                                // have a Kotlin-CONTRACT return type (`Int`/`Boolean`/`Int`) the body must
+                                // conform to — use it when the body can't be inferred locally (a body like
+                                // `compareTo(o) = v - o.v` references the parameter, which the literal
+                                // inference can't resolve). kotlinc fixes these signatures.
+                                match (m.name.as_str(), m.params.len()) {
+                                    ("compareTo", 1) => Ty::Int,
+                                    ("equals", 1) => Ty::Boolean,
+                                    ("hashCode", 0) => Ty::Int,
+                                    _ => Ty::Unit,
+                                }
                             });
                             (m.name.clone(), {
                                 let lambda_param_types: Vec<Vec<Ty>> = m.params.iter().map(|p| {
