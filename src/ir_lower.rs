@@ -3230,6 +3230,15 @@ impl<'a> Lower<'a> {
                         if narrow_targ && args.iter().any(|&a| matches!(self.info.ty(a), Ty::Int | Ty::Long | Ty::Char)) {
                             return None;
                         }
+                        // krusty's `Ty` erases `byte`/`short` to `Int`, but a resolved overload's
+                        // descriptor keeps `B`/`S` — so for a `byte`/`short` parameter the lowering builds
+                        // an `int`/`int[]` that mismatches the callee's `B`/`[B` descriptor (a verify error).
+                        // This happens when the precise `Int` overload is private `@InlineOnly` and the
+                        // public `Byte` one is mis-selected (`maxOf(3, 7)`). Bail (skip) rather than
+                        // miscompile — a genuine `byte`-parameter library call is rare and skips safely.
+                        if descriptor_has_byte_or_short_param(&c.descriptor) {
+                            return None;
+                        }
                         let last_is_array = c.params.last().map_or(false, |p| p.array_elem().is_some());
                         let vararg = !c.params.is_empty() && last_is_array
                             && (c.params.len() != args.len() || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
@@ -3729,6 +3738,24 @@ fn stmt_contains_branch(file: &ast::File, s: ast::StmtId) -> bool {
         Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => true,
         _ => file.any_child_stmt(s, &mut |c| body_contains_branch(file, c)),
     }
+}
+
+/// Whether a JVM method descriptor `(params)ret` has a top-level `byte` (`B`) or `short` (`S`) parameter
+/// (including a `byte[]`/`short[]` array). krusty's `Ty` erases these to `Int`, so it can't build a
+/// matching argument/array — a call to such an overload would fail the verifier; the caller bails.
+fn descriptor_has_byte_or_short_param(desc: &str) -> bool {
+    let Some(end) = desc.find(')') else { return false };
+    let bytes = desc[1..end].as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => { i += 1; } // array prefix — fall through to the element type
+            b'L' => { while i < bytes.len() && bytes[i] != b';' { i += 1; } i += 1; } // skip `Lname;`
+            b'B' | b'S' => return true,
+            _ => { i += 1; }
+        }
+    }
+    false
 }
 
 /// Is `e` a compile-time constant literal (an argument-default krusty can inline at the call site)?
