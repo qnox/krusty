@@ -516,7 +516,10 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
         }
     }
     e.emit(body, &mut code);
-    if ret == Ty::Unit {
+    // The implicit `return` for a `Unit` function is dead code when the body already diverges
+    // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
+    // the verifier rejects it. Skip it exactly when the body can't fall through.
+    if ret == Ty::Unit && !e.diverges(body) {
         code.ret_void();
     }
     code.ensure_locals(e.next_slot);

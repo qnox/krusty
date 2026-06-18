@@ -2970,6 +2970,24 @@ impl<'a> Checker<'a> {
         if let Some((ty, _)) = self.syms.ext_props.get(&(rt.descriptor(), name.to_string())) {
             return *ty;
         }
+        // Library-type property read (`list.size`): a Kotlin property is a zero-arg accessor on the
+        // JVM — try the property's own name and its `getX()` form.
+        if let Ty::Obj(internal, _) = rt {
+            // `x` → `getX` (an `isFoo` boolean property keeps its name).
+            let getter = if name.starts_with("is") && name.as_bytes().get(2).map_or(false, |b| b.is_ascii_uppercase()) {
+                name.to_string()
+            } else {
+                let mut c = name.chars();
+                format!("get{}{}", c.next().map(|f| f.to_uppercase().to_string()).unwrap_or_default(), c.as_str())
+            };
+            for cand in [name.to_string(), getter] {
+                if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, &cand, &[]) {
+                    if !matches!(m.ret, Ty::Unit | Ty::Error) {
+                        return m.ret;
+                    }
+                }
+            }
+        }
         self.diags.error(span, format!("unresolved member '{name}' on '{}'", rt.name()));
         Ty::Error
     }
