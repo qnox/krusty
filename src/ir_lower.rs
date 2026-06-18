@@ -72,7 +72,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let ctor_param_count = ctor_fields.len() as u32;
             // Non-null reference constructor parameters get an `Intrinsics.checkNotNullParameter` guard
             // (kotlinc does); primitives, nullable params, and class type-parameters are skipped.
-            let ctor_param_checks: Vec<Option<String>> = c.props.iter().filter(|p| p.is_property).map(|p| {
+            // Parallel to ALL ctor params (declaration order, `ctor_args`) — a non-null reference plain
+            // parameter is guarded too (it's still a constructor argument kotlinc null-checks).
+            let ctor_param_checks: Vec<Option<String>> = c.props.iter().map(|p| {
                 let ty = ty_of(file, &p.ty);
                 let is_type_param = c.type_params.contains(&p.ty.name);
                 if !p.ty.nullable && !is_type_param && ty.is_reference() { Some(p.name.clone()) } else { None }
@@ -123,6 +125,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 supertypes: vec![],
                 fields: fields.iter().map(|(n, t)| (n.clone(), ty_to_ir(*t))).collect(),
                 ctor_param_count,
+                // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
+                ctor_args: c.props.iter().map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property)).collect(),
                 init_body: None,
                 methods: vec![],
                 is_interface: c.is_interface,
@@ -251,6 +255,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: comp_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
+                    ctor_args: vec![],
                     init_body: None, methods: vec![], is_interface: false,
                     superclass: "kotlin/Any".to_string(), super_args: vec![],
                     enum_entries: vec![], bridges: vec![], interfaces: vec![],
@@ -553,17 +558,42 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    for p in c.props.iter().filter(|p| p.is_property) {
+                    // ALL ctor params (property and plain) are in scope as values `1..=M` in declaration
+                    // order — a plain parameter is an argument the initializer / `super(…)` can read.
+                    for p in c.props.iter() {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
                     let super_field_tys: Vec<IrType> = lo.classes[&internal].super_internal.clone()
                         .and_then(|s| lo.classes.get(&s).map(|sup| sup.id))
                         .map(|sid| {
-                            let n = lo.ir.classes[sid as usize].ctor_param_count as usize;
-                            lo.ir.classes[sid as usize].fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                            let sup = &lo.ir.classes[sid as usize];
+                            if sup.ctor_args.is_empty() {
+                                let n = sup.ctor_param_count as usize;
+                                sup.fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                            } else {
+                                sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                            }
                         })
                         .unwrap_or_default();
+                    // The `super(…)` call must match the base's PRIMARY constructor exactly: same arity,
+                    // and each argument assignable to the corresponding param (no narrowing/erasure). A
+                    // mismatch means the call actually targets a base SECONDARY constructor (with
+                    // defaults) — which krusty doesn't resolve — so bail rather than emit a `<init>` call
+                    // whose stack shape won't verify. A branchy super argument (`Base("O" + if(…))`) emits
+                    // merge frames in the pre-`super()` region the flat ctor emitter can't reconcile — bail.
+                    if c.base_args.len() != super_field_tys.len()
+                        || c.base_args.iter().any(|&a| body_contains_branch(file, a))
+                        || c.base_args.iter().zip(&super_field_tys).any(|(&a, ft)| {
+                            let at = info.ty(a);
+                            // Exact IR-type match is fine; a reference arg into a reference param (erased
+                            // generic / `Any`) is fine; anything else (e.g. an `Int` arg into a `String`
+                            // param — the call really targets a secondary ctor) is a mis-target → bail.
+                            &ty_to_ir(at) != ft && !(at.is_reference() && ir_type_is_reference(ft)) && at != Ty::Error
+                        })
+                    {
+                        return None;
+                    }
                     let mut sargs = Vec::new();
                     for (a, ft) in c.base_args.iter().zip(&super_field_tys) {
                         sargs.push(lo.lower_arg(*a, ft)?);
@@ -580,7 +610,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    for p in c.props.iter().filter(|p| p.is_property) {
+                    // ALL ctor params (property and plain) in scope as values `1..=M`, declaration order.
+                    for p in c.props.iter() {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
@@ -737,7 +768,9 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Secondary constructors delegating to the primary (`constructor(p) : this(args)`) are
         // emitted as extra `<init>` methods; `super(…)` delegation isn't supported.
         && c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
-        && c.props.iter().all(|p| p.is_property)
+        // A non-`val`/`var` primary-ctor parameter (`class C(x: Int) { val y = x }`) is an argument only
+        // (no field), available in the constructor body — lowered via `ctor_args`. (Both property and
+        // plain params are fine here.)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
@@ -3294,10 +3327,16 @@ impl<'a> Lower<'a> {
                         // constructors aren't lowered — bail (skip) rather than emit a call whose
                         // stack shape won't match the constructor descriptor (a VerifyError).
                         let ctor_count = self.ir.classes[class as usize].ctor_param_count as usize;
-                        // Coerce each argument to its constructor-parameter field type, filling named
-                        // args + constant-literal defaults (`LongWrapper(2)`, `C(y = 1)`, `C()`).
-                        let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields[..ctor_count]
-                            .iter().map(|(_, t)| t.clone()).collect();
+                        // Coerce each argument to its constructor-parameter type, filling named args +
+                        // constant-literal defaults (`LongWrapper(2)`, `C(y = 1)`, `C()`). Use the FULL
+                        // ctor-param list (`ctor_args`, property + plain params) when present, else the
+                        // leading parameter fields (synthesized classes have empty `ctor_args`).
+                        let ctor_args = self.ir.classes[class as usize].ctor_args.clone();
+                        let field_tys: Vec<IrType> = if ctor_args.is_empty() {
+                            self.ir.classes[class as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect()
+                        } else {
+                            ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                        };
                         let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&fname)
                             .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
                             .unwrap_or_default();
