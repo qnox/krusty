@@ -1410,6 +1410,13 @@ impl<'a> Lower<'a> {
                     Some(r) if self.classes.contains_key(&class_internal(self.afile, &r.name)) => {
                         Ty::obj(&class_internal(self.afile, &r.name))
                     }
+                    // A library reference type (`Throwable?`, `List<Int>`): use the declared reference
+                    // type, not the initializer's. A `null` initializer is `Ty::Null`, which would type
+                    // the slot as `top` in frames; the declared reference type keeps the slot a
+                    // reference so a later reassign + use across branches verifies.
+                    Some(r) if self.catch_internal(&r.name).is_some() => {
+                        Ty::obj(&self.catch_internal(&r.name).unwrap())
+                    }
                     _ => init_ty,
                 };
                 // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
@@ -1642,6 +1649,14 @@ impl<'a> Lower<'a> {
             // `throw e` — throw the exception value; control never returns.
             Expr::Throw { operand } => {
                 let v = self.expr(operand)?;
+                // Throwing an erased generic value (`throw id(e)`, where `id` returns a type parameter
+                // and is physically `Object`) needs the `checkcast Throwable` kotlinc inserts — the JVM
+                // `athrow` requires a `Throwable` on the stack.
+                let v = if self.info.ty(operand) == Ty::obj("kotlin/Any") {
+                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: v, type_operand: ty_to_ir(Ty::obj("kotlin/Throwable")) })
+                } else {
+                    v
+                };
                 self.ir.add_expr(IrExpr::Throw { operand: v })
             }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
@@ -1898,6 +1913,24 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::String) })
                     } else { recv };
                     self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                } else if let Some((internal, m, is_iface)) = {
+                    // A property read on a library type (`list.size`): a Kotlin property is realized as a
+                    // zero-arg accessor on the JVM. Try the property's own name (`size()` — collections
+                    // map `size` straight to the JVM method) and the `getX()` accessor form.
+                    if let Ty::Obj(i, _) = rt {
+                        [name.clone(), getter_name(&name)].into_iter().find_map(|cand| {
+                            crate::libraries::resolve_instance(&*self.syms.libraries, i, &cand, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)).map(|m| {
+                                let is_iface = self.syms.libraries.resolve_type(i).map_or(false, |t| t.is_interface);
+                                (i.to_string(), m, is_iface)
+                            })
+                        })
+                    } else {
+                        None
+                    }
+                } {
+                    let recv = self.expr(receiver)?;
+                    let read = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: m.name.clone(), descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] });
+                    self.coerce_generic_read(read, e, m.ret)
                 } else {
                     return None;
                 }

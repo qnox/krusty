@@ -81,6 +81,13 @@ const TYPE_MAP: &[(&str, &str)] = &[
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
 pub fn to_jvm_internal(internal: &str) -> &str {
+    // Emit-only mappings: core-introduced Kotlin names with a JVM counterpart that the classpath
+    // never surfaces (so they stay out of the bidirectional `TYPE_MAP` and don't affect
+    // `to_kotlin_internal`). `kotlin/Throwable` is synthesized by the front end for the `throw`
+    // checkcast; the classpath always reads `java/lang/Throwable` directly.
+    if internal == "kotlin/Throwable" {
+        return "java/lang/Throwable";
+    }
     TYPE_MAP.iter().find(|(k, _)| *k == internal).map(|(_, j)| *j).unwrap_or(internal)
 }
 
