@@ -424,7 +424,12 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             // to Unit; check_fun will do a deeper inference pass and record any
                             // non-Unit result in TypeInfo::fun_ret_overrides for codegen.
                             if let FunBody::Expr(e) = &f.body {
-                                let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
+                                // For an extension function, bind `this` to the receiver type so a body
+                                // using it (`fun Int.double() = this * 2`) infers correctly.
+                                let this_scope: Vec<(String, Ty, bool)> = f.receiver.as_ref()
+                                    .map(|r| vec![("this".to_string(), ty_of_ref(r, &class_names, &tp, diags), false)])
+                                    .unwrap_or_default();
+                                let t = infer_lit_ty_p(file, *e, &class_names, &fun_rets, &this_scope);
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -1065,7 +1070,8 @@ fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>,
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
-        // A bare name referring to one of the enclosing class's properties.
+        // A bare name referring to a property (or `this` — the receiver of an expression-bodied
+        // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry).
         Expr::Name(n) => props.iter().find(|(pn, _, _)| pn == n).map(|(_, t, _)| *t).unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(prim) = file.expr(*receiver) {
