@@ -2260,6 +2260,16 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.file.add_expr(Expr::LongLit(v), span)
             }
+            TokenKind::UIntLit => {
+                let v = parse_int_literal(self.text()); // suffix stripped inside
+                self.bump();
+                self.file.add_expr(Expr::UIntLit(v), span)
+            }
+            TokenKind::ULongLit => {
+                let v = parse_int_literal(self.text());
+                self.bump();
+                self.file.add_expr(Expr::ULongLit(v), span)
+            }
             TokenKind::DoubleLit => {
                 let v = self.text().parse::<f64>().unwrap_or(0.0);
                 self.bump();
@@ -2630,6 +2640,8 @@ fn starts_expr(k: TokenKind) -> bool {
         TokenKind::Ident
             | TokenKind::IntLit
             | TokenKind::LongLit
+            | TokenKind::UIntLit
+            | TokenKind::ULongLit
             | TokenKind::DoubleLit
             | TokenKind::FloatLit
             | TokenKind::StringLit

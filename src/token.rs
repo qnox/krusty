@@ -8,6 +8,8 @@ pub enum TokenKind {
     Ident,
     IntLit,    // 123
     LongLit,   // 123L
+    UIntLit,   // 123u / 0xFFu
+    ULongLit,  // 123uL
     DoubleLit, // 1.5
     FloatLit,  // 1.5f / 1f
     StringLit, // "..." (no interpolation)

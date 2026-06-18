@@ -80,6 +80,13 @@ pub enum Ty {
     Double,
     Boolean,
     Char,
+    /// Unsigned integers — Kotlin inline classes over the matching signed primitive (`UInt` over
+    /// `Int`, `ULong` over `Long`). Unboxed they ARE that JVM primitive (`I`/`J`); the unsignedness
+    /// shows only in operation choice (unsigned `/`/`%`/compare/`toString`) and boxing (`kotlin/UInt`).
+    /// Kept distinct from the signed types so those operations and widening (`toLong` = zero-extend)
+    /// are selected correctly.
+    UInt,
+    ULong,
     String,
     Unit,
     /// A JVM reference type by internal name (e.g. `demo/Point`), with its generic type arguments
@@ -177,6 +184,8 @@ impl Ty {
             "Double" => Ty::Double,
             "Boolean" => Ty::Boolean,
             "Char" => Ty::Char,
+            "UInt" => Ty::UInt,
+            "ULong" => Ty::ULong,
             "String" => Ty::String,
             "Unit" => Ty::Unit,
             "Any" => Ty::obj("kotlin/Any"),
@@ -207,6 +216,8 @@ impl Ty {
             Ty::Double => "Double",
             Ty::Boolean => "Boolean",
             Ty::Char => "Char",
+            Ty::UInt => "UInt",
+            Ty::ULong => "ULong",
             Ty::String => "String",
             Ty::Unit => "Unit",
             Ty::Obj(n, _) => n,
@@ -236,7 +247,21 @@ impl Ty {
     }
 
     pub fn is_primitive(self) -> bool {
-        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char)
+        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char | Ty::UInt | Ty::ULong)
+    }
+
+    /// True for the unsigned integer types (inline classes over a signed primitive).
+    pub fn is_unsigned(self) -> bool {
+        matches!(self, Ty::UInt | Ty::ULong)
+    }
+
+    /// The signed primitive an unsigned type is represented by on the JVM (`UInt` → `Int`).
+    pub fn unsigned_repr(self) -> Option<Ty> {
+        match self {
+            Ty::UInt => Some(Ty::Int),
+            Ty::ULong => Some(Ty::Long),
+            _ => None,
+        }
     }
 
     /// JVM type descriptor for ABI (`I`, `J`, `D`, `Z`, `String`, `V`, `Lpkg/Name;`). Reference
@@ -254,6 +279,9 @@ impl Ty {
             Ty::Double => "D".into(),
             Ty::Boolean => "Z".into(),
             Ty::Char => "C".into(),
+            // Unboxed inline-class erasure: `UInt` is a JVM `int`, `ULong` a `long`.
+            Ty::UInt => "I".into(),
+            Ty::ULong => "J".into(),
             Ty::String => obj_desc("kotlin/String"),
             Ty::Unit => "V".into(),
             Ty::Obj(n, _) => obj_desc(n),
