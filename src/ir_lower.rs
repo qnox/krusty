@@ -469,6 +469,24 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.lower_body(&m.body, &ret_ty, fid)?;
                     }
                 }
+                // A superclass whose constructor needs more arguments than are supplied (`object : A()`
+                // where `A(val x = …)` has defaulted parameters) — krusty doesn't fill super default
+                // arguments, so the `super(…)` call shape wouldn't match. Bail rather than miscompile.
+                if let Some(sup) = lo.classes[&internal].super_internal.clone().and_then(|s| lo.classes.get(&s)) {
+                    let sup_params = lo.ir.classes[sup.id as usize].ctor_param_count as usize;
+                    if sup_params > c.base_args.len() {
+                        return None;
+                    }
+                    // An anonymous object extending a *parameterized* base class can reference the
+                    // enclosing instance's (private) members, which Kotlin binds by capture — not by
+                    // inheritance (a base's private field is invisible to a subclass). krusty has no
+                    // outer-instance capture, so it would resolve such a name to the inherited field
+                    // and miscompile (KT-3684). Bail those; SAM-style anon objects over interfaces or
+                    // no-argument classes are unaffected.
+                    if internal.contains("$anon$") && sup_params > 0 {
+                        return None;
+                    }
+                }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
                 if !c.base_args.is_empty() {
