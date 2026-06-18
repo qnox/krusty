@@ -544,6 +544,16 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                         props.push((bp.name.clone(), ty, bp.is_var));
                         init_scope.push((bp.name.clone(), ty, bp.is_var));
                     }
+                    // An inner class's methods can read the enclosing instance's properties (via
+                    // `this$0`); add the outer class's backing-field properties so an expression-bodied
+                    // inner method (`fun box() = s`) infers its return type from them.
+                    if let Some(outer) = &c.inner_of {
+                        if let Some(oc) = file.decls.iter().filter_map(|&d| match file.decl(d) { Decl::Class(x) => Some(x), _ => None }).find(|x| x.name == *outer) {
+                            for p in oc.props.iter().filter(|p| p.is_property) {
+                                props.push((p.name.clone(), ty_of_ref(&p.ty, &class_names, &ctp, diags), p.is_var));
+                            }
+                        }
+                    }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
@@ -1392,7 +1402,14 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)
                 // visible as an implicit `this` scope.
-                let props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
+                let mut props = syms.classes.get(&cl.name).map(|s| s.props.clone()).unwrap_or_default();
+                // An inner class's methods can read the enclosing instance's properties (via `this$0`);
+                // make the outer class's backing-field properties resolvable as implicit-`this` members.
+                if let Some(outer) = &cl.inner_of {
+                    if let Some(os) = syms.classes.get(outer) {
+                        props.extend(os.props.clone());
+                    }
+                }
                 c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods);

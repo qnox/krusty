@@ -128,6 +128,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // An inner method reads the enclosing instance's members through `this$0` (via the getter); an
+    // inner property initializer can combine outer + own members (`val z = x + y`).
+    ("InnerOuterAccess", r#"
+class Outer(val x: String) {
+    inner class Inner(val y: String) {
+        val z = x + y
+        fun outer(): String = x
+    }
+}
+fun box(): String {
+    val i = Outer("O").Inner("K")
+    if (i.z != "OK") return "f1:${i.z}"
+    if (i.outer() != "O") return "f2"
+    return "OK"
+}
+"#),
     // A `var` captured (even read-only) by a closure but reassigned later in the enclosing scope is
     // boxed, so the closure observes the update (kotlinc's captured-var semantics; KT-4656 style).
     ("CaptureReassigned", r#"
