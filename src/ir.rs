@@ -266,6 +266,14 @@ pub struct IrClass {
     /// for an `enum class`; the backend emits a static field per entry, a `$VALUES` array, a
     /// `<clinit>` that constructs them, and `values()`/`valueOf(String)`.
     pub enum_entries: Vec<(String, Vec<ExprId>)>,
+    /// Parallel to `enum_entries`: `Some(subclass_fq)` when that entry has a body and is constructed
+    /// as an instance of a synthesized anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`),
+    /// else `None` (constructed as the enum itself). Non-empty only on an `enum class` with bodies.
+    pub enum_entry_subclass: Vec<Option<String>>,
+    /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
+    /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
+    /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
+    pub enum_entry_of: Option<Vec<IrType>>,
     /// Synthetic bridge methods: an override whose erased signature differs from the supertype's
     /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
     /// that adapts arguments and delegates to the concrete override.

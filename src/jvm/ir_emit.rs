@@ -118,6 +118,9 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     if c.is_interface {
         return emit_interface_class(ir, c);
     }
+    if let Some(user_tys) = &c.enum_entry_of {
+        return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
+    }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
@@ -343,6 +346,40 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     cw.finish()
 }
 
+/// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
+/// package-private `final` class with one constructor `(String name, int ordinal, <user fields>)V`
+/// that delegates to the enum's `(String,int,<user>)V` constructor, plus the entry's overriding
+/// methods. It has no fields of its own — overrides read the enum's fields via the inherited `this`.
+fn emit_enum_entry_subclass(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies, user_tys: &[IrType]) -> Vec<u8> {
+    let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
+    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
+
+    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`.
+    let user_jvm: Vec<Ty> = user_tys.iter().map(ir_ty_to_jvm).collect();
+    let ctor_params: Vec<Ty> = std::iter::once(Ty::String).chain(std::iter::once(Ty::Int)).chain(user_jvm.iter().copied()).collect();
+    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
+    let mut ctor = CodeBuilder::new(1 + ctor_words);
+    ctor.aload(0);
+    let mut slot = 1u16;
+    for t in &ctor_params {
+        load(*t, slot, &mut ctor);
+        slot += slot_words(*t);
+    }
+    let super_init = cw.methodref(&c.superclass, "<init>", &method_descriptor(&ctor_params, Ty::Unit));
+    let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
+    ctor.invokespecial(super_init, argw, 0);
+    ctor.ret_void();
+    ctor.ensure_locals(1 + ctor_words);
+    ctor.link();
+    cw.add_method(0x0000, "<init>", &method_descriptor(&ctor_params, Ty::Unit), &ctor);
+
+    // The overriding methods (always concrete — an entry body has bodied overrides only).
+    for &fid in &c.methods {
+        emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
+    }
+    cw.finish()
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (checkcast / unbox / numeric convert), delegates to the concrete override, and adapts
 /// the return value back (box / numeric convert). Bridges are straight-line — no frames.
@@ -450,7 +487,14 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
     let mut cw = ClassWriter::new(&fq, "java/lang/Enum");
-    cw.set_access(0x0001 | 0x0010 | 0x0020 | ACC_ENUM); // PUBLIC | FINAL | SUPER | ENUM
+    // An enum with an abstract member is `ACC_ABSTRACT`; one with any bodied entry (so a subclass
+    // extends it) must not be `final`. A plain enum stays `final`.
+    let has_abstract = c.methods.iter().any(|&fid| ir.functions[fid as usize].body.is_none());
+    let has_subclass = c.enum_entry_subclass.iter().any(|s| s.is_some());
+    let mut access = 0x0001 | 0x0020 | ACC_ENUM; // PUBLIC | SUPER | ENUM
+    if has_abstract { access |= 0x0400; } // ABSTRACT
+    if !has_abstract && !has_subclass { access |= 0x0010; } // FINAL
+    cw.set_access(access);
 
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
     let n_params = c.ctor_param_count as usize;
@@ -486,7 +530,10 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     ctor.ret_void();
     ctor.ensure_locals(1 + ctor_words);
     ctor.link();
-    cw.add_method(0x0002 | ACC_SYNTHETIC, "<init>", &ctor_desc, &ctor);
+    // A subclassed enum's constructor must be reachable from its entry subclasses' `<init>` (an
+    // `invokespecial` from another class) — package-private, not private.
+    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 | ACC_SYNTHETIC };
+    cw.add_method(base_ctor_acc, "<init>", &ctor_desc, &ctor);
 
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
@@ -498,7 +545,10 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
             // first, then construct (mirrors the `New` node's spill).
             let spill = args.iter().any(|&a| e.records_frame(a));
             let temps = if spill { e.spill_to_temps(args, &mut clinit) } else { Vec::new() };
-            let cls = e.cw.class_ref(&fq);
+            // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
+            // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
+            let new_class = c.enum_entry_subclass.get(i).and_then(|s| s.clone()).unwrap_or_else(|| fq.clone());
+            let cls = e.cw.class_ref(&new_class);
             clinit.new_obj(cls);
             clinit.dup();
             clinit.push_string(entry, e.cw);
@@ -511,7 +561,7 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
                     e.emit_value(a, &mut clinit);
                 }
             }
-            let ctor_ref = e.cw.methodref(&fq, "<init>", &ctor_desc);
+            let ctor_ref = e.cw.methodref(&new_class, "<init>", &ctor_desc);
             clinit.invokespecial(ctor_ref, ctor_argw, 0);
             let fref = e.cw.fieldref(&fq, entry, &self_desc);
             clinit.putstatic(fref, 1);
@@ -561,8 +611,14 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     cw.add_method(0x0009, "valueOf", &format!("(Ljava/lang/String;){self_desc}"), &vof);
 
     for &fid in &c.methods {
-        if ir.functions[fid as usize].body.is_some() {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
             emit_method(ir, fid, &fq, facade, &mut cw, true, bodies);
+        } else {
+            // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
+            // entry subclasses override it.
+            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ir_ty_to_jvm(&f.ret)));
         }
     }
     cw.finish()

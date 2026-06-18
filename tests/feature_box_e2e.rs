@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Enum entries with a body: each bodied entry is a synthesized subclass (`Op$ADD extends Op`)
+    // overriding an abstract member; the override can read an enum constructor `val`.
+    ("EnumEntryBody", r#"
+enum class Op(val sym: String) {
+    ADD("+") { override fun apply(a: Int, b: Int) = a + b },
+    MUL("*") { override fun apply(a: Int, b: Int) = a * b };
+    abstract fun apply(a: Int, b: Int): Int
+}
+fun box(): String {
+    if (Op.ADD.apply(2, 3) != 5) return "f1"
+    if (Op.MUL.apply(2, 3) != 6) return "f2"
+    if (Op.ADD.sym != "+") return "f3"
+    if (Op.MUL.sym != "*") return "f4"
+    return "OK"
+}
+"#),
     // The overridable members compareTo/equals/hashCode have Kotlin-contract return types (Int/Boolean/
     // Int), used when the body can't be inferred locally (`compareTo(o) = v - o.v` references `o`).
     ("CompareToContract", r#"
