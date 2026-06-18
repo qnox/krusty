@@ -337,10 +337,10 @@ impl<'a> Parser<'a> {
     /// `abstract_ok` — allow missing initializer (abstract/interface props, class/object body props
     /// with init blocks, etc.). Top-level properties always require an initializer.
     fn parse_top_property(&mut self, is_lateinit: bool, abstract_ok: bool) -> PropDecl {
-        self.parse_top_property_c(is_lateinit, abstract_ok, false)
+        self.parse_top_property_c(is_lateinit, abstract_ok, false, false)
     }
 
-    fn parse_top_property_c(&mut self, is_lateinit: bool, abstract_ok: bool, is_const: bool) -> PropDecl {
+    fn parse_top_property_c(&mut self, is_lateinit: bool, abstract_ok: bool, is_const: bool, is_abstract: bool) -> PropDecl {
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
@@ -415,11 +415,11 @@ impl<'a> Parser<'a> {
         // A property with no initializer, no getter, and no backing-field need must be `lateinit`
         // (or an abstract/interface property); an extension property always has a getter, so it is
         // exempt.
-        if init.is_none() && getter.is_none() && setter.is_none() && !is_lateinit && !abstract_ok && receiver.is_none() {
+        if init.is_none() && getter.is_none() && setter.is_none() && !is_lateinit && !abstract_ok && !is_abstract && receiver.is_none() {
             self.diags.error(start, "krusty: a property without an initializer must be 'lateinit'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        PropDecl { name, receiver, ty, is_var, init, is_lateinit, getter, setter, is_const, span: Span::new(start.lo, end.hi) }
+        PropDecl { name, receiver, ty, is_var, init, is_lateinit, getter, setter, is_const, is_abstract, span: Span::new(start.lo, end.hi) }
     }
 
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
@@ -497,7 +497,7 @@ impl<'a> Parser<'a> {
                     d.is_private = mods.iter().any(|m| m == "private");
                     methods.push(d);
                 }
-                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property_c(lateinit, false, mods.iter().any(|m| m == "const"))),
+                TokenKind::KwVal | TokenKind::KwVar => props.push(self.parse_top_property_c(lateinit, false, mods.iter().any(|m| m == "const"), false)),
                 _ => {
                     self.diags.error(self.tok().span, "krusty: companion bodies support only 'fun' and 'val'/'var'");
                     self.bump();
@@ -891,9 +891,9 @@ impl<'a> Parser<'a> {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        // Non-abstract body props may omit the initializer; init blocks supply the value.
-                        // Abstract body props (unsupported) remain rejected via abstract_ok=false.
-                        let p = self.parse_top_property_c(lateinit, !is_abstract, mods.iter().any(|m| m == "const"));
+                        // Non-abstract body props may omit the initializer (init blocks supply the
+                        // value); an `abstract` property has no field and is marked accordingly.
+                        let p = self.parse_top_property_c(lateinit, !is_abstract, mods.iter().any(|m| m == "const"), is_abstract);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -1141,7 +1141,7 @@ impl<'a> Parser<'a> {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property_c(lateinit, true, mods.iter().any(|m| m == "const"));
+                        let p = self.parse_top_property_c(lateinit, true, mods.iter().any(|m| m == "const"), false);
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -1221,7 +1221,7 @@ impl<'a> Parser<'a> {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
                     TokenKind::KwVal | TokenKind::KwVar => {
-                        let p = self.parse_top_property_c(lateinit, true, mods.iter().any(|m| m == "const")); // init blocks may supply the value
+                        let p = self.parse_top_property_c(lateinit, true, mods.iter().any(|m| m == "const"), false); // init blocks may supply the value
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }

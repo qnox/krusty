@@ -339,6 +339,9 @@ pub struct PropDecl {
     /// sites; krusty doesn't model that, so a const read across declaration order (a member reading a
     /// later const) would observe the uninitialized field. Used to bail such cases.
     pub is_const: bool,
+    /// `true` if declared `abstract` — no backing field; emitted as an abstract `getX()` accessor that
+    /// a subclass overrides.
+    pub is_abstract: bool,
     pub span: Span,
 }
 

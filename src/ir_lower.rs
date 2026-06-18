@@ -77,7 +77,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }).collect();
             // Computed body properties (custom getter, no backing field) become `getX()` methods, not
             // fields — exclude them here.
-            let body_fields: Vec<(String, Ty)> = c.body_props.iter().filter(|p| !is_computed_prop(p))
+            let body_fields: Vec<(String, Ty)> = c.body_props.iter().filter(|p| is_backing_field_prop(p))
                 .map(|p| {
                     let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
@@ -135,7 +135,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 is_companion: false,
                 companion_class: None,
                 field_final: c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var)
-                    .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| !p.is_var))
+                    .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| !p.is_var))
                     .collect(),
                 secondary_ctors: vec![],
             });
@@ -179,10 +179,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods.insert(gname, (mi, fid, ty));
                 method_fids.push(fid);
             }
-            // Interface properties (`interface I { val x: T }`) → an abstract `getX()` (and `setX()`
-            // for a `var`) the implementing class overrides with its field accessor.
-            if c.is_interface {
-                for p in c.body_props.iter().filter(|p| !is_computed_prop(p)) {
+            // Abstract properties (`abstract val x: T`, and every interface property) → an abstract
+            // `getX()` (and `setX()` for a `var`) the implementing class overrides with its field
+            // accessor.
+            {
+                for p in c.body_props.iter().filter(|p| p.is_abstract || (c.is_interface && !is_computed_prop(p))) {
                     let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     let gname = getter_name(&p.name);
                     if !methods.contains_key(&gname) {
@@ -207,7 +208,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
             if !c.is_interface && !c.is_enum {
                 let field_props: Vec<(String, bool)> = c.props.iter().filter(|p| p.is_property).map(|p| (p.name.clone(), p.is_var))
-                    .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| (p.name.clone(), p.is_var)))
+                    .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| (p.name.clone(), p.is_var)))
                     .collect();
                 for (fidx, (pname, is_var)) in field_props.iter().enumerate() {
                     let fty = fields[fidx].1;
@@ -564,13 +565,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     for step in &c.init_order {
                         match step {
                             ast::ClassInit::PropInit(i) => {
-                                // A computed body property has no backing field — nothing to initialize.
-                                if is_computed_prop(&c.body_props[*i as usize]) {
+                                // A computed or abstract body property has no backing field here —
+                                // nothing to initialize.
+                                if !is_backing_field_prop(&c.body_props[*i as usize]) {
                                     continue;
                                 }
                                 // Computed body properties are not fields, so the field index counts
                                 // only the non-computed body properties before this one.
-                                let body_offset = c.body_props[..*i as usize].iter().filter(|p| !is_computed_prop(p)).count();
+                                let body_offset = c.body_props[..*i as usize].iter().filter(|p| is_backing_field_prop(p)).count();
                                 let field_idx = ctor_count + body_offset as u32;
                                 let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize].1.clone();
                                 let init_e = c.body_props[*i].init.unwrap();
@@ -714,8 +716,9 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         && c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
-        // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p))
+        // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
+        // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract)
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -774,6 +777,12 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
 fn is_computed_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none() && !p.is_lateinit && !p.is_var
         && p.init.is_none() && p.getter.is_some() && p.setter.is_none() && p.ty.is_some()
+}
+
+/// A body property with a real backing field — neither a computed property (custom getter, no field)
+/// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass).
+fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
+    !is_computed_prop(p) && !p.is_abstract
 }
 
 /// The JVM accessor name for a property: `x` → `getX`; an `is`-prefixed boolean keeps its name
