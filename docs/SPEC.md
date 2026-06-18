@@ -265,6 +265,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ULong`/`Char` counters (not just `Int`): the counter takes the uniform bound type, signed/`Long`/`Char`
   compare with the direct opcode, and the unsigned case compares with `Integer.compareUnsigned`/
   `Long.compareUnsigned` (a signed `<=` would misorder values past the sign bit). `tests/range_value_e2e.rs`.
+- **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
+  which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
+  erased element; the checker rejects a *primitive* element — `arrayOf(1, 2)` — since `Array<Int>` is
+  `Integer[]` and would need per-element boxing krusty doesn't model yet). An element that lowers to a
+  branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
+  mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
+  rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
