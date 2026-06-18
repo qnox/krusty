@@ -2291,7 +2291,18 @@ bodies exist only as jar bytecode):
      route (b). Also: the checker must permit mutable capture for any inline-fn lambda arg (today only the
      named desugar set), since a by-value `impl_fn` capture param can't write the outer local — mutable
      capture needs the body emitted against the caller's *actual* slot, which inline-emit gives. Major
-     multi-part feature; foundations (296–298) done; `emit_fn_body_inline` is the next concrete step.
+     multi-part feature; foundations (296–298) done.
+     **EMITTER HALF DONE (phase 299):** `Emitter::emit_fn_body_inline` + `try_inline_lambda_call` inline a
+     non-capturing lambda's body at a branchless single-invoke body's `FunctionN.invoke` (store non-lambda
+     args, append `before`, unbox the boxed invoke args to the typed lambda params, inline the body, box
+     the result, append `after`). 0-FAIL; reachable for any lambda-arg inline call (`map` → branchy → falls
+     back). **TO FIRE — front-end routing (the remaining blockers):** (i) krusty resolves NO custom-lib
+     top-level facade fn (`lib.LibKt.dbl` → "unresolved"), and types a top-level lib fn's lambda arg before
+     its sig is known (`it: Any`) — needs a resolver fix to use a custom-lib inline fn as the vehicle.
+     (ii) stdlib `let`/`also` are IR-desugared (`ir_lower` ~3261, a clean IR true-inline) — route only
+     *non-capturing* ones to `Callee::Static(inline)` (keep the desugar for capturing lambdas; detect free
+     vars at the desugar site). (iii) an inlined `impl_fn` is still emitted as a dead method — skip it for
+     byte-equality.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
