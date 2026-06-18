@@ -607,7 +607,7 @@ impl LibrarySet for JvmLibraries {
                 }
                 gsig_to_ty(&rsig, &binds)
             }).unwrap_or(*ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), default_call: false });
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
@@ -649,7 +649,7 @@ impl LibrarySet for JvmLibraries {
                     }
                     gsig_to_ty(&rsig, &binds)
                 }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), default_call: false });
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
             }
         }
         // No exact-arity match — try the `name$default` synthetic for an extension with default
@@ -694,7 +694,7 @@ impl LibrarySet for JvmLibraries {
                     }
                     gsig_to_ty(&rsig, &binds)
                 }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), default_call: true });
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true });
             }
         }
         None

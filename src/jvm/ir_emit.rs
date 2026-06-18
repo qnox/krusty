@@ -650,9 +650,7 @@ struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
     /// The narrow bytecode provider — lets the emitter read a cross-module `inline fun`'s compiled
-    /// body (`bodies.body`) to splice it at the call site (the bytecode inliner). Consumed by the
-    /// splice path landing in the next phase.
-    #[allow(dead_code)]
+    /// body (`bodies.body`) to splice it at the call site (the bytecode inliner).
     bodies: &'a dyn MethodBodies,
     owner: String,
     facade: String,
@@ -664,6 +662,16 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    /// Attempt to splice a cross-module `inline fun`'s compiled body at the call site (the bytecode
+    /// inliner; the callee body comes from [`MethodBodies::body`]). Returns `true` if spliced; `false`
+    /// ⇒ the caller emits an ordinary `invokestatic`, so an un-spliceable inline call is never
+    /// miscompiled. The splice itself (StackMapTable relocation for branchy bodies + lambda-argument
+    /// splicing) lands in the next phase — until then this always falls back.
+    fn try_inline_static(&mut self, _owner: &str, _name: &str, _descriptor: &str, _args: &[u32], _code: &mut CodeBuilder) -> bool {
+        let _ = self.bodies;
+        false
+    }
+
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
             IrExpr::Block { stmts, value } => {
@@ -934,9 +942,15 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
-                Callee::Static { owner, name, descriptor } => {
-                    let (owner, name, descriptor) = (owner.clone(), name.clone(), descriptor.clone());
+                Callee::Static { owner, name, descriptor, inline } => {
+                    let (owner, name, descriptor, inline) = (owner.clone(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
+                    // A cross-module `inline fun`: try to splice its compiled body here (the bytecode
+                    // inliner). On any unsupported shape `try_inline_static` returns false and we emit the
+                    // ordinary `invokestatic` — so an un-spliceable inline call is never miscompiled.
+                    if inline && self.try_inline_static(&owner, &name, &descriptor, &args, code) {
+                        return;
+                    }
                     self.emit_operands(&args, code);
                     let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
                     let ret = ty_from_descriptor_ret(&descriptor);

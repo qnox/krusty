@@ -957,7 +957,7 @@ impl<'a> Lower<'a> {
                 (self.coerce_erased(c, log, m.ret), log)
             } else if let Some(c) = self.syms.libraries.resolve_callable(&comp, Some(it_ty), &[], &[]) {
                 // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: vec![recv] });
+                let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: vec![recv] });
                 (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
             } else {
                 // An indexable type: `componentN` is the inline `get(N-1)`.
@@ -1141,7 +1141,7 @@ impl<'a> Lower<'a> {
     fn box_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
         let (owner, prim) = if ty == Ty::UInt { ("kotlin/UInt", "I") } else { ("kotlin/ULong", "J") };
         self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static { owner: owner.to_string(), name: "box-impl".to_string(), descriptor: format!("({prim})L{owner};") },
+            callee: Callee::Static { owner: owner.to_string(), name: "box-impl".to_string(), descriptor: format!("({prim})L{owner};"), inline: false },
             dispatch_receiver: None, args: vec![val],
         })
     }
@@ -1160,7 +1160,7 @@ impl<'a> Lower<'a> {
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> u32 {
         let (owner, prim) = if ty == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
         self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static { owner: owner.to_string(), name: "toUnsignedString".to_string(), descriptor: format!("({prim})Ljava/lang/String;") },
+            callee: Callee::Static { owner: owner.to_string(), name: "toUnsignedString".to_string(), descriptor: format!("({prim})Ljava/lang/String;"), inline: false },
             dispatch_receiver: None, args: vec![val],
         })
     }
@@ -1548,7 +1548,7 @@ impl<'a> Lower<'a> {
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
         let iter_callee = if iter_ext {
-            Callee::Static { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc }
+            Callee::Static { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc, inline: false }
         } else {
             Callee::Virtual { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc, interface: it_iface }
         };
@@ -1982,7 +1982,7 @@ impl<'a> Lower<'a> {
                 let cond = if elem.is_unsigned() {
                     let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
                     let cmp_call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I") },
+                        callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
                         dispatch_receiver: None, args: vec![gi, ge],
                     });
                     let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
@@ -2572,7 +2572,7 @@ impl<'a> Lower<'a> {
                     let r = self.expr(rhs)?;
                     let call = |this: &mut Self, name: &str, desc: String, args: Vec<u32>| {
                         this.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static { owner: owner.to_string(), name: name.to_string(), descriptor: desc },
+                            callee: Callee::Static { owner: owner.to_string(), name: name.to_string(), descriptor: desc, inline: false },
                             dispatch_receiver: None, args,
                         })
                     };
@@ -2756,7 +2756,7 @@ impl<'a> Lower<'a> {
                     RangeKind::Until => {
                         let descriptor = format!("({prim_desc}{prim_desc})L{range_internal};");
                         self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static { owner: "kotlin/ranges/RangesKt".to_string(), name: "until".to_string(), descriptor },
+                            callee: Callee::Static { owner: "kotlin/ranges/RangesKt".to_string(), name: "until".to_string(), descriptor, inline: false },
                             dispatch_receiver: None,
                             args: vec![lo_v, hi_v],
                         })
@@ -3170,7 +3170,7 @@ impl<'a> Lower<'a> {
                                 a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
                             }
                         }
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a })
+                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: a })
                     } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
@@ -3339,7 +3339,7 @@ impl<'a> Lower<'a> {
                                 if rty == Ty::UInt && matches!(target, Ty::Long | Ty::ULong) {
                                     // zero-extend the 32-bit unsigned value into a long
                                     return Some(self.ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Static { owner: "java/lang/Integer".to_string(), name: "toUnsignedLong".to_string(), descriptor: "(I)J".to_string() },
+                                        callee: Callee::Static { owner: "java/lang/Integer".to_string(), name: "toUnsignedLong".to_string(), descriptor: "(I)J".to_string(), inline: false },
                                         dispatch_receiver: None, args: vec![r],
                                     }));
                                 }
@@ -3537,7 +3537,7 @@ impl<'a> Lower<'a> {
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         }
-                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a });
+                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: a });
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else {
                         return None;

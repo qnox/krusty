@@ -51,7 +51,9 @@ pub enum Callee {
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
-    Static { owner: String, name: String, descriptor: String },
+    /// `inline` => the callee is a Kotlin `inline` function (set from the resolved signature's metadata);
+    /// the JVM backend may splice its compiled body here instead of emitting the `invokestatic`.
+    Static { owner: String, name: String, descriptor: String, inline: bool },
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
     Virtual { owner: String, name: String, descriptor: String, interface: bool },
