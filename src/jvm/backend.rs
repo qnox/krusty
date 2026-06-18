@@ -7,7 +7,17 @@ use crate::diag::DiagSink;
 use crate::jvm::names::file_class_name;
 use crate::resolve::{SymbolTable, TypeInfo};
 
-pub struct JvmBackend;
+/// The JVM backend holds the shared classpath (`Rc`, same instance as `JvmLibraries`) so the emitter
+/// can read inline-function bodies for the bytecode inliner.
+pub struct JvmBackend {
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+}
+
+impl JvmBackend {
+    pub fn new(cp: std::rc::Rc<crate::jvm::classpath::Classpath>) -> JvmBackend {
+        JvmBackend { cp }
+    }
+}
 
 /// package → file-facade class names, accumulated across files for the `.kotlin_module` mapping.
 #[derive(Default)]
@@ -38,7 +48,7 @@ impl Backend for JvmBackend {
         };
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
         // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
-        let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name) else {
+        let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp) else {
             diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
             return outputs;
         };

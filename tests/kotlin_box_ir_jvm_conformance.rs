@@ -189,7 +189,8 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
     // path, exactly as a `kotlinc -classpath` invocation would.
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(Classpath::new(cp_paths)));
+    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let syms = collect_signatures_with_cp(&files, platform, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
@@ -214,7 +215,7 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
             return None;
         }
     };
-    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name) {
+    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp) {
         Some(o) => o,
         None => {
             T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);

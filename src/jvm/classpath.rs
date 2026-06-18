@@ -358,6 +358,14 @@ impl Classpath {
     }
 }
 
+/// The classpath is the JVM realization of the inliner's narrow [`MethodBodies`] capability — the
+/// emitter sees only this, not the whole `Classpath`.
+impl super::inline::MethodBodies for Classpath {
+    fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
+        self.method_code(owner, name, descriptor)
+    }
+}
+
 /// A lean per-class record for building the extension index — only what's needed to follow facade
 /// superclass chains and index static methods (no fields, no instance methods).
 struct ClassLite {

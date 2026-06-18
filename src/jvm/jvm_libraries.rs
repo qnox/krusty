@@ -8,13 +8,16 @@ use crate::types::Ty;
 use super::classpath::Classpath;
 use super::jvm_class_map::{to_kotlin_internal, to_jvm_internal, kotlin_builtin_to_jvm, BUILTIN_MAPPED_NAMES};
 
-/// A platform backed by a JVM classpath (dirs + jars + the JDK jimage).
+/// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
+/// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
+/// the same lazily-populated caches — all within the `jvm` module, never through the `LibrarySet`
+/// abstraction.
 pub struct JvmLibraries {
-    cp: Classpath,
+    cp: std::rc::Rc<Classpath>,
 }
 
 impl JvmLibraries {
-    pub fn new(cp: Classpath) -> JvmLibraries {
+    pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
         JvmLibraries { cp }
     }
 }

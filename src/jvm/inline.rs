@@ -8,6 +8,16 @@ use super::classfile::ClassWriter;
 use super::classreader::{MethodCode, C};
 use std::collections::HashMap;
 
+/// The narrow capability the bytecode inliner needs from the classpath (interface segregation /
+/// least-knowledge): read a method's compiled body by owner/name/descriptor. *Whether* a callee is
+/// `inline` is function metadata that travels with the resolved signature (decoded once, alongside the
+/// signature, in `metadata.rs`) and reaches the emitter via the IR — it is not re-queried here. The
+/// emitter depends only on this, not on the whole `Classpath` (caches, jimage, type indexes).
+pub trait MethodBodies {
+    /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
+    fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
+}
+
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
         C::Utf8(s) => Some(s),
