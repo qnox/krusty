@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A body property's type is inferred from its initializer with the preceding properties (and
+    // val/var ctor params) in scope: `val b = a + 1` sees the earlier `a`.
+    ("SequentialPropInfer", r#"
+class C(val x: Int) {
+    val a = 10
+    val b = a + 1
+    val c = b * x
+}
+fun box(): String {
+    val o = C(2)
+    if (o.a != 10) return "f1"
+    if (o.b != 11) return "f2"
+    if (o.c != 22) return "f3:${o.c}"
+    return "OK"
+}
+"#),
     // A private @InlineOnly String extension (`uppercase`/`lowercase` → `toUpperCase(Locale.ROOT)`) is
     // inlined from its real stdlib bytecode (it has no callable body and no JDK member equivalent).
     ("StringInlineExt", r#"
