@@ -48,6 +48,11 @@ pub struct LibraryCallable {
     /// type parameter). The backend inserts the unbox/checkcast bridging `physical_ret` → `ret`.
     pub physical_ret: Ty,
     pub descriptor: String,
+    /// True when this resolves a `name$default` synthetic (a callable with defaulted parameters called
+    /// with fewer arguments): `params` are the real parameters, and the backend appends zero/`null`
+    /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
+    /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
+    pub default_call: bool,
 }
 
 /// The shape of a library type: enough for the front end to resolve member accesses against it

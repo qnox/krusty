@@ -266,6 +266,21 @@ fn arg_fits(p: &Ty, a: &Ty) -> bool {
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
+/// Like [`arg_fits`], but also accepts a reference argument that is a *subtype* of a reference
+/// parameter (`String` into a `CharSequence` parameter) by walking the classpath supertype chain.
+/// Used where overload selection must distinguish a real subtype from an unrelated type (a `Char`
+/// argument must NOT match a `CharSequence` parameter).
+fn arg_fits_subtype(cp: &Classpath, p: &Ty, a: &Ty) -> bool {
+    if arg_fits(p, a) {
+        return true;
+    }
+    if a.is_reference() && matches!(p, Ty::Obj(..) | Ty::String) {
+        let pd = p.descriptor();
+        return supertype_descriptors(cp, *a).iter().any(|d| *d == pd);
+    }
+    false
+}
+
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     let close = desc.find(')').unwrap_or(0);
@@ -470,6 +485,12 @@ impl LibrarySet for JvmLibraries {
                     && args[fixed..].iter().all(|a| arg_fits(&elem, a))
             }));
             let (c, params, ret) = pick?;
+            // A reified reflection intrinsic (`typeOf` → `KType`) is implemented by inlining + reified
+            // substitution; called as a plain static it throws at runtime. krusty doesn't inline it —
+            // leave it unresolved (the file skips) rather than emit a call that fails.
+            if ret.obj_internal() == Some("kotlin/reflect/KType") {
+                return None;
+            }
             // Recover the parameterized return from the generic signature: bind the type variables
             // from the actual arguments (the vararg element unifies with each trailing arg) and
             // substitute into the return node. Falls back to the erased return when absent.
@@ -500,7 +521,7 @@ impl LibrarySet for JvmLibraries {
                 }
                 gsig_to_ty(&rsig, &binds)
             }).unwrap_or(*ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone() });
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), default_call: false });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
@@ -530,7 +551,52 @@ impl LibrarySet for JvmLibraries {
                     }
                     gsig_to_ty(&rsig, &binds)
                 }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone() });
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), default_call: false });
+            }
+        }
+        // No exact-arity match — try the `name$default` synthetic for an extension with default
+        // parameters (`list.joinToString(",")` → `joinToString$default(list, ",", …, mask, null)`).
+        // Its descriptor is `(recv, real…, int mask, Object marker)ret`; the call fills a prefix of the
+        // real parameters, the backend defaults the rest.
+        // A trailing lambda binds to the *last* function parameter (not a prefix), which interacts with
+        // defaulted middle parameters in a way the prefix-fill below doesn't model — leave those calls
+        // unresolved (the file skips) rather than risk a wrong argument placement.
+        if args.last().map_or(false, |a| matches!(a, Ty::Fun(_))) {
+            return None;
+        }
+        let default_name = format!("{name}$default");
+        for recv_desc in supertype_descriptors(&self.cp, receiver) {
+            for c in self.cp.find_extensions(&recv_desc, &default_name) {
+                let (params, ret) = parse_method_desc(&c.descriptor);
+                if params.len() < 3 {
+                    continue; // need at least receiver + mask + marker
+                }
+                let real_count = params.len() - 3; // exclude receiver, int mask, Object marker
+                // The provided arguments fill a prefix of the real parameters; each must fit its
+                // parameter (subtype-aware) so a wrong overload (`contains(CharSequence)` for a `Char`
+                // argument) is rejected rather than miscompiled.
+                if args.len() > real_count {
+                    continue;
+                }
+                if !params[1..1 + args.len()].iter().zip(args).all(|(p, a)| arg_fits_subtype(&self.cp, p, a)) {
+                    continue;
+                }
+                // Keep the receiver + real parameters (drop the trailing mask + marker), like the
+                // non-`$default` case — the backend appends the placeholders, mask, and marker.
+                let kept: Vec<Ty> = params[..params.len() - 2].to_vec();
+                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    // psigs for `$default` are `[recv, real…, int, Object]`; unify the receiver + provided.
+                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
+                    for (ps, a) in psigs.iter().zip(&actuals) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&rsig, &binds)
+                }).unwrap_or(ret);
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), default_call: true });
             }
         }
         None
