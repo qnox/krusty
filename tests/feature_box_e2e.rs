@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Method references: bound `obj::m` (receiver captured) and unbound `Type::m` (receiver is the
+    // first argument) — each a closure over a synthesized `(receiver, args) -> receiver.m(args)`.
+    ("MethodRef", r#"
+class C(val p: String) {
+    fun get(): String = p
+    fun plus(x: String): String = p + x
+}
+fun box(): String {
+    val c = C("OK")
+    val bound = c::get
+    if (bound() != "OK") return "f1"
+    val unbound = C::plus
+    if (unbound(C("A"), "B") != "AB") return "f2"
+    return "OK"
+}
+"#),
     // A `Unit`-returning function reference `::add` wraps the call and returns the Unit singleton
     // (a direct method handle would adapt `void` to `null`, breaking a `FunctionN` consumer).
     ("UnitFunRef", r#"

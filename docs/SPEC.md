@@ -221,6 +221,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
   closure. Only the simple primary-constructor positional case (the reference's arity matches the
   constructor's field params) is modeled; defaulted/secondary constructors are skipped.
+- Method references `obj::m` (bound) and `Type::m` (unbound): a synthesized static impl
+  `(receiver, args…) -> receiver.m(args)` — bound captures the receiver into the closure (so its
+  arity is the method's), unbound takes the receiver as the first parameter. Only user-class methods
+  (resolvable in the IR class table) and non-`Unit`/`Nothing` returns are modeled.
 - Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
   lambda, but the impl method handle points directly at the referenced function (no synthesized body).
   Exception: a `Unit`-returning `::foo` gets a synthesized wrapper `(params) -> { foo(params); Unit }`

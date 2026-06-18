@@ -1618,6 +1618,56 @@ impl<'a> Lower<'a> {
 
     /// Resolve a method by name, walking the superclass chain. Returns the *owning* class id, the
     /// method index within that class, its FunId, and its return type.
+    /// Lower a method reference `obj::m` (bound — the receiver is an in-scope value, captured) or
+    /// `Type::m` (unbound — the receiver is a user class, supplied as the first argument) to a
+    /// synthesized static impl `(receiver, args…) -> receiver.m(args)` wrapped in a closure, exactly
+    /// as a lambda `{ a -> obj.m(a) }` / `{ r, a -> r.m(a) }` would lower. `params`/`ret` are the
+    /// reference's function type. Only user-class methods are modeled (the receiver/method must
+    /// resolve in the IR class table); a `Unit`/`Nothing` return is skipped.
+    fn lower_method_ref(&mut self, recv: AstExprId, name: &str, params: &[Ty], ret: Ty) -> Option<u32> {
+        if ret == Ty::Unit || ret == Ty::Nothing {
+            return None;
+        }
+        let Expr::Name(rn) = self.afile.expr(recv).clone() else { return None };
+        // Bound `obj::m`: `rn` is an in-scope value, captured into the closure. Unbound `Type::m`:
+        // `rn` is a class; the receiver is the reference's first parameter.
+        let (bound_capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
+            Some((v, ty)) => (Some(v), ty),
+            None => {
+                let internal = class_internal(self.afile, &rn);
+                if !self.classes.contains_key(&internal) {
+                    return None;
+                }
+                (None, *params.first()?)
+            }
+        };
+        let internal = recv_ty.obj_internal()?.to_string();
+        let (class_id, index, _fid, _mret) = self.resolve_method(&internal, name)?;
+        // The method's own parameter types: all of `params` for a bound ref (the receiver is captured),
+        // `params[1..]` for an unbound ref (the receiver is the first parameter).
+        let method_params: Vec<Ty> = if bound_capture.is_some() { params.to_vec() } else { params[1..].to_vec() };
+        // Impl value layout: value 0 = receiver, values 1.. = the method arguments.
+        let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
+        let arg_vs: Vec<Option<u32>> = (0..method_params.len() as u32)
+            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1)))).collect();
+        let mc = self.ir.add_expr(IrExpr::MethodCall { class: class_id, index, receiver: recv_v, args: arg_vs });
+        let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
+        let block = self.ir.add_expr(IrExpr::Block { stmts: vec![ret_e], value: None });
+        let impl_name = format!("{}$methodref${}", self.cur_fn_name, self.lambda_seq);
+        self.lambda_seq += 1;
+        let mut impl_params: Vec<IrType> = vec![ty_to_ir(recv_ty)];
+        impl_params.extend(method_params.iter().map(|t| ty_to_ir(*t)));
+        let fid = self.ir.add_fun(IrFunction {
+            name: impl_name, params: impl_params, ret: ty_to_ir(ret), body: Some(block),
+            is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+        });
+        let captures = match bound_capture {
+            Some(v) => vec![self.ir.add_expr(IrExpr::GetValue(v))],
+            None => vec![],
+        };
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: params.len() as u8, captures, sam: None, inline_body: None }))
+    }
+
     fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
         let mut cur = Some(internal.to_string());
         while let Some(ci_name) = cur {
@@ -2554,11 +2604,11 @@ impl<'a> Lower<'a> {
             // `LambdaMetafactory` machinery as a lambda, but the impl method handle points directly at
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
-                if receiver.is_some() {
-                    return None;
-                }
                 let Ty::Fun(sig) = self.info.ty(e) else { return None };
                 let arity = sig.params.len();
+                if let Some(recv) = receiver {
+                    return self.lower_method_ref(recv, &name, &sig.params, sig.ret);
+                }
                 // Constructor reference `::A` (the name is a class, not a function): synthesize a
                 // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
                 // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional
