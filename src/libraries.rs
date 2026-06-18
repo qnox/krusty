@@ -48,6 +48,10 @@ pub struct LibraryCallable {
     /// type parameter). The backend inserts the unbox/checkcast bridging `physical_ret` → `ret`.
     pub physical_ret: Ty,
     pub descriptor: String,
+    /// True when the callee is a Kotlin `inline` function (per its `@Metadata`, decoded with the
+    /// signature). The JVM backend may splice the callee's compiled body at the call site (the bytecode
+    /// inliner) instead of emitting an `invokestatic`. `false` for a non-inline callable.
+    pub is_inline: bool,
     /// True when this resolves a `name$default` synthetic (a callable with defaulted parameters called
     /// with fewer arguments): `params` are the real parameters, and the backend appends zero/`null`
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
