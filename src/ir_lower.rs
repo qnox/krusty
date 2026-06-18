@@ -1775,6 +1775,14 @@ impl<'a> Lower<'a> {
                         let resolved = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).map(|m| ("set", m))
                             .or_else(|| crate::libraries::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).map(|m| ("put", m)));
                         if let Some((mname, m)) = resolved {
+                            // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
+                            // needs `(value).toByte()` before boxing as `java/lang/Byte` — not yet modeled.
+                            // Bail (skip the file) rather than box the wrong wrapper type.
+                            if let Some(elem) = self.syms.libraries.member_return(at, "get", &[it]) {
+                                if elem.is_primitive() && elem != vt {
+                                    return None;
+                                }
+                            }
                             let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
                             let a = self.expr(array)?;
                             let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;

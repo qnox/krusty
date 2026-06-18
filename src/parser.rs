@@ -1644,23 +1644,24 @@ impl<'a> Parser<'a> {
                 let f = self.parse_fun(false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
-            // Prefix increment/decrement statement: `++name` / `--name` → `name = name ± 1`.
+            // Prefix increment/decrement statement: `++target` / `--target`. In statement position the
+            // produced value is discarded, so prefix and postfix are identical — parse the lvalue and
+            // desugar to `target = target ± 1` via the shared helper.
             TokenKind::PlusPlus | TokenKind::MinusMinus => {
                 let dec = self.at(TokenKind::MinusMinus);
+                let op_span = self.tok().span;
                 self.bump();
-                let name = self.ident_or_error("increment target");
-                return self.parse_incdec(name, dec, start);
+                let e = self.parse_expr();
+                return self.incdec_target(e, dec, op_span, start);
             }
             _ => {
                 let e = self.parse_expr();
-                // Postfix increment/decrement statement: `name++` / `name--`.
+                // Postfix increment/decrement statement: `target++` / `target--`.
                 if self.at(TokenKind::PlusPlus) || self.at(TokenKind::MinusMinus) {
-                    if let Expr::Name(n) = self.file.expr(e).clone() {
-                        let dec = self.at(TokenKind::MinusMinus);
-                        self.bump();
-                        return self.parse_incdec(n, dec, start);
-                    }
-                    self.diags.error(self.tok().span, "krusty: '++'/'--' is only supported on a simple variable");
+                    let dec = self.at(TokenKind::MinusMinus);
+                    let op_span = self.tok().span;
+                    self.bump();
+                    return self.incdec_target(e, dec, op_span, start);
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
@@ -2399,6 +2400,48 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_expr(Expr::Try { body, catches, finally }, Span::new(start.lo, end.hi))
+    }
+
+    /// Desugar a `++`/`--` statement on an already-parsed lvalue `e` (the operator at `op_span`,
+    /// statement starting at `start`). A simple `Name` uses the `IncDec` node (overloadable-operator
+    /// aware); `obj.x` / `arr[i]` desugar to `target = target ± 1` (the old value is discarded in
+    /// statement position). `dec` selects subtraction.
+    fn incdec_target(&mut self, e: ExprId, dec: bool, op_span: Span, start: Span) -> StmtId {
+        let op = if dec { BinOp::Sub } else { BinOp::Add };
+        // The desugar `target = target ± 1` re-evaluates `target`, so its receiver/index must be
+        // side-effect-free (a pure access path). For a complex receiver (`f().x++`) kotlinc evaluates
+        // it exactly once — not yet modeled — so bail (skip the file) rather than double-evaluate.
+        match self.file.expr(e).clone() {
+            Expr::Name(n) => self.parse_incdec(n, dec, start),
+            Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
+                let one = self.file.add_expr(Expr::IntLit(1), op_span);
+                let lhs = self.file.add_expr(Expr::Member { receiver, name: name.clone() }, op_span);
+                let value = self.file.add_expr(Expr::Binary { op, lhs, rhs: one }, op_span);
+                self.finish_stmt(Stmt::AssignMember { receiver, name, value }, start)
+            }
+            Expr::Index { array, index } if self.is_pure_path(array) && self.is_pure_path(index) => {
+                let one = self.file.add_expr(Expr::IntLit(1), op_span);
+                let lhs = self.file.add_expr(Expr::Index { array, index }, op_span);
+                let value = self.file.add_expr(Expr::Binary { op, lhs, rhs: one }, op_span);
+                self.finish_stmt(Stmt::AssignIndex { array, index, value }, start)
+            }
+            _ => {
+                self.diags.error(op_span, "krusty: '++'/'--' is only supported on a simple variable or pure access path");
+                self.finish_stmt(Stmt::Expr(e), start)
+            }
+        }
+    }
+
+    /// Whether `e` is a side-effect-free access path — a name, a literal, or a member/index chain
+    /// bottoming out at one. Such an expression can be re-evaluated safely (used to gate the
+    /// `++`/`--` desugar, which reads its target twice).
+    fn is_pure_path(&self, e: ExprId) -> bool {
+        match self.file.expr(e) {
+            Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::CharLit(_) | Expr::BoolLit(_) | Expr::NullLit => true,
+            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
+            Expr::Index { array, index } => self.is_pure_path(*array) && self.is_pure_path(*index),
+            _ => false,
+        }
     }
 
     fn parse_when(&mut self) -> ExprId {
