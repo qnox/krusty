@@ -100,12 +100,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             } else {
                 super_internal.clone().unwrap_or_else(|| "kotlin/Any".to_string())
             };
-            // Implemented interfaces (`: I, J`): each must be a file interface, else bail.
+            // Implemented interfaces (`: I, J`): a file interface, or a classpath interface
+            // (`Runnable`, `Comparator`) resolved through the library set; else bail.
             let mut iface_internals = Vec::new();
             for st in &c.supertypes {
                 let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface));
-                if !is_file_iface { return None; }
-                iface_internals.push(class_internal(file, st));
+                if is_file_iface {
+                    iface_internals.push(class_internal(file, st));
+                    continue;
+                }
+                let resolved = lo.syms.class_names.get(st).cloned().unwrap_or_else(|| st.clone());
+                if lo.syms.libraries.resolve_type(&resolved).map_or(false, |t| t.is_interface) {
+                    iface_internals.push(resolved);
+                } else {
+                    return None;
+                }
             }
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
