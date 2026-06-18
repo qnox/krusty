@@ -1022,39 +1022,24 @@ fn collect_lambda_outer_writes(file: &File, e: ExprId, outer_names: &std::collec
 /// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
 /// box). Used to decide which captured `var`s must be boxed.
 fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
-    fn ce(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
-        match file.expr(e) {
-            Expr::Block { stmts, trailing } => { for &s in stmts { cs(file, s, out); } if let Some(t) = trailing { ce(file, *t, out); } }
-            Expr::If { cond, then_branch, else_branch } => { ce(file, *cond, out); ce(file, *then_branch, out); if let Some(x) = else_branch { ce(file, *x, out); } }
-            Expr::Try { body, catches, finally } => { ce(file, *body, out); for c in catches { ce(file, c.body, out); } if let Some(f) = finally { ce(file, *f, out); } }
-            Expr::When { subject, arms } => { if let Some(s) = subject { ce(file, *s, out); } for a in arms { for &c in &a.conditions { ce(file, c, out); } ce(file, a.body, out); } }
-            Expr::Lambda { body, .. } => ce(file, *body, out),
-            Expr::Binary { lhs, rhs, .. } => { ce(file, *lhs, out); ce(file, *rhs, out); }
-            Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Throw { operand } => ce(file, *operand, out),
-            Expr::Call { callee, args } => { ce(file, *callee, out); for &a in args { ce(file, a, out); } }
-            Expr::Member { receiver, .. } => ce(file, *receiver, out),
-            Expr::Index { array, index } => { ce(file, *array, out); ce(file, *index, out); }
-            Expr::IncDec { target, .. } => { if let Expr::Name(n) = file.expr(*target) { out.insert(n.clone()); } ce(file, *target, out); }
-            _ => {}
+    // Traverse via `any_child_expr`/`any_child_stmt` (which visit EVERY child, including lambda and
+    // local-function bodies) so no expression form can hide a reassignment from the scan. The closures
+    // only collect (return `false` to keep visiting); a `RefCell` lets both share the accumulator.
+    let cell = std::cell::RefCell::new(std::mem::take(out));
+    fn ce(file: &File, e: ExprId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
+        if let Expr::IncDec { target, .. } = file.expr(e) {
+            if let Expr::Name(n) = file.expr(*target) { cell.borrow_mut().insert(n.clone()); }
         }
+        file.any_child_expr(e, &mut |c| { ce(file, c, cell); false }, &mut |s| { cs(file, s, cell); false });
     }
-    fn cs(file: &File, s: StmtId, out: &mut std::collections::HashSet<String>) {
-        match file.stmt(s) {
-            Stmt::Assign { name, value } => { out.insert(name.clone()); ce(file, *value, out); }
-            Stmt::IncDec { name, .. } => { out.insert(name.clone()); }
-            Stmt::LocalFun(f) => { if let FunBody::Expr(b) | FunBody::Block(b) = &f.body { ce(file, *b, out); } }
-            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => ce(file, *init, out),
-            Stmt::AssignMember { receiver, value, .. } => { ce(file, *receiver, out); ce(file, *value, out); }
-            Stmt::AssignIndex { array, index, value } => { ce(file, *array, out); ce(file, *index, out); ce(file, *value, out); }
-            Stmt::Return(Some(e)) => ce(file, *e, out),
-            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => { ce(file, *cond, out); ce(file, *body, out); }
-            Stmt::For { range, body, .. } => { ce(file, range.start, out); ce(file, range.end, out); if let Some(st) = range.step { ce(file, st, out); } ce(file, *body, out); }
-            Stmt::ForEach { iterable, body, .. } => { ce(file, *iterable, out); ce(file, *body, out); }
-            Stmt::Expr(e) => ce(file, *e, out),
-            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
+    fn cs(file: &File, s: StmtId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
+        if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
+            cell.borrow_mut().insert(name.clone());
         }
+        file.any_child_stmt(s, &mut |c| { ce(file, c, cell); false });
     }
-    ce(file, e, out);
+    ce(file, e, &cell);
+    *out = cell.into_inner();
 }
 
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
