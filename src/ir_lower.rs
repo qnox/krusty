@@ -305,6 +305,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
             // resolve and the generic method emitter handles them.
             if c.is_data {
+                // An inner `data class`'s synthetic `this$0` sits at field 0, which `synth_data_members`
+                // (componentN/copy/equals/hashCode over `fields[..n]`) would treat as the first data
+                // property — skip rather than miscompile.
+                if c.inner_of.is_some() {
+                    return None;
+                }
                 lo.synth_data_members(&internal, id, ctor_param_count as usize);
             }
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
@@ -3819,7 +3825,14 @@ impl<'a> Lower<'a> {
                         .and_then(|i| self.classes.get(i)).map(|ci| ci.id)
                         .filter(|&id| {
                             let c = &self.ir.classes[id as usize];
-                            c.fields.first().map_or(false, |(n, _)| n == "this$0") && c.fq_name.ends_with(&format!("${name}"))
+                            // The inner's `this$0` field type must match the receiver's type (the outer
+                            // instance) — guards against a same-named method returning an inner-typed value.
+                            let this0_outer = match c.fields.first() {
+                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => Some(fq_name.as_str()),
+                                _ => None,
+                            };
+                            c.fq_name.ends_with(&format!("${name}"))
+                                && this0_outer == self.info.ty(receiver).obj_internal()
                         })
                     {
                         let field_tys: Vec<IrType> = self.ir.classes[class_id as usize].ctor_args.iter().map(|(t, _)| t.clone()).collect();
