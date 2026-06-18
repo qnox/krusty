@@ -418,19 +418,25 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
-    fn extension_lambda_param_types(&self, recv: Ty, name: &str) -> Option<Vec<Vec<Ty>>> {
+    fn extension_lambda_param_types(&self, recv: Ty, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         // Find a generic extension named `name` on the receiver (or a supertype) that takes a function
-        // argument; bind its type variables from the receiver and report each lambda argument's
-        // element-typed parameters (`Function1<? super T, …>` on `List<Int>` → `[Int]`).
+        // argument; bind its type variables from the receiver and the already-typed non-lambda
+        // arguments, then report each lambda argument's element-typed parameters (`Function1<? super
+        // T, …>` on `List<Int>` → `[Int]`; `fold(0) { acc, x -> }` binds the accumulator from `0`).
         for recv_desc in supertype_descriptors(&self.cp, recv) {
             for c in self.cp.find_extensions(&recv_desc, name) {
                 let Some(sig) = c.signature.as_deref() else { continue };
                 let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
-                if psigs.is_empty() {
+                if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
                     continue;
                 }
                 let mut binds = std::collections::HashMap::new();
                 unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
+                for (ps, at) in psigs[1..].iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
+                    }
+                }
                 let out: Vec<Vec<Ty>> = psigs[1..].iter().map(|ps| function_input_types(ps, &binds)).collect();
                 if out.iter().any(|v| !v.is_empty()) {
                     return Some(out);

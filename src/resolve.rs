@@ -3175,12 +3175,17 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
-                // types are the receiver's element type(s), recovered from the extension's generic
-                // signature, so the lambda body checks against `Int` rather than the erased `Any`.
+                // types are recovered from the extension's generic signature — bound by the receiver's
+                // element type and the non-lambda arguments — so the lambda body checks against `Int`
+                // rather than the erased `Any`. Type the non-lambda arguments first (the accumulator in
+                // `fold(0) { acc, x -> }` binds `R`); lambda positions are `None` until resolved.
                 let ext_lambda_pts: Option<Vec<Vec<Ty>>> = if method_sig.is_none()
                     && matches!(rt, Ty::Obj(..))
                     && args.iter().any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. })) {
-                    self.syms.libraries.extension_lambda_param_types(rt, &name)
+                    let partial: Vec<Option<Ty>> = args.iter().map(|&a| {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) { None } else { Some(self.expr(a)) }
+                    }).collect();
+                    self.syms.libraries.extension_lambda_param_types(rt, &name, &partial)
                 } else {
                     None
                 };
