@@ -3054,13 +3054,12 @@ impl<'a> Lower<'a> {
                     if name == "forEach" && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);
-                            // Restricted to `Obj` iterables (`List`/`Set`/`Iterable`), where the checker
-                            // typed the lambda parameter from the extension's generic signature; array/
-                            // `String` `forEach` keep the closure path (their param isn't element-typed
-                            // here, so inlining would mistype the loop variable).
-                            let iterable = rty.obj_internal().map_or(false, |i| range_counted_elem(i).is_some()
-                                || crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
-                                || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
+                            // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
+                            // by `lower_for_each` (and the checker element-types the lambda parameter).
+                            let iterable = rty.array_elem().is_some() || rty == Ty::String
+                                || rty.obj_internal().map_or(false, |i| range_counted_elem(i).is_some()
+                                    || crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
+                                    || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
                             if iterable {
                                 let param = params.first().cloned().unwrap_or_else(|| "it".to_string());
                                 return self.lower_for_each(&param, receiver, lbody);

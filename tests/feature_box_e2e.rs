@@ -95,6 +95,13 @@ fun box(): String {
     var w = 0
     listOf(10, 20, 30).forEachIndexed { i, x -> w += (i + 1) * x }
     if (w != 140) return "f4: $w"
+    // array + String forEach (inlined index loop) with mutable capture
+    var asum = 0
+    intArrayOf(1, 2, 3, 4).forEach { asum += it }
+    if (asum != 10) return "f5: $asum"
+    var csum = 0
+    "abc".forEach { csum += it.code }
+    if (csum != 'a'.code + 'b'.code + 'c'.code) return "f6: $csum"
     return "OK"
 }
 "#),
