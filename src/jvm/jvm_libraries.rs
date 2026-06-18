@@ -247,6 +247,16 @@ fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
+/// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
+/// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
+fn arg_fits(p: &Ty, a: &Ty) -> bool {
+    if p == a || *p == Ty::obj("kotlin/Any") {
+        return true;
+    }
+    matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
+}
+
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     let close = desc.find(')').unwrap_or(0);
@@ -262,10 +272,13 @@ fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
 /// breadth-first so a more specific receiver is tried before a more general one.
 fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
+    // Every type is a subtype of `Any`, so a generic extension declared on `T` (erased to `Object`)
+    // applies to any receiver — always try `java/lang/Object` last (after the specific supertypes).
+    let object = "Ljava/lang/Object;".to_string();
     let start = match receiver {
         Ty::Obj(i, _) => to_jvm_internal(i).to_string(),
         Ty::String => to_jvm_internal("kotlin/String").to_string(),
-        _ => return vec![receiver.descriptor()],
+        _ => return vec![receiver.descriptor(), object],
     };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -284,6 +297,9 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
                 q.push_back(s.clone());
             }
         }
+    }
+    if !out.iter().any(|d| d == &object) {
+        out.push(object);
     }
     out
 }
@@ -353,7 +369,6 @@ impl LibrarySet for JvmLibraries {
         // Walk the generic hierarchy carrying each class's type arguments, substituting them through
         // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
         // member's generic return under the bindings reached there.
-        let assignable = |p: &Ty, a: &Ty| p == a || *p == Ty::obj("kotlin/Any");
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
@@ -369,7 +384,7 @@ impl LibrarySet for JvmLibraries {
             // A member declared here whose parameters match the call.
             let found = ci.methods.iter().filter(|m| m.is_public() && !m.is_static() && m.name == name).find(|m| {
                 let (params, _) = parse_method_desc(&m.descriptor);
-                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| assignable(p, a))
+                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
             });
             if let Some(m) = found {
                 let sig = m.signature.as_deref()?;
@@ -404,10 +419,9 @@ impl LibrarySet for JvmLibraries {
                 let (params, ret) = parse_method_desc(&c.descriptor);
                 (c, params, ret)
             }).collect();
-            let assignable = |p: &Ty, a: &Ty| p == a || *p == Ty::obj("kotlin/Any");
             // Exact arity first.
             let pick = parsed.iter().find(|(_, params, _)| {
-                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| assignable(p, a))
+                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
             }).or_else(|| parsed.iter().find(|(_, params, _)| {
                 // Vararg: fixed leading params match positionally, the last (array) param's element
                 // type absorbs the rest.
@@ -415,8 +429,8 @@ impl LibrarySet for JvmLibraries {
                 let fixed = params.len() - 1;
                 let Some(elem) = params[fixed].array_elem() else { return false };
                 args.len() >= fixed
-                    && params[..fixed].iter().zip(args).all(|(p, a)| assignable(p, a))
-                    && args[fixed..].iter().all(|a| assignable(&elem, a))
+                    && params[..fixed].iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                    && args[fixed..].iter().all(|a| arg_fits(&elem, a))
             }));
             let (c, params, ret) = pick?;
             // Recover the parameterized return from the generic signature: bind the type variables
@@ -444,18 +458,33 @@ impl LibrarySet for JvmLibraries {
                 }
                 gsig_to_ty(&rsig, &binds)
             }).unwrap_or(*ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, descriptor: c.descriptor.clone() });
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone() });
         };
-        let rest_params: String = args.iter().map(|t| t.descriptor()).collect();
         // Try the receiver type and its supertypes, most specific first — the extension's declared
-        // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension).
+        // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
+        // generic `T` erased to `Object` (`fun <T> T.to(…)`). Match by boxing-aware parameter
+        // assignability (an `Any` parameter accepts any argument), not exact descriptor prefix.
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
-            let full_prefix = format!("({recv_desc}{rest_params})");
             for c in self.cp.find_extensions(&recv_desc, name) {
-                if c.descriptor.starts_with(&full_prefix) {
-                    let (params, ret) = parse_method_desc(&c.descriptor);
-                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret, descriptor: c.descriptor.clone() });
+                let (params, ret) = parse_method_desc(&c.descriptor);
+                // params[0] is the receiver (keyed by `recv_desc`); the rest are the call arguments.
+                if params.len() != args.len() + 1 {
+                    continue;
                 }
+                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
+                    continue;
+                }
+                // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
+                // type variables bind from the receiver (the first parameter) and the arguments.
+                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(psigs, rsig)| {
+                    let mut binds = std::collections::HashMap::new();
+                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
+                    for (ps, a) in psigs.iter().zip(&actuals) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&rsig, &binds)
+                }).unwrap_or(ret);
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone() });
             }
         }
         None

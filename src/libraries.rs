@@ -41,7 +41,12 @@ pub struct LibraryCallable {
     pub owner: String,
     pub name: String,
     pub params: Vec<Ty>,
+    /// The *logical* return type — for a generic callable, the substituted type (`listOf<Int>` →
+    /// `List<Int>`, `first()` → the element). The checker reports this.
     pub ret: Ty,
+    /// The *physical* (erased) return type the JVM signature actually produces (`Object` for an erased
+    /// type parameter). The backend inserts the unbox/checkcast bridging `physical_ret` → `ret`.
+    pub physical_ret: Ty,
     pub descriptor: String,
 }
 
