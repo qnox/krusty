@@ -384,6 +384,23 @@ impl LibrarySet for JvmLibraries {
         LibrarySeed { class_names, type_aliases: idx.type_aliases.clone() }
     }
 
+    fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
+        use crate::jvm::classreader::ConstVal;
+        use crate::libraries::LibConst;
+        // The JVM realizes a primitive's companion as `kotlin/jvm/internal/<Prim>CompanionObject`,
+        // whose `MAX_VALUE`/`MIN_VALUE`/… are `static final` with a `ConstantValue` (kotlinc inlines it).
+        let internal = format!("kotlin/jvm/internal/{prim}CompanionObject");
+        let ci = self.cp.find(&internal)?;
+        let f = ci.fields.iter().find(|f| f.name == field)?;
+        match f.const_value.as_ref()? {
+            ConstVal::Int(v) => Some(LibConst::Int(*v)),
+            ConstVal::Long(v) => Some(LibConst::Long(*v)),
+            ConstVal::Float(v) => Some(LibConst::Float(*v)),
+            ConstVal::Double(v) => Some(LibConst::Double(*v)),
+            ConstVal::Str(_) => None,
+        }
+    }
+
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
         let ci = self.cp.find(internal)?;
         let mut constructors = Vec::new();

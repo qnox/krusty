@@ -1986,6 +1986,17 @@ impl<'a> Lower<'a> {
                 // The increment is the loop `update` (runs at the `continue` target), not a body stmt —
                 // so `continue` advances the counter instead of skipping it.
                 let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
+                // Non-overflowing loop: break when the counter reaches the (inclusive) bound, *before*
+                // the increment in the `update` — so `0..Int.MAX_VALUE` / `x downTo Int.MIN_VALUE` don't
+                // wrap past it and loop forever. The check goes at the END of the body (which has the
+                // loop's break scope, unlike the `update`). For an exclusive `until` the counter never
+                // equals `end`, and a non-1 step may skip it — harmless either way (the `cond` ends it).
+                let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
+                let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
+                let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: ic, rhs: ec });
+                let brk = self.ir.add_expr(IrExpr::Break);
+                let if_break = self.ir.add_expr(IrExpr::When { branches: vec![(Some(at_end), brk)] });
+                out.push(if_break);
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
                 let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc), post_test: false });
                 self.scope.truncate(depth);
@@ -2303,6 +2314,22 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: Some(a), args: vec![i] })
             }
             Expr::Member { receiver, name } => {
+                // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the
+                // compile-time value read from the library (kotlinc emits the same `ldc`).
+                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                    if matches!(rn.as_str(), "Int" | "Long" | "Short" | "Byte" | "Char" | "Double" | "Float" | "Boolean")
+                        && self.lookup(&rn).is_none() {
+                        if let Some(lc) = self.syms.libraries.prim_companion_const(&rn, &name) {
+                            let c = match lc {
+                                crate::libraries::LibConst::Int(v) => IrConst::Int(v),
+                                crate::libraries::LibConst::Long(v) => IrConst::Long(v),
+                                crate::libraries::LibConst::Float(v) => IrConst::Float(v),
+                                crate::libraries::LibConst::Double(v) => IrConst::Double(v),
+                            };
+                            return Some(self.ir.add_expr(IrExpr::Const(c)));
+                        }
+                    }
+                }
                 // `EnumClass.ENTRY` — a static enum-constant read.
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     let internal = class_internal(self.afile, &rn);
