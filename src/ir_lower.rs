@@ -1121,6 +1121,28 @@ impl<'a> Lower<'a> {
     /// Convert an unsigned value (`UInt`/`ULong`, represented as int/long) to its unsigned-decimal
     /// `String` via `Integer.toUnsignedString`/`Long.toUnsignedString` — what kotlinc uses for an
     /// unsigned `toString()`/string-template part (a signed `toString` would print the wrong value).
+    /// Box an unsigned primitive (`UInt`/`ULong`, represented as int/long) to its inline-class object
+    /// via `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (kotlinc's synthetic factory) — NOT
+    /// `Integer.valueOf`, which would lose the unsigned identity (`is UInt`, the unsigned `toString`).
+    fn box_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
+        let (owner, prim) = if ty == Ty::UInt { ("kotlin/UInt", "I") } else { ("kotlin/ULong", "J") };
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static { owner: owner.to_string(), name: "box-impl".to_string(), descriptor: format!("({prim})L{owner};") },
+            dispatch_receiver: None, args: vec![val],
+        })
+    }
+
+    /// Unbox a (possibly `Object`-typed) `kotlin/UInt`/`ULong` object back to its int/long: checkcast
+    /// to the inline-class type, then `unbox-impl`.
+    fn unbox_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
+        let (owner, prim) = if ty == Ty::UInt { ("kotlin/UInt", "I") } else { ("kotlin/ULong", "J") };
+        let cast = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: val, type_operand: ty_to_ir(Ty::obj(owner)) });
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual { owner: owner.to_string(), name: "unbox-impl".to_string(), descriptor: format!("(){prim}"), interface: false },
+            dispatch_receiver: Some(cast), args: vec![],
+        })
+    }
+
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> u32 {
         let (owner, prim) = if ty == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
         self.ir.add_expr(IrExpr::Call {
@@ -1527,7 +1549,11 @@ impl<'a> Lower<'a> {
             callee: Callee::Virtual { owner: iter_internal.clone(), name: "next".to_string(), descriptor: next_m.descriptor, interface: iter_iface },
             dispatch_receiver: Some(it_g2), args: vec![],
         });
-        let x_init = if elem.is_primitive() {
+        let x_init = if elem.is_unsigned() {
+            // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
+            // `Integer` unbox a plain `is_primitive` coercion would emit.
+            self.unbox_unsigned(next_call, elem)
+        } else if elem.is_primitive() {
             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: next_call, type_operand: ty_to_ir(elem) })
         } else if elem != Ty::obj("kotlin/Any") {
             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: next_call, type_operand: ty_to_ir(elem) })
@@ -1562,6 +1588,11 @@ impl<'a> Lower<'a> {
         }
         let e = self.expr(arg)?;
         let target_ref = ir_type_is_reference(target);
+        // An unsigned value flowing into a reference context (`Any`, a generic, a collection element)
+        // boxes via the inline-class `box-impl` factory to a `kotlin/UInt`/`ULong` object.
+        if at.is_unsigned() && target_ref {
+            return Some(self.box_unsigned(e, at));
+        }
         if at.is_primitive() && target_ref {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
         } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
@@ -1605,6 +1636,11 @@ impl<'a> Lower<'a> {
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
         if logical == physical {
             return read;
+        }
+        // An unsigned value out of an erased reference: checkcast to the inline-class object, then
+        // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
+        if logical.is_unsigned() && physical.is_reference() {
+            return self.unbox_unsigned(read, logical);
         }
         // A primitive flowing out of any erased reference (`Object`, or a type-parameter bound like
         // `Comparable`/`Number` — `maxOrNull(): T`) unboxes; a reference erased to `Object` checkcasts.
@@ -2441,7 +2477,13 @@ impl<'a> Lower<'a> {
                 let target = self.ty_ref(&ty).or_else(|| {
                     if ty.nullable { None } else { Ty::from_name(&ty.name).filter(|t| t.is_primitive() && !matches!(t, Ty::Double | Ty::Float)) }
                 })?;
-                let type_operand = ty_to_ir(target);
+                // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
+                // representation's wrapper (`Integer`).
+                let type_operand = if target.is_unsigned() {
+                    ty_to_ir(Ty::obj(if target == Ty::UInt { "kotlin/UInt" } else { "kotlin/ULong" }))
+                } else {
+                    ty_to_ir(target)
+                };
                 self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
             }
             Expr::InRange { value, start, end, kind, negated } => {
