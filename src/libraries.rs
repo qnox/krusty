@@ -68,6 +68,29 @@ fn params_prefix(member_params: &[Ty], args: &[Ty]) -> bool {
     member_params.len() >= args.len() && member_params[..args.len()] == *args
 }
 
+/// Whether `arg` can be passed where `param` is expected, in erased Kotlin terms: an exact `Ty`
+/// match, or any argument into an erased generic (`Any`) parameter — a primitive boxes into it
+/// (`List<Int>.add(E)` → `add(Object)`, calling with `Int` boxes to `Integer`), a reference passes
+/// directly. This is what lets a primitive argument select the erased `(Object)` overload instead of
+/// falling through to a longer-arity overload it happens to prefix.
+fn arg_assignable(param: &Ty, arg: &Ty) -> bool {
+    param == arg || *param == Ty::obj("kotlin/Any")
+}
+
+/// The best overload named `name` among `candidates` for `args`: an exact-arity exact-`Ty` match,
+/// else an exact-arity match with autoboxing into erased `Any` parameters, else a prefix match (the
+/// loose fallback covering varargs/defaulted trailing parameters).
+fn best_overload<'a>(
+    candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
+    name: &str,
+    args: &[Ty],
+) -> Option<&'a LibraryMember> {
+    let named = candidates.filter(|m| m.name == name);
+    named.clone().find(|m| m.params == *args)
+        .or_else(|| named.clone().find(|m| m.params.len() == args.len() && m.params.iter().zip(args).all(|(p, a)| arg_assignable(p, a))))
+        .or_else(|| named.clone().find(|m| params_prefix(&m.params, args)))
+}
+
 impl LibraryType {
     /// A constructor callable with `args` — exact arity, then a widening pass that erases each
     /// reference argument to `Any` (a JDK type may only expose the `(Object)` overload).
@@ -79,14 +102,14 @@ impl LibraryType {
         self.constructors.iter().find(|m| m.params == widened)
     }
 
-    /// A companion member named `name` whose parameters prefix-match `args`.
+    /// The best companion member named `name` for `args` (exact, then boxing, then prefix).
     pub fn companion_member(&self, name: &str, args: &[Ty]) -> Option<&LibraryMember> {
-        self.companion.iter().find(|m| m.name == name && params_prefix(&m.params, args))
+        best_overload(self.companion.iter(), name, args)
     }
 
-    /// An instance member named `name` (declared on this type) whose parameters prefix-match `args`.
+    /// The best instance member named `name` (declared on this type) for `args`.
     pub fn instance_member(&self, name: &str, args: &[Ty]) -> Option<&LibraryMember> {
-        self.members.iter().find(|m| m.name == name && params_prefix(&m.params, args))
+        best_overload(self.members.iter(), name, args)
     }
 
     /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
