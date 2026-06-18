@@ -137,6 +137,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 field_final: c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var)
                     .chain(c.body_props.iter().filter(|p| !is_computed_prop(p)).map(|p| !p.is_var))
                     .collect(),
+                secondary_ctors: vec![],
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -228,7 +229,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     superclass: "kotlin/Any".to_string(), super_args: vec![],
                     enum_entries: vec![], bridges: vec![], interfaces: vec![],
                     is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
-                    field_final: vec![],
+                    field_final: vec![], secondary_ctors: vec![],
                 });
                 let csig = syms.classes.get(&c.name)?;
                 let mut cmethods = HashMap::new();
@@ -575,6 +576,51 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
+                // Secondary constructors (`constructor(p) : this(args) { body }`): each an extra
+                // `<init>(p)` delegating to the primary. Only `this(…)` delegation is supported.
+                if !c.secondary_ctors.is_empty() {
+                    let class_id = lo.classes[&internal].id;
+                    let primary_param_tys: Vec<IrType> = {
+                        let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
+                        lo.ir.classes[class_id as usize].fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                    };
+                    let mut secs = Vec::new();
+                    for sc in &c.secondary_ctors {
+                        let delegate_args = match &sc.delegation {
+                            ast::CtorDelegation::This(args) => args.clone(),
+                            _ => return None, // `super(…)` / no delegation not modelled
+                        };
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(internal.clone());
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                        let mut param_irs = Vec::new();
+                        for p in &sc.params {
+                            let pty = ty_of(file, &p.ty);
+                            let v = lo.fresh_value();
+                            lo.scope.push((p.name.clone(), v, pty));
+                            param_irs.push(ty_to_ir(pty));
+                        }
+                        if delegate_args.len() != primary_param_tys.len() {
+                            return None;
+                        }
+                        let mut dargs = Vec::new();
+                        for (a, ft) in delegate_args.iter().zip(&primary_param_tys) {
+                            dargs.push(lo.lower_arg(*a, ft)?);
+                        }
+                        let body = match sc.body {
+                            Some(b) => {
+                                let mut out = Vec::new();
+                                lo.append_body_stmts(b, &mut out)?;
+                                Some(lo.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
+                            }
+                            None => None,
+                        };
+                        secs.push(crate::ir::IrSecondaryCtor { params: param_irs, delegate_args: dargs, body });
+                    }
+                    lo.ir.classes[class_id as usize].secondary_ctors = secs;
+                }
                 // Enum entries: lower each entry's constructor arguments (constant expressions
                 // evaluated in `<clinit>`), coerced to the matching ctor-parameter field type.
                 if c.is_enum {
@@ -639,7 +685,10 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
     // companion with properties (`val`/`const val`) is not yet.
     !c.is_value && !c.is_object && !c.is_enum && !c.is_interface
-        && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
+        && c.companion_props.is_empty()
+        // Secondary constructors delegating to the primary (`constructor(p) : this(args)`) are
+        // emitted as extra `<init>` methods; `super(…)` delegation isn't supported.
+        && c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
         && c.props.iter().all(|p| p.is_property)
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`).
@@ -1124,7 +1173,7 @@ impl<'a> Lower<'a> {
         {
             let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
             let args: Vec<u32> = (0..fields.len()).map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1))).collect();
-            let new = self.ir.add_expr(IrExpr::New { class: class_id, args });
+            let new = self.ir.add_expr(IrExpr::New { class: class_id, args, ctor_params: None });
             let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
             if let Some(copy_fid) = self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body) {
@@ -2502,8 +2551,19 @@ impl<'a> Lower<'a> {
                         let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&fname)
                             .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
                             .unwrap_or_default();
-                        let a = self.lower_args_defaulted(e, &meta, &args, &field_tys)?;
-                        self.ir.add_expr(IrExpr::New { class, args: a })
+                        // The primary constructor (exact/defaulted positional match), else a secondary
+                        // constructor selected by argument count.
+                        if let Some(a) = self.lower_args_defaulted(e, &meta, &args, &field_tys) {
+                            self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None })
+                        } else if let Some(sc) = self.ir.classes[class as usize].secondary_ctors.clone().into_iter().find(|sc| sc.params.len() == args.len()) {
+                            let mut a = Vec::new();
+                            for (arg, pt) in args.iter().zip(&sc.params) {
+                                a.push(self.lower_arg(*arg, pt)?);
+                            }
+                            self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: Some(sc.params) })
+                        } else {
+                            return None;
+                        }
                     }
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.

@@ -203,6 +203,51 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     // `<clinit>` can call it without nestmate attributes); a normal class's is public.
     let ctor_access = if c.is_object { 0x0002 } else if c.is_companion { 0x0000 } else { 0x0001 };
     cw.add_method(ctor_access, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
+
+    // Secondary constructors: each `<init>(p)` calls `this(delegate_args)` (the primary `<init>`) then
+    // runs its body. `this` is slot 0, parameters follow.
+    for sc in &c.secondary_ctors {
+        let sc_param_tys: Vec<Ty> = sc.params.iter().map(ir_ty_to_jvm).collect();
+        let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
+        let mut sctor = CodeBuilder::new(1 + sc_words);
+        let sec_max;
+        let mut sec_diverges = false;
+        {
+            let mut e = Emitter { ir, cw: &mut cw, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
+            e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
+            let mut s = 1u16;
+            for (vi, t) in sc_param_tys.iter().enumerate() {
+                e.slots.insert(vi as u32 + 1, (s, *t));
+                s += slot_words(*t);
+            }
+            // `this(delegate_args)` — `invokespecial` the primary `<init>` (this is loaded first, so
+            // spill any branchy delegate argument to a temp before it).
+            let dargs = sc.delegate_args.clone();
+            if dargs.iter().any(|&a| e.records_frame(a)) {
+                let temps = e.spill_to_temps(&dargs, &mut sctor);
+                sctor.aload(0);
+                for &(slot, t, _) in &temps { load(t, slot, &mut sctor); }
+                for &(_, _, key) in &temps { e.slots.remove(&key); }
+            } else {
+                sctor.aload(0);
+                for &a in &dargs { e.emit_value(a, &mut sctor); }
+            }
+            let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+            let prim_init = e.cw.methodref(&c.fq_name, "<init>", &method_descriptor(&param_tys, Ty::Unit));
+            sctor.invokespecial(prim_init, aw, 0);
+            if let Some(body) = sc.body {
+                e.emit(body, &mut sctor);
+                sec_diverges = e.diverges(body);
+            }
+            sec_max = e.next_slot;
+        }
+        if !sec_diverges {
+            sctor.ret_void();
+        }
+        sctor.ensure_locals(sec_max);
+        sctor.link();
+        cw.add_method(0x0001, "<init>", &method_descriptor(&sc_param_tys, Ty::Unit), &sctor);
+    }
     // A class with a `companion object`: a `public static final Companion` field of the companion
     // type, constructed in this class's `<clinit>`.
     if let Some(comp_fq) = &c.companion_class {
@@ -785,11 +830,15 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.getstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::New { class, args } => {
+            IrExpr::New { class, args, ctor_params } => {
                 let c = &self.ir.classes[*class as usize];
                 let owner = c.fq_name.clone();
-                // The constructor takes only the parameter fields; body properties are set inside it.
-                let field_tys: Vec<Ty> = c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+                // The constructor takes only the parameter fields (primary), or a secondary
+                // constructor's explicit parameter types; body properties are set inside it.
+                let field_tys: Vec<Ty> = match ctor_params {
+                    Some(ps) => ps.iter().map(ir_ty_to_jvm).collect(),
+                    None => c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect(),
+                };
                 let args = args.clone();
                 let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&field_tys, Ty::Unit);

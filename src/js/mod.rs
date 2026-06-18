@@ -186,7 +186,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let name = &ir.classes[*class as usize].fields[*index as usize].0;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
-        IrExpr::New { class, args } => {
+        IrExpr::New { class, args, .. } => {
             let name = class_simple(&ir.classes[*class as usize].fq_name);
             let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
             format!("new {}({})", name, a.join(", "))

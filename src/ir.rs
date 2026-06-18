@@ -122,7 +122,9 @@ pub enum IrExpr {
     /// Write a top-level (module) property — `statics[index] = value` (statement).
     SetStatic { index: u32, value: ExprId },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
-    New { class: ClassId, args: Vec<ExprId> },
+    /// `ctor_params` is `None` for the primary constructor (the descriptor covers the leading
+    /// parameter fields); `Some(types)` selects a secondary constructor with that parameter list.
+    New { class: ClassId, args: Vec<ExprId>, ctor_params: Option<Vec<IrType>> },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
     /// the meaning is backend-agnostic — the JVM realizes omitted args via the `$default` stub + mask,
@@ -271,6 +273,19 @@ pub struct IrClass {
     /// Per-field `true` when the backing field is immutable (`val`) — emitted `final`. Parallel to
     /// `fields` (empty ⇒ none final, for synthesized classes).
     pub field_final: Vec<bool>,
+    /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
+    /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
+    pub secondary_ctors: Vec<IrSecondaryCtor>,
+}
+
+/// A secondary constructor delegating to the primary: `<init>(params)` evaluates `delegate_args`,
+/// calls `this(…)` (`invokespecial` the primary `<init>`), then runs `body`. `this` is value 0 and
+/// the parameters are values `1..=params.len()` in `delegate_args`/`body`.
+#[derive(Clone, Debug)]
+pub struct IrSecondaryCtor {
+    pub params: Vec<IrType>,
+    pub delegate_args: Vec<ExprId>,
+    pub body: Option<ExprId>,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).
