@@ -3169,11 +3169,27 @@ impl<'a> Checker<'a> {
                     Ty::Obj(internal, _) => self.lookup_method(internal, &name),
                     _ => None,
                 };
+                // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
+                // types are the receiver's element type(s), recovered from the extension's generic
+                // signature, so the lambda body checks against `Int` rather than the erased `Any`.
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = if method_sig.is_none()
+                    && matches!(rt, Ty::Obj(..))
+                    && args.iter().any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. })) {
+                    self.syms.libraries.extension_lambda_param_types(rt, &name)
+                } else {
+                    None
+                };
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if let Some(ref sig) = method_sig {
                         if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty()
                             && matches!(self.file.expr(a), Expr::Lambda { .. }) {
                             let pt = sig.lambda_param_types[i].clone();
+                            return self.check_lambda_with_types(a, &pt);
+                        }
+                    }
+                    if let Some(ref pts) = ext_lambda_pts {
+                        if pts.get(i).map_or(false, |v| !v.is_empty()) && matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            let pt = pts[i].clone();
                             return self.check_lambda_with_types(a, &pt);
                         }
                     }

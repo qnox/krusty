@@ -217,6 +217,19 @@ fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut std::collections::HashMap<Stri
                 unify_gsig(inner, elem, binds);
             }
         }
+        GSig::Class(internal, args) if internal.starts_with("kotlin/jvm/functions/Function") => {
+            // A function parameter (`Function1<T, R>`) unifies against a lambda argument (`Ty::Fun`):
+            // the leading type arguments bind the lambda's parameters, the last binds its return —
+            // so `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
+            if let Ty::Fun(fsig) = actual {
+                if let Some((ret_sig, in_sigs)) = args.split_last() {
+                    for (a, p) in in_sigs.iter().zip(fsig.params.iter()) {
+                        unify_gsig(a, *p, binds);
+                    }
+                    unify_gsig(ret_sig, fsig.ret, binds);
+                }
+            }
+        }
         GSig::Class(_, args) => {
             // Unify the type arguments positionally against the actual's carried arguments, if any.
             if let Ty::Obj(_, targs) = actual {
@@ -247,12 +260,27 @@ fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// If `sig` is a `kotlin/jvm/functions/FunctionN` type, the (substituted) types of its lambda
+/// parameters — its first N type arguments (the last is the return type). Empty for anything else.
+fn function_input_types(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Vec<Ty> {
+    if let GSig::Class(internal, targs) = sig {
+        if internal.starts_with("kotlin/jvm/functions/Function") && !targs.is_empty() {
+            return targs[..targs.len() - 1].iter().map(|a| gsig_to_ty(a, binds)).collect();
+        }
+    }
+    Vec::new()
+}
+
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
 /// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
 /// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
 fn arg_fits(p: &Ty, a: &Ty) -> bool {
     if p == a || *p == Ty::obj("kotlin/Any") {
         return true;
+    }
+    // A lambda (`Ty::Fun`) is passed where a `kotlin/jvm/functions/FunctionN` is expected.
+    if let (Ty::Obj(pi, _), Ty::Fun(_)) = (p, a) {
+        return pi.starts_with("kotlin/jvm/functions/Function");
     }
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
@@ -403,6 +431,28 @@ impl LibrarySet for JvmLibraries {
                 // No generic class signature — follow raw supertypes (members there are non-generic).
                 for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
                     q.push_back((i.clone(), vec![]));
+                }
+            }
+        }
+        None
+    }
+
+    fn extension_lambda_param_types(&self, recv: Ty, name: &str) -> Option<Vec<Vec<Ty>>> {
+        // Find a generic extension named `name` on the receiver (or a supertype) that takes a function
+        // argument; bind its type variables from the receiver and report each lambda argument's
+        // element-typed parameters (`Function1<? super T, …>` on `List<Int>` → `[Int]`).
+        for recv_desc in supertype_descriptors(&self.cp, recv) {
+            for c in self.cp.find_extensions(&recv_desc, name) {
+                let Some(sig) = c.signature.as_deref() else { continue };
+                let Some((psigs, _)) = parse_method_gsig(sig) else { continue };
+                if psigs.is_empty() {
+                    continue;
+                }
+                let mut binds = std::collections::HashMap::new();
+                unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
+                let out: Vec<Vec<Ty>> = psigs[1..].iter().map(|ps| function_input_types(ps, &binds)).collect();
+                if out.iter().any(|v| !v.is_empty()) {
+                    return Some(out);
                 }
             }
         }
