@@ -754,21 +754,33 @@ impl<'a> Emitter<'a> {
         // Reserve the spliced body's own local range (`base..base+max_locals`, e.g. kotlinc's `$i$f`
         // inline-marker store) so the fresh lambda-param slots sit above it and `max_locals` covers all.
         self.next_slot = self.next_slot.max(base + body.max_locals);
-        // The lambda impl's typed parameters (no captures) and return.
+        // The lambda impl's parameters are `[captures…, lambda_params…]`.
         let impl_f = &self.ir.functions[impl_fn as usize];
-        if impl_f.params.len() != arity {
-            return false; // a capture slipped through — unsupported
-        }
-        let lam_tys: Vec<Ty> = impl_f.params.iter().map(ir_ty_to_jvm).collect();
-        let impl_ret = ir_ty_to_jvm(&impl_f.ret);
-        // v1: only a single-expression *value* lambda — body `{ Return(Some(ve)) }`. A multi-statement,
-        // Unit, or early-`return` body would leave the operand stack inconsistent under the `inlining`
-        // flag (every `Return` leaves its value + falls through); those fall back to a normal call.
-        let single_value_return = matches!(impl_f.body, Some(b)
-            if matches!(self.ir.expr(b), IrExpr::Block { stmts, value: None }
-                if stmts.len() == 1 && matches!(self.ir.expr(stmts[0]), IrExpr::Return(Some(_)))));
-        if !single_value_return {
+        let Some(n_cap) = impl_f.params.len().checked_sub(arity) else { return false };
+        if n_cap != captures.len() {
             return false;
+        }
+        let cap_tys: Vec<Ty> = impl_f.params[..n_cap].iter().map(ir_ty_to_jvm).collect();
+        let lam_tys: Vec<Ty> = impl_f.params[n_cap..].iter().map(ir_ty_to_jvm).collect();
+        let impl_ret = ir_ty_to_jvm(&impl_f.ret);
+        // Single-exit body only: `{ effects…; Return(Some(rv)) }` with no early/non-local return — the
+        // `inlining` flag makes every `Return` leave its value and fall through, so multiple returns or a
+        // return nested in control flow would corrupt the stack. (Covers value AND Unit lambdas; the
+        // preceding effect statements must not themselves return/branch.)
+        let body_ok = matches!(impl_f.body, Some(b) if matches!(self.ir.expr(b), IrExpr::Block { stmts, value: None }
+            if stmts.last().map_or(false, |&l| matches!(self.ir.expr(l), IrExpr::Return(Some(_))))
+                && stmts[..stmts.len() - 1].iter().all(|&s| !matches!(self.ir.expr(s),
+                    IrExpr::Return(_) | IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. }))));
+        if !body_ok {
+            return false;
+        }
+        // Capture parameters bind to the caller's *actual* slots, so a mutable capture written by the
+        // lambda body propagates to the enclosing variable (`var s; recv.let { s += it }`).
+        let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(n_cap);
+        for (i, &cap) in captures.iter().enumerate() {
+            let IrExpr::GetValue(v) = self.ir.expr(cap) else { return false };
+            let Some(&(slot, _)) = self.slots.get(v) else { return false };
+            cap_slots.push((slot, cap_tys[i]));
         }
 
         // Prologue: emit each NON-lambda argument and store it into its parameter slot (the lambda param
@@ -785,8 +797,10 @@ impl<'a> Emitter<'a> {
         // `before`: the relocated body up to the invoke (lambda-object loads elided) — leaves the lambda's
         // (boxed) arguments on the stack.
         self.append_segment(&before, body.max_stack, code, arity as i32);
-        // Unbox each argument to the lambda's typed parameter and store it (top = last argument).
-        let mut param_slots: Vec<(u16, Ty)> = vec![(0, Ty::Error); arity];
+        // Unbox each argument to the lambda's typed parameter and store it (top = last argument). The
+        // full parameter→slot map is the captures (bound to caller slots) followed by these.
+        let mut param_slots: Vec<(u16, Ty)> = cap_slots;
+        param_slots.extend(std::iter::repeat((0, Ty::Error)).take(arity));
         for j in (0..arity).rev() {
             let jt = lam_tys[j];
             if jt.is_primitive() {
@@ -795,7 +809,7 @@ impl<'a> Emitter<'a> {
             let slot = self.next_slot;
             self.next_slot += slot_words(jt);
             store(jt, slot, code);
-            param_slots[j] = (slot, jt);
+            param_slots[n_cap + j] = (slot, jt);
         }
         code.set_stack(0);
         // The lambda body, inlined (its captures resolve to the caller's frame; mutable capture works).

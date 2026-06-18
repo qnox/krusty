@@ -519,6 +519,11 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
+    fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.cp.method_code(owner, name, descriptor)
+            .map_or(false, |body| crate::jvm::inline::is_lambda_spliceable(&body))
+    }
+
     fn toplevel_lambda_param_types(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         for c in self.cp.find_top_level(name) {
             let Some(sig) = c.signature.as_deref() else { continue };

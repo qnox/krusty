@@ -220,6 +220,14 @@ pub trait LibrarySet {
     fn toplevel_lambda_param_types(&self, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         None
     }
+
+    /// Whether the platform can splice (truly inline) the lambda-taking `inline fun` `owner.name desc`
+    /// at a call site — i.e. its compiled body is shaped for the lambda-argument splice. The front end
+    /// routes a call to the inliner only when this is true, so an un-spliceable (e.g. `@InlineOnly`,
+    /// uncallable) callee is never emitted as a broken call. `false` for non-JVM platforms.
+    fn can_inline_lambda(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
+        false
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------
