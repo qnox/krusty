@@ -533,7 +533,9 @@ impl LibrarySet for JvmLibraries {
                 }
             }
             let out: Vec<Vec<Ty>> = psigs.iter().map(|ps| function_input_types(ps, &binds)).collect();
-            if out.iter().any(|v| !v.is_empty()) {
+            // Accept this overload only if a *lambda* position (an untyped `None` argument) actually
+            // recovered parameter types — so an overload whose lambda is elsewhere isn't mis-picked.
+            if out.iter().zip(arg_tys).any(|(v, at)| at.is_none() && !v.is_empty()) {
                 return Some(out);
             }
         }
