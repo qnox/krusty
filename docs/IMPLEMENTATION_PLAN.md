@@ -2204,17 +2204,26 @@ bodies exist only as jar bytecode):
   IR). Gap: the inline fn is not *also* emitted as a method, so the facade ABI differs (kotlinc emits
   it) — an ABI-parity gap, not behavioural.
 
-- **Inliner #2 — bytecode splicer (cross-module stdlib `inline fun`s).** ⬜ The kotlinc-JVM path
+- **Inliner #2 — bytecode splicer (cross-module stdlib `inline fun`s).** 🚧 The kotlinc-JVM path
   (`MethodInliner`): read the callee's compiled body from the classpath jar and splice it into the
   caller, relocating the constant pool. Retires the scattered `forEach`/`let`/`also`/`repeat` desugars
   (the no-hardcode win). `src/jvm/inline.rs` already has: `relocate_const`/`relocate_code` (pool
   relocation), `disassemble`/`assemble`, `shift_locals`, `redirect_returns`, `substitute_reified`,
-  `param_store_ops`, and `splice()` wiring them — with unit tests. **Unwired (no caller) and missing
-  the hard pieces.** Build order:
-  1. **Wire `splice` for a no-lambda stdlib inline fn** end-to-end through `ir_emit`, behind a strict
-     guard that falls back to a normal call on ANY relocation failure (0-FAIL by construction). Proves
-     the cross-module path. (Low behavioural value — such fns already work as plain calls — but
-     establishes the mechanism + byte-parity.)
+  `param_store_ops`, and `splice()` wiring them — with unit tests.
+  **Foundation DONE (phases 287–288):** the classpath is `Rc`-shared with the emitter inside the `jvm`
+  module (no `LibrarySet` boundary); the emitter depends only on the narrow `MethodBodies` trait
+  (`body(owner,name,desc)` — fetch bytecode by FQN, *not* the whole `Classpath`); `LibraryCallable`
+  carries `is_inline` (decoded with the signature); the IR `Callee::Static` carries `inline: bool`; and
+  the emitter routes an inline call to `Emitter::try_inline_static` (the splice decision point) with a
+  hard fallback to `invokestatic`. Build order for the splice itself:
+  1. **Branchless splice** through `try_inline_static`, behind the fallback (0-FAIL by construction).
+     ⚠️ NOTE: `redirect_returns` rewrites even a single trailing `ireturn` into a `goto end`, which is a
+     branch needing a StackMapTable frame — so the branchless path must instead *drop* the trailing
+     return (single-exit body) to stay frame-free. Guard: branchless body (no branch opcodes), no
+     exception table, no `Lkotlin/jvm/functions/Function` parameter. Add `CodeBuilder::splice_branchless`
+     (append relocated bytes + stack/local bookkeeping) and `inline::is_branchless`. Test: compile a
+     tiny lib with kotlinc that has a branchless `inline fun`, put it on krusty's `-cp`, assert krusty
+     splices it (verifier-clean + correct runtime result).
   2. **Lambda-argument splicing (the crux).** The stdlib body calls `Function1.invoke(elem)` (an
      invokeinterface), not the lambda directly. To inline, the caller's lambda body must be spliced at
      each `FunctionN.invoke` site inside the relocated body (kotlinc inlines the lambda too). Needs:
