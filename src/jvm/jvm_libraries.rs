@@ -574,8 +574,17 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        self.cp.method_code(owner, name, descriptor)
-            .map_or(false, |body| crate::jvm::inline::is_call_spliceable(&body))
+        self.cp.method_code(owner, name, descriptor).map_or(false, |body| {
+            // Structurally spliceable (branchless, single return, no lambda invoke) AND actually
+            // relocatable: dry-run the SAME `splice_branchless` the emitter uses, into a throwaway
+            // `ClassWriter`. This exercises constant-pool relocation, so an un-relocatable body
+            // (invokedynamic, a pool entry `relocate_const` rejects, …) fails the gate — never routed
+            // and then fallen back to an `invokestatic` on the private method (an `IllegalAccessError`).
+            crate::jvm::inline::is_call_spliceable(&body) && {
+                let mut dummy = crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy).is_some()
+            }
+        })
     }
 
     fn resolve_scope_inline(&self, name: &str, receiver: Ty, args: &[Ty]) -> Option<LibraryCallable> {

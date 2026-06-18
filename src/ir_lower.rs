@@ -3646,8 +3646,9 @@ impl<'a> Lower<'a> {
                         // A private `@InlineOnly` extension (`String.uppercase()` → inlines
                         // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
                         // `Callee::Static` so the backend splices its REAL body (no call to the
-                        // package-private method is emitted). The emitter skips the file if the body isn't
-                        // spliceable, so this never miscompiles.
+                        // package-private method is emitted). Gated on `can_inline_call`, which DRY-RUNS the
+                        // actual splice — so a body the emitter couldn't splice (and would fall back to an
+                        // `invokestatic` on the private method) is never routed; the call simply skips.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.syms.libraries.resolve_scope_inline(&name, rt, &arg_tys)
                             .filter(|c| c.is_inline && self.syms.libraries.can_inline_call(&c.owner, &c.name, &c.descriptor))
