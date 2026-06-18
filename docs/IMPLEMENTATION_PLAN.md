@@ -2190,6 +2190,45 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 > getters; coroutines; inner classes; nullable primitives `Int?`) are each multi-file, infrastructure-scale
 > efforts — see the coverage-roadmap notes for entry points. The 0-FAIL never-miscompile invariant holds.
 
+## Inline functions — the two-inliner architecture (mirrors kotlinc-JVM)
+
+kotlinc-JVM inlines from whatever form the callee body exists in; krusty does the same with two
+complementary inliners (decided after evaluating an IR-only approach — it cannot reach stdlib, whose
+bodies exist only as jar bytecode):
+
+- **Inliner #1 — IR inliner (same-module, user `inline fun`s).** ✅ Phases 285–286. Expands the body
+  at each call site in the lowerer (`Lower::lower_inline_fn_call` / `lower_inline_lambda_invoke`):
+  value params → once-evaluated temps; lambda args inlined at their function-typed parameter's invoke
+  sites (no closure). Bails (file skipped, 0-FAIL) outside the subset (extension/reified/default/
+  vararg/non-local-return) or on (mutual) recursion. This is K2's same-module path (body available as
+  IR). Gap: the inline fn is not *also* emitted as a method, so the facade ABI differs (kotlinc emits
+  it) — an ABI-parity gap, not behavioural.
+
+- **Inliner #2 — bytecode splicer (cross-module stdlib `inline fun`s).** ⬜ The kotlinc-JVM path
+  (`MethodInliner`): read the callee's compiled body from the classpath jar and splice it into the
+  caller, relocating the constant pool. Retires the scattered `forEach`/`let`/`also`/`repeat` desugars
+  (the no-hardcode win). `src/jvm/inline.rs` already has: `relocate_const`/`relocate_code` (pool
+  relocation), `disassemble`/`assemble`, `shift_locals`, `redirect_returns`, `substitute_reified`,
+  `param_store_ops`, and `splice()` wiring them — with unit tests. **Unwired (no caller) and missing
+  the hard pieces.** Build order:
+  1. **Wire `splice` for a no-lambda stdlib inline fn** end-to-end through `ir_emit`, behind a strict
+     guard that falls back to a normal call on ANY relocation failure (0-FAIL by construction). Proves
+     the cross-module path. (Low behavioural value — such fns already work as plain calls — but
+     establishes the mechanism + byte-parity.)
+  2. **Lambda-argument splicing (the crux).** The stdlib body calls `Function1.invoke(elem)` (an
+     invokeinterface), not the lambda directly. To inline, the caller's lambda body must be spliced at
+     each `FunctionN.invoke` site inside the relocated body (kotlinc inlines the lambda too). Needs:
+     identify the invoke sites, map the lambda's params to the invoke args (fresh slots above `base`),
+     splice the lambda's own compiled/relocated code, and handle the lambda's captures. This is what
+     unlocks `forEach`/`map`/… and retires those desugars.
+  3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
+     jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
+  4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
+     bails on these today; needed when a spliced body itself constructs a lambda.
+  Invariant throughout: any unhandled construct ⇒ fall back to the existing (working) call/desugar path;
+  never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
+  byte-diff vs kotlinc for the spliced method.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
