@@ -3594,6 +3594,21 @@ impl<'a> Checker<'a> {
                 // mutable capture is fine because the backend inlines it to a counted loop.
                 let repeat_lambda = fname == "repeat" && known_sig.is_none() && self.lookup(&fname).is_none()
                     && args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
+                // A receiver-less top-level *library* function with a lambda argument (`applyIt(5){ it+1 }`):
+                // recover the lambda parameter types from its generic signature so `it` types correctly
+                // (the erased `Function1` descriptor hides them), mirroring the extension-call path.
+                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = if known_sig.is_none()
+                    && self.lookup(&fname).is_none()
+                    && !array_init_lambda && !repeat_lambda
+                    && args.iter().any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                {
+                    let partial: Vec<Option<Ty>> = args.iter()
+                        .map(|&a| if matches!(self.file.expr(a), Expr::Lambda { .. }) { None } else { Some(self.expr(a)) })
+                        .collect();
+                    self.syms.libraries.toplevel_lambda_param_types(&fname, &partial)
+                } else {
+                    None
+                };
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if array_init_lambda && i == 1 {
                         return self.check_lambda_with_types(a, &[Ty::Int]);
@@ -3604,6 +3619,11 @@ impl<'a> Checker<'a> {
                         let t = self.check_lambda_with_types(a, &[Ty::Int]);
                         self.allow_lambda_mutation = prev;
                         return t;
+                    }
+                    if let Some(ref pts) = toplevel_lambda_pts {
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) && i < pts.len() && !pts[i].is_empty() {
+                            return self.check_lambda_with_types(a, &pts[i]);
+                        }
                     }
                     if let Some(ref sig) = known_sig {
                         // A lambda argument to a function-typed parameter. For an `inline fun` the lambda
@@ -3742,6 +3762,12 @@ impl<'a> Checker<'a> {
                             }
                         } else {
                             for (i, a) in arg_tys.iter().enumerate() {
+                                // A lambda argument was already typed against the parameter's lambda types
+                                // (`toplevel_lambda_pts`); its `Fun` type is assignable to the erased
+                                // `FunctionN` parameter, so skip the (over-strict) assignability check.
+                                if matches!(self.file.expr(args[i]), Expr::Lambda { .. }) {
+                                    continue;
+                                }
                                 self.expect_assignable(c.params[i], *a, self.span(args[i]), "argument");
                             }
                         }

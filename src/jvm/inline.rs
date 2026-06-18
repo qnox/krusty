@@ -806,6 +806,25 @@ pub fn branchless_lambda_segments(
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
         return None; // branchless only (loops handled later)
     }
+    // Strip kotlinc's entry `Intrinsics.checkNotNullParameter(param, "name")` null-checks (the value
+    // push + name `ldc` + the call): they guard the original parameters (incl. the lambda object),
+    // which don't exist once inlined. Branchless ⇒ no branch targets into the removed region.
+    let mut drop = vec![false; insns.len()];
+    for (i, insn) in insns.iter().enumerate() {
+        if let Insn::Plain { op: 0xb8, operands } = insn {
+            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8 | operands.get(1).copied().unwrap_or(0) as u16;
+            if let Some(("kotlin/jvm/internal/Intrinsics", n)) = methodref_target(&body.source_cp, idx) {
+                if n == "checkNotNullParameter" || n == "checkNotNullExpressionValue" {
+                    drop[i] = true;
+                    if i >= 1 { drop[i - 1] = true; }
+                    if i >= 2 { drop[i - 2] = true; }
+                }
+            }
+        }
+    }
+    if drop.iter().any(|&d| d) {
+        insns = insns.into_iter().zip(drop).filter(|(_, d)| !d).map(|(x, _)| x).collect();
+    }
     let sites = function_invoke_sites(&insns, &body.source_cp);
     if sites.len() != 1 {
         return None; // exactly one lambda call (let/also/run/apply/…)
