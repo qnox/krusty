@@ -227,6 +227,18 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
+    // `.get()` (no args) reads `this.receiver`'s property.
+    ("BoundPropertyRef", r#"
+class A(val x: Int)
+fun box(): String {
+    val a = A(7)
+    val p = a::x
+    if (p.get() != 7) return "f1"
+    if (p.name != "x") return "f2"
+    return "OK"
+}
+"#),
     // The literal `-2147483648` is `Int.MIN_VALUE` (an Int), not a Long — usable as an Int `when`
     // branch and in an Int context (the bare `2147483648` overflows Int and is a Long).
     ("IntMinLiteral", r#"

@@ -390,6 +390,9 @@ fn emit_enum_entry_subclass(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, b
 /// is inherited from `PropertyReference1Impl` (returns the constructor's name argument).
 fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
+    if pr.bound {
+        return emit_bound_prop_ref_class(c, pr);
+    }
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
     let mut cw = ClassWriter::new(&fq, &c.superclass);
@@ -442,6 +445,53 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
     clinit.ensure_locals(0);
     clinit.link();
     cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    cw.finish()
+}
+
+/// Emit a bound property-reference (`obj::prop` → `PropertyReference0Impl` subclass): a constructor
+/// `(Object receiver)` delegating to `super(receiver, owner.class, name, "getName()desc", 0)` (the base
+/// stores the receiver), and a no-arg `get()` reading `((Owner) this.receiver).getName()`. Constructed
+/// per use with the captured receiver — no `INSTANCE` singleton.
+fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) -> Vec<u8> {
+    let fq = c.fq_name.clone();
+    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+
+    let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
+    let getter_desc = format!("(){}", prop_jvm.descriptor());
+    let signature = format!("{}{}", pr.getter_name, getter_desc);
+
+    // `<init>(Object)V`: super(receiver, owner.class, name, "getName()desc", 0).
+    let mut ctor = CodeBuilder::new(2);
+    ctor.aload(0);
+    ctor.aload(1);
+    ctor.ldc_class(&pr.owner_internal, &mut cw);
+    ctor.push_string(&pr.prop_name, &mut cw);
+    ctor.push_string(&signature, &mut cw);
+    ctor.push_int(0, &mut cw);
+    let sup = cw.methodref(&c.superclass, "<init>", "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
+    ctor.invokespecial(sup, 5, 0);
+    ctor.ret_void();
+    ctor.ensure_locals(2);
+    ctor.link();
+    cw.add_method(0x0000, "<init>", "(Ljava/lang/Object;)V", &ctor);
+
+    // `get()Object`: ((Owner) this.receiver).getName(), boxed if primitive.
+    let mut get = CodeBuilder::new(1);
+    get.aload(0);
+    let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
+    get.getfield(recv_f, 1);
+    let owner_ref = cw.class_ref(&pr.owner_internal);
+    get.checkcast(owner_ref);
+    let gref = cw.methodref(&pr.owner_internal, &pr.getter_name, &getter_desc);
+    get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
+    if prop_jvm.is_primitive() {
+        box_prim_free(&mut cw, &mut get, prop_jvm);
+    }
+    get.areturn();
+    get.ensure_locals(1);
+    get.link();
+    cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
     cw.finish()
 }
 

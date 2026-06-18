@@ -326,6 +326,10 @@ pub struct PropRef {
     pub prop_name: String,
     pub getter_name: String,
     pub prop_ty: IrType,
+    /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
+    /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
+    /// whose `get()` reads `this.receiver`).
+    pub bound: bool,
 }
 
 /// A secondary constructor delegating to the primary: `<init>(params)` evaluates `delegate_args`,
