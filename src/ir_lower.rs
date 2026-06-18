@@ -1467,6 +1467,14 @@ impl<'a> Lower<'a> {
     /// `is_inline` flag, not the name. Only routes a non-capturing, single-value-return lambda (which the
     /// emitter is guaranteed to splice); `None` ⇒ the call falls through to its desugar / normal lowering.
     fn try_route_lambda_inline(&mut self, name: &str, receiver: AstExprId, lam_arg: AstExprId, rty: Ty) -> Option<u32> {
+        // The bytecode splicer substitutes the receiver inline; it can relocate a simple value but not
+        // an `invokedynamic` (a lambda literal or callable reference `::A` as the receiver), so the
+        // splice would fail at emit and fall back to a real call to the private `@InlineOnly` callee
+        // (IllegalAccessError). Bail so the `let`/`also` desugar — which binds the receiver to a local
+        // first — handles it instead.
+        if matches!(self.afile.expr(receiver), Expr::CallableRef { .. } | Expr::Lambda { .. }) {
+            return None;
+        }
         // Resolve via the inline-only path, which (unlike `resolve_callable`) matches `@InlineOnly`
         // package-private scope fns (`let`/`also`) — safe because we *inline* it (no call is emitted).
         let c = self.syms.libraries.resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
