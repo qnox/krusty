@@ -3647,6 +3647,9 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
         // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame), so it is not safe to
         // splice mid-sequence (e.g. as an array-literal element) — treat it as branchy so callers bail.
         Expr::SafeCall { .. } => true,
+        // A `try`/`catch` expression emits exception-handler merge frames; as a mid-`Vararg`-fill element
+        // those frames land inside the element-store sequence and fail the verifier — bail (skip).
+        Expr::Try { .. } => true,
         Expr::Binary { op, lhs, .. } => {
             use ast::BinOp::*;
             matches!(op, Lt | Le | Gt | Ge | And | Or)
