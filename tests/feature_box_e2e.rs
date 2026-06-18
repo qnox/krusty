@@ -112,6 +112,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Constructor reference `::A` — a closure wrapping `new A(args)`, usable as a `FunctionN` value.
+    ("CtorRef", r#"
+class A(val result: String)
+class P(val x: Int, val y: Int)
+fun box(): String {
+    val f = ::A
+    if (f("OK").result != "OK") return "f1"
+    val g = ::P
+    val p = g(3, 4)
+    if (p.x != 3 || p.y != 4) return "f2"
+    return "OK"
+}
+"#),
     // Enum entries with a body: each bodied entry is a synthesized subclass (`Op$ADD extends Op`)
     // overriding an abstract member; the override can read an enum constructor `val`.
     ("EnumEntryBody", r#"

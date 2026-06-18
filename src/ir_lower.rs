@@ -2551,6 +2551,35 @@ impl<'a> Lower<'a> {
                 }
                 let Ty::Fun(sig) = self.info.ty(e) else { return None };
                 let arity = sig.params.len();
+                // Constructor reference `::A` (the name is a class, not a function): synthesize a
+                // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
+                // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional
+                // case (the closure's arity matches the constructor's field params) is modeled.
+                if !self.fun_ids.contains_key(&name) {
+                    let ci = self.class_of(sig.ret)?;
+                    let class_id = ci.id;
+                    let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
+                    let ctor_args = self.ir.classes[class_id as usize].ctor_args.clone();
+                    let field_tys: Vec<IrType> = if ctor_args.is_empty() {
+                        self.ir.classes[class_id as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect()
+                    } else {
+                        ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                    };
+                    if field_tys.len() != arity {
+                        return None;
+                    }
+                    let argvals: Vec<u32> = (0..arity as u32).map(|i| self.ir.add_expr(IrExpr::GetValue(i))).collect();
+                    let new_e = self.ir.add_expr(IrExpr::New { class: class_id, args: argvals, ctor_params: None });
+                    let ret_e = self.ir.add_expr(IrExpr::Return(Some(new_e)));
+                    let block = self.ir.add_expr(IrExpr::Block { stmts: vec![ret_e], value: None });
+                    let impl_name = format!("{}$ctorref${}", self.cur_fn_name, self.lambda_seq);
+                    self.lambda_seq += 1;
+                    let fid = self.ir.add_fun(IrFunction {
+                        name: impl_name, params: field_tys, ret: ty_to_ir(sig.ret), body: Some(block),
+                        is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+                    });
+                    return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
+                }
                 let fid = *self.fun_ids.get(&name)?;
                 // Same guards as lambdas: a `Unit`/`Nothing` return needs the `kotlin/Unit` singleton,
                 // and a generic referenced function erases its type parameters.
