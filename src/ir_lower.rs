@@ -388,14 +388,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             }
                         }
                     }
-                    // A property redeclared in the subclass (`override val field`) needs getter/setter
-                    // virtual dispatch — krusty reads the field directly, which would bypass the
-                    // override. Bail when a subclass field name shadows a base field.
-                    let own_fields = c.props.iter().filter(|p| p.is_property).map(|p| &p.name)
-                        .chain(c.body_props.iter().map(|p| &p.name));
+                    // A property redeclared in the subclass (`override val field`) overrides the base's
+                    // `getX()`, so external access dispatches virtually to the subclass field — correct.
+                    // But a *base-class member that reads the property internally* reads the field
+                    // directly (not via `getX`), bypassing the override. Bail only then.
+                    let own_fields: Vec<&String> = c.props.iter().filter(|p| p.is_property).map(|p| &p.name)
+                        .chain(c.body_props.iter().map(|p| &p.name)).collect();
+                    let base_name = c.base_class.clone();
+                    let base_decl = base_name.as_ref().and_then(|bn| file.decls.iter().find_map(|&d| match file.decl(d) {
+                        Decl::Class(bc) if bc.name == *bn => Some(bc),
+                        _ => None,
+                    }));
                     for fname in own_fields {
                         if lo.resolve_field(&super_int, fname).is_some() {
-                            return None;
+                            // A base with its own base, or a base member reading `fname`, risks the
+                            // internal-read bypass — bail conservatively; else the override is safe.
+                            let unsafe_base = base_decl.map_or(true, |bd| bd.base_class.is_some()
+                                || bd.methods.iter().any(|m| match &m.body {
+                                    FunBody::Expr(e) | FunBody::Block(e) => crate::resolve::expr_uses_name_pub(file, *e, fname),
+                                    FunBody::None => false,
+                                })
+                                || bd.body_props.iter().any(|p| p.init.map_or(false, |e| crate::resolve::expr_uses_name_pub(file, e, fname))));
+                            if unsafe_base {
+                                return None;
+                            }
                         }
                     }
                 }
