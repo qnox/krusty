@@ -112,6 +112,30 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // String members resolve to their java.lang.String JVM methods (a member wins over a same-named
+    // private @InlineOnly extension like StringsKt.isEmpty).
+    ("StringMembers", r#"
+fun box(): String {
+    if ("abc".isEmpty()) return "f1"
+    if (!"".isEmpty()) return "f2"
+    if (!"abc".startsWith("ab")) return "f3"
+    if ("abc".indexOf("b") != 1) return "f4"
+    return "OK"
+}
+"#),
+    // A data class ALWAYS generates equals/hashCode/toString over an OPEN base member (KT-6206), but
+    // INHERITS a `final` base member (can't override it).
+    ("DataClassOverBase", r#"
+abstract class Open { override fun toString() = "base" }
+data class D1(val f: String) : Open()
+abstract class Final { final override fun toString() = "kept" }
+data class D2(val f: String) : Final()
+fun box(): String {
+    if (D1("x").toString() != "D1(f=x)") return "f1:${D1("x")}"
+    if (D2("x").toString() != "kept") return "f2:${D2("x")}"
+    return "OK"
+}
+"#),
     // Kotlin's built-in collection mapped members: `Map.keys`/`entries` resolve to the JVM
     // `keySet()`/`entrySet()` (Map.values/size keep their JVM name and already worked).
     ("MapMappedMembers", r#"

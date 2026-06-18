@@ -1085,14 +1085,21 @@ impl<'a> Lower<'a> {
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
     /// it resolves like any other method and the generic emitter handles it — no backend special-case.
-    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32) -> Option<u32> {
+    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32, force_override: bool) -> Option<u32> {
         if self.classes.get(internal).map_or(false, |ci| ci.methods.contains_key(name)) {
             return None; // a user-defined override exists — don't synthesize over it
         }
-        // Don't synthesize a member a superclass already provides (e.g. a `final override fun
-        // toString()` on a base class — a data class inherits it instead of regenerating).
+        // Don't synthesize over a member a superclass provides. For a `data class` member
+        // (`force_override`), only a *final* base member blocks generation — an `open` override IS
+        // overridden by the synthesized member (KT-6206); a final one is inherited (can't override).
+        // Other synthesis (an interface-delegation forwarder) inherits any base member.
         if let Some(s) = self.classes.get(internal).and_then(|ci| ci.super_internal.clone()) {
-            if self.resolve_method(&s, name).is_some() {
+            let blocks = if force_override {
+                self.syms.method_of(&s, name).map_or(false, |sig| sig.is_final)
+            } else {
+                self.resolve_method(&s, name).is_some()
+            };
+            if blocks {
                 return None;
             }
         }
@@ -1135,7 +1142,7 @@ impl<'a> Lower<'a> {
                     let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
                     self.ir.add_expr(IrExpr::Block { stmts: vec![ret_stmt], value: None })
                 };
-                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body);
+                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
             }
         }
         Some(())
@@ -1228,7 +1235,7 @@ impl<'a> Lower<'a> {
             let get = self.this_field(class_id, i as u32);
             let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, &format!("component{}", i + 1), vec![], *t, body);
+            self.add_synth_method(internal, class_id, &format!("component{}", i + 1), vec![], *t, body, true);
         }
 
         // toString(): `"Simple(f1=" + f1 + ", f2=" + f2 + ")"`.
@@ -1246,7 +1253,7 @@ impl<'a> Lower<'a> {
             acc = self.str_plus(acc, close);
             let ret = self.ir.add_expr(IrExpr::Return(Some(acc)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body);
+            self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body, true);
         }
 
         // hashCode(): `h(f1)`, then `result*31 + h(fN)` (0 for an empty data class).
@@ -1271,7 +1278,7 @@ impl<'a> Lower<'a> {
             };
             let ret = self.ir.add_expr(IrExpr::Return(Some(result)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body);
+            self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true);
         }
 
         // equals(other): `if (other !is T) return false; if (f1 != o.f1) return false; …; return true`.
@@ -1295,7 +1302,7 @@ impl<'a> Lower<'a> {
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
             let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-            self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body);
+            self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body, true);
         }
 
         // copy(f1, f2, …): `return P(f1, f2, …)`. (A `copy` call with named/omitted arguments — the
@@ -1306,7 +1313,7 @@ impl<'a> Lower<'a> {
             let new = self.ir.add_expr(IrExpr::New { class: class_id, args, ctor_params: None });
             let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
             let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            if let Some(copy_fid) = self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body) {
+            if let Some(copy_fid) = self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body, true) {
                 // Each `copy` parameter defaults to the corresponding property of the receiver — the
                 // backend-agnostic meaning. (The JVM backend realizes this as `copy$default`.) The
                 // `$default` mask is one `int`, so it covers ≤31 parameters; a wider data class uses
@@ -3579,6 +3586,10 @@ impl<'a> Lower<'a> {
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.class_of(rt).map(|ci| ci.internal.clone())
                             .or_else(|| if let Ty::Obj(i, _) = rt { Some(i.to_string()) } else { None })
+                            // A `String` receiver resolves its `java.lang.String` members (`isEmpty()`,
+                            // `isBlank()`, …) — a member wins over a same-named extension, as in kotlinc
+                            // (and a private `@InlineOnly` extension like `StringsKt.isEmpty` can't be called).
+                            .or_else(|| if rt == Ty::String { Some("java/lang/String".to_string()) } else { None })
                             .and_then(|internal| {
                                 crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys).map(|m| {
                                     let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);

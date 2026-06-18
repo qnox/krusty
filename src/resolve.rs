@@ -33,6 +33,9 @@ pub struct Signature {
     /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
     /// argument may capture a mutable local), instead of forming a closure.
     pub is_inline: bool,
+    /// True for a `final` member (a non-`open` member, or an explicit `final override`). A subclass —
+    /// including a `data class` synthesizing `equals`/`hashCode`/`toString` — cannot override it.
+    pub is_final: bool,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -462,7 +465,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             Vec::new()
                         }
                     }).collect();
-                    let sig = Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: f.is_inline };
+                    let sig = Signature { params, ret, vararg, required, param_names: f.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: f.is_inline, is_final: f.is_final };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (receiver_descriptor, method_name).
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
@@ -545,7 +548,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false, is_final: m.is_final }
                             })
                         })
                         .collect();
@@ -553,13 +556,13 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
                         for (i, (_, ty, _)) in props.iter().enumerate() {
-                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new(), is_inline: false });
+                            methods.insert(format!("component{}", i + 1), Signature { params: vec![], ret: *ty, vararg: false, required: 0, param_names: Vec::new(), lambda_param_types: Vec::new(), is_inline: false, is_final: true });
                         }
                         // Every `copy` parameter has a default (the receiver's property) — so `required`
                         // is 0 and any subset may be passed, by name or position.
                         methods.insert(
                             "copy".into(),
-                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: 0, param_names: props.iter().map(|(n, _, _)| n.clone()).collect(), lambda_param_types: Vec::new(), is_inline: false },
+                            Signature { params: props.iter().map(|(_, t, _)| *t).collect(), ret: self_ty, vararg: false, required: 0, param_names: props.iter().map(|(n, _, _)| n.clone()).collect(), lambda_param_types: Vec::new(), is_inline: false, is_final: true },
                         );
                     }
                     if c.is_object {
@@ -604,7 +607,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                                         p.ty.fun_params.iter().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).collect()
                                     } else { Vec::new() }
                                 }).collect();
-                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false }
+                                Signature { params, ret, vararg: false, required: m.params.iter().take_while(|p| p.default.is_none()).count(), param_names: m.params.iter().map(|p| p.name.clone()).collect(), lambda_param_types, is_inline: false, is_final: m.is_final }
                             })
                         })
                         .collect();
@@ -4303,6 +4306,7 @@ impl<'a> Checker<'a> {
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
             is_inline: false,
+            is_final: false,
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.
