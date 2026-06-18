@@ -291,6 +291,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   doesn't read jimage constructor descriptors yet, so classes whose `<init>` lives only in the jimage —
   e.g. `StringBuilder` — are skipped). `throw e` emits `athrow` (`tests/throw_e2e.rs`).
 
+- **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
+  (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
+  argument temps, and a lambda argument is inlined at the call sites of its function-typed parameter
+  (`Lower::lower_inline_lambda_invoke`), so a lambda capturing a mutable local works with **no closure
+  class emitted**. This is how K2 inlines a *same-module* body (it has the body as IR). Supported subset:
+  no extension receiver, no reified/type parameters, no default/vararg parameters, and no non-local
+  `return` (an inlined `return` would return from the caller — bailed). Anything outside the subset
+  bails (the file is skipped, never miscompiled). Known gaps vs kotlinc: (1) the inline function is
+  **not also emitted as a standalone method**, so the facade ABI differs (kotlinc emits the body for
+  binary compat / reflective callers) — an ABI-parity gap, not behavioural; (2) **cross-module stdlib**
+  `inline fun`s (`forEach`/`let`/`also`/`repeat`) exist only as jar *bytecode*, so they cannot be IR-
+  inlined — they are still expanded by targeted desugars in the lowerer pending the JVM bytecode splicer
+  (`src/jvm/inline.rs`), which is the kotlinc-JVM path (`MethodInliner`) and the route to retiring those
+  desugars. Tested by the `UserInline` snippet in `tests/feature_box_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

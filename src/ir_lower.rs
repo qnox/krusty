@@ -45,12 +45,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         companions: HashMap::new(),
         computed_props: HashMap::new(),
         expr_depth: 0,
+        inline_lambdas: Vec::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if !f.is_inline => {} // top-level function or extension function
+            Decl::Fun(_) => {} // top-level function, extension function, or `inline fun` (expanded at call sites)
             Decl::Class(c) if is_simple_class(c) => {}
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
@@ -288,9 +289,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
         }
     }
-    // Pass 1b: register top-level functions and extension functions.
+    // Pass 1b: register top-level functions and extension functions. An `inline fun` is not emitted
+    // as a standalone method — it is expanded at each call site (pass 2 skips it too).
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
+            if f.is_inline {
+                continue;
+            }
             if let Some(recv_ref) = &f.receiver {
                 // Extension function `fun Recv.name(…)` → a static method whose first parameter is the
                 // receiver (Kotlin's compilation strategy). Keyed by (receiver descriptor, name). A
@@ -339,6 +344,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
+            Decl::Fun(f) if f.is_inline => {} // inline functions are expanded at call sites, not emitted
             Decl::Fun(f) => {
                 lo.scope.clear();
                 lo.next_value = 0;
@@ -852,6 +858,10 @@ struct Lower<'a> {
     /// deep expression (a stress test with thousands of nested operators): past the limit, lowering
     /// bails (the file is skipped, never miscompiled or crashed).
     expr_depth: u32,
+    /// Active inlined-lambda parameters while expanding an `inline fun` body, as a stack so nested
+    /// inline calls compose. Each entry is `(param name, lambda parameter names, lambda body, lambda
+    /// parameter types)`: a call `param(args)` in the inline body inlines the lambda body in place.
+    inline_lambdas: Vec<(String, Vec<String>, AstExprId, Vec<Ty>)>,
 }
 
 impl<'a> Lower<'a> {
@@ -2063,6 +2073,115 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
     }
 
+    /// Expand a call to a user-defined `inline fun`: bind its value parameters to the (once-evaluated)
+    /// arguments, register its lambda arguments for inlining at their invoke sites, then lower its body
+    /// in place — exactly what kotlinc's inliner does. Returns `None` (the file bails, never miscompiles)
+    /// for anything outside the supported subset.
+    fn lower_inline_fn_call(&mut self, fname: &str, args: &[AstExprId]) -> Option<u32> {
+        let f = self.top_fun_decl(fname)?;
+        // Subset: a plain top-level inline fn with no extension receiver, no reified/type params, and no
+        // default/vararg params. A `return` in the body would be a non-local return once inlined — bail.
+        if f.receiver.is_some() || !f.type_params.is_empty() {
+            return None;
+        }
+        if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
+            return None;
+        }
+        let body = match f.body {
+            FunBody::Expr(e) | FunBody::Block(e) => e,
+            FunBody::None => return None,
+        };
+        let pnames: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        if body_has_return(self.afile, body) {
+            return None;
+        }
+        let sig = self.syms.funs.get(fname)?.clone();
+        if sig.params.len() != args.len() || sig.params.len() != pnames.len() {
+            return None;
+        }
+        let depth = self.scope.len();
+        let lam_depth = self.inline_lambdas.len();
+        let mut stmts = Vec::new();
+        for (i, pty) in sig.params.iter().enumerate() {
+            if let Ty::Fun(fnsig) = pty {
+                // A lambda parameter: require a literal lambda argument with no non-local return.
+                if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[i]).clone() {
+                    // A single-parameter lambda may name its parameter implicitly as `it`.
+                    let params = if params.is_empty() && fnsig.params.len() == 1 {
+                        vec!["it".to_string()]
+                    } else {
+                        params
+                    };
+                    if body_has_return(self.afile, lbody) || params.len() != fnsig.params.len() {
+                        self.scope.truncate(depth);
+                        self.inline_lambdas.truncate(lam_depth);
+                        return None;
+                    }
+                    self.inline_lambdas.push((pnames[i].clone(), params, lbody, fnsig.params.clone()));
+                } else {
+                    self.scope.truncate(depth);
+                    self.inline_lambdas.truncate(lam_depth);
+                    return None;
+                }
+            } else {
+                // A value parameter: evaluate once into a temp, visible by name in the body.
+                let slot = self.fresh_value();
+                let val = match self.lower_arg(args[i], &ty_to_ir(*pty)) {
+                    Some(v) => v,
+                    None => {
+                        self.scope.truncate(depth);
+                        self.inline_lambdas.truncate(lam_depth);
+                        return None;
+                    }
+                };
+                let var = self.ir.add_expr(IrExpr::Variable { index: slot, ty: ty_to_ir(*pty), init: Some(val) });
+                stmts.push(var);
+                self.scope.push((pnames[i].clone(), slot, *pty));
+            }
+        }
+        let body_val = self.expr(body);
+        self.scope.truncate(depth);
+        self.inline_lambdas.truncate(lam_depth);
+        let body_val = body_val?;
+        if stmts.is_empty() {
+            Some(body_val)
+        } else {
+            Some(self.ir.add_expr(IrExpr::Block { stmts, value: Some(body_val) }))
+        }
+    }
+
+    /// Expand a call `param(args)` to an inlined lambda parameter: bind the lambda's parameters to the
+    /// (evaluated) arguments, then lower its body in place. The body's value is the call's value.
+    fn lower_inline_lambda_invoke(&mut self, idx: usize, args: &[AstExprId]) -> Option<u32> {
+        let (_, lam_params, lam_body, lam_param_tys) = self.inline_lambdas[idx].clone();
+        if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
+            return None;
+        }
+        let depth = self.scope.len();
+        let mut stmts = Vec::new();
+        for ((pname, pty), &arg) in lam_params.iter().zip(&lam_param_tys).zip(args) {
+            let slot = self.fresh_value();
+            let val = match self.lower_arg(arg, &ty_to_ir(*pty)) {
+                Some(v) => v,
+                None => {
+                    self.scope.truncate(depth);
+                    return None;
+                }
+            };
+            let var = self.ir.add_expr(IrExpr::Variable { index: slot, ty: ty_to_ir(*pty), init: Some(val) });
+            stmts.push(var);
+            self.scope.push((pname.clone(), slot, *pty));
+        }
+        let body_val = self.expr(lam_body);
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        if stmts.is_empty() {
+            Some(body_val)
+        } else {
+            Some(self.ir.add_expr(IrExpr::Block { stmts, value: Some(body_val) }))
+        }
+    }
+
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
         // Guard against a stack overflow on a pathologically deep expression (a stress test with
         // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
@@ -2851,6 +2970,19 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
+                    // currently being expanded: inline the passed lambda's body in place.
+                    if self.lookup(&fname).is_none() {
+                        if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
+                            return self.lower_inline_lambda_invoke(idx, &args);
+                        }
+                    }
+                    // A user-defined `inline fun foo(...)` — expand it here (kotlinc's inliner): bind its
+                    // value parameters to the evaluated arguments, register its lambda arguments, and
+                    // lower its body so a lambda capturing a mutable local works (no closure).
+                    if self.lookup(&fname).is_none() && self.syms.funs.get(&fname).map_or(false, |s| s.is_inline) {
+                        return self.lower_inline_fn_call(&fname, &args);
+                    }
                     // `repeat(count) { i -> body }` — the stdlib inline `repeat`, body
                     // `for (i in 0 until times) action(i)`. Inline to a counted loop (the lambda's
                     // single parameter is the index) so a mutable capture works.
@@ -3409,6 +3541,20 @@ impl<'a> Lower<'a> {
 /// expression can't be safely emitted while other operands sit on the stack (the merge frame would
 /// omit them). Primitive `==`/`<`… and `if`/`when`/elvis are branchy; reference `==`
 /// (`Intrinsics.areEqual`) and plain calls are not.
+/// Does the expression (or any nested statement/expression) contain a `return`? Inlining a body or
+/// lambda that returns non-locally isn't modeled, so such an `inline fun` is bailed (file skipped).
+fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
+    file.any_child_expr(
+        e,
+        &mut |x| body_has_return(file, x),
+        &mut |s| stmt_has_return(file, s),
+    )
+}
+
+fn stmt_has_return(file: &ast::File, s: ast::StmtId) -> bool {
+    matches!(file.stmt(s), Stmt::Return(_)) || file.any_child_stmt(s, &mut |x| body_has_return(file, x))
+}
+
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
         Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
