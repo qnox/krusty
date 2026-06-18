@@ -2309,6 +2309,24 @@ bodies exist only as jar bytecode):
      *non-capturing* ones to `Callee::Static(inline)` (keep the desugar for capturing lambdas; detect free
      vars at the desugar site). (iii) an inlined `impl_fn` is still emitted as a dead method — skip it for
      byte-equality.
+     **ROUTE (b) FIRES (phases 299–302):** krusty truly inlines a cross-module lambda inline fn end-to-end
+     (`applyIt(5){it+1}` → inlined, no call, verifier-clean, 0-FAIL). The engine = `emit_fn_body_inline` +
+     `try_inline_lambda_call` (emitter) + `toplevel_lambda_param_types` (resolver types `it` from the
+     generic Signature) + `checkNotNullParameter`-strip + body-slot reservation. v1: branchless single-
+     invoke, non-capturing, single-value lambda; proven on a single-file-facade custom lib.
+     **TO RETIRE THE STDLIB DESUGARS (`let`/`also`/`forEach`) — the next arc, each a real sub-step:**
+     (a) **Multifile-facade body read.** `let`'s body is in `kotlin/StandardKt__StandardKt.class` (the part),
+     NOT the facade `StandardKt.class` (a 413-byte stub) — `MethodBodies::body(facade,…)` returns None.
+     Fix: when the facade lacks the method, read from its multifile parts (the facade's `@Metadata` d1 lists
+     them, or scan classpath for `{facade}__*`). Gateway to all stdlib scope/collection inline fns.
+     (b) **Route off the desugar.** In `ir_lower` (~3261) route a *non-capturing* `let`/`also` to
+     `Callee::Static(inline)` (keep the desugar for capturing lambdas; detect free vars at the desugar site).
+     (c) **Captures** — `forEach { s += it }`: bind the lambda impl's capture params to the caller's slots
+     (mutable capture works since the body emits in the caller frame). (d) **Unit lambdas** (`also`/`forEach`)
+     — the v1 guard rejects them; emit the Unit result. (e) **Branchy bodies** (`forEach`/`map` loops) —
+     interleave the lambda at `function_invoke_sites` inside the `splice_branchy` frame machinery.
+     (f) **Receiver-rebind** (`run`/`with`/`apply`: `this` not `it`). (g) skip emitting the now-dead inlined
+     `impl_fn` method for byte-equality.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
