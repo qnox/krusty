@@ -2343,6 +2343,11 @@ impl<'a> Lower<'a> {
                     let st = self.info.ty(subj);
                     for arm in &arms {
                         for &c in &arm.conditions {
+                            // `is`/`in` conditions are complete boolean tests, not `==` comparands —
+                            // their type (`Boolean`) needn't match the subject's primitiveness.
+                            if matches!(self.afile.expr(c), Expr::Is { .. } | Expr::InRange { .. }) {
+                                continue;
+                            }
                             if st.is_primitive() != self.info.ty(c).is_primitive() {
                                 return None;
                             }
@@ -2372,18 +2377,25 @@ impl<'a> Lower<'a> {
                     } else {
                         let mut cond: Option<u32> = None;
                         for &c in &arm.conditions {
-                            let test = match (subj_tmp, subject) {
-                                (Some((v, _)), _) => {
-                                    let s = self.ir.add_expr(IrExpr::GetValue(v));
-                                    let cv = self.expr(c)?;
-                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                            // An `is`/`!is` or `in`/`!in` condition is already a complete boolean test
+                            // involving the subject (the parser embeds it) — use it directly rather than
+                            // comparing the subject against it with `==`.
+                            let test = if matches!(self.afile.expr(c), Expr::Is { .. } | Expr::InRange { .. }) {
+                                self.expr(c)?
+                            } else {
+                                match (subj_tmp, subject) {
+                                    (Some((v, _)), _) => {
+                                        let s = self.ir.add_expr(IrExpr::GetValue(v));
+                                        let cv = self.expr(c)?;
+                                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                    }
+                                    (None, Some(subj)) => {
+                                        let s = self.expr(subj)?;
+                                        let cv = self.expr(c)?;
+                                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                    }
+                                    (None, None) => self.expr(c)?,
                                 }
-                                (None, Some(subj)) => {
-                                    let s = self.expr(subj)?;
-                                    let cv = self.expr(c)?;
-                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
-                                }
-                                (None, None) => self.expr(c)?,
                             };
                             cond = Some(match cond {
                                 Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: prev, rhs: test }),
