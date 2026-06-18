@@ -414,3 +414,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `val` — matching kotlinc and avoiding needless boxing. This covers a `var` a closure only reads but
   the enclosing scope reassigns after the closure is built (KT-4656). Unsigned `UInt`/`ULong` share the
   signed `Ref$IntRef`/`Ref$LongRef` holder (their unboxed JVM representation).
+
+- **Inner-class outer access**: an inner method reads an enclosing-instance member through `this$0`
+  (field 0) via the outer's synthesized getter (`this.this$0.getX()`) — the outer backing field is
+  private, so direct field access would be illegal. The checker makes the outer class's backing-field
+  properties resolvable as implicit-`this` members of the inner class (in both signature collection,
+  for return-type inference, and body checking). An inner property initializer may combine outer and
+  own members (`val z = x + y`); the constructor body scopes `this$0` as the first parameter value.

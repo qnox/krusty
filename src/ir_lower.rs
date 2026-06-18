@@ -651,7 +651,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    // ALL ctor params (property and plain) in scope as values `1..=M`, declaration order.
+                    // An inner class's synthetic `this$0` is the first constructor parameter (value 1).
+                    if let Some(outer) = &c.inner_of {
+                        let v = lo.fresh_value();
+                        lo.scope.push(("this$0".to_string(), v, Ty::obj(&class_internal(file, outer))));
+                    }
+                    // ALL ctor params (property and plain) in scope as values, declaration order.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
@@ -2874,9 +2879,19 @@ impl<'a> Lower<'a> {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     if let Some((class, idx)) = field {
                         self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
-                    } else {
-                        let (class, index, _, _) = self.resolve_method(&cur, &getter_name(&n))?;
+                    } else if let Some((class, index, _, _)) = self.resolve_method(&cur, &getter_name(&n)) {
                         self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                    } else {
+                        // An inner class reads an enclosing member through `this$0` (its field 0).
+                        let cur_id = self.classes.get(&cur)?.id;
+                        let outer = match self.ir.classes[cur_id as usize].fields.first() {
+                            Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
+                            _ => return None,
+                        };
+                        let this0 = self.ir.add_expr(IrExpr::GetField { receiver: recv, class: cur_id, index: 0 });
+                        // The outer backing field is private — read it through its synthesized getter.
+                        let (class, index, _, _) = self.resolve_method(&outer, &getter_name(&n))?;
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: vec![] })
                     }
                 }
             }
