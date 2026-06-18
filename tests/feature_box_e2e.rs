@@ -1,0 +1,224 @@
+//! Consolidated feature `box()` snippets, compiled by krusty and run on a real JVM. To keep the test
+//! suite fast, every accepted snippet runs in ONE JVM via a reflective runner (per-snippet
+//! `URLClassLoader`), instead of a `javac`+`java` per snippet — the same trick as `box_vendored_e2e`.
+//! Each snippet's `box(): String` must return "OK" under `-Xverify:all`.
+
+use std::fs;
+use std::process::Command;
+
+mod common;
+
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
+}
+
+/// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
+const SNIPPETS: &[(&str, &str)] = &[
+    ("Unsigned", r#"
+fun box(): String {
+    val u1 = 1u; val u2 = 2u
+    val u3 = u1 + u2
+    if (u3.toInt() != 3) return "f1"
+    val a = 42.toUInt()
+    if (a.toInt() != 42) return "f2"
+    val d = 0u.dec()
+    if (d.toLong() != 4294967295L) return "f3"
+    val ul = 5uL
+    if (ul.toLong() != 5L) return "f4"
+    if ((3u - 1u).toInt() != 2) return "f5"
+    if (0xFFu.toInt() != 255) return "f6"
+    val x = 5u; val y = 3u
+    if (x < y) return "f7"
+    if (x / y != 1u) return "f8"
+    if (x % y != 2u) return "f9"
+    if (0u.dec() < x) return "f10"
+    if (10uL / 4uL != 2uL) return "f11"
+    if (10uL % 4uL != 2uL) return "f12"
+    if (10uL < 4uL) return "f13"
+    if (0u.dec().toString() != "4294967295") return "f14"
+    if ("${0u.dec()}!" != "4294967295!") return "f15"
+    if (0uL.dec().toString() != "18446744073709551615") return "f16"
+    val any: Any = 5u
+    if (any !is UInt) return "f17"
+    if (any is Int) return "f18"
+    if (any.toString() != "5") return "f19"
+    val anyL: Any = 7uL
+    if (anyL !is ULong) return "f21"
+    var rs = 0u
+    for (u in 1u..6u) rs += u
+    if (rs != 21u) return "f22"
+    var cnt = 0
+    for (u in 0u..<4u) cnt++
+    if (cnt != 4) return "f23"
+    return "OK"
+}
+"#),
+    ("ForeachInline", r#"
+fun box(): String {
+    var s = 0
+    listOf(1, 2, 3, 4).forEach { s += it }
+    if (s != 10) return "f1: $s"
+    var p = 1
+    setOf(2, 3, 5).forEach { p *= it }
+    if (p != 30) return "f2: $p"
+    val sb = StringBuilder()
+    listOf("a", "b", "c").forEach { sb.append(it) }
+    if (sb.toString() != "abc") return "f3: $sb"
+    var w = 0
+    listOf(10, 20, 30).forEachIndexed { i, x -> w += (i + 1) * x }
+    if (w != 140) return "f4: $w"
+    return "OK"
+}
+"#),
+    ("MapIndexed", r#"
+fun box(): String {
+    val r = listOf(10, 20, 30).mapIndexed { i, x -> i * x + 1 }
+    if (r != listOf(1, 21, 61)) return "f1: $r"
+    val r2 = listOf("a", "bb", "ccc").mapIndexed { i, s -> i + s.length }
+    if (r2 != listOf(1, 3, 5)) return "f2: $r2"
+    return "OK"
+}
+"#),
+    ("IncDec", r#"
+fun ident(n: Int): Int = n
+fun box(): String {
+    var i = 5
+    val a = i++
+    if (a != 5 || i != 6) return "f1"
+    val b = ++i
+    if (b != 7 || i != 7) return "f2"
+    var j = 3
+    if (j-- != 3 || j != 2) return "f3"
+    if (--j != 1 || j != 1) return "f4"
+    var k = 0
+    if ((k++) + (k++) != 1 || k != 2) return "f5"
+    var m = 3
+    if (ident(m--) != 3 || m != 2) return "f6"
+    var t = 0
+    if ("${t++}x" != "0x" || t != 1) return "f7"
+    var w = 0
+    when (w++) { 0 -> {} else -> {} }
+    if (w != 1) return "f8"
+    var n = 0; n++; ++n
+    if (n != 2) return "f9"
+    var by1: Byte = 127; by1++
+    if (by1.toInt() != -128) return "f10"
+    var by2: Byte = 127
+    val ob = by2++
+    if (ob.toInt() != 127 || by2.toInt() != -128) return "f11"
+    var sh: Short = 32767; sh++
+    if (sh.toInt() != -32768) return "f12"
+    var ch = 'a'
+    val oc = ch++
+    if (oc != 'a' || ch != 'b') return "f13"
+    return "OK"
+}
+"#),
+    ("RangeValue", r#"
+fun box(): String {
+    val r = 0..3
+    if (r.first != 0) return "f1"
+    if (r.last != 3) return "f2"
+    var s = 0
+    for (x in r) s += x
+    if (s != 6) return "f3"
+    if ((1..<4).last != 3) return "f4"
+    val lr = 10L..12L
+    if (lr.last != 12L) return "f5a"
+    var lo = 0L
+    for (y in lr) lo += y
+    if (lo != 33L) return "f5"
+    var t = 0
+    for (z in 5..7) t += z
+    if (t != 18) return "f6"
+    var cs = 0
+    for (c in 'a'..'e') cs += c.code
+    if (cs != 'a'.code + 'b'.code + 'c'.code + 'd'.code + 'e'.code) return "f7"
+    var lt = 0L
+    for (y in 1L..4L) lt += y
+    if (lt != 10L) return "f8"
+    return "OK"
+}
+"#),
+];
+
+#[test]
+fn feature_snippets_run() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping feature_box_e2e: set JAVA_HOME");
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping feature_box_e2e: no kotlin-stdlib jar found");
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let jdk_modules = format!("{java_home}/lib/modules");
+    let compile_cp = if std::path::Path::new(&jdk_modules).exists() {
+        format!("{stdlib}:{jdk_modules}")
+    } else {
+        stdlib.clone()
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let work = std::env::temp_dir().join(format!("krusty_feat_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    // Reflective runner compiled once.
+    let runner = work.join("runner");
+    fs::create_dir_all(&runner).unwrap();
+    let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
+public class BoxRun {
+  public static void main(String[] args) throws Exception {
+    for (int i = 0; i + 1 < args.length; i += 2) {
+      String result;
+      try {
+        URLClassLoader cl = new URLClassLoader(new URL[]{ new File(args[i]).toURI().toURL() }, BoxRun.class.getClassLoader());
+        Object r = Class.forName(args[i+1], true, cl).getMethod("box").invoke(null);
+        result = String.valueOf(r);
+      } catch (Throwable t) { result = "EXC:" + t; }
+      System.out.println(args[i+1] + "\t" + result);
+    }
+  }
+}
+"#;
+    fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
+    let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
+    assert!(jc.status.success(), "javac(BoxRun): {}", String::from_utf8_lossy(&jc.stderr));
+
+    // Compile every snippet with krusty into its own dir.
+    let mut cases: Vec<(String, String)> = Vec::new(); // (dir, boxClass)
+    for (i, (stem, src)) in SNIPPETS.iter().enumerate() {
+        let dir = work.join(format!("s{i}"));
+        fs::create_dir_all(&dir).unwrap();
+        let kt = dir.join(format!("{stem}.kt"));
+        fs::write(&kt, src).unwrap();
+        let out = Command::new(krusty).args(["-cp", &compile_cp, "-d", dir.to_str().unwrap()]).arg(&kt).output().unwrap();
+        assert!(out.status.success(), "krusty {stem}: {}", String::from_utf8_lossy(&out.stderr));
+        cases.push((dir.to_str().unwrap().to_string(), format!("{stem}Kt")));
+    }
+
+    // Run all snippets in one JVM.
+    let mut cp = runner.to_str().unwrap().to_string();
+    cp.push(':');
+    cp.push_str(&stdlib);
+    let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
+    for (dir, class) in &cases {
+        args.push(dir.clone());
+        args.push(class.clone());
+    }
+    let run = Command::new(&java).args(&args).output().unwrap();
+    assert!(run.status.success(), "BoxRun: {}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let results: std::collections::HashMap<&str, &str> = stdout.lines().filter_map(|l| l.split_once('\t')).collect();
+    for (_, class) in &cases {
+        let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
+        assert!(got == "OK", "{class}.box() returned {got:?} (all: {stdout})");
+    }
+    let _ = fs::remove_dir_all(&work);
+}
