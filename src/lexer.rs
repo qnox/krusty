@@ -172,6 +172,10 @@ impl<'a> Lexer<'a> {
             let kind = if self.peek() == b'L' {
                 self.i += 1;
                 TokenKind::LongLit
+            } else if self.peek() == b'u' || self.peek() == b'U' {
+                // `0xFFu` (UInt) / `0xFFuL` (ULong).
+                self.i += 1;
+                if self.peek() == b'L' || self.peek() == b'l' { self.i += 1; TokenKind::ULongLit } else { TokenKind::UIntLit }
             } else {
                 TokenKind::IntLit
             };
@@ -202,17 +206,15 @@ impl<'a> Lexer<'a> {
         let kind = if self.peek() == b'f' || self.peek() == b'F' {
             self.i += 1; // `1.5f` / `1f` — a Float literal
             TokenKind::FloatLit
-        } else if self.peek() == b'u' || self.peek() == b'U' {
-            // `1u`/`42U`/`1uL` — unsigned literal. krusty does not model unsigned types (`UInt`,
-            // `ULong` are inline value classes with distinct semantics); treating them as plain
-            // int/long would miscompile (`%`, comparisons, ABI). Reject so the file is skipped,
-            // never silently miscompiled.
-            self.i += 1;
+        } else if (self.peek() == b'u' || self.peek() == b'U') && !is_double {
+            // `1u`/`42U` (UInt) and `1uL`/`42UL` (ULong) — unsigned literals.
+            self.i += 1; // consume `u`/`U`
             if self.peek() == b'L' || self.peek() == b'l' {
                 self.i += 1;
+                TokenKind::ULongLit
+            } else {
+                TokenKind::UIntLit
             }
-            self.diags.error(Span::new(lo, self.i as u32), "krusty: unsigned types are not supported".to_string());
-            TokenKind::IntLit
         } else if self.peek() == b'L' && !is_double {
             self.i += 1;
             TokenKind::LongLit

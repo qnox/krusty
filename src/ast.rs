@@ -28,6 +28,10 @@ pub enum UnOp {
 pub enum Expr {
     IntLit(i64),
     LongLit(i64),
+    /// Unsigned integer literals (`1u`, `0xFFu`, `1uL`). The value is the unsigned magnitude; the
+    /// backend reinterprets it as the signed `int`/`long` bit pattern it is represented by.
+    UIntLit(i64),
+    ULongLit(i64),
     DoubleLit(f64),
     FloatLit(f32),
     BoolLit(bool),
@@ -432,7 +436,8 @@ impl File {
     /// *here*, not in every walker.
     pub fn any_child_expr(&self, e: ExprId, fe: &mut impl FnMut(ExprId) -> bool, fs: &mut impl FnMut(StmtId) -> bool) -> bool {
         match self.expr(e) {
-            Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+            Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
+            | Expr::DoubleLit(_) | Expr::FloatLit(_)
             | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
             | Expr::Name(_) => false,
             Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
@@ -554,6 +559,8 @@ impl File {
         match self.expr(id) {
             Expr::IntLit(v) => out.push_str(&v.to_string()),
             Expr::LongLit(v) => out.push_str(&format!("{v}L")),
+            Expr::UIntLit(v) => out.push_str(&format!("{v}u")),
+            Expr::ULongLit(v) => out.push_str(&format!("{v}uL")),
             Expr::DoubleLit(v) => out.push_str(&format!("{v}d")),
             Expr::FloatLit(v) => out.push_str(&format!("{v}f")),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),

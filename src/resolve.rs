@@ -222,6 +222,8 @@ pub fn conversion_target(name: &str) -> Option<Ty> {
         "toFloat" => Ty::Float,
         "toDouble" => Ty::Double,
         "toChar" => Ty::Char,
+        "toUInt" => Ty::UInt,
+        "toULong" => Ty::ULong,
         _ => return None,
     })
 }
@@ -2135,6 +2137,8 @@ impl<'a> Checker<'a> {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
+            Expr::UIntLit(_) => Ty::UInt,
+            Expr::ULongLit(_) => Ty::ULong,
             Expr::DoubleLit(_) => Ty::Double,
             Expr::FloatLit(_) => Ty::Float,
             Expr::BoolLit(_) => Ty::Boolean,
@@ -2736,6 +2740,16 @@ impl<'a> Checker<'a> {
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
         }
+        // Unsigned arithmetic: both operands the same unsigned type (`UInt`/`ULong`). `+`/`-`/`*`/`/`/`%`
+        // keep the type; comparisons/equality yield `Boolean`. Mixed signed/unsigned is a type error in
+        // Kotlin (explicit conversion required), so it falls through to `bin_err`.
+        if lt.is_unsigned() && lt == rt {
+            return match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => Ty::Boolean,
+                BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => self.bin_err(op, lt, rt, span),
+            };
+        }
         match op {
             BinOp::And | BinOp::Or => {
                 if lt == Ty::Boolean && rt == Ty::Boolean {
@@ -3307,9 +3321,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Numeric/`Char` conversion intrinsics: `n.toInt()`/`toLong()`/`c.toChar()`/….
-                if (rt.is_numeric() || rt == Ty::Char) && arg_tys.is_empty() {
+                if (rt.is_numeric() || rt == Ty::Char || rt.is_unsigned()) && arg_tys.is_empty() {
                     if let Some(target) = conversion_target(&name) {
                         return target;
+                    }
+                    // `inc`/`dec` on an unsigned value return the same unsigned type.
+                    if rt.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
+                        return rt;
                     }
                 }
                 // Curated `java.lang.StringBuilder` instance methods (append/toString/length).

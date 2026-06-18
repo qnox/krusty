@@ -1972,6 +1972,10 @@ impl<'a> Lower<'a> {
         Some(match self.afile.expr(e).clone() {
             Expr::IntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as i32))),
             Expr::LongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
+            // Unsigned literals are the signed int/long bit pattern of their magnitude (`UInt.MAX` =
+            // 0xFFFFFFFFu reinterprets to int -1, which is what kotlinc stores).
+            Expr::UIntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as u32 as i32))),
+            Expr::ULongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
             Expr::DoubleLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Double(v))),
             Expr::FloatLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Float(v))),
             Expr::CharLit(c) => self.ir.add_expr(IrExpr::Const(IrConst::Char(c))),
@@ -2297,6 +2301,14 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
+                // Unsigned `+`/`-`/`*`/`==`/`!=` match signed two's-complement opcodes, but unsigned
+                // `/`/`%`/`<`/`>`/`<=`/`>=` need `UnsignedKt`/`compareUnsigned` (not yet emitted) — bail
+                // so the file is skipped rather than miscompiled.
+                if self.info.ty(lhs).is_unsigned()
+                    && matches!(op, BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                {
+                    return None;
+                }
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = match op {
                     BinOp::Add => Some("plus"), BinOp::Sub => Some("minus"), BinOp::Mul => Some("times"),
@@ -2551,6 +2563,12 @@ impl<'a> Lower<'a> {
                 let body_tys: Vec<Ty> = arms.iter().map(|a| self.info.ty(a.body)).collect();
                 let any_unit = body_tys.iter().any(|t| *t == Ty::Unit);
                 if any_unit && !body_tys.iter().all(|t| *t == Ty::Unit) {
+                    return None;
+                }
+                // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
+                // but a `ULong` subject whose magnitude exceeds `Long.MAX` needs care, and the unsigned
+                // const-val arms aren't materialized yet — bail rather than risk a mismatch.
+                if subject.map_or(false, |s| self.info.ty(s).is_unsigned()) {
                     return None;
                 }
                 // A no-`else` `when` used as a *value* is only accepted by the checker when it is
@@ -2882,6 +2900,41 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
+                    // Unsigned conversions. `UInt`/`Int` and `ULong`/`Long` share a JVM representation,
+                    // so a conversion that doesn't change the representation is a no-op reinterpret;
+                    // `UInt.toLong()`/`toULong()` zero-extend (`Integer.toUnsignedLong`, NOT the
+                    // sign-extending `i2l`); `ULong.toInt()` truncates (`l2i`); `inc`/`dec` are ±1.
+                    {
+                        let rty = self.info.ty(receiver);
+                        if args.is_empty() && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong")) {
+                            let repr = |t: Ty| t.unsigned_repr().unwrap_or(t);
+                            if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
+                                let one = if rty == Ty::ULong { IrConst::Long(1) } else { IrConst::Int(1) };
+                                let r = self.expr(receiver)?;
+                                let o = self.ir.add_expr(IrExpr::Const(one));
+                                let op = if name == "dec" { IrBinOp::Sub } else { IrBinOp::Add };
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: r, rhs: o }));
+                            }
+                            if let Some(target) = crate::resolve::conversion_target(&name) {
+                                let r = self.expr(receiver)?;
+                                if rty == Ty::UInt && matches!(target, Ty::Long | Ty::ULong) {
+                                    // zero-extend the 32-bit unsigned value into a long
+                                    return Some(self.ir.add_expr(IrExpr::Call {
+                                        callee: Callee::Static { owner: "java/lang/Integer".to_string(), name: "toUnsignedLong".to_string(), descriptor: "(I)J".to_string() },
+                                        dispatch_receiver: None, args: vec![r],
+                                    }));
+                                }
+                                if repr(rty) == repr(target) {
+                                    return Some(r); // identity reinterpret (UInt↔Int, ULong↔Long, UInt→UInt)
+                                }
+                                if repr(rty).is_primitive() && repr(target).is_primitive() {
+                                    return Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: ty_to_ir(repr(target)) }));
+                                }
+                            }
+                            // Any other unsigned conversion (e.g. unsigned→float) isn't modeled — bail.
+                            return None;
+                        }
+                    }
                     // Primitive numeric/`Char` conversions (`n.toLong()`, `c.toInt()`, `i.toChar()`, …)
                     // are coercions — the backend emits the `i2l`/`l2i`/`i2c`/… opcode.
                     {
@@ -3098,7 +3151,8 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
 /// Is `e` a compile-time constant literal (an argument-default krusty can inline at the call site)?
 fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e),
-        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
+        | Expr::DoubleLit(_) | Expr::FloatLit(_)
         | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::StringLit(_) | Expr::NullLit)
 }
 
@@ -3106,7 +3160,8 @@ fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
 /// `Intrinsics.areEqual`)? Conservative — only obvious primitive literals count.
 fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e),
-        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+        Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
+        | Expr::DoubleLit(_) | Expr::FloatLit(_)
         | Expr::BoolLit(_) | Expr::CharLit(_))
 }
 
@@ -3222,6 +3277,10 @@ fn ty_to_ir(t: Ty) -> IrType {
     let fq = match t {
         Ty::Int => "kotlin/Int",
         Ty::Long => "kotlin/Long",
+        // Unboxed unsigned types ARE their signed primitive on the JVM (`UInt` = int, `ULong` = long);
+        // unsigned-specific operations are selected earlier from the checker `Ty`, not here.
+        Ty::UInt => "kotlin/Int",
+        Ty::ULong => "kotlin/Long",
         Ty::Short => "kotlin/Short",
         Ty::Byte => "kotlin/Byte",
         Ty::Boolean => "kotlin/Boolean",
