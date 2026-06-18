@@ -741,9 +741,6 @@ impl<'a> Emitter<'a> {
         if !captures.is_empty() {
             return false; // v1: only non-capturing lambdas
         }
-        if code.stack_height() != 0 {
-            return false; // empty operand-stack baseline (sub-expression calls fall back)
-        }
         let arity = arity as usize;
         let Some(params) = parse_descriptor_params(descriptor) else { return false };
         if lam_idx >= params.len() {

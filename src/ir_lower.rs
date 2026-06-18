@@ -1323,6 +1323,34 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.classes.get(i))
     }
 
+    /// Route a library `inline fun` call with a lambda argument (`recv.<name> { … }`) to the bytecode
+    /// inliner (`Callee::Static` with `inline`), carrying the receiver and the lambda — so its real body
+    /// is spliced rather than desugared per-function. Metadata-driven: gated on the resolved callable's
+    /// `is_inline` flag, not the name. Only routes a non-capturing, single-value-return lambda (which the
+    /// emitter is guaranteed to splice); `None` ⇒ the call falls through to its desugar / normal lowering.
+    fn try_route_lambda_inline(&mut self, name: &str, receiver: AstExprId, lam_arg: AstExprId, rty: Ty) -> Option<u32> {
+        let c = self.syms.libraries.resolve_callable(name, Some(rty), &[self.info.ty(lam_arg)], &[])?;
+        if !c.is_inline {
+            return None;
+        }
+        let lam = self.expr(lam_arg)?;
+        let inlinable = matches!(self.ir.expr(lam), IrExpr::Lambda { captures, impl_fn, .. }
+            if captures.is_empty() && {
+                let b = self.ir.functions[*impl_fn as usize].body;
+                matches!(b, Some(bb) if matches!(self.ir.expr(bb), IrExpr::Block { stmts, value: None }
+                    if stmts.len() == 1 && matches!(self.ir.expr(stmts[0]), IrExpr::Return(Some(_)))))
+            });
+        if !inlinable {
+            return None;
+        }
+        let recv = self.expr(receiver)?;
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: true },
+            dispatch_receiver: None,
+            args: vec![recv, lam],
+        }))
+    }
+
     fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
         self.afile.decls.iter().find_map(|&d| match self.afile.decl(d) {
             Decl::Fun(f) if f.name == name => Some(f),
@@ -3258,6 +3286,17 @@ impl<'a> Lower<'a> {
                     // Inlined scope functions `recv.let { it -> body }` / `recv.also { it -> body }`:
                     // bind the lambda parameter to the (once-evaluated) receiver; `let` yields the body
                     // value, `also` yields the receiver. Inlined so a mutable capture works (no closure).
+                    // Route (b), metadata-driven (no name hardcode): inline ANY library `inline fun` whose
+                    // single lambda argument the emitter can splice (non-capturing, single-value return) —
+                    // by reading its real compiled body, not a per-function desugar. `try_route_lambda_inline`
+                    // gates on the resolved callable's `is_inline` flag (from `@Metadata`); it returns `None`
+                    // when not inlinable, so the call falls through to its desugar / normal lowering.
+                    if args.len() == 1 && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
+                        let rty = self.info.ty(receiver);
+                        if let Some(call) = self.try_route_lambda_inline(&name, receiver, args[0], rty) {
+                            return Some(call);
+                        }
+                    }
                     if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);
