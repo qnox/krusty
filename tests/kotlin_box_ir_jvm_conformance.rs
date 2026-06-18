@@ -170,6 +170,15 @@ static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Compile Kotlin source to a list of (class_internal_name, class_bytes) pairs.
 /// Returns None if compilation fails (unsupported feature).
+thread_local! {
+    /// One `Classpath` per (rayon thread, classpath set), reused across every file that thread
+    /// compiles — the real `kotlinc`/`main.rs` builds the classpath once per invocation too, so
+    /// rebuilding (and re-indexing the stdlib jar) per file was pure harness overhead. `Classpath` is
+    /// `!Sync` (RefCell caches), so the cache is thread-local rather than shared across workers.
+    static CP_CACHE: std::cell::RefCell<std::collections::HashMap<Vec<std::path::PathBuf>, std::rc::Rc<Classpath>>>
+        = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
     let t0 = std::time::Instant::now();
@@ -189,7 +198,13 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
     // path, exactly as a `kotlinc -classpath` invocation would.
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
-    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    // Reuse a thread-local `Classpath` for this classpath set (warm caches across files).
+    let cp = CP_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry(cp_paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
+            .clone()
+    });
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let syms = collect_signatures_with_cp(&files, platform, &mut diags);
     T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
