@@ -3804,7 +3804,15 @@ impl<'a> Checker<'a> {
                             crate::libraries::resolve_instance(&*self.syms.libraries, i, &comp, &[])
                                 .map(|m| self.syms.libraries.member_return(it, &comp, &[]).unwrap_or(m.ret))
                         })
-                    });
+                    })
+                    // `List.component1()`, … are stdlib *extensions* — try those too.
+                    .or_else(|| self.syms.libraries.resolve_callable(&comp, Some(it), &[], &[]).map(|c| c.ret))
+                    // An indexable type (`List`): `componentN` is the inline `get(N-1)` — use the
+                    // element type from `get(Int)` (which kotlinc inlines the component to).
+                    .or_else(|| internal.and_then(|i| {
+                        crate::libraries::resolve_instance(&*self.syms.libraries, i, "get", &[Ty::Int])
+                            .map(|m| self.syms.libraries.member_return(it, "get", &[Ty::Int]).unwrap_or(m.ret))
+                    }));
                     match ty {
                         Some(t) => self.declare(name, t, *is_var),
                         None => {
