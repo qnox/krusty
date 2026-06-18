@@ -134,6 +134,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
+                enum_entry_subclass: vec![None; c.enum_entries.len()],
+                enum_entry_of: None,
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object,
@@ -258,7 +260,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     ctor_args: vec![],
                     init_body: None, methods: vec![], is_interface: false,
                     superclass: "kotlin/Any".to_string(), super_args: vec![],
-                    enum_entries: vec![], bridges: vec![], interfaces: vec![],
+                    enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None, bridges: vec![], interfaces: vec![],
                     is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
                     field_final: vec![], secondary_ctors: vec![],
                 });
@@ -740,6 +742,52 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].1 = lowered;
                     }
+                    // Entry bodies (`ENTRY { override fun m() = … }`) → a synthesized subclass per
+                    // bodied entry (`Enum$ENTRY extends Enum`) whose overrides are lowered with the
+                    // enum's field/`this` scope (so a read of a constructor `val` becomes a getfield on
+                    // the enum). The entry is then constructed as `new Enum$ENTRY(...)`.
+                    for (ei, body) in c.enum_entry_bodies.iter().enumerate() {
+                        if body.is_empty() {
+                            continue;
+                        }
+                        let entry_name = &c.enum_entries[ei];
+                        let sub_fq = format!("{internal}${entry_name}");
+                        let sub_id = lo.ir.add_class(IrClass {
+                            fq_name: sub_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
+                            ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
+                            superclass: internal.clone(), super_args: vec![],
+                            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: Some(field_tys.clone()),
+                            bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
+                            is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
+                        });
+                        let mut mfids = Vec::new();
+                        for bm in body {
+                            // The override conforms to the abstract member it overrides — use that
+                            // signature for the emitted descriptor (kotlinc's erased override shape).
+                            let sig = syms.classes.get(&c.name)?.methods.get(&bm.name)?.clone();
+                            let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                            let fid = lo.ir.add_fun(IrFunction {
+                                name: bm.name.clone(), params, ret: ty_to_ir(sig.ret), body: None,
+                                is_static: false, dispatch_receiver: Some(sub_fq.clone()), param_checks: vec![],
+                            });
+                            lo.scope.clear();
+                            lo.next_value = 0;
+                            lo.cur_class = Some(internal.clone());
+                            lo.cur_fn_name = bm.name.clone();
+                            lo.lambda_seq = 0;
+                            let this_v = lo.fresh_value();
+                            lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                            for (p, t) in bm.params.iter().zip(&sig.params) {
+                                let v = lo.fresh_value();
+                                lo.scope.push((p.name.clone(), v, *t));
+                            }
+                            let ret_ty = ty_to_ir(sig.ret);
+                            lo.lower_body(&bm.body, &ret_ty, fid)?;
+                            mfids.push(fid);
+                        }
+                        lo.ir.classes[sub_id as usize].methods = mfids;
+                        lo.ir.classes[class_id as usize].enum_entry_subclass[ei] = Some(sub_fq);
+                    }
                 }
             }
             Decl::Property(p) => {
@@ -799,15 +847,24 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
-/// bodied) methods, plain body-props, and no companion / secondary ctors / supertypes / per-entry
-/// bodies (entry bodies would need an anonymous subclass per entry, which the flat AST doesn't carry).
+/// bodied) or abstract methods, plain body-props, and no companion / secondary ctors / supertypes.
+/// Per-entry bodies (`ENTRY { override fun m() = … }`) are emitted as anonymous subclasses; only
+/// method overrides are supported (a property override would need backing-field plumbing — deferred).
 fn is_simple_enum(c: &ast::ClassDecl) -> bool {
+    let has_abstract_method = c.methods.iter().any(|m| matches!(m.body, FunBody::None));
     c.is_enum
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
         && c.props.iter().all(|p| p.is_property)
-        && c.body_props.iter().all(is_plain_body_prop)
-        && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
+        // A body property must be a plain backing field — an `abstract val` (entry-overridden property)
+        // isn't modeled yet.
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) && !p.is_abstract)
+        && c.methods.iter().all(|m| m.receiver.is_none())
+        // Entry-body overrides: concrete, non-extension methods only.
+        && c.enum_entry_bodies.iter().all(|b| b.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None)))
+        // If the enum declares an abstract method, every entry must override it (a bodyless entry would
+        // instantiate the abstract enum directly → a verify error). kotlinc requires this anyway.
+        && (!has_abstract_method || c.enum_entry_bodies.iter().all(|b| !b.is_empty()))
 }
 
 /// An `object Foo` the IR can emit as a singleton: no primary-constructor params, plain body

@@ -538,6 +538,7 @@ impl<'a> Parser<'a> {
         }
         let mut entries = Vec::new();
         let mut entry_args: Vec<Vec<ExprId>> = Vec::new();
+        let mut entry_bodies: Vec<Vec<FunDecl>> = Vec::new();
         let mut methods = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
@@ -559,10 +560,28 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(TokenKind::RParen, "')'");
                 }
-                // A per-entry class body (`RED { … }`) is an anonymous subclass — unsupported.
-                if self.at(TokenKind::LBrace) {
-                    self.diags.error(self.tok().span, "krusty: enum entries with a body are not supported");
+                // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
+                // Capture its method overrides; any non-method member bails (file skips cleanly).
+                let mut body = Vec::new();
+                if self.eat(TokenKind::LBrace) {
+                    self.skip_newlines();
+                    while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                        let bmods = if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                            let m = self.skip_decl_prefix();
+                            self.skip_newlines();
+                            m
+                        } else { Vec::new() };
+                        if self.at(TokenKind::KwFun) {
+                            body.push(self.parse_fun(bmods.iter().any(|m| m == "inline"), bmods.iter().any(|m| m == "final")));
+                        } else {
+                            self.diags.error(self.tok().span, "krusty: only method overrides are supported in an enum entry body");
+                            while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) { self.bump(); }
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace, "'}'");
                 }
+                entry_bodies.push(body);
                 entry_args.push(args);
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
@@ -627,6 +646,7 @@ impl<'a> Parser<'a> {
             is_enum: true,
             enum_entries: entries,
             enum_entry_args: entry_args,
+            enum_entry_bodies: entry_bodies,
             is_interface: false, is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -988,7 +1008,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, delegations, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, delegations, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -1112,7 +1132,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
@@ -1185,7 +1205,7 @@ impl<'a> Parser<'a> {
             name: name.clone(), type_params: Vec::new(), props: Vec::new(), methods,
             companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order,
             is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false,
             is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
             supertypes, delegations, base_class, base_args, secondary_ctors: Vec::new(),
             span: Span::new(span.lo, end.hi),
@@ -1250,7 +1270,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

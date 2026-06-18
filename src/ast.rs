@@ -277,6 +277,10 @@ pub struct ClassDecl {
     /// Constructor arguments per enum entry (parallel to `enum_entries`; empty for `A` with no args).
     /// The enum's primary-constructor parameters are in `props`.
     pub enum_entry_args: Vec<Vec<ExprId>>,
+    /// Per-entry class body (`ENTRY { override fun m() = … }`) — the overriding methods of the
+    /// anonymous subclass kotlinc emits as `Enum$ENTRY`. Parallel to `enum_entries`; an empty `Vec`
+    /// means the entry has no body. Only method overrides are captured (property overrides bail).
+    pub enum_entry_bodies: Vec<Vec<FunDecl>>,
     /// `interface Name { … }` — a JVM interface (abstract methods).
     pub is_interface: bool,
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is

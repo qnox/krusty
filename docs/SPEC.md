@@ -182,8 +182,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
   order, and synthetic `values()`/`valueOf(String)`. `e.ordinal`/`e.name` are `Enum.ordinal()`/
   `name()`; entry equality is reference identity (`==`). Entry constructor args are constant
-  expressions evaluated in `<clinit>` (branchy args, entry bodies, and abstract enum methods are not
-  yet supported — krusty skips such files rather than miscompile).
+  expressions evaluated in `<clinit>` (branchy args are spilled to `<clinit>` temps).
+- **Enum entries with a body / abstract enum members**: an `abstract fun`/bodied entry makes the enum
+  `ACC_ABSTRACT` (not `final`); each entry with a body (`ENTRY { override fun m() = … }`) is emitted
+  as a synthesized package-private `final` subclass `Enum$ENTRY extends Enum` whose constructor
+  `(String, int, …userArgs)V` delegates to the enum's constructor (made package-private so the
+  subclass can call it) and whose overrides are lowered with the enum's `this`/field scope (so an
+  override may read a constructor `val` as a `getfield` on the enum). The `<clinit>` constructs such
+  an entry as `new Enum$ENTRY(name, ordinal, …)`. An abstract enum member requires every entry to
+  override it (else the file is skipped, never miscompiled); property overrides in an entry body
+  (`override val`) are not yet modeled — skipped.
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form

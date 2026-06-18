@@ -1336,6 +1336,15 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
+                // Enum entry bodies (`ENTRY { override fun m() = … }`): each override is checked like
+                // a method of the enum — `this` is the enum type, its properties are in scope (so an
+                // override can read a constructor `val`), and the return type comes from the abstract
+                // member it overrides.
+                for body in &cl.enum_entry_bodies {
+                    for bm in body {
+                        c.check_method(bm, &props);
+                    }
+                }
                 // Secondary constructors: their parameters + the class properties are in scope; the
                 // `this(args)` delegation is checked against the primary constructor, then the body.
                 let primary_params = c.syms.classes.get(&cl.name).map(|s| s.ctor_params.clone()).unwrap_or_default();
