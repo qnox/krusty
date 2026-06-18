@@ -843,7 +843,7 @@ fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
 fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
     let v = |x: ExprId| bc_complex_e(file, x, true);
     match file.stmt(s) {
-        Stmt::Break | Stmt::Continue => forbidden,
+        Stmt::Break(_) | Stmt::Continue(_) => forbidden,
         Stmt::Local { init, .. } | Stmt::Destructure { init, .. } | Stmt::Assign { value: init, .. } => v(*init),
         Stmt::AssignMember { receiver, value, .. } => v(*receiver) || v(*value),
         Stmt::AssignIndex { array, index, value } => v(*array) || v(*index) || v(*value),
@@ -851,7 +851,7 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
         Stmt::Return(None) | Stmt::IncDec { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
         Stmt::Expr(e) => bc_complex_e(file, *e, false),
-        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => v(*cond) || bc_complex_e(file, *body, false),
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => v(*cond) || bc_complex_e(file, *body, false),
         Stmt::For { range, body, .. } => v(range.start) || v(range.end) || range.step.map_or(false, |s| v(s)) || bc_complex_e(file, *body, false),
         Stmt::ForEach { iterable, body, .. } => v(*iterable) || bc_complex_e(file, *body, false),
         // A local function is a separate body — `break`/`continue` in it would be non-local.
@@ -920,8 +920,8 @@ fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collectio
             Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
             Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
             Stmt::Return(Some(e)) => r(*e),
-            Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
-            Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => r(*cond) || r(*body),
+            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => false,
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => r(*cond) || r(*body),
             Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
             Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
             Stmt::Expr(e) => r(*e),
@@ -1815,7 +1815,7 @@ impl<'a> Checker<'a> {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
                 } else if let Some(&last) = stmts.last() {
-                    matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break | Stmt::Continue)
+                    matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_))
                 } else {
                     false
                 }
@@ -2582,7 +2582,7 @@ impl<'a> Checker<'a> {
                         // A block whose last statement always transfers control (break/continue/return)
                         // has type Nothing — it never produces a value or falls through.
                         if let Some(&last) = stmts.last() {
-                            if matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break | Stmt::Continue) {
+                            if matches!(self.file.stmt(last), Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_)) {
                                 Ty::Nothing
                             } else {
                                 Ty::Unit
@@ -4066,7 +4066,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Break | Stmt::Continue => {} // loop control — validated structurally at codegen
+            Stmt::Break(_) | Stmt::Continue(_) => {} // loop control — validated structurally at codegen
             Stmt::Return(e) => {
                 let rt = self.ret_ty;
                 match e {
@@ -4081,17 +4081,17 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 self.expr(body);
             }
-            Stmt::DoWhile { body, cond } => {
+            Stmt::DoWhile { body, cond, .. } => {
                 self.expr(body);
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
             }
-            Stmt::For { name, range, body } => {
+            Stmt::For { name, range, body, .. } => {
                 let st = self.expr(range.start);
                 let et = self.expr(range.end);
                 // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
@@ -4112,7 +4112,7 @@ impl<'a> Checker<'a> {
                 self.expr(body);
                 self.pop_scope();
             }
-            Stmt::ForEach { name, iterable, body } => {
+            Stmt::ForEach { name, iterable, body, .. } => {
                 let it = self.expr(iterable);
                 let elem = match it {
                     Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),

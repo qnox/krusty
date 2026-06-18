@@ -1550,14 +1550,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> StmtId {
-        // Labeled loop: `l1@while(…)` or `l1@for(…)` — labels are not supported yet.
+        // Labeled loop: `l1@ while(…)` / `l1@ for(…)` / `l1@ do {…}`. Capture the label and thread it
+        // onto the loop so `break@l1`/`continue@l1` can target it.
+        let mut loop_label: Option<String> = None;
         if self.at(TokenKind::Ident) {
             let next1 = self.t.get(self.i + 1);
             let next2 = self.t.get(self.i + 2);
             let is_label = next1.map_or(false, |t| t.kind == TokenKind::At)
-                && next2.map_or(false, |t| matches!(t.kind, TokenKind::KwWhile | TokenKind::KwFor));
+                && next2.map_or(false, |t| matches!(t.kind, TokenKind::KwWhile | TokenKind::KwFor | TokenKind::KwDo));
             if is_label {
-                self.diags.error(self.tok().span, "krusty: labeled loops not supported".to_string());
+                loop_label = Some(self.text().to_string());
                 self.bump(); // label name
                 self.bump(); // '@'
             }
@@ -1629,19 +1631,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident if self.text() == "break" => {
                 self.bump();
-                if self.at(TokenKind::At) {
-                    self.diags.error(self.tok().span, "krusty: labeled break not supported".to_string());
-                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
-                }
-                self.finish_stmt(Stmt::Break, start)
+                let label = self.parse_loop_label_ref();
+                self.finish_stmt(Stmt::Break(label), start)
             }
             TokenKind::Ident if self.text() == "continue" => {
                 self.bump();
-                if self.at(TokenKind::At) {
-                    self.diags.error(self.tok().span, "krusty: labeled continue not supported".to_string());
-                    while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) { self.bump(); }
-                }
-                self.finish_stmt(Stmt::Continue, start)
+                let label = self.parse_loop_label_ref();
+                self.finish_stmt(Stmt::Continue(label), start)
             }
             TokenKind::KwWhile => {
                 self.bump();
@@ -1651,7 +1647,7 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 // `parse_branch` handles a statement body (e.g. `while (c) i++`), not just an expression.
                 let body = self.parse_branch();
-                self.finish_stmt(Stmt::While { cond, body }, start)
+                self.finish_stmt(Stmt::While { cond, body, label: loop_label }, start)
             }
             TokenKind::KwDo => {
                 self.bump();
@@ -1662,9 +1658,9 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::LParen, "'('");
                 let cond = self.parse_expr();
                 self.expect(TokenKind::RParen, "')'");
-                self.finish_stmt(Stmt::DoWhile { body, cond }, start)
+                self.finish_stmt(Stmt::DoWhile { body, cond, label: loop_label }, start)
             }
-            TokenKind::KwFor => self.parse_for(start),
+            TokenKind::KwFor => self.parse_for(start, loop_label),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
             TokenKind::KwFun => {
                 let f = self.parse_fun(false, false);
@@ -1740,7 +1736,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_for(&mut self, start: Span) -> StmtId {
+    fn parse_for(&mut self, start: Span, label: Option<String>) -> StmtId {
         self.bump(); // 'for'
         self.expect(TokenKind::LParen, "'('");
         // A destructuring loop variable — `for ((a, b) in pairs)` — desugars to a synthetic temp plus
@@ -1791,11 +1787,11 @@ impl<'a> Parser<'a> {
                     let zero = self.file.add_expr(Expr::IntLit(0), sp);
                     let size = self.file.add_expr(Expr::Member { receiver, name: "size".to_string() }, sp);
                     let range = ForRange { start: zero, end: size, kind: RangeKind::Until, step: None };
-                    return self.finish_stmt(Stmt::For { name, range, body }, start);
+                    return self.finish_stmt(Stmt::For { name, range, body, label }, start);
                 }
             }
             // Otherwise iterate over `rstart` as a collection: `for (x in array)`.
-            return self.finish_stmt(Stmt::ForEach { name, iterable: rstart, body }, start);
+            return self.finish_stmt(Stmt::ForEach { name, iterable: rstart, body, label }, start);
         };
         let rend = self.parse_bp(9);
         let step = if self.at(TokenKind::Ident) && self.text() == "step" {
@@ -1807,7 +1803,21 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RParen, "')'");
         self.skip_newlines();
         let body = self.parse_branch();
-        self.finish_stmt(Stmt::For { name, range: ForRange { start: rstart, end: rend, kind, step }, body }, start)
+        self.finish_stmt(Stmt::For { name, range: ForRange { start: rstart, end: rend, kind, step }, body, label }, start)
+    }
+
+    /// Parse an optional `@label` reference after `break`/`continue` (`break@outer`). Returns the label
+    /// name, or `None` for an unlabeled `break`/`continue`.
+    fn parse_loop_label_ref(&mut self) -> Option<String> {
+        if self.at(TokenKind::At) {
+            self.bump(); // '@'
+            if self.at(TokenKind::Ident) {
+                let l = self.text().to_string();
+                self.bump();
+                return Some(l);
+            }
+        }
+        None
     }
 
     /// For a destructuring `for ((a, b) in …)`, prepend `val (a, b) = <temp>` to the loop body so the
