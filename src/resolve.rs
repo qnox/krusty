@@ -3303,6 +3303,17 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
+                // lambda parameter types directly from the element (the index is `Int`).
+                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
+                    if matches!(name.as_str(), "forEach" | "forEachIndexed") {
+                        let elem = if rt == Ty::String { Some(Ty::Char) } else { rt.array_elem() };
+                        if let Some(elem) = elem {
+                            return Some(if name == "forEach" { vec![vec![elem]] } else { vec![vec![Ty::Int, elem]] });
+                        }
+                    }
+                    None
+                });
                 // `recv.forEach { … }` resolving to the stdlib library extension is inlined to a
                 // for-each loop by the backend, so a mutable capture in its lambda is fine (no closure).
                 // Permit it for this call only (the lowering must inline, or bail — never form a closure).
