@@ -97,7 +97,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     for s in &ir.statics {
         cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
     }
-    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
     let mut code = CodeBuilder::new(0);
     for s in &ir.statics {
         e.emit_value(s.init, &mut code);
@@ -160,7 +160,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     let max_slot;
     let mut init_diverges = false;
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
@@ -230,7 +230,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         let sec_max;
         let mut sec_diverges = false;
         {
-            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
+            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
             e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
             let mut s = 1u16;
             for (vi, t) in sc_param_tys.iter().enumerate() {
@@ -468,7 +468,7 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
@@ -551,7 +551,7 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new(), inlining: false };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -611,7 +611,7 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new(), inlining: false };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -675,20 +675,150 @@ struct Emitter<'a> {
     ret: Ty,
     /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
     loop_stack: Vec<(Label, Label)>,
+    /// True while emitting an inlined lambda body (route-(b) lambda splice): a `Return` leaves its value
+    /// on the operand stack and falls through (the spliced stdlib body continues) instead of `*return`.
+    inlining: bool,
+}
+
+/// Parse a method descriptor's parameter types (in order) to `Ty`s.
+fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
+    let inner = desc.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while b.get(i) == Some(&b'[') {
+            i += 1;
+        }
+        match b.get(i)? {
+            b'L' => {
+                while b.get(i) != Some(&b';') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+        out.push(crate::jvm::jvm_libraries::desc_to_ty(&inner[start..i]));
+    }
+    Some(out)
 }
 
 impl<'a> Emitter<'a> {
+    /// Emit lambda impl function `impl_fn`'s body INLINE: bind its parameter value-indices `0..` to the
+    /// given JVM slots (the lambda's typed arguments), then emit its body with `inlining` set so its
+    /// `Return` leaves the result on the stack (instead of `*return`). Used by route-(b) lambda splice.
+    fn emit_fn_body_inline(&mut self, impl_fn: u32, param_slots: &[(u16, Ty)], code: &mut CodeBuilder) {
+        let body = self.ir.functions[impl_fn as usize].body.expect("lambda impl has a body");
+        let saved_slots = std::mem::take(&mut self.slots);
+        let saved_inlining = self.inlining;
+        self.inlining = true;
+        for (i, &(slot, ty)) in param_slots.iter().enumerate() {
+            self.slots.insert(i as u32, (slot, ty));
+        }
+        self.emit(body, code);
+        self.inlining = saved_inlining;
+        self.slots = saved_slots;
+    }
+
+    /// Route (b): inline a cross-module `inline fun` whose body calls a lambda *parameter*, splicing the
+    /// caller's lambda body at the `FunctionN.invoke` site. v1: a branchless single-invoke body
+    /// (`let`/`also`/`run`/`apply`/…), one lambda argument, no captures. Returns `true` if inlined.
+    fn try_inline_lambda_call(
+        &mut self,
+        descriptor: &str,
+        args: &[u32],
+        lam_idx: usize,
+        lam_expr: u32,
+        body: &crate::jvm::classreader::MethodCode,
+        base: u16,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let IrExpr::Lambda { impl_fn, arity, captures, .. } = self.ir.expr(lam_expr).clone() else {
+            return false;
+        };
+        if !captures.is_empty() {
+            return false; // v1: only non-capturing lambdas
+        }
+        if code.stack_height() != 0 {
+            return false; // empty operand-stack baseline (sub-expression calls fall back)
+        }
+        let arity = arity as usize;
+        let Some(params) = parse_descriptor_params(descriptor) else { return false };
+        if lam_idx >= params.len() {
+            return false;
+        }
+        // Slot offset of the lambda parameter within the (shifted) body frame.
+        let lambda_off: u16 = params[..lam_idx].iter().map(|t| slot_words(*t)).sum();
+        let Some((before, after)) = crate::jvm::inline::branchless_lambda_segments(body, base, lambda_off, self.cw) else {
+            return false;
+        };
+        // The lambda impl's typed parameters (no captures) and return.
+        let impl_f = &self.ir.functions[impl_fn as usize];
+        if impl_f.params.len() != arity {
+            return false; // a capture slipped through — unsupported
+        }
+        let lam_tys: Vec<Ty> = impl_f.params.iter().map(ir_ty_to_jvm).collect();
+        let impl_ret = ir_ty_to_jvm(&impl_f.ret);
+
+        // Prologue: emit each NON-lambda argument and store it into its parameter slot (the lambda param
+        // has no value — its loads were elided from the body segments).
+        let mut off: u16 = 0;
+        for (i, pty) in params.iter().enumerate() {
+            let jt = *pty;
+            if i != lam_idx {
+                self.emit_value(args[i], code);
+                store(jt, base + off, code);
+            }
+            off += slot_words(jt);
+        }
+        // `before`: the relocated body up to the invoke (lambda-object loads elided) — leaves the lambda's
+        // (boxed) arguments on the stack.
+        self.append_segment(&before, body.max_stack, code, arity as i32);
+        // Unbox each argument to the lambda's typed parameter and store it (top = last argument).
+        let mut param_slots: Vec<(u16, Ty)> = vec![(0, Ty::Error); arity];
+        for j in (0..arity).rev() {
+            let jt = lam_tys[j];
+            if jt.is_primitive() {
+                unbox_prim(self.cw, code, jt);
+            }
+            let slot = self.next_slot;
+            self.next_slot += slot_words(jt);
+            store(jt, slot, code);
+            param_slots[j] = (slot, jt);
+        }
+        code.set_stack(0);
+        // The lambda body, inlined (its captures resolve to the caller's frame; mutable capture works).
+        self.emit_fn_body_inline(impl_fn, &param_slots, code);
+        // Box the typed result back to `Object` — the body's `after` continues from the invoke's `Object`.
+        if impl_ret.is_primitive() {
+            box_prim_free(self.cw, code, impl_ret);
+        }
+        // `after`: the relocated body past the invoke (the trailing return dropped) — yields the value.
+        self.append_segment(&after, body.max_stack, code, slot_words(ty_from_descriptor_ret(descriptor)) as i32);
+        true
+    }
+
+    /// Append a pre-relocated, branchless instruction segment (from `branchless_lambda_segments`) as raw
+    /// bytes, reserving `body_stack` of headroom and setting the resulting stack height to `result_slots`.
+    fn append_segment(&mut self, seg: &[crate::jvm::inline::Insn], body_stack: u16, code: &mut CodeBuilder, result_slots: i32) {
+        let bytes = crate::jvm::inline::assemble(seg);
+        let base_stack = code.stack_height();
+        code.set_stack((base_stack as u16).saturating_add(body_stack)); // reserve peak headroom
+        code.bytes.extend_from_slice(&bytes);
+        if code.max_locals < self.next_slot {
+            code.max_locals = self.next_slot;
+        }
+        code.set_stack((base_stack + result_slots).max(0) as u16);
+    }
+
     /// Attempt to splice a cross-module `inline fun`'s compiled body at the call site (the bytecode
     /// inliner; the callee body comes from [`MethodBodies::body`]). Returns `true` if spliced; `false`
     /// ⇒ the caller emits an ordinary `invokestatic`, so an un-spliceable inline call is never
     /// miscompiled. The splice itself (StackMapTable relocation for branchy bodies + lambda-argument
     /// splicing) lands in the next phase — until then this always falls back.
     fn try_inline_static(&mut self, owner: &str, name: &str, descriptor: &str, args: &[u32], code: &mut CodeBuilder) -> bool {
-        // A function-typed (lambda) parameter needs invoke-site splicing of the caller's lambda — a
-        // later step; for now only no-lambda inline fns are spliceable.
-        if descriptor.contains("Lkotlin/jvm/functions/Function") {
-            return false;
-        }
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
             return false;
         };
@@ -696,6 +826,17 @@ impl<'a> Emitter<'a> {
         // high-water mark, so the spliced temporaries can never collide with a caller local (live or
         // reserved-but-unstored).
         let base = self.next_slot.max(code.max_locals);
+        // Route (b): a literal lambda argument → inline its body at the body's `FunctionN.invoke` site.
+        if let Some((lam_idx, lam_expr)) = args.iter().enumerate()
+            .find_map(|(i, &a)| matches!(self.ir.expr(a), IrExpr::Lambda { .. }).then_some((i, a)))
+        {
+            return self.try_inline_lambda_call(descriptor, args, lam_idx, lam_expr, &body, base, code);
+        }
+        // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) isn't
+        // spliceable — fall back to a normal call.
+        if descriptor.contains("Lkotlin/jvm/functions/Function") {
+            return false;
+        }
         let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
         let top_local = base + body.max_locals;
         // Branchless single-exit body: append the spliced bytes, no frames needed.
@@ -784,9 +925,17 @@ impl<'a> Emitter<'a> {
             IrExpr::Return(v) => match v {
                 Some(v) => {
                     self.emit_value(v, code);
-                    emit_return(self.ret, code);
+                    // Inside an inlined lambda body the result must stay on the stack (the spliced stdlib
+                    // body continues) rather than returning from the enclosing method.
+                    if !self.inlining {
+                        emit_return(self.ret, code);
+                    }
                 }
-                None => code.ret_void(),
+                None => {
+                    if !self.inlining {
+                        code.ret_void();
+                    }
+                }
             },
             IrExpr::Variable { index, ty, init } => {
                 // Emit the initializer BEFORE allocating the slot, so the variable's slot isn't
