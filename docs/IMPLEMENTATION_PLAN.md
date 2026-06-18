@@ -2342,6 +2342,21 @@ bodies exist only as jar bytecode):
      `try_route_lambda_inline` resolves them, the inliner splices, and the desugar deletes (0 coverage
      loss — the engine handles every shape, verified phase 307). This is a front-end (resolver) arc, not
      an inliner one.
+     **FULLY MAPPED (phase 309 — got it working end-to-end, then reverted on a 0-FAIL regression):** the
+     complete fix chain, all verified individually correct, is: (a) `method_code`/`is_inline_method` follow
+     the **superclass chain** (a multifile facade *extends* its parts: `StandardKt` → `StandardKt__Synchron…`
+     → `StandardKt__StandardKt`; d2 is empty — the earlier d2 approach never fired); (b) the checker's
+     `let`/`also` handler uses `check_lambda_with_types` so the lambda arg's `Ty::Fun` is RECORDED in
+     `TypeInfo` (was `Ty::Error`); (c) the ext index includes **non-public** statics (`@InlineOnly` scope
+     fns are package-private); (d) the prologue **boxes** a primitive receiver into the `Object` param
+     (`5.let{…}`); (e) the route wraps the call in `coerce_erased(ret, physical_ret)` to unbox the erased
+     `Object` result to the logical type. With (a)–(e), `let`/`also` inline correctly for value/Unit/
+     capture/mutable/chained/non-local-return (all verified). **THE ONE REMAINING BLOCKER:** (c) exposes
+     `@InlineOnly` methods (`hashCode`, `iterator`, …) to *normal* resolution too → `invokestatic` to a
+     package-private method → `IllegalAccessError` (8 box FAILs). FIX: tag each `ExtCandidate` public/
+     non-public; normal `resolve_callable` returns public-only, while the inline route may use non-public
+     (it inlines — no call emitted). Then `let`/`also` inline AND 0-FAIL holds, and the desugar deletes.
+     That single public/non-public split in the ext index is the last step.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
