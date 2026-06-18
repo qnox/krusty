@@ -86,6 +86,18 @@ fun box(): String {
     return "OK"
 }
 "#),
+    ("ArrayOfRef", r#"
+fun box(): String {
+    val a = arrayOf("O", "K")
+    if (a[0] + a[1] != "OK") return "f1"
+    val b = arrayOf("x", "y", "z")
+    var s = ""
+    for (e in b) s += e
+    if (s != "xyz") return "f2: $s"
+    if (b.size != 3) return "f3"
+    return "OK"
+}
+"#),
     ("RepeatInline", r#"
 fun box(): String {
     var s = 0

@@ -3135,6 +3135,25 @@ impl<'a> Lower<'a> {
                         }
                         return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
                     }
+                    // Reference array literal `arrayOf(a, b, c)` → a `Vararg` of the (reference) element
+                    // type, which the backend allocates as `T[]` and fills — the same node `intArrayOf`
+                    // uses. The element type is the array's erased element (the checker already typed the
+                    // call `Array<T>` and rejected a primitive element, so this is always a reference).
+                    if fname == "arrayOf" {
+                        let elem = self.info.ty(e).array_elem()?;
+                        if !elem.is_reference() {
+                            return None;
+                        }
+                        let elem_ir = ty_to_ir(elem);
+                        let mut elements = Vec::new();
+                        for &arg in &args {
+                            if is_branchy(self.afile, arg) {
+                                return None;
+                            }
+                            elements.push(self.lower_arg(arg, &elem_ir)?);
+                        }
+                        return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                    }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
@@ -3625,6 +3644,9 @@ fn stmt_has_return(file: &ast::File, s: ast::StmtId) -> bool {
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
         Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
+        // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame), so it is not safe to
+        // splice mid-sequence (e.g. as an array-literal element) — treat it as branchy so callers bail.
+        Expr::SafeCall { .. } => true,
         Expr::Binary { op, lhs, .. } => {
             use ast::BinOp::*;
             matches!(op, Lt | Le | Gt | Ge | And | Or)
