@@ -759,6 +759,24 @@ impl<'a> Lower<'a> {
     /// with the lambda's (real, from the checker) parameter types. Non-capturing only: a body that
     /// reads any enclosing local/parameter, or a lambda inside a class method (which could capture
     /// `this`/fields), bails (`None`) rather than miscompile.
+    /// Append a loop body's statements to `out`: a block's statements (plus its trailing expression),
+    /// or a single non-block body expression (`for (x in xs) f(x)` — no braces). Returns `None` if any
+    /// statement can't be lowered.
+    fn append_body_stmts(&mut self, body: AstExprId, out: &mut Vec<u32>) -> Option<()> {
+        match self.afile.expr(body).clone() {
+            Expr::Block { stmts, trailing } => {
+                for s in stmts {
+                    out.push(self.stmt(s)?);
+                }
+                if let Some(t) = trailing {
+                    out.push(self.expr(t)?);
+                }
+            }
+            _ => out.push(self.expr(body)?),
+        }
+        Some(())
+    }
+
     fn lower_lambda(&mut self, e: AstExprId, params: &[String], body: AstExprId) -> Option<u32> {
         let Ty::Fun(sig) = self.info.ty(e) else { return None };
         let arity = sig.params.len();
@@ -1252,16 +1270,10 @@ impl<'a> Lower<'a> {
         self.scope.push((name.to_string(), x_v, elem));
         let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(x_init) });
 
-        let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else {
+        let mut out = vec![var_x];
+        if self.append_body_stmts(body, &mut out).is_none() {
             self.scope.truncate(depth);
             return None;
-        };
-        let mut out = vec![var_x];
-        for s in stmts {
-            out.push(self.stmt(s)?);
-        }
-        if let Some(t) = trailing {
-            out.push(self.expr(t)?);
         }
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
         let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: None, post_test: false });
@@ -1531,30 +1543,17 @@ impl<'a> Lower<'a> {
             }
             Stmt::While { cond, body } => {
                 let c = self.expr(cond)?;
-                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { return None };
                 let depth = self.scope.len();
                 let mut out = Vec::new();
-                for s in stmts {
-                    out.push(self.stmt(s)?);
-                }
-                // A body ending in an expression (`… ; if (c) break`) keeps it as a discarded statement.
-                if let Some(t) = trailing {
-                    out.push(self.expr(t)?);
-                }
+                self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
                 let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
                 Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: false }))
             }
             Stmt::DoWhile { body, cond } => {
-                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { return None };
                 let depth = self.scope.len();
                 let mut out = Vec::new();
-                for s in stmts {
-                    out.push(self.stmt(s)?);
-                }
-                if let Some(t) = trailing {
-                    out.push(self.expr(t)?);
-                }
+                self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
                 // The condition is lowered after the body's scope is dropped — a `do…while` condition
                 // can't see body-local declarations (Kotlin scopes them to the body).
@@ -1585,14 +1584,8 @@ impl<'a> Lower<'a> {
                 let ge = self.ir.add_expr(IrExpr::GetValue(end_v));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: gi, rhs: ge });
                 // body + increment
-                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
                 let mut out = Vec::new();
-                for s in stmts {
-                    out.push(self.stmt(s)?);
-                }
-                if let Some(t) = trailing {
-                    out.push(self.expr(t)?);
-                }
+                if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
                 let step = match range.step { Some(e) => self.expr(e)?, None => self.ir.add_expr(IrExpr::Const(IrConst::Int(1))) };
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) { IrBinOp::Sub } else { IrBinOp::Add };
                 let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
@@ -1641,14 +1634,8 @@ impl<'a> Lower<'a> {
                 let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
                 let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
                 let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
-                let Expr::Block { stmts, trailing } = self.afile.expr(body).clone() else { self.scope.truncate(depth); return None };
                 let mut out = vec![var_x];
-                for s in stmts {
-                    out.push(self.stmt(s)?);
-                }
-                if let Some(t) = trailing {
-                    out.push(self.expr(t)?);
-                }
+                if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
                 let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                 let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
