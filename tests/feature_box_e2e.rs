@@ -227,6 +227,23 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Nullable primitives (`Int?`/`Char?`/…) are their boxed wrappers (`java/lang/Integer`); `!!`
+    // unboxes to the primitive after a null check, and a primitive boxes into a nullable slot.
+    ("NullablePrimitive", r#"
+fun foo(): Int? = 42
+fun box(): String {
+    val a: Int? = 5
+    if (a!! + 1 != 6) return "f1"
+    if (foo()!! > 239) return "f2"
+    val c: Char? = 'a'
+    if (c!! >= 'b') return "f3"
+    var n: Int? = null
+    if (n != null) return "f4"
+    val r = try { n!!.toString() } catch (e: NullPointerException) { "OK" }
+    if (r != "OK") return "f5"
+    return "OK"
+}
+"#),
     // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
     // `.get()` (no args) reads `this.receiver`'s property.
     ("BoundPropertyRef", r#"

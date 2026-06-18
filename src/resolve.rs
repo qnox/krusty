@@ -1270,13 +1270,49 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
         diags.error(r.span, format!("unresolved reference: {}", r.name));
         Ty::Error
     };
-    // Nullable reference types share the non-null JVM descriptor; nullable primitives would need
-    // boxing (out of subset) so they are rejected (the file is skipped, never miscompiled).
+    // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`); a non-wrappable
+    // primitive (unsigned/value) is still rejected (skip, never miscompiled).
     if r.nullable && !base.is_reference() && base != Ty::Error {
+        if let Some(w) = nullable_prim_wrapper(base) {
+            return Ty::obj(w);
+        }
         diags.error(r.span, format!("nullable primitive type '{}?' is not supported", r.name));
         return Ty::Error;
     }
     base
+}
+
+/// The JVM wrapper internal name for a nullable primitive (`Int?` → `java/lang/Integer`). `None` for a
+/// non-wrappable primitive (unsigned/value types) — those stay unsupported.
+pub(crate) fn nullable_prim_wrapper(t: Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Int => "java/lang/Integer",
+        Ty::Long => "java/lang/Long",
+        Ty::Double => "java/lang/Double",
+        Ty::Float => "java/lang/Float",
+        Ty::Boolean => "java/lang/Boolean",
+        Ty::Char => "java/lang/Character",
+        Ty::Byte => "java/lang/Byte",
+        Ty::Short => "java/lang/Short",
+        _ => return None,
+    })
+}
+
+/// The unboxed primitive `Ty` of a JVM wrapper internal name (`java/lang/Integer` → `Int`); inverse of
+/// [`nullable_prim_wrapper`]. Used to narrow a nullable primitive (`Int?`) to its primitive after `!!`
+/// or a null smart-cast.
+pub(crate) fn prim_of_wrapper(internal: &str) -> Option<Ty> {
+    Some(match internal {
+        "java/lang/Integer" => Ty::Int,
+        "java/lang/Long" => Ty::Long,
+        "java/lang/Double" => Ty::Double,
+        "java/lang/Float" => Ty::Float,
+        "java/lang/Boolean" => Ty::Boolean,
+        "java/lang/Character" => Ty::Char,
+        "java/lang/Byte" => Ty::Byte,
+        "java/lang/Short" => Ty::Short,
+        _ => return None,
+    })
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.
@@ -1803,6 +1839,9 @@ impl<'a> Checker<'a> {
             Ty::Error
         };
         if r.nullable && !base.is_reference() && base != Ty::Error {
+            if let Some(w) = nullable_prim_wrapper(base) {
+                return Ty::obj(w);
+            }
             self.diags.error(r.span, format!("nullable primitive type '{}?' is not supported", r.name));
             return Ty::Error;
         }
@@ -2297,6 +2336,13 @@ impl<'a> Checker<'a> {
         if matches!(expected, Ty::Float | Ty::Double) && matches!(actual, Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float) {
             return;
         }
+        // A primitive is assignable to its boxed wrapper — i.e. to the matching nullable primitive
+        // (`Int` → `Int?` = `java/lang/Integer`). The box (`Integer.valueOf`) is the emit site's job.
+        if let Ty::Obj(ew, _) = expected {
+            if prim_of_wrapper(ew) == Some(actual) {
+                return;
+            }
+        }
         // In Kotlin every type is a subtype of `Any`/`Object`, and the top type narrows back to a
         // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
         // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
@@ -2360,7 +2406,11 @@ impl<'a> Checker<'a> {
             Expr::StringLit(_) => Ty::String,
             Expr::CharLit(_) => Ty::Char,
             Expr::NullLit => Ty::Null,
-            Expr::NotNull { operand } => self.expr(operand), // value with the same (non-null) type
+            Expr::NotNull { operand } => {
+                // The value with its non-null type; `Int?!!` narrows to the unboxed primitive `Int`.
+                let t = self.expr(operand);
+                t.obj_internal().and_then(prim_of_wrapper).unwrap_or(t)
+            }
             Expr::Throw { operand } => {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
                 Ty::Nothing

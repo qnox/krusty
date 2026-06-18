@@ -421,3 +421,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   properties resolvable as implicit-`this` members of the inner class (in both signature collection,
   for return-type inference, and body checking). An inner property initializer may combine outer and
   own members (`val z = x + y`); the constructor body scopes `this$0` as the first parameter value.
+
+- **Nullable primitives** (`Int?`/`Long?`/`Char?`/…): modeled as their boxed JVM wrapper
+  (`Int?` = `java/lang/Integer`) everywhere — `resolve_ty`, `ir_lower::ty_of`, and the `Stmt::Local`
+  slot type all map a nullable primitive to its wrapper (so a boxed value is never stored in a
+  primitive slot). A primitive is assignable to its wrapper (boxed at the emit site:
+  `Integer.valueOf`); `x!!` narrows a wrapper to its unboxed primitive (the checker types it as the
+  primitive, the lowerer unboxes after the null check). Unsigned/value-type nullables stay unsupported
+  (skipped). Also fixed a generic vararg with a primitive type argument (`mk<Long>(-1, …)`): each
+  element is coerced to the type-argument primitive before boxing, so `-1` becomes a `Long`, not an
+  `Integer`.
