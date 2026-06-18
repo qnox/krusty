@@ -1557,6 +1557,9 @@ impl<'a> Lower<'a> {
             p
         } else if self.classes.contains_key(&r.name) {
             Ty::obj(&r.name)
+        } else if self.classes.contains_key(&class_internal(self.afile, &r.name)) {
+            // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
+            Ty::obj(&class_internal(self.afile, &r.name))
         } else {
             return None;
         };
@@ -2669,6 +2672,25 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // Nested-class construction `Outer.Inner(args)` — the receiver is a class name and
+                    // the call's result type is the nested class. Emit `new Outer$Inner(args)`.
+                    if let Expr::Name(root) = self.afile.expr(receiver).clone() {
+                        if self.lookup(&root).is_none() {
+                            let qname = format!("{root}.{name}");
+                            if let Some(ci) = self.classes.get(&class_internal(self.afile, &qname)) {
+                                let class = ci.id;
+                                let ctor_count = self.ir.classes[class as usize].ctor_param_count as usize;
+                                let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect();
+                                let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&qname)
+                                    .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
+                                    .unwrap_or_default();
+                                if let Some(a) = self.lower_args_defaulted(e, &meta, &args, &field_tys) {
+                                    return Some(self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None }));
+                                }
+                                return None;
+                            }
+                        }
+                    }
                     // A top-level extension function `recv.name(args)` → a static call whose first
                     // argument is the receiver (matching how the extension was registered/emitted).
                     {

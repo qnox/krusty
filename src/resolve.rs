@@ -3106,6 +3106,30 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // Nested-class construction `Outer.Inner(args)` — the source name `Outer.Inner` is a
+                // registered class (kotlinc's `Outer$Inner`).
+                if let Expr::Name(root) = self.file.expr(receiver).clone() {
+                    if self.lookup(&root).is_none() {
+                        let qname = format!("{root}.{name}");
+                        if let Some(cls) = self.syms.classes.get(&qname).cloned() {
+                            let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                            let params = if cls.ctor_params.len() == arg_tys.len() {
+                                Some(cls.ctor_params.clone())
+                            } else {
+                                cls.secondary_ctors.iter().find(|sp| sp.len() == arg_tys.len()).cloned()
+                            };
+                            match params {
+                                Some(ps) => {
+                                    for (i, (p, a)) in ps.iter().zip(&arg_tys).enumerate() {
+                                        self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                    }
+                                }
+                                None => self.diags.error(span, format!("constructor '{qname}' expects {} args, got {}", cls.ctor_params.len(), arg_tys.len())),
+                            }
+                            return self.ctor_result(call, &cls.internal);
+                        }
+                    }
+                }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
                     if self.lookup(&en).is_none() && self.syms.enums.contains_key(&en) {

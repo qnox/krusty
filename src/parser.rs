@@ -1286,8 +1286,16 @@ impl<'a> Parser<'a> {
                 TypeRef { name: "<error>".to_string(), nullable: false, arg: None, targs: Vec::new(), span, fun_params: Vec::new() }
             }
         } else if self.at(TokenKind::Ident) {
-            let name = self.text().to_string();
+            let mut name = self.text().to_string();
             self.bump();
+            // A qualified type name — a nested class `Outer.Inner` (registered as `Outer.Inner`) or a
+            // package-qualified type (`kotlin.reflect.KClass`). Consume the dotted path.
+            while self.at(TokenKind::Dot) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Ident) {
+                self.bump(); // '.'
+                name.push('.');
+                name.push_str(self.text());
+                self.bump();
+            }
             // For `Array<T>`, capture the element type in `arg`; for any other generic type, capture
             // the full argument list in `targs` (erased in JVM descriptors, kept for member typing).
             let mut targs = Vec::new();
