@@ -2293,14 +2293,14 @@ impl<'a> Checker<'a> {
                     vec![]
                 };
                 let arity = bind_names.len() as u8;
-                // A non-inlined lambda that writes an enclosing local captures it through a
-                // `kotlin/jvm/internal/Ref$XxxRef` box (handled in lowering); record those vars so the
-                // lowerer boxes them. The body still checks normally below.
-                if !self.allow_lambda_mutation {
-                    let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-                    if !outer_names.is_empty() {
-                        collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
-                    }
+                // A lambda that writes an enclosing local: record those vars so the lowerer boxes them
+                // into a `kotlin/jvm/internal/Ref$XxxRef` (a closure can't write a captured-by-value
+                // local otherwise). Recorded unconditionally — over-boxing a var that turns out inlined
+                // is harmless, and NOT recording one that becomes a closure would miscompile. The body
+                // still checks normally below.
+                let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                if !outer_names.is_empty() {
+                    collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
                 }
                 // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
                 // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
