@@ -673,6 +673,9 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
         // An `init { … }` block with side effects must not run when a `const val` is read (a const is
         // inlined, not fetched through INSTANCE) — krusty doesn't model const-inlining, so bail.
         && c.init_order.iter().all(|s| matches!(s, ast::ClassInit::PropInit(_)))
+        // A `const val` read through a method during property initialization would observe the
+        // uninitialized backing field (kotlinc inlines the constant; krusty doesn't). Bail.
+        && !(c.body_props.iter().any(|p| p.is_const) && !c.methods.is_empty())
 }
 
 /// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
