@@ -339,7 +339,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         if let Stmt::LocalFun(_) = s {
             let stmt_id = crate::ast::StmtId(i as u32);
             if let Some((mangled, sig)) = info.local_fun_sigs.get(&stmt_id) {
-                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                // Captured outer locals become extra leading parameters (a boxed var is passed as its
+                // `Ref` holder reference, an ordinary one by value), then the declared parameters.
+                let mut params: Vec<IrType> = Vec::new();
+                if let Some(caps) = info.local_fun_captures.get(&stmt_id) {
+                    for (name, ty) in caps {
+                        params.push(captured_param_ir(name, *ty, &info.boxed_vars));
+                    }
+                }
+                params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
                 let ret = ty_to_ir(sig.ret);
                 let id = lo.ir.add_fun(IrFunction { name: mangled.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks: vec![] });
                 lo.local_fun_ids.insert(stmt_id, id);
@@ -840,6 +848,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
         lo.lambda_seq = 0;
         let sig = info.local_fun_sigs.get(stmt_id)?.1.clone();
+        // Captured outer locals occupy the leading value slots; a boxed one binds its `Ref` holder
+        // (reads/writes go through `element` via `boxed_elem`), an ordinary one binds its value.
+        if let Some(caps) = info.local_fun_captures.get(stmt_id) {
+            for (name, ty) in caps {
+                let v = lo.fresh_value();
+                if info.boxed_vars.contains(name) {
+                    lo.scope.push((name.clone(), v, Ty::obj(ref_holder_internal(*ty))));
+                    lo.boxed_elem.insert(name.clone(), *ty);
+                } else {
+                    lo.scope.push((name.clone(), v, *ty));
+                }
+            }
+        }
         for (p, t) in f.params.iter().zip(&sig.params) {
             let v = lo.fresh_value();
             lo.scope.push((p.name.clone(), v, *t));
@@ -3463,12 +3484,19 @@ impl<'a> Lower<'a> {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
                     // A call to a lifted local function — the checker mapped this call to its decl.
+                    // Prepend the captured outer locals (the enclosing scope holds each captured var's
+                    // value, or its `Ref` holder when boxed), then the declared arguments.
                     if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
                         if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
                             let params = self.ir.functions[fid as usize].params.clone();
-                            if args.len() == params.len() {
+                            let caps = self.info.local_fun_captures.get(&stmt_id).cloned().unwrap_or_default();
+                            if args.len() + caps.len() == params.len() {
                                 let mut a = Vec::new();
-                                for (arg, pt) in args.iter().zip(&params) {
+                                for (name, _) in &caps {
+                                    let (cv, _) = self.lookup(name)?;
+                                    a.push(self.ir.add_expr(IrExpr::GetValue(cv)));
+                                }
+                                for (arg, pt) in args.iter().zip(&params[caps.len()..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
                                 return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
@@ -4209,6 +4237,16 @@ fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
         Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
         | Expr::DoubleLit(_) | Expr::FloatLit(_)
         | Expr::BoolLit(_) | Expr::CharLit(_))
+}
+
+/// The IR parameter type for a captured local lifted into a local function: a boxed (closure-written)
+/// var is passed as its `Ref$XxxRef` holder reference; an ordinary captured local by its own value.
+fn captured_param_ir(name: &str, ty: Ty, boxed: &std::collections::HashSet<String>) -> IrType {
+    if boxed.contains(name) {
+        ty_to_ir(Ty::obj(ref_holder_internal(ty)))
+    } else {
+        ty_to_ir(ty)
+    }
 }
 
 /// The `kotlin/jvm/internal/Ref$XxxRef` holder class for a boxed mutable local of (erased) type `t`.

@@ -112,6 +112,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A capturing local function is lifted with its captured locals prepended as parameters: a `val`
+    // is passed by value, a `var` it writes is boxed into a shared `Ref` holder (so the mutation is
+    // visible to the enclosing scope).
+    ("LocalFunCapture", r#"
+fun box(): String {
+    val base = 100
+    fun add(x: Int) = base + x
+    if (add(5) != 105) return "f1"
+    var acc = 0
+    fun bump(x: Int) { acc = acc + x }
+    bump(3); bump(4)
+    if (acc != 7) return "f2:$acc"
+    return "OK"
+}
+"#),
     // A non-capturing local function is lifted to a private static method on the facade; calls route
     // to it. Recursion and multiple local functions in one body are supported.
     ("LocalFun", r#"
