@@ -217,6 +217,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend** maps it to `kotlin/jvm/functions/FunctionN` and enforces the JVM-only fixed-arity limit
   (`Function0..22`) — higher arities, and bound/object/constructor references, are skipped
   (`tests/callable_ref_e2e.rs`).
+- Receiver (extension) function types `Recv.() -> R` / `Recv.(A) -> R`: parsed by **folding the
+  receiver in as the first `FunctionN` parameter** — `Recv.() -> R` ≡ `Function1<Recv, R>`,
+  `Recv.(A) -> R` ≡ `Function2<Recv, A, R>` — exactly how Kotlin lowers an extension-function type to
+  `FunctionN`, so the rest of the pipeline sees a plain `(Recv, …) -> R`. This is a **parse**-level
+  decision (`src/parser.rs`, `receiver_function_type_param` test); a call site that invokes such a
+  parameter with an *implicit* receiver (the builder pattern `instructions()` / `recv.block()`) needs
+  receiver-rebinding the checker does not yet model, so those still skip cleanly rather than
+  miscompile (0-FAIL preserved).
 - Not-null assertion `x!!`: yields `x`, throwing a `NullPointerException` if it is null. Compiled (on a
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null

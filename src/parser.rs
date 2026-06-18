@@ -1315,7 +1315,33 @@ impl<'a> Parser<'a> {
                 None
             };
             let nullable = self.eat(TokenKind::Question); // `T?`
-            TypeRef { name, nullable, arg, targs, span, fun_params: Vec::new() }
+            let base = TypeRef { name, nullable, arg, targs, span, fun_params: Vec::new() };
+            // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
+            // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
+            // parameter, exactly how Kotlin lowers an extension-function type to `FunctionN` — so the
+            // rest of the pipeline sees a plain `(Recv, …) -> R`. (The dotted-path loop above stops at
+            // `.` `(` since `(` is not an `Ident`, leaving us positioned here.)
+            if self.at(TokenKind::Dot) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::LParen) {
+                self.bump(); // '.'
+                self.bump(); // '('
+                let mut fun_params = vec![base];
+                while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                    if self.at(TokenKind::Ident) && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::Colon) {
+                        self.bump(); // name
+                        self.bump(); // ':'
+                    }
+                    fun_params.push(self.parse_type());
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen, "')'");
+                self.expect(TokenKind::Arrow, "'->'");
+                let ret = self.parse_type();
+                let fnull = self.eat(TokenKind::Question);
+                return TypeRef { name: "<fun>".to_string(), nullable: fnull, arg: Some(Box::new(ret)), targs: Vec::new(), span, fun_params };
+            }
+            base
         } else {
             self.diags.error(span, "expected a type");
             TypeRef { name: "<error>".to_string(), nullable: false, arg: None, targs: Vec::new(), span, fun_params: Vec::new() }
@@ -2828,6 +2854,17 @@ mod tests {
     fn simple_fun() {
         assert_eq!(tree("fun add(a: Int, b: Int): Int = a + b"),
             "(fun add (param a Int) (param b Int) :Int (+ a b))\n");
+    }
+
+    #[test]
+    fn receiver_function_type_param() {
+        // A receiver (extension) function type `Recv.() -> R` parses by folding the receiver in as the
+        // first `FunctionN` parameter — no parse error (was "expected ')'" before).
+        let mut d = DiagSink::new();
+        let src = "fun build(instructions: Buildee<T>.(Int) -> Unit) {}";
+        let toks = lex(src, &mut d);
+        let _ = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "receiver function type should parse: {}", d.render("test", src));
     }
 
     #[test]
