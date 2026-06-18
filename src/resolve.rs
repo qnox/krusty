@@ -814,6 +814,23 @@ fn stmt_has_try(file: &File, s: StmtId) -> bool {
     file.any_child_stmt(s, &mut |c| expr_has_try(file, c))
 }
 
+/// Whether any `try` within `e` (inclusive) carries a `finally`. A `finally` is inlined at each exit of
+/// its protected region; combined with nested `try`s (overlapping exception ranges) that duplication
+/// trips a verify error, so the checker rejects a nested-try structure that contains any `finally`.
+fn expr_has_finally(file: &File, e: ExprId) -> bool {
+    match file.expr(e) {
+        Expr::Try { body, catches, finally } => {
+            finally.is_some()
+                || expr_has_finally(file, *body)
+                || catches.iter().any(|c| expr_has_finally(file, c.body))
+                || finally.map_or(false, |f| expr_has_finally(file, f))
+        }
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_has_finally(file, c),
+            &mut |s| file.any_child_stmt(s, &mut |c| expr_has_finally(file, c))),
+    }
+}
+
 /// Whether `break`/`continue` appears in a position krusty's backend can't yet emit: in *value*
 /// position (its value would be consumed while operands sit on the stack — an operand-spill the
 /// emitter doesn't do), inside a `try` (the jump must cross exception regions / run `finally`), or
@@ -2241,14 +2258,20 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
             Expr::Try { body, catches, finally } => {
-                // Nested try/catch trips a StackMapTable frame bug in codegen — skip rather than
-                // emit a VerifyError. (The `finally` is inlined at several exits, so a nested try
-                // inside it would be emitted multiple times — also rejected.)
-                if expr_has_try(self.file, body)
+                // Nested `try`s are emitted fine on their own, and a flat `try … finally` is fine — but the
+                // COMBINATION is not: a `finally` is inlined at each exit of its protected region, so when it
+                // sits inside (or wraps) another `try`, the duplicated code lands in overlapping exception
+                // ranges and trips a verify error (Bad local variable type). Reject only that combination —
+                // a nesting that involves any `finally` — keeping plain nested try/catch and plain finally.
+                let nested = expr_has_try(self.file, body)
                     || catches.iter().any(|c| expr_has_try(self.file, c.body))
-                    || finally.map_or(false, |f| expr_has_try(self.file, f))
-                {
-                    self.diags.error(self.span(e), "krusty: nested try/catch is not supported".to_string());
+                    || finally.map_or(false, |f| expr_has_try(self.file, f));
+                let any_finally = finally.is_some()
+                    || expr_has_finally(self.file, body)
+                    || catches.iter().any(|c| expr_has_finally(self.file, c.body))
+                    || finally.map_or(false, |f| expr_has_finally(self.file, f));
+                if nested && any_finally {
+                    self.diags.error(self.span(e), "krusty: a nested try combined with a finally is not supported".to_string());
                 }
                 let bt = self.expr(body);
                 if let Some(f) = finally {

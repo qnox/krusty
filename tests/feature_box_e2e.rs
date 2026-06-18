@@ -98,6 +98,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Nested try/catch (without a finally in the nest) compiles and runs; only a nested-try combined
+    // with a finally is rejected (skip), never miscompiled.
+    ("NestedTry", r#"
+fun box(): String {
+    var r = ""
+    try {
+        try {
+            r += "a"
+            throw RuntimeException("x")
+        } catch (e: RuntimeException) {
+            r += "b"
+        }
+        r += "c"
+    } catch (e: Exception) {
+        r += "z"
+    }
+    return if (r == "abc") "OK" else "F:$r"
+}
+"#),
     // A bare-value lambda types its parameters from its own annotations (`{ x: Int -> … }`), even with
     // no expected function type — so the body and a direct call both check correctly.
     ("LambdaParamType", r#"
