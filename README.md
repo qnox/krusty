@@ -52,19 +52,24 @@ index-based AST — and whether such output can still be a drop-in Kotlin librar
   `max_stack`/`max_locals`, branch fixups; no external bytecode dependency.
 - **Correctness by differential testing** — the source of truth is the real `kotlinc`: ABI
   signatures (`javap`) must match, and Kotlin/Java consumers must compile and run identically.
-- **Conformance** — krusty is run against JetBrains/Kotlin's own `codegen/box` suite (10,009 cases):
-  it skips what it can't yet compile, runs `box()` for what it can, and is asserted to **never
-  miscompile a case it accepts** (latest sweep: 13 in-subset cases, all `OK`, 0 failures). Coverage
-  grows automatically as the language widens.
+- **Conformance** — krusty is run against JetBrains/Kotlin's own `codegen/box` suite (7,352 cases):
+  it skips what it can't yet compile, runs `box()` on the JVM for what it can, and is asserted to
+  **never miscompile a case it accepts** (latest sweep: 476 cases compiled, all `box() == OK`, 0
+  failures). Coverage grows automatically as the language widens.
+- **Inline functions** — `inline fun`s are inlined from their **real compiled bytecode**, not a
+  hardcoded per-function desugar: a library scope function such as `x.let { … }` / `x.also { … }` is
+  resolved through the classpath and its actual stdlib body is spliced at the call site (lambda body
+  included), exactly as `kotlinc`'s inliner does — no `invokestatic` to the inline callee survives.
 
 ## Layout
 
 ```
 src/lexer.rs, parser.rs, ast.rs   front end (Pratt expressions, arena AST)
 src/types.rs, resolve.rs          type model + signature collection + per-file typecheck
-src/codegen/                      class-file writer + AST→bytecode lowering
+src/ir.rs, ir_lower.rs            backend-neutral IR + AST→IR lowering
+src/jvm/                          IR→bytecode emit, class-file writer, .class reader, jar/dir
+                                  classpath, bytecode inliner (inline.rs)
 src/metadata/                     @kotlin.Metadata protobuf + .kotlin_module emitters
-src/jvm/                          .class reader + jar/dir classpath
 tests/                            differential + round-trip harness vs real kotlinc
 docs/SPEC.md                      language subset + Kotlin-semantics decisions
 docs/IMPLEMENTATION_PLAN.md       phased plan (each phase ends green)
