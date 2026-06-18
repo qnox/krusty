@@ -1379,6 +1379,20 @@ impl<'a> Lower<'a> {
     /// Insert the unbox/checkcast bridging an erased physical type to a known logical type — the same
     /// coercion as [`coerce_generic_read`] but with both types given directly (for synthesized reads,
     /// e.g. a destructuring `componentN()` call whose erased `Object` becomes the element type).
+    /// A typed zero/`null` placeholder for an omitted `$default` parameter — the value is ignored
+    /// (the synthetic stub substitutes the real default when the mask bit is set), but its type must
+    /// match the descriptor slot: `0` for a primitive, `null` for a reference.
+    fn zero_placeholder(&mut self, t: Ty) -> u32 {
+        let c = match t {
+            Ty::Long => IrConst::Long(0),
+            Ty::Double => IrConst::Double(0.0),
+            Ty::Float => IrConst::Float(0.0),
+            t if t.is_primitive() => IrConst::Int(0), // Int/Short/Byte/Char/Boolean → iconst_0
+            _ => IrConst::Null,
+        };
+        self.ir.add_expr(IrExpr::Const(c))
+    }
+
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
         if logical == physical || physical != Ty::obj("kotlin/Any") {
             return read;
@@ -2659,6 +2673,18 @@ impl<'a> Lower<'a> {
                                 Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                 None => a.push(self.expr(arg)?),
                             }
+                        }
+                        // A `name$default` call appends a placeholder per omitted trailing parameter, an
+                        // `int` bit-mask (a bit per omitted parameter), and a `null` marker.
+                        if c.default_call {
+                            let real_count = c.params.len() - 1; // exclude the receiver
+                            for j in args.len()..real_count {
+                                let ph = self.zero_placeholder(c.params[j + 1]);
+                                a.push(ph);
+                            }
+                            let mask: i32 = (args.len()..real_count).map(|j| 1i32 << j).sum();
+                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         }
                         let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: a });
                         self.coerce_generic_read(call, e, c.physical_ret)
