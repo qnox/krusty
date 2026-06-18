@@ -936,11 +936,22 @@ impl<'a> Lower<'a> {
             let (call, log_ty) = if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
                 let ret = self.syms.method_of(&internal, &comp).map(|s| s.ret).unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 (self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] }), ret)
-            } else {
-                let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])?;
+            } else if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[]) {
                 let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
                 let log = self.syms.libraries.member_return(it_ty, &comp, &[]).unwrap_or(m.ret);
                 let c = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: comp.clone(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] });
+                (self.coerce_erased(c, log, m.ret), log)
+            } else if let Some(c) = self.syms.libraries.resolve_callable(&comp, Some(it_ty), &[], &[]) {
+                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
+                let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor }, dispatch_receiver: None, args: vec![recv] });
+                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+            } else {
+                // An indexable type: `componentN` is the inline `get(N-1)`.
+                let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, "get", &[Ty::Int])?;
+                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                let log = self.syms.libraries.member_return(it_ty, "get", &[Ty::Int]).unwrap_or(m.ret);
+                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                let c = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: "get".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(recv), args: vec![i] });
                 (self.coerce_erased(c, log, m.ret), log)
             };
             let v = self.fresh_value();
