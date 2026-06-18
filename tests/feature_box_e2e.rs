@@ -53,6 +53,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    ("ScopeFns", r#"
+fun box(): String {
+    val r = "abc".let { it.length }
+    if (r != 3) return "f1: $r"
+    var s = 0
+    3.let { s += it }
+    if (s != 3) return "f2: $s"
+    val a = "x".also { s += 5 }
+    if (s != 8 || a != "x") return "f3: $s,$a"
+    val chain = 5.let { it * 2 }.let { it + 1 }
+    if (chain != 11) return "f4: $chain"
+    return "OK"
+}
+"#),
     ("RepeatInline", r#"
 fun box(): String {
     var s = 0
