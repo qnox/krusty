@@ -112,6 +112,17 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A `Unit`-returning function reference `::add` wraps the call and returns the Unit singleton
+    // (a direct method handle would adapt `void` to `null`, breaking a `FunctionN` consumer).
+    ("UnitFunRef", r#"
+val sb = StringBuilder()
+fun add(s: String) { sb.append(s) }
+fun apply2(f: (String) -> Unit) { f("O"); f("K") }
+fun box(): String {
+    apply2(::add)
+    return sb.toString()
+}
+"#),
     // Constructor reference `::A` — a closure wrapping `new A(args)`, usable as a `FunctionN` value.
     ("CtorRef", r#"
 class A(val result: String)

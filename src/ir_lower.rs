@@ -2589,17 +2589,35 @@ impl<'a> Lower<'a> {
                     return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
                 }
                 let fid = *self.fun_ids.get(&name)?;
-                // Same guards as lambdas: a `Unit`/`Nothing` return needs the `kotlin/Unit` singleton,
-                // and a generic referenced function erases its type parameters.
                 let ret = self.ir.functions[fid as usize].ret.clone();
-                if ret == IrType::Unit || ret == IrType::Nothing {
-                    return None;
-                }
+                // A generic referenced function erases its type parameters — not modeled.
                 if self.ir.functions[fid as usize].params.len() != arity {
                     return None;
                 }
                 if self.top_fun_decl(&name).map_or(false, |f| !f.type_params.is_empty()) {
                     return None;
+                }
+                // A `Unit`-returning function's method handle returns `void`; the SAM's `invoke` must
+                // return the `kotlin/Unit` singleton (LambdaMetafactory would adapt `void` to `null`).
+                // Synthesize a wrapper `(params) -> { foo(params); return Unit.INSTANCE }`. `Nothing`
+                // (every path throws) stays unmodeled.
+                if ret == IrType::Nothing {
+                    return None;
+                }
+                if ret == IrType::Unit {
+                    let params = self.ir.functions[fid as usize].params.clone();
+                    let argvals: Vec<u32> = (0..arity as u32).map(|i| self.ir.add_expr(IrExpr::GetValue(i))).collect();
+                    let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: argvals });
+                    let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                    let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+                    let block = self.ir.add_expr(IrExpr::Block { stmts: vec![call, ret_e], value: None });
+                    let impl_name = format!("{}$funref${}", self.cur_fn_name, self.lambda_seq);
+                    self.lambda_seq += 1;
+                    let wfid = self.ir.add_fun(IrFunction {
+                        name: impl_name, params, ret: ty_to_ir(Ty::obj("kotlin/Unit")), body: Some(block),
+                        is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+                    });
+                    return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: wfid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
                 }
                 return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
             }

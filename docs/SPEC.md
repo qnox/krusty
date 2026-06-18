@@ -223,6 +223,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor's field params) is modeled; defaulted/secondary constructors are skipped.
 - Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
   lambda, but the impl method handle points directly at the referenced function (no synthesized body).
+  Exception: a `Unit`-returning `::foo` gets a synthesized wrapper `(params) -> { foo(params); Unit }`
+  so the SAM's `invoke` yields the `kotlin/Unit` singleton (a direct `void` handle would adapt to
+  `null`, breaking a `FunctionN` consumer that expects `Unit`).
   kotlinc instead emits a `kotlin/jvm/internal/FunctionReferenceImpl` subclass carrying reflection
   metadata, but that class is synthetic and not part of the facade's ABI, so public signatures and the
   round-trip result match. A function type lowers to the backend-neutral `IrType::Function`; the **JVM
