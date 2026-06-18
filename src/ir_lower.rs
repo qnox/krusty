@@ -179,6 +179,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods.insert(gname, (mi, fid, ty));
                 method_fids.push(fid);
             }
+            // Interface properties (`interface I { val x: T }`) → an abstract `getX()` (and `setX()`
+            // for a `var`) the implementing class overrides with its field accessor.
+            if c.is_interface {
+                for p in c.body_props.iter().filter(|p| !is_computed_prop(p)) {
+                    let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                    let gname = getter_name(&p.name);
+                    if !methods.contains_key(&gname) {
+                        let mi = method_fids.len() as u32;
+                        let fid = lo.ir.add_fun(IrFunction { name: gname.clone(), params: vec![], ret: ty_to_ir(ty), body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                        methods.insert(gname, (mi, fid, ty));
+                        method_fids.push(fid);
+                    }
+                    if p.is_var {
+                        let sname = setter_name(&p.name);
+                        if !methods.contains_key(&sname) {
+                            let mi = method_fids.len() as u32;
+                            let fid = lo.ir.add_fun(IrFunction { name: sname.clone(), params: vec![ty_to_ir(ty)], ret: IrType::Unit, body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                            methods.insert(sname, (mi, fid, Ty::Unit));
+                            method_fids.push(fid);
+                        }
+                    }
+                }
+            }
             // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
             // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
@@ -732,7 +755,11 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
     c.is_interface
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
-        && c.props.is_empty() && c.body_props.is_empty()
+        && c.props.is_empty()
+        // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`;
+        // a property with an initializer or custom getter (an interface can't have a backing field)
+        // isn't modeled.
+        && c.body_props.iter().all(|p| p.init.is_none() && p.getter.is_none() && p.ty.is_some())
         && c.methods.iter().all(|m| m.receiver.is_none() && matches!(m.body, FunBody::None))
 }
 
