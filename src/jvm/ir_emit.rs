@@ -993,17 +993,20 @@ impl<'a> Emitter<'a> {
                 self.slots = saved;
             }
             IrExpr::Lambda { impl_fn, arity, captures } => {
-                // Non-capturing lambdas only (lowering bails otherwise).
-                debug_assert!(captures.is_empty());
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
                 let impl_ret = ir_ty_to_jvm(&f.ret);
                 let iface = format!("kotlin/jvm/functions/Function{arity}");
+                // The impl method's parameters are the captured variables (bound at the call site)
+                // followed by the lambda's own parameters. Only the latter form the SAM/instantiated
+                // method types; the captures parameterize the `invokedynamic` itself.
+                let n_cap = impl_params.len() - *arity as usize;
+                let (cap_tys, lam_tys) = impl_params.split_at(n_cap);
                 let impl_desc = jvm_descriptor(&impl_params, impl_ret);
                 // samMethodType: the erased `(Object,…)Object`; instantiatedMethodType: boxed actuals.
                 let sam_desc = sam_descriptor(*arity);
-                let inst_params: Vec<String> = impl_params.iter().map(|t| boxed_descriptor(*t)).collect();
+                let inst_params: Vec<String> = lam_tys.iter().map(|t| boxed_descriptor(*t)).collect();
                 let inst_desc = format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
                 let facade = self.facade.clone();
                 let meta = self.cw.method_handle_static(
@@ -1012,8 +1015,14 @@ impl<'a> Emitter<'a> {
                 let impl_mh = self.cw.method_handle_static(&facade, &impl_name, &impl_desc);
                 let inst_mt = self.cw.method_type(&inst_desc);
                 let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
-                let indy = self.cw.invoke_dynamic(bsm, "invoke", &format!("()L{iface};"));
-                code.invokedynamic(indy, 0, 1);
+                // The `invokedynamic` takes the captured values and yields the `FunctionN` instance.
+                let cap_descs: String = cap_tys.iter().map(|t| t.descriptor()).collect();
+                let indy = self.cw.invoke_dynamic(bsm, "invoke", &format!("({cap_descs})L{iface};"));
+                let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                for &c in captures {
+                    self.emit_value(c, code);
+                }
+                code.invokedynamic(indy, cap_words, 1);
             }
             IrExpr::UnitInstance => {
                 let f = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");

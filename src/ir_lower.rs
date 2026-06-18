@@ -783,17 +783,31 @@ impl<'a> Lower<'a> {
         if bind_names.len() != arity {
             return None;
         }
-        // Non-capturing only: bail if the body reads any enclosing local/parameter that the lambda
-        // does not itself bind (capturing it would require a closure with captured fields).
-        for (name, _, _) in &self.scope {
-            if !bind_names.contains(name) && crate::resolve::expr_uses_name_pub(self.afile, body, name) {
-                return None;
+        // Captured free variables: enclosing locals/parameters the body reads but the lambda doesn't
+        // bind. Each is passed into the impl method as a leading parameter and bound into the closure
+        // at the `invokedynamic` call site (kotlinc's capture convention). Dedup by name, keeping the
+        // innermost binding (the last in the scope stack).
+        let mut captures: Vec<(String, u32, Ty)> = Vec::new();
+        for (name, v, ty) in self.scope.iter().rev() {
+            if !bind_names.contains(name)
+                && !captures.iter().any(|(n, _, _)| n == name)
+                && crate::resolve::expr_uses_name_pub(self.afile, body, name)
+            {
+                captures.push((name.clone(), *v, *ty));
             }
         }
-        // Lower the body in a fresh value-numbering scope (the impl method's own locals).
+        captures.reverse();
+        // The capture values are read in the *enclosing* scope before it's swapped out.
+        let capture_vals: Vec<u32> = captures.iter().map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v))).collect();
+        // Lower the body in a fresh value-numbering scope: captured params first (values `0..n_cap`),
+        // then the lambda's own parameters.
         let saved_scope = std::mem::take(&mut self.scope);
         let saved_next = self.next_value;
         self.next_value = 0;
+        for (name, _, ty) in &captures {
+            let v = self.fresh_value();
+            self.scope.push((name.clone(), v, *ty));
+        }
         for (name, pty) in bind_names.iter().zip(sig.params.iter()) {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *pty));
@@ -818,7 +832,9 @@ impl<'a> Lower<'a> {
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
-        let params_ir: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+        // Impl parameters: captured variables first, then the lambda's own parameters.
+        let mut params_ir: Vec<IrType> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
+        params_ir.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -828,7 +844,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![] }))
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
