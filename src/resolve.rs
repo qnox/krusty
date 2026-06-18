@@ -986,6 +986,38 @@ fn lambda_body_writes_outer(file: &File, e: ExprId, outer_names: &std::collectio
     check_e(file, e, outer_names)
 }
 
+/// Collect the outer-variable names a lambda body writes (assigns / `++`/`--`), so the lowerer can box
+/// them. Mirrors [`lambda_body_writes_outer`] but accumulates the names instead of returning a bool;
+/// like it, does not descend into nested lambdas (their writes are recorded when they're checked).
+fn collect_lambda_outer_writes(file: &File, e: ExprId, outer_names: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+    fn ce(file: &File, e: ExprId, outer: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+        match file.expr(e) {
+            Expr::Block { stmts, trailing } => { for &s in stmts { cs(file, s, outer, out); } if let Some(t) = trailing { ce(file, *t, outer, out); } }
+            Expr::If { cond, then_branch, else_branch } => { ce(file, *cond, outer, out); ce(file, *then_branch, outer, out); if let Some(x) = else_branch { ce(file, *x, outer, out); } }
+            Expr::Try { body, catches, finally } => { ce(file, *body, outer, out); for c in catches { ce(file, c.body, outer, out); } if let Some(f) = finally { ce(file, *f, outer, out); } }
+            Expr::When { subject, arms } => { if let Some(s) = subject { ce(file, *s, outer, out); } for a in arms { for &c in &a.conditions { ce(file, c, outer, out); } ce(file, a.body, outer, out); } }
+            Expr::Lambda { .. } => {}
+            _ => {}
+        }
+    }
+    fn cs(file: &File, s: StmtId, outer: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+        match file.stmt(s) {
+            Stmt::IncDec { name, .. } => { if outer.contains(name) { out.insert(name.clone()); } }
+            Stmt::Assign { name, value } => { if outer.contains(name) { out.insert(name.clone()); } ce(file, *value, outer, out); }
+            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => ce(file, *init, outer, out),
+            Stmt::AssignMember { receiver, value, .. } => { ce(file, *receiver, outer, out); ce(file, *value, outer, out); }
+            Stmt::AssignIndex { array, index, value } => { ce(file, *array, outer, out); ce(file, *index, outer, out); ce(file, *value, outer, out); }
+            Stmt::Return(Some(e)) => ce(file, *e, outer, out),
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => { ce(file, *cond, outer, out); ce(file, *body, outer, out); }
+            Stmt::For { range, body, .. } => { ce(file, range.start, outer, out); ce(file, range.end, outer, out); if let Some(st) = range.step { ce(file, st, outer, out); } ce(file, *body, outer, out); }
+            Stmt::ForEach { iterable, body, .. } => { ce(file, *iterable, outer, out); ce(file, *body, outer, out); }
+            Stmt::Expr(e) => ce(file, *e, outer, out),
+            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalFun(_) => {}
+        }
+    }
+    ce(file, e, outer_names, out);
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -1224,6 +1256,11 @@ pub struct TypeInfo {
     /// Synthetic bridge methods a class must emit so a supertype's erased call dispatches to the
     /// class's concrete override (`class_internal → [bridge]`).
     pub bridges: HashMap<String, Vec<BridgeSpec>>,
+    /// Names of local `var`s that a non-inlined lambda (a closure) writes — they must be boxed into a
+    /// `kotlin/jvm/internal/Ref$XxxRef` so the closure and its enclosing scope share the cell. Tracked
+    /// by name (a file-wide set); the lowerer boxes any matching `var` it declares (over-boxing an
+    /// unrelated same-named `var` is harmless — an extra indirection, never incorrect).
+    pub boxed_vars: std::collections::HashSet<String>,
 }
 
 /// A bridge method: erased signature (the supertype's descriptor, what callers invoke) delegating to
@@ -1274,6 +1311,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
+        boxed_vars: std::collections::HashSet::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         loop_labels: Vec::new(),
@@ -1553,7 +1591,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
-    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls, bridges: c.bridges }
+    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls, bridges: c.bridges, boxed_vars: c.boxed_vars }
 }
 
 struct Checker<'a> {
@@ -1584,6 +1622,7 @@ struct Checker<'a> {
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
+    boxed_vars: std::collections::HashSet<String>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -2254,15 +2293,14 @@ impl<'a> Checker<'a> {
                     vec![]
                 };
                 let arity = bind_names.len() as u8;
-                // Lambdas that are not inlined (let/also/run/apply) become closure classes and
-                // cannot mutate the outer function's local variables. Detect this and reject.
-                let outer_names: std::collections::HashSet<String> = self.scopes.iter()
-                    .flat_map(|s| s.keys().cloned())
-                    .collect();
-                if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
-                    self.diags.error(self.file.expr_spans[e.0 as usize],
-                        "krusty: lambda captures a mutable local variable — not supported".to_string());
-                    return Ty::fun(vec![Ty::obj("kotlin/Any"); arity as usize], Ty::Unit);
+                // A non-inlined lambda that writes an enclosing local captures it through a
+                // `kotlin/jvm/internal/Ref$XxxRef` box (handled in lowering); record those vars so the
+                // lowerer boxes them. The body still checks normally below.
+                if !self.allow_lambda_mutation {
+                    let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                    if !outer_names.is_empty() {
+                        collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
+                    }
                 }
                 // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
                 // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
@@ -3129,15 +3167,13 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
-            // Same mutable-capture rejection as the `Expr::Lambda` arm: a non-inlined lambda (krusty
-            // doesn't inline `forEach`/`map`/…) becomes a closure class and can't write the enclosing
-            // function's locals. Without this, an extension-call lambda silently miscompiled.
-            let outer_names: std::collections::HashSet<String> = self.scopes.iter()
-                .flat_map(|s| s.keys().cloned()).collect();
-            if !self.allow_lambda_mutation && !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
-                self.diags.error(self.file.expr_spans[e.0 as usize],
-                    "krusty: lambda captures a mutable local variable — not supported".to_string());
-                return self.set(e, Ty::fun(param_types.to_vec(), Ty::Unit));
+            // A non-inlined lambda that writes an enclosing local captures it through a `Ref$XxxRef`
+            // box (handled in lowering); record those vars. The body still checks normally here.
+            if !self.allow_lambda_mutation {
+                let outer_names: std::collections::HashSet<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                if !outer_names.is_empty() {
+                    collect_lambda_outer_writes(self.file, body, &outer_names, &mut self.boxed_vars);
+                }
             }
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
