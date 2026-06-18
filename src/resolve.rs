@@ -2188,9 +2188,14 @@ impl<'a> Checker<'a> {
                         "krusty: lambda captures a mutable local variable — not supported".to_string());
                     return Ty::fun(vec![Ty::obj("kotlin/Any"); arity as usize], Ty::Unit);
                 }
+                // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
+                // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
+                // function type, when there is one, is applied via `check_lambda_with_types` instead).
+                let decl_types: Vec<Option<TypeRef>> = self.file.lambda_param_types.get(&e.0).cloned().unwrap_or_default();
                 self.push_scope();
-                for name in &bind_names {
-                    self.declare(name, Ty::obj("kotlin/Any"), false);
+                for (i, name) in bind_names.iter().enumerate() {
+                    let pty = decl_types.get(i).and_then(|t| t.as_ref()).map(|r| self.resolve_ty(r)).unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                    self.declare(name, pty, false);
                 }
                 // `field` does not propagate into a (non-inlined) lambda closure — krusty can't
                 // emit a backing-field read from the lambda class. Clear it so `field` inside a
@@ -2207,8 +2212,13 @@ impl<'a> Checker<'a> {
                 }
                 self.field_ty = saved_field;
                 self.pop_scope();
-                // Params unknown here (no annotation) → erased `Object`; return type comes from the body.
-                Ty::fun(vec![Ty::obj("kotlin/Any"); arity as usize], bret)
+                // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
+                // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
+                // type comes from the body.
+                let fun_params: Vec<Ty> = (0..arity as usize)
+                    .map(|i| decl_types.get(i).and_then(|t| t.as_ref()).map(|r| self.resolve_ty(r)).unwrap_or_else(|| Ty::obj("kotlin/Any")))
+                    .collect();
+                Ty::fun(fun_params, bret)
             }
             Expr::Index { array, index } => {
                 let at = self.expr(array);

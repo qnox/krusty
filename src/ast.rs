@@ -395,6 +395,11 @@ pub struct File {
     /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
     pub call_type_args: std::collections::HashMap<u32, Vec<TypeRef>>,
+    /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
+    /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
+    /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
+    /// when no expected function type drives them.
+    pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
