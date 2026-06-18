@@ -3865,6 +3865,16 @@ impl<'a> Checker<'a> {
                     Ty::Obj(internal, args) if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[]).is_some() => {
                         args.first().copied().unwrap_or_else(|| Ty::obj("kotlin/Any"))
                     }
+                    // A value with no `iterator()` member but an `iterator` extension (`for (e in map)`
+                    // uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`): the element is that iterator's
+                    // type argument.
+                    Ty::Obj(..) => match self.syms.libraries.resolve_callable("iterator", Some(it), &[], &[]) {
+                        Some(c) => c.ret.type_args().first().copied().unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                        None => {
+                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                            Ty::Error
+                        }
+                    },
                     _ => {
                         self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
                         Ty::Error

@@ -1223,25 +1223,42 @@ impl<'a> Lower<'a> {
     /// (skip) if the iterator methods or the element type can't be resolved.
     fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty) -> Option<u32> {
         let internal = it_ty.obj_internal()?;
-        let iter_m = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])?;
-        let iter_ty = iter_m.ret;
+        // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
+        // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
+        // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
+        let (iter_ret, iter_desc, iter_owner, iter_ext) =
+            if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[]) {
+                (m.ret, m.descriptor, internal.to_string(), false)
+            } else if let Some(c) = self.syms.libraries.resolve_callable("iterator", Some(it_ty), &[], &[]) {
+                (c.ret, c.descriptor, c.owner, true)
+            } else {
+                return None;
+            };
+        let iter_ty = iter_ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
         let hasnext_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "hasNext", &[])?;
         let next_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "next", &[])?;
-        // The element is the receiver's type argument (`List<Int>` → `Int`), or the iterable type
-        // parameter's upper bound (`Any`) when no argument is present (e.g. a constructor-inferred
-        // `ArrayList()` not yet propagating `<String>`). The JVM `Object` realization + checkcast are
-        // the backend's concern, applied at the Ty→bytecode boundary, not here.
-        let elem = it_ty.type_args().first().copied().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        // The element is the iterator's type argument (`Iterator<Map.Entry<K,V>>`), else the iterable's
+        // own (`List<Int>` → `Int`), else the type parameter's upper bound (`Any`). The JVM `Object`
+        // realization + checkcast are the backend's concern, applied at the Ty→bytecode boundary.
+        let elem = iter_ty.type_args().first().copied()
+            .or_else(|| it_ty.type_args().first().copied())
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         let it_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
         let iter_iface = self.syms.libraries.resolve_type(&iter_internal).map_or(false, |t| t.is_interface);
         let depth = self.scope.len();
 
-        // it = iterable.iterator()
+        // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
+        let iter_callee = if iter_ext {
+            Callee::Static { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc }
+        } else {
+            Callee::Virtual { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc, interface: it_iface }
+        };
         let iter_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual { owner: internal.to_string(), name: "iterator".to_string(), descriptor: iter_m.descriptor, interface: it_iface },
-            dispatch_receiver: Some(recv), args: vec![],
+            callee: iter_callee,
+            dispatch_receiver: if iter_ext { None } else { Some(recv) },
+            args: if iter_ext { vec![recv] } else { vec![] },
         });
         let it_v = self.fresh_value();
         let var_it = self.ir.add_expr(IrExpr::Variable { index: it_v, ty: ty_to_ir(iter_ty), init: Some(iter_call) });
