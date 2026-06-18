@@ -431,3 +431,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (skipped). Also fixed a generic vararg with a primitive type argument (`mk<Long>(-1, …)`): each
   element is coerced to the type-argument primitive before boxing, so `-1` becomes a `Long`, not an
   `Integer`.
+
+- **Nullable-primitive equality + generic literal coercion**: `nullablePrimitive == primitive` (`a == 5`)
+  is allowed — the primitive operand is boxed for structural equality (`Intrinsics.areEqual`). Float/Double
+  are excluded (their `0.0 == -0.0` IEEE-754 semantics differ between primitive `==` and boxed `equals`).
+  A generic constructor with a primitive type argument (`Box<Long>(-1)`) coerces each non-nullable
+  type-parameter field's literal to the type-argument primitive before boxing (so `-1` becomes `Long`,
+  not `Integer`). An assignment to a typed `var` coerces a generic-erased `Object` value to the slot
+  type (the `checkcast` kotlinc inserts) so the slot's stackmap frame stays consistent.

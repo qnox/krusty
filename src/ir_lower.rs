@@ -2247,8 +2247,11 @@ impl<'a> Lower<'a> {
                     let val = self.lower_arg(value, &ty_to_ir(elem))?;
                     return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv, elem: ty_to_ir(elem), value: val }));
                 }
-                if let Some((v, _)) = self.lookup(&name) {
-                    let val = self.expr(value)?;
+                if let Some((v, sty)) = self.lookup(&name) {
+                    // Coerce to the slot's declared type — a generic-erased `Object` value assigned to a
+                    // typed `var` gets the `checkcast` kotlinc inserts (else the slot frame is
+                    // inconsistent: `String?` at init vs `Object` after the assignment).
+                    let val = self.lower_arg(value, &ty_to_ir(sty))?;
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
@@ -3866,6 +3869,35 @@ impl<'a> Lower<'a> {
                         } else {
                             ctor_args.iter().map(|(t, _)| t.clone()).collect()
                         };
+                        // Generic constructor with a primitive type argument (`Box<Long>(-1)`): a
+                        // type-parameter field gets its argument coerced to the type-argument primitive
+                        // (`Int`→`Long`) before boxing — else an `Int` literal boxes as `Integer`, not
+                        // `Long`. Only the simple all-property positional case.
+                        // A NULLABLE type-param field (`val z: T?`) stays boxed (`Int?`) — only coerce a
+                        // non-nullable one (`val value: T`); use an empty (non-matching) name for nullable.
+                        let (tparams, prop_tys): (Vec<String>, Vec<String>) = self.class_decl(&fname)
+                            .map(|cd| (cd.type_params.clone(), cd.props.iter().filter(|p| p.is_property)
+                                .map(|p| if p.ty.nullable { String::new() } else { p.ty.name.clone() }).collect()))
+                            .unwrap_or_default();
+                        let targs: Vec<Ty> = self.afile.call_type_args.get(&e.0)
+                            .map(|ts| ts.iter().map(|r| ty_of(self.afile, r)).collect()).unwrap_or_default();
+                        let no_named = self.afile.call_arg_names.get(&e.0).map_or(true, |ns| ns.iter().all(|n| n.is_none()));
+                        let arg_prim = |i: usize| prop_tys.get(i).and_then(|pn| tparams.iter().position(|tp| tp == pn))
+                            .and_then(|ti| targs.get(ti)).copied().filter(|t| t.is_primitive());
+                        if !targs.is_empty() && no_named && args.len() == field_tys.len()
+                            && prop_tys.len() == field_tys.len() && (0..args.len()).any(|i| arg_prim(i).is_some())
+                        {
+                            let mut a = Vec::new();
+                            for (i, &arg) in args.iter().enumerate() {
+                                if let Some(p) = arg_prim(i) {
+                                    let v = self.lower_arg(arg, &ty_to_ir(p))?;
+                                    a.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: v, type_operand: field_tys[i].clone() }));
+                                } else {
+                                    a.push(self.lower_arg(arg, &field_tys[i])?);
+                                }
+                            }
+                            return Some(self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None }));
+                        }
                         let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&fname)
                             .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
                             .unwrap_or_default();
