@@ -1915,25 +1915,40 @@ impl<'a> Lower<'a> {
             Stmt::For { name, range, body } => {
                 use crate::ast::RangeKind;
                 let depth = self.scope.len();
+                // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`).
+                let elem = self.info.ty(range.start);
+                let elem_ir = ty_to_ir(elem);
+                let one = if matches!(elem, Ty::Long | Ty::ULong) { IrConst::Long(1) } else { IrConst::Int(1) };
                 // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
-                // counter's primitive type so the value is unboxed before the int-typed slot store.
-                let start = self.lower_arg(range.start, &ty_to_ir(Ty::Int))?;
+                // counter's primitive type so the value is unboxed before the slot store.
+                let start = self.lower_arg(range.start, &elem_ir)?;
                 let i_v = self.fresh_value();
-                self.scope.push((name.clone(), i_v, Ty::Int));
-                let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(start) });
+                self.scope.push((name.clone(), i_v, elem));
+                let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: elem_ir.clone(), init: Some(start) });
                 // hoisted bound
-                let end_e = self.lower_arg(range.end, &ty_to_ir(Ty::Int))?;
+                let end_e = self.lower_arg(range.end, &elem_ir)?;
                 let end_v = self.fresh_value();
-                let var_end = self.ir.add_expr(IrExpr::Variable { index: end_v, ty: ty_to_ir(Ty::Int), init: Some(end_e) });
-                // condition
+                let var_end = self.ir.add_expr(IrExpr::Variable { index: end_v, ty: elem_ir.clone(), init: Some(end_e) });
+                // condition. Signed/Long use the direct comparison opcode; unsigned compares via the JDK
+                // `compareUnsigned(i, end) <op> 0` (a signed `<=` would misorder values past the sign bit).
                 let cmp = match range.kind { RangeKind::Through => IrBinOp::Le, RangeKind::Until => IrBinOp::Lt, RangeKind::DownTo => IrBinOp::Ge };
                 let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let ge = self.ir.add_expr(IrExpr::GetValue(end_v));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: gi, rhs: ge });
+                let cond = if elem.is_unsigned() {
+                    let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+                    let cmp_call = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I") },
+                        dispatch_receiver: None, args: vec![gi, ge],
+                    });
+                    let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: cmp_call, rhs: zero })
+                } else {
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: gi, rhs: ge })
+                };
                 // body + increment
                 let mut out = Vec::new();
                 if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
-                let step = match range.step { Some(e) => self.expr(e)?, None => self.ir.add_expr(IrExpr::Const(IrConst::Int(1))) };
+                let step = match range.step { Some(e) => self.expr(e)?, None => self.ir.add_expr(IrExpr::Const(one)) };
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) { IrBinOp::Sub } else { IrBinOp::Add };
                 let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: inc_op, lhs: gi2, rhs: step });

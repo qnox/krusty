@@ -3998,15 +3998,22 @@ impl<'a> Checker<'a> {
             }
             Stmt::For { name, range, body } => {
                 let st = self.expr(range.start);
-                self.expect_assignable(Ty::Int, st, self.span(range.start), "range start");
                 let et = self.expr(range.end);
-                self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
+                // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
+                // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
+                let elem = if st == et && matches!(st, Ty::Int | Ty::Long | Ty::UInt | Ty::ULong) {
+                    st
+                } else {
+                    self.expect_assignable(Ty::Int, st, self.span(range.start), "range start");
+                    self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
+                    Ty::Int
+                };
                 if let Some(step) = range.step {
                     let stp = self.expr(step);
-                    self.expect_assignable(Ty::Int, stp, self.span(step), "range step");
+                    self.expect_assignable(elem, stp, self.span(step), "range step");
                 }
                 self.push_scope();
-                self.declare(&name, Ty::Int, true); // loop variable (mutated by the lowering)
+                self.declare(&name, elem, true); // loop variable (mutated by the lowering)
                 self.expr(body);
                 self.pop_scope();
             }
