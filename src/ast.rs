@@ -419,6 +419,52 @@ impl File {
         self.decl_arena.push(d);
         id
     }
+
+    /// Whether any *direct* child expression or child statement of `e` satisfies the given predicate
+    /// — the single structural definition of "what an expression contains", with `||`/`.any()`
+    /// short-circuiting. Tree walks (free-variable / capture / `try` / `break`-context checks)
+    /// delegate their uniform recursion here, overriding only the variants whose handling differs
+    /// (scope boundaries, leaf checks); a new `Expr` variant is then covered by adding one arm
+    /// *here*, not in every walker.
+    pub fn any_child_expr(&self, e: ExprId, fe: &mut impl FnMut(ExprId) -> bool, fs: &mut impl FnMut(StmtId) -> bool) -> bool {
+        match self.expr(e) {
+            Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
+            | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
+            | Expr::Name(_) => false,
+            Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
+            Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
+            | Expr::Is { operand, .. } | Expr::As { operand, .. } | Expr::Lambda { body: operand, .. } => fe(*operand),
+            Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => fe(*lhs) || fe(*rhs),
+            Expr::RangeTo { lo, hi, .. } => fe(*lo) || fe(*hi),
+            Expr::InRange { value, start, end, .. } => fe(*value) || fe(*start) || fe(*end),
+            Expr::Member { receiver, .. } => fe(*receiver),
+            Expr::Index { array, index } => fe(*array) || fe(*index),
+            Expr::Call { callee, args } => fe(*callee) || args.iter().any(|&a| fe(a)),
+            Expr::SafeCall { receiver, args, .. } => fe(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| fe(x))),
+            Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if fe(*x))),
+            Expr::If { cond, then_branch, else_branch } => fe(*cond) || fe(*then_branch) || else_branch.map_or(false, |x| fe(x)),
+            Expr::Block { stmts, trailing } => stmts.iter().any(|&s| fs(s)) || trailing.map_or(false, |t| fe(t)),
+            Expr::Try { body, catches, finally } => fe(*body) || catches.iter().any(|c| fe(c.body)) || finally.map_or(false, |f| fe(f)),
+            Expr::When { subject, arms } => subject.map_or(false, |s| fe(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| fe(c)) || fe(a.body)),
+        }
+    }
+
+    /// Whether any direct child expression of statement `s` satisfies the predicate. (A statement
+    /// never directly contains another statement — nesting goes through a `Block` expression, handled
+    /// by [`any_child_expr`](Self::any_child_expr).) Companion to that method.
+    pub fn any_child_stmt(&self, s: StmtId, fe: &mut impl FnMut(ExprId) -> bool) -> bool {
+        match self.stmt(s) {
+            Stmt::Break | Stmt::Continue | Stmt::Return(None) | Stmt::IncDec { .. } => false,
+            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } | Stmt::Assign { value: init, .. }
+            | Stmt::Return(Some(init)) | Stmt::Expr(init) => fe(*init),
+            Stmt::AssignMember { receiver, value, .. } => fe(*receiver) || fe(*value),
+            Stmt::AssignIndex { array, index, value } => fe(*array) || fe(*index) || fe(*value),
+            Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => fe(*cond) || fe(*body),
+            Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || range.step.map_or(false, |st| fe(st)) || fe(*body),
+            Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
+            Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
+        }
+    }
 }
 
 // ---- S-expression debug printer (used by parser tests) ---------------------------------------

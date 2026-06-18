@@ -786,56 +786,27 @@ pub fn expr_uses_name_pub(file: &File, e: ExprId, name: &str) -> bool {
 }
 
 fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&str>) -> bool {
-    let r = |x: ExprId| expr_refs_param(file, x, names);
     match file.stmt(s) {
-        Stmt::Local { init, .. } => r(*init),
-        Stmt::Destructure { init, .. } => r(*init),
+        // `name++` references `name`; a local function is a separate scope (stop).
         Stmt::IncDec { name, .. } => names.contains(name.as_str()),
-        Stmt::Assign { value, .. } => r(*value),
-        Stmt::AssignMember { receiver, value, .. } => r(*receiver) || r(*value),
-        Stmt::AssignIndex { array, index, value } => r(*array) || r(*index) || r(*value),
-        Stmt::Return(Some(e)) => r(*e),
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
-        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => r(*cond) || r(*body),
-        Stmt::For { range, body, .. } => r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body),
-        Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
-        Stmt::Expr(e) => r(*e),
         Stmt::LocalFun(_) => false,
+        _ => file.any_child_stmt(s, &mut |c| expr_refs_param(file, c, names)),
     }
 }
 
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
 fn expr_has_try(file: &File, e: ExprId) -> bool {
-    let r = |x: ExprId| expr_has_try(file, x);
     match file.expr(e) {
         Expr::Try { .. } => true,
-        Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
-        | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
-        | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
-        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
-        | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
-        Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
-        Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
-        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
-        Expr::Member { receiver, .. } => r(*receiver),
-        Expr::Index { array, index } => r(*array) || r(*index),
-        Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
-        Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
-        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
-        Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-        Expr::Block { stmts, trailing } => stmts.iter().any(|&s| stmt_has_try(file, s)) || trailing.map_or(false, |t| r(t)),
-        Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
+        // A `try` inside a lambda body is its own scope — not a *nested* try in the codegen sense.
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_has_try(file, c), &mut |s| stmt_has_try(file, s)),
     }
 }
 
 fn stmt_has_try(file: &File, s: StmtId) -> bool {
-    match file.stmt(s) {
-        Stmt::Expr(e) => expr_has_try(file, *e),
-        Stmt::Return(Some(e)) => expr_has_try(file, *e),
-        Stmt::Local { init, .. } => expr_has_try(file, *init),
-        _ => false,
-    }
+    file.any_child_stmt(s, &mut |c| expr_has_try(file, c))
 }
 
 /// Whether `break`/`continue` appears in a position krusty's backend can't yet emit: in *value*
@@ -846,21 +817,12 @@ fn stmt_has_try(file: &File, s: StmtId) -> bool {
 fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
     let v = |x: ExprId| bc_complex_e(file, x, true);
     match file.expr(e) {
+        // Pure leaves (a `CallableRef` receiver can't carry a loop jump) — never complex.
         Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
         | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
         | Expr::CallableRef { .. } => false,
         // A lambda body's `break`/`continue` would be a non-local jump (unsupported) — forbid throughout.
         Expr::Lambda { body, .. } => bc_complex_e(file, *body, true),
-        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
-        | Expr::Is { operand, .. } | Expr::As { operand, .. } => v(*operand),
-        Expr::InRange { value, start, end, .. } => v(*value) || v(*start) || v(*end),
-        Expr::RangeTo { lo, hi, .. } => v(*lo) || v(*hi),
-        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => v(*lhs) || v(*rhs),
-        Expr::Member { receiver, .. } => v(*receiver),
-        Expr::Index { array, index } => v(*array) || v(*index),
-        Expr::Call { callee, args } => v(*callee) || args.iter().any(|&a| v(a)),
-        Expr::SafeCall { receiver, args, .. } => v(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| v(x))),
-        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if v(*x))),
         // The condition/subject is a value; branches inherit the current context (a value `if`/`when`
         // makes its branches values; a statement `if` keeps them statements).
         Expr::If { cond, then_branch, else_branch } => v(*cond) || bc_complex_e(file, *then_branch, forbidden) || else_branch.map_or(false, |x| bc_complex_e(file, x, forbidden)),
@@ -868,6 +830,8 @@ fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
         Expr::Block { stmts, trailing } => stmts.iter().any(|&s| bc_complex_s(file, s, forbidden)) || trailing.map_or(false, |t| bc_complex_e(file, t, forbidden)),
         // Inside a `try`, any `break`/`continue` must cross the region — forbid throughout.
         Expr::Try { body, catches, finally } => bc_complex_e(file, *body, true) || catches.iter().any(|c| bc_complex_e(file, c.body, true)) || finally.map_or(false, |f| bc_complex_e(file, f, true)),
+        // Every other expression evaluates its children as *values* (forbidden context).
+        _ => file.any_child_expr(e, &mut |c| v(c), &mut |s| bc_complex_s(file, s, true)),
     }
 }
 
@@ -894,26 +858,11 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
 }
 
 fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
-    let r = |x: ExprId| expr_refs_param(file, x, names);
     match file.expr(e) {
         Expr::Name(n) => names.contains(n.as_str()),
-        Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit => false,
-        Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. } => r(*operand),
-        Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
-        Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
-        Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
-        Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
-        Expr::Member { receiver, .. } => r(*receiver),
-        Expr::Index { array, index } => r(*array) || r(*index),
-        Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
-        Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
-        Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
-        Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-        // Blocks, try, and when recurse; Lambda introduces a new `it` scope so stop here.
-        Expr::Block { stmts, trailing } => stmts.iter().any(|&s| stmt_refs_param(file, s, names)) || trailing.map_or(false, |t| r(t)),
-        Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
-        Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
-        Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+        // A lambda introduces a new `it` scope — stop (its captures are handled elsewhere).
+        Expr::Lambda { .. } => false,
+        _ => file.any_child_expr(e, &mut |c| expr_refs_param(file, c, names), &mut |s| stmt_refs_param(file, s, names)),
     }
 }
 
@@ -921,46 +870,16 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
 /// `outer`. Used to detect captures in local function bodies before allowing lift-to-static.
 fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> bool {
     fn check_e(file: &File, e: ExprId, outer: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer);
-        let rs = |x: StmtId| check_s(file, x, outer);
         match file.expr(e) {
             Expr::Name(n) => outer.contains(n),
-            Expr::IntLit(_)|Expr::LongLit(_)|Expr::DoubleLit(_)|Expr::FloatLit(_)
-            |Expr::BoolLit(_)|Expr::StringLit(_)|Expr::CharLit(_)|Expr::NullLit => false,
-            Expr::NotNull{operand}|Expr::Throw{operand}|Expr::Unary{operand,..} => r(*operand),
-            Expr::Is{operand,..}|Expr::As{operand,..} => r(*operand),
-            Expr::InRange{value,start,end,..} => r(*value)||r(*start)||r(*end),
-            Expr::RangeTo{lo,hi,..} => r(*lo)||r(*hi),
-            Expr::Elvis{lhs,rhs}|Expr::Binary{lhs,rhs,..} => r(*lhs)||r(*rhs),
-            Expr::Member{receiver,..} => r(*receiver),
-            Expr::Index{array,index} => r(*array)||r(*index),
-            Expr::Call{callee,args} => r(*callee)||args.iter().any(|&a|r(a)),
-            Expr::SafeCall{receiver,args,..} => r(*receiver)||args.as_ref().map_or(false,|a|a.iter().any(|&x|r(x))),
-            Expr::Template(parts) => parts.iter().any(|p|matches!(p,TemplatePart::Expr(x) if r(*x))),
-            Expr::If{cond,then_branch,else_branch} => r(*cond)||r(*then_branch)||else_branch.map_or(false,|x|r(x)),
-            Expr::Lambda{body,..} => r(*body),
-            Expr::Try{body,catches,finally} => r(*body)||catches.iter().any(|c|r(c.body))||finally.map_or(false,|f|r(f)),
-            Expr::When{subject,arms} => subject.map_or(false,|s|r(s))||arms.iter().any(|a|a.conditions.iter().any(|&c|r(c))||r(a.body)),
-            Expr::Block{stmts,trailing} => stmts.iter().any(|&s|rs(s))||trailing.map_or(false,|t|r(t)),
-            Expr::CallableRef{receiver,..} => receiver.map_or(false,|r2|r(r2)),
+            _ => file.any_child_expr(e, &mut |c| check_e(file, c, outer), &mut |s| check_s(file, s, outer)),
         }
     }
     fn check_s(file: &File, s: StmtId, outer: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer);
         match file.stmt(s) {
-            Stmt::Local{init,..} => r(*init),
-            Stmt::Destructure{init,..} => r(*init),
-            Stmt::IncDec{name,..} => outer.contains(name),
-            Stmt::Assign{value,..} => r(*value),
-            Stmt::AssignMember{receiver,value,..} => r(*receiver)||r(*value),
-            Stmt::AssignIndex{array,index,value} => r(*array)||r(*index)||r(*value),
-            Stmt::Return(Some(e)) => r(*e),
-            Stmt::Return(None)|Stmt::Break|Stmt::Continue => false,
-            Stmt::While{cond,body} | Stmt::DoWhile{cond,body} => r(*cond)||r(*body),
-            Stmt::For{range,body,..} => r(range.start)||r(range.end)||range.step.map_or(false,|s|r(s))||r(*body),
-            Stmt::ForEach{iterable,body,..} => r(*iterable)||r(*body),
-            Stmt::Expr(e) => r(*e),
+            Stmt::IncDec { name, .. } => outer.contains(name),
             Stmt::LocalFun(_) => false, // nested local funs have their own capture check
+            _ => file.any_child_stmt(s, &mut |c| check_e(file, c, outer)),
         }
     }
     check_e(file, e, outer)

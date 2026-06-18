@@ -3124,25 +3124,10 @@ fn ir_type_is_object(t: &IrType) -> bool {
 /// `finally`. Does not descend into lambdas (their control flow is separate).
 fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
     fn ex(file: &ast::File, e: AstExprId, ld: u32) -> bool {
-        let r = |x: AstExprId| ex(file, x, ld);
         match file.expr(e) {
-            Expr::Name(_) | Expr::IntLit(_) | Expr::LongLit(_) | Expr::DoubleLit(_) | Expr::FloatLit(_)
-            | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
-            | Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
-            Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
-            | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
-            Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
-            Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
-            Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
-            Expr::Member { receiver, .. } => r(*receiver),
-            Expr::Index { array, index } => r(*array) || r(*index),
-            Expr::Call { callee, args } => r(*callee) || args.iter().any(|&a| r(a)),
-            Expr::SafeCall { receiver, args, .. } => r(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| r(x))),
-            Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if r(*x))),
-            Expr::If { cond, then_branch, else_branch } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-            Expr::Block { stmts, trailing } => stmts.iter().any(|&s| st(file, s, ld)) || trailing.map_or(false, |t| r(t)),
-            Expr::When { subject, arms } => subject.map_or(false, |s| r(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body)),
-            Expr::Try { body, catches, finally } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
+            // A lambda's control flow is separate; a callable-ref receiver carries no return/break.
+            Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld), &mut |s| st(file, s, ld)),
         }
     }
     fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32) -> bool {
