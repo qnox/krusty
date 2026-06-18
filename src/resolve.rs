@@ -2091,6 +2091,29 @@ impl<'a> Checker<'a> {
     /// If `cond` is `x is T` (or `x !is T` when `for_else`) and `x` is a stable local/parameter and
     /// `T` a non-nullable known reference type, return the smart-cast binding `(x, T)`.
     fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
+        // `x != null` (then-branch) / `x == null` (else-branch) narrows a nullable-primitive wrapper to
+        // its unboxed primitive — the only null-narrowing krusty needs (a nullable reference is already
+        // its non-null type here). Only a stable `val`/parameter narrows soundly.
+        if let Expr::Binary { op, lhs, rhs } = self.file.expr(cond).clone() {
+            if matches!(op, BinOp::Ne | BinOp::Eq) {
+                let narrows_then = matches!(op, BinOp::Ne); // `!= null` narrows in the then-branch
+                if narrows_then == !for_else {
+                    let name = match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
+                        (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => Some(n),
+                        _ => None,
+                    };
+                    if let Some(n) = name {
+                        if let Some(l) = self.lookup(&n) {
+                            if !l.is_var {
+                                if let Some(p) = l.ty.obj_internal().and_then(prim_of_wrapper) {
+                                    return Some((n, p));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let Expr::Is { operand, ty, negated } = self.file.expr(cond).clone() else { return None };
         // The then-branch narrows on a positive `is`; the else-branch on a negative `!is`.
         if negated != for_else {

@@ -244,6 +244,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Null-check smart-cast of a nullable primitive: after `if (t != null)`, `t` narrows to its
+    // unboxed primitive, so it can be used in arithmetic directly.
+    ("NullableSmartCast", r#"
+fun box(): String {
+    val t: Int? = 7
+    if (t != null) {
+        if (t + 1 != 8) return "f1"
+    } else {
+        return "f2"
+    }
+    val u: Int? = null
+    if (u == null) return "OK"
+    return "f3"
+}
+"#),
     // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
     // `.get()` (no args) reads `this.receiver`'s property.
     ("BoundPropertyRef", r#"
