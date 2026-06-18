@@ -53,7 +53,13 @@ fn branchless_inline_fn_is_spliced_not_called() {
 
     // 2. A caller that uses the inline fn, compiled by krusty with the lib on its classpath.
     let main_kt = work.join("Main.kt");
-    fs::write(&main_kt, "import lib.triple\nfun box(): String = if (triple(7) == 21) \"OK\" else \"fail:${triple(7)}\"\n").unwrap();
+    // `a` is a live caller local across the spliced `triple(a)` call — if the splice clobbered its
+    // slot, `a + b` below would be wrong. Exercises the splice-base (no slot collision).
+    fs::write(
+        &main_kt,
+        "import lib.triple\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = a + b\n    return if (c == 20) \"OK\" else \"fail:a=$a b=$b c=$c\"\n}\n",
+    )
+    .unwrap();
     let compile_cp = format!("{libout}:{stdlib}:{jdk_modules}", libout = libout.to_str().unwrap());
     let kr = Command::new(krusty)
         .args(["-cp", &compile_cp, "-d", mainout.to_str().unwrap()])
