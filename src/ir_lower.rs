@@ -68,19 +68,27 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
+            // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
+            // type, prepended as the first constructor-parameter field.
+            let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
-            let ctor_fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
+            let mut ctor_fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
                 .map(|p| (p.name.clone(), ty_of(file, &p.ty))).collect();
+            if let Some(outer) = &inner_outer {
+                ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
+            }
             let ctor_param_count = ctor_fields.len() as u32;
             // Non-null reference constructor parameters get an `Intrinsics.checkNotNullParameter` guard
             // (kotlinc does); primitives, nullable params, and class type-parameters are skipped.
             // Parallel to ALL ctor params (declaration order, `ctor_args`) — a non-null reference plain
             // parameter is guarded too (it's still a constructor argument kotlinc null-checks).
-            let ctor_param_checks: Vec<Option<String>> = c.props.iter().map(|p| {
+            let mut ctor_param_checks: Vec<Option<String>> = c.props.iter().map(|p| {
                 let ty = ty_of(file, &p.ty);
                 let is_type_param = c.type_params.contains(&p.ty.name);
                 if !p.ty.nullable && !is_type_param && ty.is_reference() { Some(p.name.clone()) } else { None }
             }).collect();
+            // The synthetic `this$0` is not null-checked (kotlinc doesn't guard it).
+            if inner_outer.is_some() { ctor_param_checks.insert(0, None); }
             // Computed body properties (custom getter, no backing field) become `getX()` methods, not
             // fields — exclude them here.
             let body_fields: Vec<(String, Ty)> = c.body_props.iter().filter(|p| is_backing_field_prop(p))
@@ -128,7 +136,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 fields: fields.iter().map(|(n, t)| (n.clone(), ty_to_ir(*t))).collect(),
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
-                ctor_args: c.props.iter().map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property)).collect(),
+                // An inner class's synthetic `this$0` (the outer instance) is the first field param.
+                ctor_args: inner_outer.iter().map(|o| (ty_to_ir(Ty::obj(o)), true))
+                    .chain(c.props.iter().map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property))).collect(),
                 init_body: None,
                 methods: vec![],
                 is_interface: c.is_interface,
@@ -144,7 +154,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
-                field_final: c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var)
+                field_final: inner_outer.iter().map(|_| true) // `this$0` is final
+                    .chain(c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var))
                     .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| !p.is_var))
                     .collect(),
                 secondary_ctors: vec![],
@@ -220,7 +231,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let field_props: Vec<(String, bool)> = c.props.iter().filter(|p| p.is_property).map(|p| (p.name.clone(), p.is_var))
                     .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| (p.name.clone(), p.is_var)))
                     .collect();
-                for (fidx, (pname, is_var)) in field_props.iter().enumerate() {
+                // An inner class's `this$0` occupies field index 0, so the declared properties' fields
+                // are shifted by one — map each property's `field_props` index to its real field index.
+                let field_offset = if inner_outer.is_some() { 1 } else { 0 };
+                for (pi, (pname, is_var)) in field_props.iter().enumerate() {
+                    let fidx = pi + field_offset;
                     let fty = fields[fidx].1;
                     let fty_ir = ty_to_ir(fty);
                     let gname = getter_name(pname);
@@ -3782,6 +3797,26 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer,
+                    // args)`: the checker typed the call as the inner class (whose first field is the
+                    // synthetic `this$0`), so pass the receiver as the leading constructor argument.
+                    if let Some(class_id) = self.info.ty(e).obj_internal()
+                        .and_then(|i| self.classes.get(i)).map(|ci| ci.id)
+                        .filter(|&id| {
+                            let c = &self.ir.classes[id as usize];
+                            c.fields.first().map_or(false, |(n, _)| n == "this$0") && c.fq_name.ends_with(&format!("${name}"))
+                        })
+                    {
+                        let field_tys: Vec<IrType> = self.ir.classes[class_id as usize].ctor_args.iter().map(|(t, _)| t.clone()).collect();
+                        if field_tys.len() == args.len() + 1 {
+                            let recv = self.expr(receiver)?;
+                            let mut a = vec![recv];
+                            for (arg, pt) in args.iter().zip(&field_tys[1..]) {
+                                a.push(self.lower_arg(*arg, pt)?);
+                            }
+                            return Some(self.ir.add_expr(IrExpr::New { class: class_id, args: a, ctor_params: None }));
+                        }
+                    }
                     // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
                     // `for (x in this) body` — inline it to a for-each loop (no closure), so a mutable
                     // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the

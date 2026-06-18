@@ -650,7 +650,7 @@ impl<'a> Parser<'a> {
             is_interface: false, is_fun_interface: false,
             is_open: false,
             is_abstract: false,
-            is_sealed: false,
+            is_sealed: false, inner_of: None,
             supertypes: Vec::new(), delegations: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
@@ -934,20 +934,18 @@ impl<'a> Parser<'a> {
                     // requires nesting the full resolver/emitter; for now we drop them and the
                     // file compiles so tests that don't exercise the nested type still pass.
                     TokenKind::KwClass => {
-                        // An `inner class` captures the outer instance (a `Test this$0` field +
-                        // qualified `new`), which krusty doesn't model — reject.
-                        if mods.iter().any(|m| m == "inner") {
-                            self.diags.error(self.tok().span, "krusty: inner classes are not supported");
-                            let _ = self.parse_nested_type_decl();
-                        } else {
-                            // A plain *nested* class `Outer { class Inner … }` is a separate class
-                            // (internal name `Outer$Inner`, source name `Outer.Inner`). Hoist it to
-                            // the file's top level so it is registered and emitted like any class.
-                            let mut nested = self.parse_class();
-                            nested.name = format!("{}.{}", name, nested.name);
-                            let id = self.file.add_decl(Decl::Class(nested));
-                            self.file.decls.push(id);
+                        // A nested class `Outer { class Inner … }` is hoisted to the file top level as a
+                        // separate class (internal `Outer$Inner`, source `Outer.Inner`). An `inner class`
+                        // additionally captures the enclosing instance (`inner_of` → a synthetic `this$0`
+                        // field + outer-as-first-constructor-parameter).
+                        let is_inner = mods.iter().any(|m| m == "inner");
+                        let mut nested = self.parse_class();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        if is_inner {
+                            nested.inner_of = Some(name.clone());
                         }
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
                     }
                     // Nested `data class Inner(…)` → hoist like a plain nested class (`Outer.Inner`),
                     // constructed as `Outer.Inner(…)`; its data members emit normally.
@@ -1008,7 +1006,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes, delegations, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params, props, methods, companion_methods, companion_props, body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, inner_of: None, supertypes, delegations, base_class, base_args, secondary_ctors, span: Span::new(start.lo, end.hi) }
     }
 
     /// Parse an optional `: Base(args), Iface1, Iface2` supertype list. A supertype with `()` is the
@@ -1132,7 +1130,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name, type_params, props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order: Vec::new(),
             is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
-            enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
+            enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: true, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, inner_of: None,
             supertypes, delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(),
             span: Span::new(start.lo, end.hi),
         }
@@ -1206,7 +1204,7 @@ impl<'a> Parser<'a> {
             companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order,
             is_data: false, is_value: false, is_annotation: false, is_object: false, is_enum: false,
             enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false,
-            is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false,
+            is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, inner_of: None,
             supertypes, delegations, base_class, base_args, secondary_ctors: Vec::new(),
             span: Span::new(span.lo, end.hi),
         };
@@ -1270,7 +1268,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
-        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, supertypes: Vec::new(), delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
+        ClassDecl { name, type_params: Vec::new(), props: Vec::new(), methods, companion_methods: Vec::new(), companion_props: Vec::new(), body_props, init_order, is_data: false, is_value: false, is_annotation: false, is_object: true, is_enum: false, enum_entries: Vec::new(), enum_entry_args: Vec::new(), enum_entry_bodies: Vec::new(), is_interface: false, is_fun_interface: false, is_open: false, is_abstract: false, is_sealed: false, inner_of: None, supertypes: Vec::new(), delegations: Vec::new(), base_class: None, base_args: Vec::new(), secondary_ctors: Vec::new(), span: Span::new(start.lo, end.hi) }
     }
 
     fn parse_type(&mut self) -> TypeRef {

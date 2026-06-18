@@ -112,6 +112,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // An `inner class` captures the enclosing instance (a synthetic `this$0` field); it is constructed
+    // as `outerInstance.Inner(args)` → `new Outer$Inner(outer, args)`.
+    ("InnerClassCtor", r#"
+class Outer(val tag: Int) {
+    inner class Inner(val n: Int) {
+        fun describe(): Int = n
+    }
+}
+fun box(): String {
+    val o = Outer(7)
+    val i = o.Inner(42)
+    if (i.describe() != 42) return "f1"
+    if (i.n != 42) return "f2"
+    return "OK"
+}
+"#),
     // A `var` captured (even read-only) by a closure but reassigned later in the enclosing scope is
     // boxed, so the closure observes the update (kotlinc's captured-var semantics; KT-4656 style).
     ("CaptureReassigned", r#"
