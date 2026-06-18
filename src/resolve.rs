@@ -1058,9 +1058,13 @@ fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>,
                 }
                 // A primitive conversion method (`2.toByte()`, `n.toLong()`) returns its named
                 // primitive regardless of receiver — Kotlin's `Number`/`Char` conversion family.
+                // `toString()` is `String` on any receiver (`Any.toString`).
                 Expr::Member { name, .. } => {
                     if let Some(t) = prim_conversion_ret(name) {
                         return t;
+                    }
+                    if name == "toString" {
+                        return Ty::String;
                     }
                 }
                 _ => {}
