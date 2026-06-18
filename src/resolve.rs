@@ -2714,7 +2714,12 @@ impl<'a> Checker<'a> {
                 }
             }
             BinOp::Eq | BinOp::Ne => {
-                if lt == rt || Ty::promote(lt, rt).is_some() || (lt.is_reference() && rt.is_reference()) {
+                // `Any` compares with anything (Kotlin structural equality boxes a primitive operand);
+                // otherwise require equal/promotable primitives or two references.
+                let any = Ty::obj("kotlin/Any");
+                if lt == rt || Ty::promote(lt, rt).is_some() || (lt.is_reference() && rt.is_reference())
+                    || lt == any || rt == any
+                {
                     Ty::Boolean
                 } else {
                     self.bin_err(op, lt, rt, span)

@@ -2029,6 +2029,12 @@ impl<'a> Lower<'a> {
                         let pir = ty_to_ir(p);
                         if lt != p { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: pir.clone() }); }
                         if rt != p { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: pir }); }
+                    } else if matches!(op, BinOp::Eq | BinOp::Ne) && lt.is_reference() != rt.is_reference() {
+                        // Mixed reference/primitive equality (`Any == 5`): box the primitive operand so
+                        // both sides are references → structural equality (`Intrinsics.areEqual`).
+                        let obj = ty_to_ir(Ty::obj("kotlin/Any"));
+                        if lt.is_primitive() { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: obj }); }
+                        else { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: obj }); }
                     }
                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
                 }
