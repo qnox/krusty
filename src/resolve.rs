@@ -801,6 +801,17 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
 
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
+/// Kotlin's built-in read-only/mutable collection types remap a handful of member names onto their JVM
+/// `java.util` methods (the compiler's "mapped members"): `Map.keys`→`keySet`, `Map.entries`→`entrySet`.
+/// `values`/`size` keep their JVM name, so only the renamed ones need listing. Returns the JVM accessor.
+pub(crate) fn collection_mapped_accessor(name: &str) -> Option<&'static str> {
+    match name {
+        "keys" => Some("keySet"),
+        "entries" => Some("entrySet"),
+        _ => None,
+    }
+}
+
 fn expr_has_try(file: &File, e: ExprId) -> bool {
     match file.expr(e) {
         Expr::Try { .. } => true,
@@ -3132,7 +3143,10 @@ impl<'a> Checker<'a> {
                 let mut c = name.chars();
                 format!("get{}{}", c.next().map(|f| f.to_uppercase().to_string()).unwrap_or_default(), c.as_str())
             };
-            for cand in [name.to_string(), getter] {
+            // Kotlin's built-in collection types remap a few property names to their JVM method (Kotlin
+            // `Map.keys`/`entries` → `java.util.Map.keySet()`/`entrySet()`), like kotlinc's mapped members.
+            let mapped = collection_mapped_accessor(&name).map(|s| s.to_string());
+            for cand in [Some(name.to_string()), Some(getter), mapped].into_iter().flatten() {
                 if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, &cand, &[]) {
                     if !matches!(m.ret, Ty::Unit | Ty::Error) {
                         return m.ret;

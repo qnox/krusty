@@ -98,6 +98,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Kotlin's built-in collection mapped members: `Map.keys`/`entries` resolve to the JVM
+    // `keySet()`/`entrySet()` (Map.values/size keep their JVM name and already worked).
+    ("MapMappedMembers", r#"
+fun box(): String {
+    val m = mapOf(1 to "a", 2 to "b", 3 to "c")
+    if (m.keys.size != 3) return "f1"
+    if (m.entries.size != 3) return "f2"
+    if (m.values.size != 3) return "f3"
+    if (m.size != 3) return "f4"
+    if (!m.keys.contains(2)) return "f5"
+    return "OK"
+}
+"#),
     // Legal nested-scope variable shadowing: an inner block's `val x` shadows an outer `x` (each gets
     // its own slot; the outer is restored at block exit). Same-scope redeclaration is still an error.
     ("Shadowing", r#"
