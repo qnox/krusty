@@ -1961,60 +1961,63 @@ impl<'a> Lower<'a> {
                 Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
-            Stmt::ForEach { name, iterable, body } => {
-                let it_ty = self.info.ty(iterable);
-                // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted
-                // loop over its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc's
-                // specialized loop and avoiding per-element boxing.
-                if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
-                    return self.lower_foreach_range(&name, iterable, body, it_ty, elem, prim_desc);
-                }
-                // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other
-                // iterable (`List`, `Set`, a progression value, …) uses the iterator protocol.
-                let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
-                let Some(elem) = elem else {
-                    return self.lower_foreach_iterator(&name, iterable, body, it_ty);
-                };
-                let depth = self.scope.len();
-                // Evaluate the array once into a temp.
-                let arr_v = self.fresh_value();
-                let arr_val = self.expr(iterable)?;
-                let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: ty_to_ir(it_ty), init: Some(arr_val) });
-                // i = 0
-                let i_v = self.fresh_value();
-                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(zero) });
-                // n = arr.size (hoisted)
-                let n_v = self.fresh_value();
-                let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                let size_fq = if it_ty == Ty::String { "kotlin/String.length" } else { "kotlin/Array.size" };
-                let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External(size_fq.to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
-                let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(size) });
-                // condition: i < n
-                let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
-                // loop var `x = arr[i]`, bound for the body
-                let x_v = self.fresh_value();
-                self.scope.push((name.clone(), x_v, elem));
-                let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
-                let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
-                let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
-                let mut out = vec![var_x];
-                if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
-                let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
-                let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
-                let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
-                self.scope.truncate(depth);
-                Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
-            }
+            Stmt::ForEach { name, iterable, body } => self.lower_for_each(&name, iterable, body),
             _ => None,
         }
+    }
+
+    /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
+    /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
+    fn lower_for_each(&mut self, name: &str, iterable: AstExprId, body: AstExprId) -> Option<u32> {
+        let it_ty = self.info.ty(iterable);
+        // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted loop over
+        // its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc and avoiding per-element boxing.
+        if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
+            return self.lower_foreach_range(name, iterable, body, it_ty, elem, prim_desc);
+        }
+        // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other iterable
+        // (`List`, `Set`, a progression value, …) uses the iterator protocol.
+        let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
+        let Some(elem) = elem else {
+            return self.lower_foreach_iterator(name, iterable, body, it_ty);
+        };
+        let depth = self.scope.len();
+        // Evaluate the array once into a temp.
+        let arr_v = self.fresh_value();
+        let arr_val = self.expr(iterable)?;
+        let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: ty_to_ir(it_ty), init: Some(arr_val) });
+        // i = 0
+        let i_v = self.fresh_value();
+        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(zero) });
+        // n = arr.size (hoisted)
+        let n_v = self.fresh_value();
+        let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        let size_fq = if it_ty == Ty::String { "kotlin/String.length" } else { "kotlin/Array.size" };
+        let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External(size_fq.to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
+        let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(size) });
+        // condition: i < n
+        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
+        // loop var `x = arr[i]`, bound for the body
+        let x_v = self.fresh_value();
+        self.scope.push((name.to_string(), x_v, elem));
+        let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
+        let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
+        let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
+        let mut out = vec![var_x];
+        if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
+        let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
+        let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
+        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
+        self.scope.truncate(depth);
+        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
     }
 
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
@@ -2959,6 +2962,26 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
+                    // `for (x in this) body` — inline it to a for-each loop (no closure), so a mutable
+                    // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
+                    // receiver being iterable (so a user `forEach` on a non-iterable falls through).
+                    if name == "forEach" && args.len() == 1 {
+                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                            let rty = self.info.ty(receiver);
+                            // Restricted to `Obj` iterables (`List`/`Set`/`Iterable`), where the checker
+                            // typed the lambda parameter from the extension's generic signature; array/
+                            // `String` `forEach` keep the closure path (their param isn't element-typed
+                            // here, so inlining would mistype the loop variable).
+                            let iterable = rty.obj_internal().map_or(false, |i| range_counted_elem(i).is_some()
+                                || crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
+                                || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
+                            if iterable {
+                                let param = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                                return self.lower_for_each(&param, receiver, lbody);
+                            }
+                        }
+                    }
                     // Nested-class construction `Outer.Inner(args)` — the receiver is a class name and
                     // the call's result type is the nested class. Emit `new Outer$Inner(args)`.
                     if let Expr::Name(root) = self.afile.expr(receiver).clone() {

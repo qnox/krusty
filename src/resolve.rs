@@ -1216,6 +1216,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
         expr_depth: 0,
+        allow_lambda_mutation: false,
     };
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
@@ -1511,6 +1512,10 @@ struct Checker<'a> {
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
+    /// Set while checking the lambda argument of an *inlined* stdlib higher-order function
+    /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
+    /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
+    allow_lambda_mutation: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -2985,7 +2990,7 @@ impl<'a> Checker<'a> {
             // function's locals. Without this, an extension-call lambda silently miscompiled.
             let outer_names: std::collections::HashSet<String> = self.scopes.iter()
                 .flat_map(|s| s.keys().cloned()).collect();
-            if !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
+            if !self.allow_lambda_mutation && !outer_names.is_empty() && lambda_body_writes_outer(self.file, body, &outer_names) {
                 self.diags.error(self.file.expr_spans[e.0 as usize],
                     "krusty: lambda captures a mutable local variable — not supported".to_string());
                 return self.set(e, Ty::fun(param_types.to_vec(), Ty::Unit));
@@ -3298,6 +3303,11 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // `recv.forEach { … }` resolving to the stdlib library extension is inlined to a
+                // for-each loop by the backend, so a mutable capture in its lambda is fine (no closure).
+                // Permit it for this call only (the lowering must inline, or bail — never form a closure).
+                let prev_allow_mut = self.allow_lambda_mutation;
+                self.allow_lambda_mutation = name == "forEach" && ext_lambda_pts.is_some();
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if let Some(ref sig) = method_sig {
                         if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty()
@@ -3314,6 +3324,7 @@ impl<'a> Checker<'a> {
                     }
                     self.expr(a)
                 }).collect();
+                self.allow_lambda_mutation = prev_allow_mut;
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
