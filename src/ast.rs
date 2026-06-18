@@ -61,6 +61,10 @@ pub enum Expr {
     /// `kind` is the range form (`..`/`until`/`downTo`); `negated` ⇒ `!in`. (Range membership only;
     /// a non-range container would resolve `contains`, not yet modeled.)
     InRange { value: ExprId, start: ExprId, end: ExprId, kind: RangeKind, negated: bool },
+    /// `lo..hi` / `lo..<hi` / `lo until hi` / `lo downTo hi` as a *value* — constructs a range
+    /// (`IntRange`/`LongRange`) or progression (`IntProgression` for `downTo`). Distinct from the
+    /// `for`/`in` forms, which lower to counted loops / membership without materializing the object.
+    RangeTo { lo: ExprId, hi: ExprId, kind: RangeKind },
     Unary { op: UnOp, operand: ExprId },
     Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
     /// `receiver.name` (no call). For a bare name use `Name`.
@@ -566,6 +570,14 @@ impl File {
                 self.write_expr(*start, out);
                 out.push(' ');
                 self.write_expr(*end, out);
+                out.push(')');
+            }
+            Expr::RangeTo { lo, hi, kind } => {
+                let op = match kind { RangeKind::Through => "..", RangeKind::Until => "..<", RangeKind::DownTo => "downTo" };
+                out.push_str(&format!("({op} "));
+                self.write_expr(*lo, out);
+                out.push(' ');
+                self.write_expr(*hi, out);
                 out.push(')');
             }
             Expr::SafeCall { receiver, name, args } => {

@@ -816,6 +816,7 @@ fn expr_has_try(file: &File, e: ExprId) -> bool {
         Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
         | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
         Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
+        Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
         Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
         Expr::Member { receiver, .. } => r(*receiver),
         Expr::Index { array, index } => r(*array) || r(*index),
@@ -853,6 +854,7 @@ fn bc_complex_e(file: &File, e: ExprId, forbidden: bool) -> bool {
         Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
         | Expr::Is { operand, .. } | Expr::As { operand, .. } => v(*operand),
         Expr::InRange { value, start, end, .. } => v(*value) || v(*start) || v(*end),
+        Expr::RangeTo { lo, hi, .. } => v(*lo) || v(*hi),
         Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => v(*lhs) || v(*rhs),
         Expr::Member { receiver, .. } => v(*receiver),
         Expr::Index { array, index } => v(*array) || v(*index),
@@ -899,6 +901,7 @@ fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&st
         Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. } => r(*operand),
         Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
         Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
+        Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
         Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
         Expr::Member { receiver, .. } => r(*receiver),
         Expr::Index { array, index } => r(*array) || r(*index),
@@ -927,6 +930,7 @@ fn local_fun_body_uses_any(file: &File, e: ExprId, outer: &std::collections::Has
             Expr::NotNull{operand}|Expr::Throw{operand}|Expr::Unary{operand,..} => r(*operand),
             Expr::Is{operand,..}|Expr::As{operand,..} => r(*operand),
             Expr::InRange{value,start,end,..} => r(*value)||r(*start)||r(*end),
+            Expr::RangeTo{lo,hi,..} => r(*lo)||r(*hi),
             Expr::Elvis{lhs,rhs}|Expr::Binary{lhs,rhs,..} => r(*lhs)||r(*rhs),
             Expr::Member{receiver,..} => r(*receiver),
             Expr::Index{array,index} => r(*array)||r(*index),
@@ -1119,6 +1123,18 @@ fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>,
             Ty::Error
         }
         _ => Ty::Error,
+    }
+}
+
+/// The unboxed element type a primitive range / progression iterates as (and the element of its
+/// `first`/`last`/`step` members). `None` for any other type. Mirrors kotlinc's specialized
+/// `IntIterator`/`LongIterator`/`CharIterator` loops, which yield the primitive without boxing.
+fn range_primitive_elem(internal: &str) -> Option<Ty> {
+    match internal {
+        "kotlin/ranges/IntRange" | "kotlin/ranges/IntProgression" => Some(Ty::Int),
+        "kotlin/ranges/LongRange" | "kotlin/ranges/LongProgression" => Some(Ty::Long),
+        "kotlin/ranges/CharRange" | "kotlin/ranges/CharProgression" => Some(Ty::Char),
+        _ => None,
     }
 }
 
@@ -2329,6 +2345,22 @@ impl<'a> Checker<'a> {
                 } else {
                     self.diags.error(self.span(e), "krusty: 'in' is only supported for primitive numeric ranges".to_string());
                     Ty::Error
+                }
+            }
+            Expr::RangeTo { lo, hi, .. } => {
+                let lt = self.expr(lo);
+                let rt = self.expr(hi);
+                // `a..b` / `a..<b` over a primitive numeric type constructs the matching stdlib range
+                // object (`Int` → `IntRange`, `Long` → `LongRange`, `Char` → `CharRange`). Require
+                // uniform operand types; any other element type is rejected (the file is skipped).
+                match (lt, rt) {
+                    (Ty::Int, Ty::Int) => Ty::obj("kotlin/ranges/IntRange"),
+                    (Ty::Long, Ty::Long) => Ty::obj("kotlin/ranges/LongRange"),
+                    (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
+                    _ => {
+                        self.diags.error(self.span(e), "krusty: range expression is only supported for Int/Long/Char operands".to_string());
+                        Ty::Error
+                    }
                 }
             }
             Expr::Elvis { lhs, rhs } => {
@@ -3986,6 +4018,9 @@ impl<'a> Checker<'a> {
                     Ty::Array(_) => it.array_elem().unwrap_or(Ty::Error),
                     Ty::String => Ty::Char, // iterating a String yields its chars
                     Ty::Error => Ty::Error,
+                    // A primitive range / progression iterates as its (unboxed) primitive element,
+                    // matching kotlinc's specialized `IntIterator.nextInt()` loop (no boxing).
+                    Ty::Obj(internal, _) if range_primitive_elem(internal).is_some() => range_primitive_elem(internal).unwrap(),
                     // A collection/range value with an `iterator()` — the iterator protocol. The
                     // element is its generic argument (`List<Int>` → `Int`), erased `Any` if absent.
                     Ty::Obj(internal, args) if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[]).is_some() => {

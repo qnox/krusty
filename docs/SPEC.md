@@ -243,6 +243,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
+  precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
+  constructs the matching stdlib range object via `new IntRange/LongRange/CharRange(II/JJ/CC)` (kotlinc's
+  intrinsic constructor); `a..<b` lowers to `RangesKt.until(…)`, returning the same range type. The
+  result type is `kotlin.ranges.IntRange`/`LongRange`/`CharRange`; members like `.first`/`.last` resolve
+  to the classpath `getFirst`/`getLast` getters. `until`/`downTo`/`step` are **not** operators — they are
+  ordinary stdlib infix functions and parse as infix calls (`a until b` → `a.until(b)`), resolved through
+  the library set like any extension call. A `for (x in r)` over a stored `IntRange`/`LongRange` value
+  iterates as a counted loop (`last = r.getLast(); i = r.getFirst(); while (i <= last) { x = i; …; i++ }`),
+  matching kotlinc's specialized loop and avoiding per-element boxing; `Char` ranges and progressions use
+  the iterator protocol. The syntactic `for (i in a..b)` form is unchanged (a direct counted loop, `Int`
+  only — it never materializes a range object). `tests/range_value_e2e.rs`.
 - `companion object` (methods only): a synthesized `C$Companion` class holds the companion methods as
   instance methods; the outer class `C` gets a `public static final Companion` field of that type, built
   in `C`'s `<clinit>`; `C.foo()` compiles to `getstatic C.Companion; invokevirtual`. The companion

@@ -1416,6 +1416,51 @@ impl<'a> Lower<'a> {
     /// type comes from the iterable's generic argument (`List<Int>` → `Int`); `next()` returns the
     /// erased `Object`, so a primitive element unboxes and a specific reference checkcasts. Bails
     /// (skip) if the iterator methods or the element type can't be resolved.
+    /// `for (x in range)` over an `IntRange`/`LongRange`/`CharRange` value → a counted loop:
+    /// `last = range.getLast(); i = range.getFirst(); while (i <= last) { x = i; …; i++ }` (step +1).
+    /// The bounds are read once via the virtual getters; element/counter are the unboxed primitive.
+    fn lower_foreach_range(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, elem: Ty, prim_desc: &str) -> Option<u32> {
+        let internal = it_ty.obj_internal()?.to_string();
+        let depth = self.scope.len();
+        let elem_ir = ty_to_ir(elem);
+        // Evaluate the range once into a temp (the getters must share one receiver).
+        let rng = self.expr(iterable)?;
+        let r_v = self.fresh_value();
+        let var_r = self.ir.add_expr(IrExpr::Variable { index: r_v, ty: ty_to_ir(it_ty), init: Some(rng) });
+        let getter = |this: &mut Self, name: &str| {
+            let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
+            this.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual { owner: internal.clone(), name: name.to_string(), descriptor: format!("(){prim_desc}"), interface: false },
+                dispatch_receiver: Some(recv), args: vec![],
+            })
+        };
+        // i = range.getFirst()
+        let first = getter(self, "getFirst");
+        let i_v = self.fresh_value();
+        self.scope.push((name.to_string(), i_v, elem));
+        let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: elem_ir.clone(), init: Some(first) });
+        // last = range.getLast()  (hoisted)
+        let last = getter(self, "getLast");
+        let n_v = self.fresh_value();
+        let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: elem_ir.clone(), init: Some(last) });
+        // condition: i <= last
+        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: gi, rhs: gn });
+        // body (the loop variable `x` is the counter `i` itself)
+        let mut out = Vec::new();
+        if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
+        // i += 1  (the loop update, at the `continue` target)
+        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let one = self.ir.add_expr(IrExpr::Const(if elem == Ty::Long { IrConst::Long(1) } else { IrConst::Int(1) }));
+        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
+        let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
+        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false });
+        self.scope.truncate(depth);
+        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_r, var_i, var_n, wh], value: None }))
+    }
+
     fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty) -> Option<u32> {
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
@@ -1856,8 +1901,14 @@ impl<'a> Lower<'a> {
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach { name, iterable, body } => {
                 let it_ty = self.info.ty(iterable);
+                // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted
+                // loop over its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc's
+                // specialized loop and avoiding per-element boxing.
+                if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
+                    return self.lower_foreach_range(&name, iterable, body, it_ty, elem, prim_desc);
+                }
                 // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other
-                // iterable (`List`, `Set`, a range value, …) uses the iterator protocol.
+                // iterable (`List`, `Set`, a progression value, …) uses the iterator protocol.
                 let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
                 let Some(elem) = elem else {
                     return self.lower_foreach_iterator(&name, iterable, body, it_ty);
@@ -2388,6 +2439,37 @@ impl<'a> Lower<'a> {
                 };
                 self.ir.add_expr(IrExpr::Block { stmts: vec![var_s, var_e, var_v], value: Some(cond) })
             }
+            Expr::RangeTo { lo, hi, kind } => {
+                use crate::ast::RangeKind;
+                // Operand primitive type (Int/Long/Char) selects the range class and descriptor.
+                let elem = self.info.ty(lo);
+                let (range_internal, prim_desc) = match elem {
+                    Ty::Int => ("kotlin/ranges/IntRange", "I"),
+                    Ty::Long => ("kotlin/ranges/LongRange", "J"),
+                    Ty::Char => ("kotlin/ranges/CharRange", "C"),
+                    _ => return None,
+                };
+                let lo_v = self.lower_arg(lo, &ty_to_ir(elem))?;
+                let hi_v = self.lower_arg(hi, &ty_to_ir(elem))?;
+                match kind {
+                    // `a..b` → `new IntRange(a, b)` (kotlinc's intrinsic constructor).
+                    RangeKind::Through => {
+                        let ctor_desc = format!("({prim_desc}{prim_desc})V");
+                        self.ir.add_expr(IrExpr::NewExternal { internal: range_internal.to_string(), ctor_desc, args: vec![lo_v, hi_v] })
+                    }
+                    // `a..<b` → `RangesKt.until(a, b)` (the `rangeUntil` operator), returning the range.
+                    RangeKind::Until => {
+                        let descriptor = format!("({prim_desc}{prim_desc})L{range_internal};");
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static { owner: "kotlin/ranges/RangesKt".to_string(), name: "until".to_string(), descriptor },
+                            dispatch_receiver: None,
+                            args: vec![lo_v, hi_v],
+                        })
+                    }
+                    // `downTo` never reaches here (it parses as an infix function call, not `RangeTo`).
+                    RangeKind::DownTo => return None,
+                }
+            }
             Expr::As { operand, ty, nullable } => {
                 // `as?` (safe cast: null on mismatch) isn't modeled — only the throwing `as`.
                 if nullable {
@@ -2645,6 +2727,16 @@ impl<'a> Lower<'a> {
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &[])
                     } {
+                        // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
+                        // element to `Object`, so a wider literal would box as `Integer` and a later
+                        // narrowing read (`map(::shortFoo)`) throws `ClassCastException`. kotlinc boxes
+                        // the constant as the narrow type; krusty doesn't track that logical-vs-erased
+                        // element type yet, so bail (skip) rather than miscompile.
+                        let narrow_targ = self.afile.call_type_args.get(&e.0)
+                            .map_or(false, |ts| ts.iter().any(|r| !r.nullable && matches!(r.name.as_str(), "Short" | "Byte")));
+                        if narrow_targ && args.iter().any(|&a| matches!(self.info.ty(a), Ty::Int | Ty::Long | Ty::Char)) {
+                            return None;
+                        }
                         let last_is_array = c.params.last().map_or(false, |p| p.array_elem().is_some());
                         let vararg = !c.params.is_empty() && last_is_array
                             && (c.params.len() != args.len() || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
@@ -3040,6 +3132,7 @@ fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
             Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
             | Expr::Is { operand, .. } | Expr::As { operand, .. } => r(*operand),
             Expr::InRange { value, start, end, .. } => r(*value) || r(*start) || r(*end),
+            Expr::RangeTo { lo, hi, .. } => r(*lo) || r(*hi),
             Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => r(*lhs) || r(*rhs),
             Expr::Member { receiver, .. } => r(*receiver),
             Expr::Index { array, index } => r(*array) || r(*index),
@@ -3068,6 +3161,17 @@ fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
 }
 
 /// The element type of a primitive-array constructor name (`IntArray` → `Int`).
+/// A primitive range class iterated by a counted loop: its (unboxed) element type and the JVM
+/// primitive descriptor of its `getFirst`/`getLast` getters. Only the step-+1 *range* classes
+/// (not the general progressions) use the counted loop; `Char` ranges fall to the iterator path.
+fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
+    match internal {
+        "kotlin/ranges/IntRange" => Some((Ty::Int, "I")),
+        "kotlin/ranges/LongRange" => Some((Ty::Long, "J")),
+        _ => None,
+    }
+}
+
 fn prim_array_elem(name: &str) -> Option<Ty> {
     Some(match name {
         "IntArray" => Ty::Int,

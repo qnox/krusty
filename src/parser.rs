@@ -1748,7 +1748,10 @@ impl<'a> Parser<'a> {
             None => self.ident_or_error("loop variable"),
         };
         self.expect(TokenKind::KwIn, "'in'");
-        let rstart = self.parse_expr();
+        // Parse the iterable / range start at additive precedence so the `..`/`until`/`downTo`
+        // operator is left for the `for`-specific range handling below (not swallowed into a
+        // `RangeTo` value expression).
+        let rstart = self.parse_bp(9);
         let kind = if self.eat(TokenKind::DotDot) {
             RangeKind::Through
         } else if self.eat(TokenKind::DotDotLt) {
@@ -1777,7 +1780,7 @@ impl<'a> Parser<'a> {
             // Otherwise iterate over `rstart` as a collection: `for (x in array)`.
             return self.finish_stmt(Stmt::ForEach { name, iterable: rstart, body }, start);
         };
-        let rend = self.parse_expr();
+        let rend = self.parse_bp(9);
         let step = if self.at(TokenKind::Ident) && self.text() == "step" {
             self.bump();
             Some(self.parse_expr())
@@ -1920,7 +1923,7 @@ impl<'a> Parser<'a> {
                     }
                     self.bump(); // 'in'
                     self.skip_newlines();
-                    let rstart = self.parse_bp(8); // the range start binds tighter than `in`
+                    let rstart = self.parse_bp(9); // the range start binds tighter than `in` (and `..`)
                     let kind = if self.eat(TokenKind::DotDot) {
                         Some(RangeKind::Through)
                     } else if self.eat(TokenKind::DotDotLt) {
@@ -1936,7 +1939,7 @@ impl<'a> Parser<'a> {
                     };
                     match kind {
                         Some(kind) => {
-                            let rend = self.parse_bp(8);
+                            let rend = self.parse_bp(9);
                             let end = self.file.expr_spans[rend.0 as usize];
                             lhs = self.file.add_expr(Expr::InRange { value: lhs, start: rstart, end: rend, kind, negated }, Span::new(lspan.lo, end.hi));
                         }
@@ -1955,14 +1958,38 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
+            // Range operators `a..b` (`rangeTo`) and `a..<b` (`rangeUntil`) as a *value*. These are
+            // the only true range *operators* — `until`/`downTo`/`step` are ordinary stdlib infix
+            // functions and flow through the infix-function path below. Binds tighter than infix
+            // functions (so `a..b step c` is `(a..b).step(c)`) and looser than additive (operands at
+            // bp 9). Builds `Expr::RangeTo`; the `for`/`in` forms are handled separately above.
+            if min_bp <= 8 {
+                let rkind = if self.at(TokenKind::DotDot) {
+                    Some(RangeKind::Through)
+                } else if self.at(TokenKind::DotDotLt) {
+                    Some(RangeKind::Until)
+                } else {
+                    None
+                };
+                if let Some(kind) = rkind {
+                    let lspan = self.file.expr_spans[lhs.0 as usize];
+                    self.bump(); // '..' / '..<'
+                    self.skip_newlines();
+                    let hi = self.parse_bp(9);
+                    let rspan = self.file.expr_spans[hi.0 as usize];
+                    lhs = self.file.add_expr(Expr::RangeTo { lo: lhs, hi, kind }, Span::new(lspan.lo, rspan.hi));
+                    continue;
+                }
+            }
             // Infix function call `a foo b` → `a.foo(b)`: a simple identifier between two operands.
             // Binds tighter than comparison (bp 7) and looser than additive (bp 9) — Kotlin's
             // `infixFunctionCall`. Resolution checks `foo` is actually an `infix`/member function.
             if min_bp <= 8 && self.at(TokenKind::Ident) {
                 let name = self.text();
-                // Exclude soft keywords and the range words (`until`/`downTo`/`step`), which the
-                // `for` loop parses specially as `ForRange` — not as generic infix calls.
-                let is_soft_kw = matches!(name, "is" | "as" | "in" | "until" | "downTo" | "step");
+                // Exclude the real soft keywords only. `until`/`downTo`/`step` are ordinary stdlib
+                // infix functions and parse as such here (`a until b` → `a.until(b)`); the `for`/`in`
+                // forms recognize them separately before reaching this point.
+                let is_soft_kw = matches!(name, "is" | "as" | "in");
                 let next_starts_expr = self.t.get(self.i + 1).map_or(false, |t| starts_expr(t.kind));
                 if !is_soft_kw && next_starts_expr {
                     let name = name.to_string();

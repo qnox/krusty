@@ -2158,6 +2158,17 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
     core: `StringBuilder`, `Class`, the String supertype set; plus the `Ty::Array` boxing-model fix
     (keep `Array<Int>` element `Int`, box in the emitter) so the resolver stops computing wrappers.
 
+- ✅ **Phase 265 — range expressions as values (`a..b`, `a..<b`)** (429 → 441 box()=OK, 0 FAIL).
+  `..`/`..<` are the only range *operators* (parsed tighter than infix functions, looser than additive);
+  `until`/`downTo`/`step` are de-special-cased back to ordinary stdlib infix functions. A new
+  `Expr::RangeTo` types to `IntRange`/`LongRange`/`CharRange` and lowers to `new IntRange/LongRange(II/JJ)`
+  (`..`) or `RangesKt.until` (`..<`); `.first`/`.last` resolve to the classpath getters. `for (x in r)`
+  over a stored `Int`/`Long` range value iterates as a counted `getFirst()/getLast()` loop (no boxing);
+  the loop variable's element type comes from `range_primitive_elem`. Also fixed a latent miscompile this
+  unlocked: `listOf<Short>(1, 2)` would box `Int` literals as `Integer` and `ClassCastException` on a
+  narrowing read — now cleanly skipped (the erased logical-vs-physical element type isn't tracked yet).
+  `tests/range_value_e2e.rs`; SPEC §7.
+
 ## Phase 7 — Hardening  ⬜
 - Fuzz the lexer/parser; property tests for arithmetic semantics vs a reference evaluator.
 - Expand the subset opportunistically (when/nullable) only if it serves the memory thesis.
