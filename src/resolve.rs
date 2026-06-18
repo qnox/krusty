@@ -2184,7 +2184,8 @@ impl<'a> Checker<'a> {
                 // `Map.get(K)`); the index type is checked against the member's parameter.
                 if let Ty::Obj(internal, _) = at {
                     if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "get", &[it]) {
-                        return self.set(e, m.ret);
+                        let ret = self.syms.libraries.member_return(at, "get", &[it]).unwrap_or(m.ret);
+                        return self.set(e, ret);
                     }
                 }
                 if at != Ty::Error {
@@ -3234,7 +3235,10 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, &name, &arg_tys) { let ret = m.ret;
+                    if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, &name, &arg_tys) {
+                        // A parameterized receiver (`List<Int>`) recovers the member's substituted
+                        // return (`get` → `Int`) from the generic signature; else the erased return.
+                        let ret = self.syms.libraries.member_return(rt, &name, &arg_tys).unwrap_or(m.ret);
                         return ret;
                     }
                 }

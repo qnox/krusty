@@ -151,6 +151,15 @@ pub trait LibrarySet {
     fn resolve_callable(&self, _name: &str, _receiver: Option<Ty>, _args: &[Ty]) -> Option<LibraryCallable> {
         None
     }
+
+    /// The substituted (non-erased) return type of instance member `name(args)` on a *parameterized*
+    /// receiver — `List<Int>.get(0)` → `Int`. Binds the receiver's type arguments through the generic
+    /// hierarchy and substitutes the member's generic return. `None` when the receiver carries no type
+    /// arguments, the member isn't generic, or the library can't resolve it (the caller then uses the
+    /// erased return). The physical descriptor is unchanged — only the *logical* type is recovered.
+    fn member_return(&self, _recv: Ty, _name: &str, _args: &[Ty]) -> Option<Ty> {
+        None
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

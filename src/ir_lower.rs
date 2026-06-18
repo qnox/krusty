@@ -2502,7 +2502,7 @@ impl<'a> Lower<'a> {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
-                    } else if let Some((internal, desc, is_iface, mparams)) = {
+                    } else if let Some((internal, desc, is_iface, mparams, mret)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
@@ -2512,7 +2512,7 @@ impl<'a> Lower<'a> {
                             .and_then(|internal| {
                                 crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys).map(|m| {
                                     let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
-                                    (internal, m.descriptor, is_iface, m.params)
+                                    (internal, m.descriptor, is_iface, m.params, m.ret)
                                 })
                             })
                     } {
@@ -2526,7 +2526,10 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a })
+                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a });
+                        // A generic member whose erased return is `Object` but whose substituted type is
+                        // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
+                        self.coerce_generic_read(call, e, mret)
                     } else if let Some(c) = {
                         // A library-resolved extension `recv.name(args)` → `invokestatic
                         // facade.name(recv, args)`. Owner + descriptor come from the library
