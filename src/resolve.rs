@@ -1256,6 +1256,11 @@ pub struct TypeInfo {
     /// Synthetic bridge methods a class must emit so a supertype's erased call dispatches to the
     /// class's concrete override (`class_internal → [bridge]`).
     pub bridges: HashMap<String, Vec<BridgeSpec>>,
+    /// A capturing local function's `StmtId` → the enclosing locals it captures, as ordered
+    /// `(name, type)`. The lowerer lifts the function with these prepended as extra leading parameters
+    /// and passes the captured values at each call site (a written-captured var is also boxed via
+    /// `boxed_vars`, so its captured "value" is the shared `Ref` holder).
+    pub local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Names of local `var`s that a non-inlined lambda (a closure) writes — they must be boxed into a
     /// `kotlin/jvm/internal/Ref$XxxRef` so the closure and its enclosing scope share the cell. Tracked
     /// by name (a file-wide set); the lowerer boxes any matching `var` it declares (over-boxing an
@@ -1312,6 +1317,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
         boxed_vars: std::collections::HashSet::new(),
+        local_fun_captures: std::collections::HashMap::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         loop_labels: Vec::new(),
@@ -1591,7 +1597,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         }
     }
-    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls, bridges: c.bridges, boxed_vars: c.boxed_vars }
+    TypeInfo { expr_types: c.expr_types, local_fun_sigs: c.local_fun_sigs, local_call_map: c.local_call_map, fun_ret_overrides: c.fun_ret_overrides, ext_calls: c.ext_calls, bridges: c.bridges, boxed_vars: c.boxed_vars, local_fun_captures: c.local_fun_captures }
 }
 
 struct Checker<'a> {
@@ -1623,6 +1629,7 @@ struct Checker<'a> {
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
     boxed_vars: std::collections::HashSet<String>,
+    local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -1672,6 +1679,7 @@ impl<'a> Checker<'a> {
             frame.insert(name.to_string(), (stmt_id, sig));
         }
     }
+
 
     /// Build a class reference type, carrying any generic arguments from the syntactic type
     /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
@@ -4366,15 +4374,37 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect();
 
-        // Detect captures by walking the body.
+        // Captured outer locals: lifted to extra leading parameters (recorded as ordered `(name,
+        // type)`); a captured var the body *writes* is also boxed (`Ref$XxxRef`) so the lift shares the
+        // cell. Determined by walking the body (stops at nested local funs, which capture separately).
         if !outer_names.is_empty() {
-            let captures = match &f.body {
-                FunBody::Expr(e) | FunBody::Block(e) => local_fun_body_uses_any(self.file, *e, &outer_names),
-                FunBody::None => false,
-            };
-            if captures {
-                self.diags.error(span, "krusty: local functions that capture outer variables are not supported".to_string());
-                return;
+            if let FunBody::Expr(e) | FunBody::Block(e) = &f.body {
+                let mut captured: Vec<(String, Ty)> = Vec::new();
+                for n in &outer_names {
+                    let single: std::collections::HashSet<String> = std::iter::once(n.clone()).collect();
+                    if local_fun_body_uses_any(self.file, *e, &single) {
+                        let ty = self.lookup(n).map(|l| l.ty).unwrap_or(Ty::Error);
+                        captured.push((n.clone(), ty));
+                    }
+                }
+                captured.sort_by(|a, b| a.0.cmp(&b.0));
+                // A captured var the local function WRITES is boxed (a shared `Ref` cell); a captured
+                // `val` is safely passed by value. A captured `var` the function only READS could be
+                // reassigned in the enclosing scope after the call (the lift would see a stale value) —
+                // box it only when it's written here, else bail (skip) rather than risk a stale read.
+                let mut written = std::collections::HashSet::new();
+                collect_lambda_outer_writes(self.file, *e, &outer_names, &mut written);
+                let read_captured_var = captured.iter().any(|(n, _)| {
+                    self.lookup(n).map_or(false, |l| l.is_var) && !written.contains(n)
+                });
+                if read_captured_var {
+                    self.diags.error(span, "krusty: a local function that reads a captured mutable variable is not supported".to_string());
+                    return;
+                }
+                self.boxed_vars.extend(written);
+                if !captured.is_empty() {
+                    self.local_fun_captures.insert(stmt_id, captured);
+                }
             }
         }
 

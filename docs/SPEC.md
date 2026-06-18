@@ -399,3 +399,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rejects captures). Calls route through the checker's `local_call_map` to the lifted `FunId`
   (`Callee::Local`). Recursion and multiple local functions in one body work. A local function that
   captures an enclosing variable, or is generic, is still skipped.
+
+- **Capturing local functions**: a local function that captures enclosing locals is lifted with those
+  captures prepended as extra leading parameters (then its declared parameters). A captured `val` (or a
+  `var` the function writes — boxed into a shared `kotlin/jvm/internal/Ref$XxxRef`) is supported: the
+  written `var`'s holder is passed so the mutation is visible to the enclosing scope. A captured `var`
+  the function only *reads* is rejected (it could be reassigned in the enclosing scope after the call,
+  making the by-value capture stale) — the checker records `local_fun_captures` as ordered `(name,
+  type)` and the lowerer passes each captured value (or holder) at the call site.
