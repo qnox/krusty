@@ -217,6 +217,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
+  impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
+  closure. Only the simple primary-constructor positional case (the reference's arity matches the
+  constructor's field params) is modeled; defaulted/secondary constructors are skipped.
 - Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
   lambda, but the impl method handle points directly at the referenced function (no synthesized body).
   kotlinc instead emits a `kotlin/jvm/internal/FunctionReferenceImpl` subclass carrying reflection
