@@ -1279,6 +1279,12 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 if cl.is_value {
                     c.diags.error(cl.span, "krusty: value/inline classes are not supported".to_string());
                 }
+                // An annotation with an array member needs content-based equals/hashCode
+                // (`Arrays.equals`/`Arrays.hashCode`) per the annotation contract — krusty's synthesized
+                // members use reference equality, so reject it rather than miscompile equality.
+                if cl.is_annotation && cl.props.iter().any(|p| matches!(c.resolve_ty(&p.ty), Ty::Array(_))) {
+                    c.diags.error(cl.span, "krusty: an annotation with an array member is not supported".to_string());
+                }
                 // Class type parameters are in scope for all members.
                 c.tparams = cl.type_params.iter().cloned().collect();
                 // Member functions are checked with the class's properties (resolved in Stage C)
@@ -2792,8 +2798,11 @@ impl<'a> Checker<'a> {
             "intArrayOf" => Some(Ty::Int),
             "longArrayOf" => Some(Ty::Long),
             "doubleArrayOf" => Some(Ty::Double),
+            "floatArrayOf" => Some(Ty::Float),
             "booleanArrayOf" => Some(Ty::Boolean),
             "charArrayOf" => Some(Ty::Char),
+            "byteArrayOf" => Some(Ty::Byte),
+            "shortArrayOf" => Some(Ty::Short),
             _ => None,
         };
         if let Some(elem) = primitive_of(fname) {
