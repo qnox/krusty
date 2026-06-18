@@ -679,6 +679,11 @@ impl CodeBuilder {
     pub fn bind(&mut self, l: Label) {
         self.labels[l.0 as usize] = self.bytes.len();
     }
+    /// Bind a label at an explicit byte offset (used to attach a relocated StackMapTable frame to a
+    /// position inside a spliced inline body, which is appended as raw bytes).
+    pub fn bind_at(&mut self, l: Label, offset: usize) {
+        self.labels[l.0 as usize] = offset;
+    }
     fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
         self.bytes.push(opcode);
         let pos = self.bytes.len();

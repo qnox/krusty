@@ -43,7 +43,11 @@ fn branchless_inline_fn_is_spliced_not_called() {
 
     // 1. A library with a branchless `inline fun`, compiled by the *real* kotlinc.
     let lib_kt = work.join("Lib.kt");
-    fs::write(&lib_kt, "package lib\ninline fun triple(x: Int): Int = x * 3\n").unwrap();
+    fs::write(
+        &lib_kt,
+        "package lib\ninline fun triple(x: Int): Int = x * 3\ninline fun atLeast(x: Int, lo: Int): Int = if (x < lo) lo else x\n",
+    )
+    .unwrap();
     let kc = Command::new(&kotlinc)
         .args(["-d", libout.to_str().unwrap(), "-cp", &stdlib])
         .arg(&lib_kt)
@@ -57,7 +61,7 @@ fn branchless_inline_fn_is_spliced_not_called() {
     // slot, `a + b` below would be wrong. Exercises the splice-base (no slot collision).
     fs::write(
         &main_kt,
-        "import lib.triple\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = a + b\n    return if (c == 20) \"OK\" else \"fail:a=$a b=$b c=$c\"\n}\n",
+        "import lib.triple\nimport lib.atLeast\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    return if (a == 5 && b == 15 && c == 20 && d == 15) \"OK\" else \"fail:a=$a b=$b c=$c d=$d\"\n}\n",
     )
     .unwrap();
     let compile_cp = format!("{libout}:{stdlib}:{jdk_modules}", libout = libout.to_str().unwrap());
@@ -70,10 +74,13 @@ fn branchless_inline_fn_is_spliced_not_called() {
 
     // 3. The inline fn was *spliced*, not called: no reference to `triple` survives in MainKt.
     let main_class = fs::read(mainout.join("MainKt.class")).unwrap();
-    assert!(
-        !contains(&main_class, b"triple"),
-        "MainKt still references `triple` — the inline fn was called, not spliced"
-    );
+    for callee in [&b"triple"[..], &b"atLeast"[..]] {
+        assert!(
+            !contains(&main_class, callee),
+            "MainKt still references `{}` — the inline fn was called, not spliced",
+            String::from_utf8_lossy(callee)
+        );
+    }
 
     // 4. The spliced bytecode verifies and computes the right result.
     let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
