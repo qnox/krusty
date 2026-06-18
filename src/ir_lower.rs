@@ -1349,6 +1349,14 @@ impl<'a> Lower<'a> {
         if !self.syms.libraries.can_inline_lambda(&c.owner, &c.name, &c.descriptor) {
             return None;
         }
+        // The emitter's lambda-splice is branchless-only: a branch in the lambda body produces a
+        // stackmap frame it can't relocate mid-splice. Route only a branchless body; a branchy one
+        // falls through to the per-function desugar, which lowers the body with normal branchy codegen.
+        if let Expr::Lambda { body, .. } = self.afile.expr(lam_arg) {
+            if body_contains_branch(self.afile, *body) {
+                return None;
+            }
+        }
         let lam = self.expr(lam_arg)?;
         // The argument must be a real lambda (with an `inline_body` to splice) — a callable reference
         // (`::foo`) has none. The emitter handles any lambda body, incl. captures and non-local return.
@@ -3668,6 +3676,26 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
         }
         Expr::Unary { op: ast::UnOp::Not, .. } => true,
         _ => false,
+    }
+}
+
+/// Deep check: does `e` contain any branch-producing construct (`if`/`when`/elvis/safe-call/`try`/`&&`/
+/// `||`/loop) anywhere within it? The branchless lambda-splice (the `let`/`also` inline route) can't
+/// relocate the stackmap frames such a body produces, so a branchy lambda body must fall back to the
+/// per-function desugar (which inlines the body through normal branchy lowering).
+fn body_contains_branch(file: &ast::File, e: AstExprId) -> bool {
+    match file.expr(e) {
+        Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::SafeCall { .. } | Expr::Try { .. } => true,
+        Expr::Binary { op: ast::BinOp::And | ast::BinOp::Or, .. } => true,
+        Expr::Lambda { .. } => false, // a nested lambda is its own method body
+        _ => file.any_child_expr(e, &mut |c| body_contains_branch(file, c), &mut |s| stmt_contains_branch(file, s)),
+    }
+}
+
+fn stmt_contains_branch(file: &ast::File, s: ast::StmtId) -> bool {
+    match file.stmt(s) {
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => true,
+        _ => file.any_child_stmt(s, &mut |c| body_contains_branch(file, c)),
     }
 }
 
