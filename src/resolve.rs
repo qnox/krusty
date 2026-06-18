@@ -3307,7 +3307,7 @@ impl<'a> Checker<'a> {
                 // for-each loop by the backend, so a mutable capture in its lambda is fine (no closure).
                 // Permit it for this call only (the lowering must inline, or bail — never form a closure).
                 let prev_allow_mut = self.allow_lambda_mutation;
-                self.allow_lambda_mutation = name == "forEach" && ext_lambda_pts.is_some();
+                self.allow_lambda_mutation = matches!(name.as_str(), "forEach" | "forEachIndexed") && ext_lambda_pts.is_some();
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if let Some(ref sig) = method_sig {
                         if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty()
