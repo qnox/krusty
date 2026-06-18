@@ -2327,6 +2327,21 @@ bodies exist only as jar bytecode):
      interleave the lambda at `function_invoke_sites` inside the `splice_branchy` frame machinery.
      (f) **Receiver-rebind** (`run`/`with`/`apply`: `this` not `it`). (g) skip emitting the now-dead inlined
      `impl_fn` method for byte-equality.
+     **DELETING THE `let`/`also` DESUGAR — the precise blocker chain (diagnosed phase 308, all in the
+     front end):** the inliner ENGINE is complete (route b inlines any lambda shape — value/Unit/captures/
+     mutable/non-local-return — proven on custom-lib fns), but stdlib `let`/`also` can't be *routed* to it:
+     (1) ✅ body lives in the multifile part `StandardKt__StandardKt` — `method_code` reads it (303).
+     (2) the ext index excludes `let`/`also` because they're `static` but **non-public** (`@InlineOnly`
+     makes them package-private to block Java calls) — `collect_class_bytes` filters `is_public`; must
+     include non-public statics (gated by the `inline` flag at the call site so non-inline non-public
+     methods aren't emitted as broken calls). (3) THE REAL BLOCKER: even with (2), the **checker types
+     `let`'s lambda argument as `Ty::Error`** in `TypeInfo` (it relies on the name-matched `let`/`also`
+     handling in `resolve.rs` and never records the lambda arg's `Ty::Fun`), so `resolve_callable`'s
+     `arg_fits(Function1, Error)` fails → the route can't resolve it. Fix order: make the checker resolve
+     `let`/`also` via the library (recording the lambda arg as `Ty::Fun`) + index non-public statics; then
+     `try_route_lambda_inline` resolves them, the inliner splices, and the desugar deletes (0 coverage
+     loss — the engine handles every shape, verified phase 307). This is a front-end (resolver) arc, not
+     an inliner one.
   3. **Non-local return** from an inlined lambda (`return` in `list.forEach { return ... }`): map to a
      jump out of the enclosing function (kotlinc uses a generated finally/label). Until done, bail.
   4. **invokedynamic relocation** (bootstrap-method + method-handle pool entries) — `relocate_const`
