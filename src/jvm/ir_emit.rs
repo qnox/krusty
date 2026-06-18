@@ -97,7 +97,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     for s in &ir.statics {
         cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
     }
-    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
+    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
     let mut code = CodeBuilder::new(0);
     for s in &ir.statics {
         e.emit_value(s.init, &mut code);
@@ -160,7 +160,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     let max_slot;
     let mut init_diverges = false;
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
@@ -230,7 +230,7 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         let sec_max;
         let mut sec_diverges = false;
         {
-            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
+            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
             e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
             let mut s = 1u16;
             for (vi, t) in sc_param_tys.iter().enumerate() {
@@ -468,7 +468,7 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new(), inlining: false };
+        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
@@ -551,7 +551,7 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new(), inlining: false };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -611,7 +611,7 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new(), inlining: false };
+    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -675,9 +675,6 @@ struct Emitter<'a> {
     ret: Ty,
     /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
     loop_stack: Vec<(Label, Label)>,
-    /// True while emitting an inlined lambda body (route-(b) lambda splice): a `Return` leaves its value
-    /// on the operand stack and falls through (the spliced stdlib body continues) instead of `*return`.
-    inlining: bool,
 }
 
 /// Parse a method descriptor's parameter types (in order) to `Ty`s.
@@ -706,19 +703,17 @@ fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
 }
 
 impl<'a> Emitter<'a> {
-    /// Emit lambda impl function `impl_fn`'s body INLINE: bind its parameter value-indices `0..` to the
-    /// given JVM slots (the lambda's typed arguments), then emit its body with `inlining` set so its
-    /// `Return` leaves the result on the stack (instead of `*return`). Used by route-(b) lambda splice.
-    fn emit_fn_body_inline(&mut self, impl_fn: u32, param_slots: &[(u16, Ty)], code: &mut CodeBuilder) {
-        let body = self.ir.functions[impl_fn as usize].body.expect("lambda impl has a body");
+    /// Emit a lambda's `inline_body` (its value-producing form) INLINE at a stdlib-inline-fn splice:
+    /// bind its parameter value-indices `0..` to the given JVM slots (captures → caller slots, lambda
+    /// params → the on-stack args), then emit the body as a value — leaving the result on the stack. A
+    /// user `return` inside the body emits a real `*return` from the enclosing method, i.e. a correct
+    /// non-local return (no synthetic-return rewriting needed).
+    fn emit_fn_body_inline(&mut self, inline_body: u32, param_slots: &[(u16, Ty)], code: &mut CodeBuilder) {
         let saved_slots = std::mem::take(&mut self.slots);
-        let saved_inlining = self.inlining;
-        self.inlining = true;
         for (i, &(slot, ty)) in param_slots.iter().enumerate() {
             self.slots.insert(i as u32, (slot, ty));
         }
-        self.emit(body, code);
-        self.inlining = saved_inlining;
+        self.emit_value(inline_body, code);
         self.slots = saved_slots;
     }
 
@@ -735,12 +730,10 @@ impl<'a> Emitter<'a> {
         base: u16,
         code: &mut CodeBuilder,
     ) -> bool {
-        let IrExpr::Lambda { impl_fn, arity, captures, .. } = self.ir.expr(lam_expr).clone() else {
+        let IrExpr::Lambda { impl_fn, arity, captures, inline_body, .. } = self.ir.expr(lam_expr).clone() else {
             return false;
         };
-        if !captures.is_empty() {
-            return false; // v1: only non-capturing lambdas
-        }
+        let Some(inline_body) = inline_body else { return false }; // a callable ref has no inlinable body
         let arity = arity as usize;
         let Some(params) = parse_descriptor_params(descriptor) else { return false };
         if lam_idx >= params.len() {
@@ -763,17 +756,6 @@ impl<'a> Emitter<'a> {
         let cap_tys: Vec<Ty> = impl_f.params[..n_cap].iter().map(ir_ty_to_jvm).collect();
         let lam_tys: Vec<Ty> = impl_f.params[n_cap..].iter().map(ir_ty_to_jvm).collect();
         let impl_ret = ir_ty_to_jvm(&impl_f.ret);
-        // Single-exit body only: `{ effects…; Return(Some(rv)) }` with no early/non-local return — the
-        // `inlining` flag makes every `Return` leave its value and fall through, so multiple returns or a
-        // return nested in control flow would corrupt the stack. (Covers value AND Unit lambdas; the
-        // preceding effect statements must not themselves return/branch.)
-        let body_ok = matches!(impl_f.body, Some(b) if matches!(self.ir.expr(b), IrExpr::Block { stmts, value: None }
-            if stmts.last().map_or(false, |&l| matches!(self.ir.expr(l), IrExpr::Return(Some(_))))
-                && stmts[..stmts.len() - 1].iter().all(|&s| !matches!(self.ir.expr(s),
-                    IrExpr::Return(_) | IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. }))));
-        if !body_ok {
-            return false;
-        }
         // Capture parameters bind to the caller's *actual* slots, so a mutable capture written by the
         // lambda body propagates to the enclosing variable (`var s; recv.let { s += it }`).
         let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(n_cap);
@@ -813,7 +795,7 @@ impl<'a> Emitter<'a> {
         }
         code.set_stack(0);
         // The lambda body, inlined (its captures resolve to the caller's frame; mutable capture works).
-        self.emit_fn_body_inline(impl_fn, &param_slots, code);
+        self.emit_fn_body_inline(inline_body, &param_slots, code);
         // Box the typed result back to `Object` — the body's `after` continues from the invoke's `Object`.
         if impl_ret.is_primitive() {
             box_prim_free(self.cw, code, impl_ret);
@@ -948,17 +930,9 @@ impl<'a> Emitter<'a> {
             IrExpr::Return(v) => match v {
                 Some(v) => {
                     self.emit_value(v, code);
-                    // Inside an inlined lambda body the result must stay on the stack (the spliced stdlib
-                    // body continues) rather than returning from the enclosing method.
-                    if !self.inlining {
-                        emit_return(self.ret, code);
-                    }
+                    emit_return(self.ret, code);
                 }
-                None => {
-                    if !self.inlining {
-                        code.ret_void();
-                    }
-                }
+                None => code.ret_void(),
             },
             IrExpr::Variable { index, ty, init } => {
                 // Emit the initializer BEFORE allocating the slot, so the variable's slot isn't
@@ -1330,7 +1304,7 @@ impl<'a> Emitter<'a> {
                 }
                 self.slots = saved;
             }
-            IrExpr::Lambda { impl_fn, arity, captures, sam } => {
+            IrExpr::Lambda { impl_fn, arity, captures, sam, .. } => {
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();

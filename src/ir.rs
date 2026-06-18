@@ -146,7 +146,11 @@ pub enum IrExpr {
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
     /// `kotlin/jvm/functions/Function{arity}.invoke`), or `Some((interface, method))` for a SAM
     /// conversion to a user functional interface (`Pred { … }` → `Pred.test`).
-    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId>, sam: Option<(String, String)> },
+    /// `inline_body` is the lambda's *value-producing* body form (no synthetic `return`), emitted
+    /// directly when the lambda is inlined into a stdlib `inline fun` splice — so a user `return` in the
+    /// lambda becomes a real return from the *enclosing* method (correct non-local return). `None` for a
+    /// callable reference (`::foo`), which has no inlinable body.
+    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId>, sam: Option<(String, String)>, inline_body: Option<ExprId> },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic
     /// kotlin/Unit.INSTANCE:Lkotlin/Unit;` — what a `Unit`-returning lambda body yields so its
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
