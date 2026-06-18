@@ -965,7 +965,10 @@ impl<'a> Lower<'a> {
         self.lower_lambda_sam(e, params, body, None)
     }
 
-    fn lower_lambda_sam(&mut self, e: AstExprId, params: &[String], body: AstExprId, sam: Option<(String, String)>) -> Option<u32> {
+    /// `sam`: `(interface internal name, abstract-method name, method returns void)`. The void flag
+    /// distinguishes a SAM whose method is `()V` (`Runnable.run`) — the impl runs the body for effect
+    /// and returns void — from a `Unit`-typed-but-`Object`-returning target (`FunctionN.invoke`).
+    fn lower_lambda_sam(&mut self, e: AstExprId, params: &[String], body: AstExprId, sam: Option<(String, String, bool)>) -> Option<u32> {
         let Ty::Fun(sig) = self.info.ty(e) else { return None };
         let arity = sig.params.len();
         // A lambda inside a class method could capture `this`/fields — not modeled yet.
@@ -1026,8 +1029,12 @@ impl<'a> Lower<'a> {
         // The SAM's `invoke` returns `Object`, so the impl method returns a reference. A `Unit` lambda
         // runs its body for effect then returns the `kotlin/Unit` singleton; a value lambda returns its
         // (boxed) body value; a diverging body falls through to its own `throw`/`return`.
+        let sam_void = matches!(&sam, Some((_, _, true)));
         let (ret_ty, block) = if diverges {
             (ty_to_ir(sig.ret), self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None }))
+        } else if sam_void {
+            // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
+            (ty_to_ir(Ty::Unit), self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None }))
         } else if sig.ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             let ret = self.ir.add_expr(IrExpr::Return(Some(unit)));
@@ -1050,7 +1057,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam }))
+        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam: sam.map(|(i, m, _)| (i, m)) }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
@@ -2529,14 +2536,19 @@ impl<'a> Lower<'a> {
                     // single abstract method (instead of `FunctionN.invoke`).
                     if args.len() == 1 && self.lookup(&fname).is_none() && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
                         if let Some(internal) = self.info.ty(e).obj_internal() {
-                            if let Some(ci) = self.classes.get(internal) {
-                                if self.ir.classes[ci.id as usize].is_interface && self.ir.classes[ci.id as usize].methods.len() == 1 {
-                                    let mfid = self.ir.classes[ci.id as usize].methods[0];
-                                    let method = self.ir.functions[mfid as usize].name.clone();
-                                    let iface = internal.to_string();
-                                    if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
-                                        return self.lower_lambda_sam(args[0], &params, body, Some((iface, method)));
-                                    }
+                            // A file interface (its single method), or a classpath functional interface
+                            // (`Runnable`, …) — its single abstract method from the library set.
+                            let target = self.classes.get(internal)
+                                .filter(|ci| self.ir.classes[ci.id as usize].is_interface && self.ir.classes[ci.id as usize].methods.len() == 1)
+                                .map(|ci| {
+                                    let f = &self.ir.functions[self.ir.classes[ci.id as usize].methods[0] as usize];
+                                    (f.name.clone(), f.ret == ty_to_ir(Ty::Unit))
+                                })
+                                .or_else(|| self.syms.libraries.sam_method(internal).map(|m| (m.name, m.ret == Ty::Unit)));
+                            if let Some((method, void)) = target {
+                                let iface = internal.to_string();
+                                if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
+                                    return self.lower_lambda_sam(args[0], &params, body, Some((iface, method, void)));
                                 }
                             }
                         }

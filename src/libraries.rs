@@ -173,6 +173,13 @@ pub trait LibrarySet {
         None
     }
 
+    /// The single abstract method of a functional interface (`Runnable.run`, `Comparator.compare`) —
+    /// its name and `LibraryMember` — for SAM conversion of a lambda. `None` if `internal` isn't an
+    /// interface with exactly one abstract (non-default, non-static, non-`Object`) method.
+    fn sam_method(&self, _internal: &str) -> Option<LibraryMember> {
+        None
+    }
+
     /// For a generic extension `recv.name(args…)` taking function arguments, the *element-typed*
     /// parameter types of each call argument that is a lambda — `List<Int>.map { … }` → `[[Int]]` (the
     /// single lambda's parameter is the element `Int`). The type variables bind from the receiver and

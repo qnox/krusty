@@ -406,6 +406,31 @@ impl LibrarySet for JvmLibraries {
         })
     }
 
+    fn sam_method(&self, internal: &str) -> Option<LibraryMember> {
+        let ci = self.cp.find(internal)?;
+        if !ci.is_interface() {
+            return None;
+        }
+        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
+        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
+        // abstract (0x0400).
+        let mut sam = None;
+        for m in &ci.methods {
+            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
+                continue;
+            }
+            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
+                continue;
+            }
+            if sam.is_some() {
+                return None; // more than one abstract method — not a SAM interface
+            }
+            let (params, ret) = parse_method_desc(&m.descriptor);
+            sam = Some(LibraryMember { name: m.name.clone(), params, ret, descriptor: m.descriptor.clone() });
+        }
+        sam
+    }
+
     fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
         let Ty::Obj(start, start_args) = recv else { return None };
         if start_args.is_empty() {
