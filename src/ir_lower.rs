@@ -2192,6 +2192,11 @@ impl<'a> Lower<'a> {
                 // Resolve the declared type: a builtin, else a known file class (`A?` → reference
                 // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
                 let kty = match ty.as_ref() {
+                    // A nullable primitive (`Char?`) is its boxed wrapper, not the primitive — keep the
+                    // slot a reference (consistent with the checker), else a boxed value is stored raw.
+                    Some(r) if Ty::from_name(&r.name).map_or(false, |t| r.nullable && !t.is_reference() && crate::resolve::nullable_prim_wrapper(t).is_some()) => {
+                        Ty::obj(crate::resolve::nullable_prim_wrapper(Ty::from_name(&r.name).unwrap()).unwrap())
+                    }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r) if self.classes.contains_key(&class_internal(self.afile, &r.name)) => {
                         Ty::obj(&class_internal(self.afile, &r.name))
@@ -2704,7 +2709,14 @@ impl<'a> Lower<'a> {
             Expr::NotNull { operand } => {
                 let v = self.expr(operand)?;
                 if self.info.ty(operand).is_reference() {
-                    self.ir.add_expr(IrExpr::NotNullAssert { operand: v })
+                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert { operand: v });
+                    // `Int?!!` narrows to the unboxed primitive — unbox the wrapper after the null check.
+                    let result = self.info.ty(e);
+                    if result.is_primitive() {
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: asserted, type_operand: ty_to_ir(result) })
+                    } else {
+                        asserted
+                    }
                 } else {
                     v
                 }
@@ -3719,12 +3731,25 @@ impl<'a> Lower<'a> {
                             for (i, &arg) in args.iter().take(fixed).enumerate() {
                                 a.push(self.lower_arg(arg, &params[i])?);
                             }
+                            // For a GENERIC vararg (`vararg z: T`) the erased element type is `Any`, so a
+                            // primitive argument would box to its own wrapper (`-1` → `Integer`). When the
+                            // call supplies a primitive type argument (`mk<Long>(-1)`), coerce each element
+                            // to that primitive first (`Int`→`Long`), then box — matching kotlinc.
+                            let targ_prim = if elem_ty == Ty::obj("kotlin/Any") {
+                                self.afile.call_type_args.get(&e.0).and_then(|ts| ts.first())
+                                    .map(|r| ty_of(self.afile, r)).filter(|t| t.is_primitive())
+                            } else { None };
                             let mut elements = Vec::new();
                             for &arg in &args[fixed..] {
                                 if is_branchy(self.afile, arg) {
                                     return None;
                                 }
-                                elements.push(self.lower_arg(arg, &elem_ir)?);
+                                if let Some(p) = targ_prim {
+                                    let v = self.lower_arg(arg, &ty_to_ir(p))?;
+                                    elements.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: v, type_operand: elem_ir.clone() }));
+                                } else {
+                                    elements.push(self.lower_arg(arg, &elem_ir)?);
+                                }
                             }
                             let arr = self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements });
                             a.push(arr);
@@ -4385,6 +4410,13 @@ fn class_internal(file: &ast::File, name: &str) -> String {
 /// `Object`). Without this, class-typed fields resolve to `Error` and emit a bad descriptor.
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
     if let Some(t) = Ty::from_name(&r.name) {
+        // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`), consistent with the
+        // checker — otherwise a boxed value would be stored in a primitive field and unboxed wrong.
+        if r.nullable && !t.is_reference() {
+            if let Some(w) = crate::resolve::nullable_prim_wrapper(t) {
+                return Ty::obj(w);
+            }
+        }
         return t;
     }
     let is_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
