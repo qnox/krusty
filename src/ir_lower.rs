@@ -2585,7 +2585,8 @@ impl<'a> Lower<'a> {
                     // zero-arg accessor on the JVM. Try the property's own name (`size()` — collections
                     // map `size` straight to the JVM method) and the `getX()` accessor form.
                     if let Ty::Obj(i, _) = rt {
-                        [name.clone(), getter_name(&name)].into_iter().find_map(|cand| {
+                        let mapped = crate::resolve::collection_mapped_accessor(&name).map(|s| s.to_string());
+                        [Some(name.clone()), Some(getter_name(&name)), mapped].into_iter().flatten().find_map(|cand| {
                             crate::libraries::resolve_instance(&*self.syms.libraries, i, &cand, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)).map(|m| {
                                 let is_iface = self.syms.libraries.resolve_type(i).map_or(false, |t| t.is_interface);
                                 (i.to_string(), m, is_iface)
