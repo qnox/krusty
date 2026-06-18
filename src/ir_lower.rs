@@ -3642,6 +3642,26 @@ impl<'a> Lower<'a> {
                         }
                         let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: a });
                         self.coerce_generic_read(call, e, c.physical_ret)
+                    } else if let Some(c) = {
+                        // A private `@InlineOnly` extension (`String.uppercase()` → inlines
+                        // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
+                        // `Callee::Static` so the backend splices its REAL body (no call to the
+                        // package-private method is emitted). The emitter skips the file if the body isn't
+                        // spliceable, so this never miscompiles.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.syms.libraries.resolve_scope_inline(&name, rt, &arg_tys)
+                            .filter(|c| c.is_inline && self.syms.libraries.can_inline_call(&c.owner, &c.name, &c.descriptor))
+                    } {
+                        let recv = self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let mut a = vec![recv];
+                        for (i, &arg) in args.iter().enumerate() {
+                            match c.params.get(i + 1) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
+                        }
+                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: true }, dispatch_receiver: None, args: a });
+                        self.coerce_generic_read(call, e, c.physical_ret)
                     } else {
                         return None;
                     }

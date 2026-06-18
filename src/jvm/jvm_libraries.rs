@@ -573,6 +573,11 @@ impl LibrarySet for JvmLibraries {
             .map_or(false, |body| crate::jvm::inline::is_lambda_spliceable(&body))
     }
 
+    fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.cp.method_code(owner, name, descriptor)
+            .map_or(false, |body| crate::jvm::inline::is_call_spliceable(&body))
+    }
+
     fn resolve_scope_inline(&self, name: &str, receiver: Ty, args: &[Ty]) -> Option<LibraryCallable> {
         self.extension_callable(name, receiver, args, &[], true)
     }

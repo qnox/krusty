@@ -229,6 +229,13 @@ pub trait LibrarySet {
         false
     }
 
+    /// Whether a NO-lambda `inline fun` body can be spliced at a call site (`String.uppercase()`). The
+    /// lowerer routes a private `@InlineOnly` extension call to the splicer only when this is true, so an
+    /// un-spliceable (e.g. branchy) private callee is never emitted as a broken `invokestatic`.
+    fn can_inline_call(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
+        false
+    }
+
     /// Resolve a scope-function extension call (`receiver.let { … }`) for the bytecode inliner — like
     /// [`resolve_callable`](Self::resolve_callable) with a receiver, but ALSO matching `@InlineOnly`
     /// package-private candidates (which `resolve_callable` hides, since they aren't callable). The
