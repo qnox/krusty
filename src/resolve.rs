@@ -3570,9 +3570,21 @@ impl<'a> Checker<'a> {
                 // lambda's parameter (the index) as `Int`.
                 let array_init_lambda = (Ty::primitive_array_element(&fname).is_some() || fname == "Array")
                     && args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
+                // `repeat(n) { i -> … }` — the stdlib inline `repeat` whose body is
+                // `for (i in 0 until times) action(i)`. Its lambda parameter (the index) is `Int`, and a
+                // mutable capture is fine because the backend inlines it to a counted loop.
+                let repeat_lambda = fname == "repeat" && known_sig.is_none() && self.lookup(&fname).is_none()
+                    && args.len() == 2 && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
                 let arg_tys: Vec<Ty> = args.iter().enumerate().map(|(i, &a)| {
                     if array_init_lambda && i == 1 {
                         return self.check_lambda_with_types(a, &[Ty::Int]);
+                    }
+                    if repeat_lambda && i == 1 {
+                        let prev = self.allow_lambda_mutation;
+                        self.allow_lambda_mutation = true;
+                        let t = self.check_lambda_with_types(a, &[Ty::Int]);
+                        self.allow_lambda_mutation = prev;
+                        return t;
                     }
                     if let Some(ref sig) = known_sig {
                         if i < sig.lambda_param_types.len() && !sig.lambda_param_types[i].is_empty() {
@@ -3584,6 +3596,9 @@ impl<'a> Checker<'a> {
                     }
                     self.expr(a)
                 }).collect();
+                if repeat_lambda && matches!(arg_tys.first(), Some(Ty::Int)) {
+                    return Ty::Unit; // `repeat(count) { … }` → Unit (inlined to a counted loop)
+                }
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
                 }
