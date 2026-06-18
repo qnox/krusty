@@ -667,9 +667,28 @@ impl<'a> Emitter<'a> {
     /// ⇒ the caller emits an ordinary `invokestatic`, so an un-spliceable inline call is never
     /// miscompiled. The splice itself (StackMapTable relocation for branchy bodies + lambda-argument
     /// splicing) lands in the next phase — until then this always falls back.
-    fn try_inline_static(&mut self, _owner: &str, _name: &str, _descriptor: &str, _args: &[u32], _code: &mut CodeBuilder) -> bool {
-        let _ = self.bodies;
-        false
+    fn try_inline_static(&mut self, owner: &str, name: &str, descriptor: &str, args: &[u32], code: &mut CodeBuilder) -> bool {
+        // A function-typed (lambda) parameter needs invoke-site splicing of the caller's lambda — a
+        // later step; for now only no-lambda inline fns are spliceable.
+        if descriptor.contains("Lkotlin/jvm/functions/Function") {
+            return false;
+        }
+        let Some(body) = self.bodies.body(owner, name, descriptor) else {
+            return false;
+        };
+        let base = code.max_locals;
+        // Branchless single-exit bodies only (no StackMapTable relocation needed yet); any other shape
+        // returns `None` and the caller emits a normal `invokestatic` — never a miscompile.
+        let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw) else {
+            return false;
+        };
+        // Commit: arguments on the stack, then the spliced (relocated) body bytes.
+        self.emit_operands(args, code);
+        let arg_words: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+        let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
+        let bytes = crate::jvm::inline::assemble(&insns);
+        code.splice_inline(&bytes, body.max_stack, base + body.max_locals, arg_words, ret_words);
+        true
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {

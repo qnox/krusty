@@ -639,9 +639,58 @@ pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap
     Some(out)
 }
 
+/// Splice a **branchless, single-exit** inline body at a call site whose arguments are already on the
+/// stack. Unlike [`splice`], it *drops* the trailing return (leaving the computed value on the stack
+/// to fall through) instead of rewriting it to a `goto` — so the spliced region contains no branch
+/// target and needs no StackMapTable frame, which is what makes it safely emittable today. `None`
+/// (caller emits a normal `invokestatic`) if the body has any branch/switch, isn't single-exit, or
+/// uses a pool entry `relocate_insns` can't relocate (`invokedynamic`).
+pub fn splice_branchless(body: &MethodCode, descriptor: &str, base: u16, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
+    let mut insns = disassemble(&body.code)?;
+    // Branchless: every instruction is `Plain` (no `goto`/conditional/`switch` target).
+    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
+        return None;
+    }
+    // Single exit: exactly one return opcode, and it is the last instruction.
+    let returns: Vec<usize> = insns.iter().enumerate()
+        .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
+        .map(|(j, _)| j)
+        .collect();
+    if returns.len() != 1 || returns[0] != insns.len() - 1 {
+        return None;
+    }
+    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    shift_locals(&mut insns, base)?;
+    insns.pop(); // drop the trailing return: fall through with the result on the stack
+    // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
+    let params = param_store_ops(descriptor, base)?;
+    let mut out: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    out.extend(insns);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splice_branchless_drops_return_and_stores_args() {
+        // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
+        let body = MethodCode { max_stack: 2, max_locals: 1, code: vec![0x1a, 0x06, 0x68, 0xac], source_cp: vec![C::Other] };
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        let insns = splice_branchless(&body, "(I)I", 3, &mut cw).expect("branchless splice");
+        // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
+        // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
+        assert_eq!(assemble(&insns), vec![0x3e, 0x1d, 0x06, 0x68]);
+    }
+
+    #[test]
+    fn splice_branchless_bails_on_branch() {
+        // `iload_0; ifeq +4; iconst_1; ireturn` — has a branch ⇒ not branchless.
+        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac], source_cp: vec![C::Other] };
+        let mut cw = ClassWriter::new("T", "java/lang/Object");
+        assert!(splice_branchless(&body, "(I)I", 1, &mut cw).is_none());
+    }
 
     #[test]
     fn relocates_pool_entries() {

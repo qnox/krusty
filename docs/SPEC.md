@@ -302,9 +302,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   **not also emitted as a standalone method**, so the facade ABI differs (kotlinc emits the body for
   binary compat / reflective callers) — an ABI-parity gap, not behavioural; (2) **cross-module stdlib**
   `inline fun`s (`forEach`/`let`/`also`/`repeat`) exist only as jar *bytecode*, so they cannot be IR-
-  inlined — they are still expanded by targeted desugars in the lowerer pending the JVM bytecode splicer
-  (`src/jvm/inline.rs`), which is the kotlinc-JVM path (`MethodInliner`) and the route to retiring those
-  desugars. Tested by the `UserInline` snippet in `tests/feature_box_e2e.rs`.
+  inlined — they go through the JVM **bytecode splicer** (`src/jvm/inline.rs`), the kotlinc-JVM path
+  (`MethodInliner`): read the callee's compiled body from the classpath jar and splice it into the
+  caller, relocating the constant pool. The IR `Callee::Static` carries `inline` (from the resolved
+  signature); `Emitter::try_inline_static` splices, falling back to `invokestatic` on any unsupported
+  shape (never a miscompile). **Landed so far:** a *branchless, single-exit* body with no function-typed
+  (lambda) parameter — `inline::splice_branchless` drops the trailing return (leaving the result on the
+  stack to fall through) rather than rewriting it to a `goto`, so the spliced region needs no
+  StackMapTable frame. Proven end-to-end against a real kotlinc-compiled library inline fn
+  (`tests/inline_splice_e2e.rs`: the call is spliced, no `invokestatic` to the callee survives). Pending:
+  StackMapTable relocation (branchy bodies) → lambda-argument splicing (retires the `forEach`/`let`/`also`
+  desugars). Tested by the `UserInline` snippet in `tests/feature_box_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 

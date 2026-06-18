@@ -640,6 +640,27 @@ impl CodeBuilder {
         self.cur_stack
     }
 
+    /// Append a pre-assembled, pool-relocated, **branchless** inline body (from `inline::splice_branchless`)
+    /// at the call site. The arguments are already on the stack (`arg_words` slots); the body's prologue
+    /// stores them into locals `base..top_local`, runs, and leaves `ret_words` slots. `body_stack` is the
+    /// body's own peak operand height. No StackMapTable frame is recorded (the bytes contain no branch).
+    pub fn splice_inline(&mut self, bytes: &[u8], body_stack: u16, top_local: u16, arg_words: i32, ret_words: i32) {
+        let baseline = self.cur_stack - arg_words; // stack height once the prologue consumes the args
+        if top_local > self.max_locals {
+            self.max_locals = top_local;
+        }
+        // Peak is the larger of the args-present prologue height and the body's internal peak.
+        let peak = (baseline + arg_words).max(baseline + body_stack as i32);
+        if peak > self.max_stack as i32 {
+            self.max_stack = peak as u16;
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.cur_stack = baseline + ret_words;
+        if self.cur_stack > self.max_stack as i32 {
+            self.max_stack = self.cur_stack as u16;
+        }
+    }
+
     /// Force the current operand-stack height (e.g. an exception handler is entered with the caught
     /// exception already on the stack). Keeps `max_stack` correct across non-linear control flow.
     pub fn set_stack(&mut self, n: u16) {
