@@ -1498,6 +1498,28 @@ fun box(): String {
 }
 "#,
     ),
+    // `x as Int` on a reference operand is an unbox cast: `checkcast Integer; intValue()`. Works for each
+    // primitive (a wrong dynamic type throws ClassCastException, like kotlinc).
+    (
+        "AsToPrimitive",
+        r#"
+fun box(): String {
+    val a: Any = 42
+    if ((a as Int) != 42) return "f1"
+    val d: Any = 2.5
+    if ((d as Double) != 2.5) return "f2"
+    val c: Any = 'q'
+    if ((c as Char) != 'q') return "f3"
+    val l: Any = 99L
+    if ((l as Long) != 99L) return "f4"
+    val bo: Any = true
+    if (!(bo as Boolean)) return "f5"
+    val s: Any = "s"
+    try { (s as Int); return "f6" } catch (e: ClassCastException) {}
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]

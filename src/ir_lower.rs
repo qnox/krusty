@@ -6095,6 +6095,20 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 let arg = self.expr(operand)?;
+                // `x as Int` (non-null primitive target) is an unbox: `checkcast Integer; intValue()`,
+                // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
+                // reference types, so handle the primitive case before it.
+                if !ty.nullable {
+                    if let Some(prim) =
+                        Ty::from_name(&ty.name).filter(|t| t.is_primitive() && !t.is_unsigned())
+                    {
+                        return Some(self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            type_operand: ty_to_ir(prim),
+                        }));
+                    }
+                }
                 let target = self.ty_ref(&ty)?;
                 let type_operand = ty_to_ir(target);
                 // `as T` to a non-null reference type throws on `null` (kotlinc null-checks before the

@@ -3514,9 +3514,11 @@ impl<'a> Checker<'a> {
             } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
-                // `checkcast` needs a reference operand and a *known* reference target (an unresolved
-                // target would erase to `Object`, a no-op cast — reject instead of miscompiling).
-                if !tt.is_reference() || (!ot.is_reference() && ot != Ty::Error) {
+                // `checkcast` needs a reference operand. The target is either a *known* reference type (an
+                // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
+                // `x as Int` on a reference operand is an unbox (`checkcast Integer; intValue()`).
+                let prim_unbox = ot.is_reference() && tt.is_primitive() && !tt.is_unsigned();
+                if !(tt.is_reference() || prim_unbox) || (!ot.is_reference() && ot != Ty::Error) {
                     self.diags.error(
                         self.span(e),
                         "krusty: 'as' with this type is not supported".to_string(),

@@ -2188,6 +2188,10 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 381 — `as` to a primitive type (unbox cast)** (871→878). `x as Int` on a reference operand →
+  `checkcast Integer; intValue()` (the emitter's existing `unbox_to`); checker allows a non-unsigned
+  primitive target, lowering emits `ImplicitCoercion`. `tests/feature_box_e2e.rs::AsToPrimitive`.
+
 - ✅ **Phase 380 — bridges with a primitive concrete type** (861→871). A getter/method bridge whose
   concrete member returns a primitive (generic `T` erased to `Object` overridden `: Int`) now boxes the
   primitive in the `ACC_BRIDGE` — the emitter already did this, so the over-conservative checker/lowering
