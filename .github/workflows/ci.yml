@@ -24,13 +24,13 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
-      - uses: actions/setup-java@v4
+      - uses: extractions/setup-just@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25' # krusty's reference toolchain is Java 25; JVM-run e2e tests need it
@@ -38,7 +38,7 @@ jobs:
       # (-> test-all) provisions both per supported version on a miss, so the differential + the
       # conformance gates actually run (they FAIL, not skip, without these).
       - name: cache kotlin toolchain + box corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .kotlinc
