@@ -477,14 +477,25 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (receiver_descriptor, method_name).
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
-                        // Nullable reference receivers (`fun String?.foo()`) are not supported: the
-                        // receiver descriptor is the same as the non-null form so krusty can't
-                        // distinguish them at the call site, leading to silent miscompiles or
-                        // infinite recursion when the body uses the same operator internally.
-                        if recv_ref.nullable && recv_ty.is_reference() {
-                            diags.error(f.span, "krusty: extension functions on nullable reference types are not supported".to_string());
-                        } else {
-                            table.ext_funs.insert((recv_ty.descriptor(), f.name.clone()), sig);
+                        // A nullable reference receiver (`fun String?.foo()`) erases to the same
+                        // descriptor as the non-null form, so krusty (whose `Ty` drops nullability)
+                        // can't pick between a `String.foo` and a `String?.foo` at the call site. An
+                        // ordinary-named lone overload is unambiguous and supported. But an *operator*
+                        // name (`String?.plus`) shadows the builtin/member operator: with nullability
+                        // erased, krusty would route every `String + …` (even a non-null one) to the
+                        // extension, recursing infinitely when the body uses the same operator. kotlinc
+                        // resolves member-over-extension by static nullability, which krusty can't — so
+                        // reject nullable-reference operator extensions (and any null/non-null collision).
+                        let is_operator = is_builtin_operator_method(&f.name)
+                            || matches!(f.name.as_str(), "equals" | "not" | "get" | "set" | "contains"
+                                | "invoke" | "iterator" | "getValue" | "setValue" | "provideDelegate");
+                        if recv_ref.nullable && recv_ty.is_reference() && is_operator {
+                            diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
+                        } else if table.ext_funs.insert((recv_ty.descriptor(), f.name.clone()), sig).is_some() {
+                            // Two extensions with the same erased receiver + name (a duplicate, or a
+                            // nullable/non-null pair) can't be told apart at the call site under
+                            // nullability erasure — reject rather than silently pick one.
+                            diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
                         }
                     } else if table.funs.insert(f.name.clone(), sig).is_some() {
                         diags.error(f.span, format!("conflicting declarations: {}", f.name));

@@ -2965,25 +2965,42 @@ impl<'a> Lower<'a> {
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
-                    let (this_v, _) = self.lookup("this")?;
-                    let cur = self.cur_class.clone()?;
-                    let field = self.classes.get(&cur).and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == n).map(|i| (ci.id, i as u32)));
+                    let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    if let Some((class, idx)) = field {
-                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
-                    } else if let Some((class, index, _, _)) = self.resolve_method(&cur, &getter_name(&n)) {
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                    if let Some(cur) = self.cur_class.clone() {
+                        let field = self.classes.get(&cur).and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == n).map(|i| (ci.id, i as u32)));
+                        if let Some((class, idx)) = field {
+                            self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                        } else if let Some((class, index, _, _)) = self.resolve_method(&cur, &getter_name(&n)) {
+                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                        } else {
+                            // An inner class reads an enclosing member through `this$0` (its field 0).
+                            let cur_id = self.classes.get(&cur)?.id;
+                            let outer = match self.ir.classes[cur_id as usize].fields.first() {
+                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
+                                _ => return None,
+                            };
+                            let this0 = self.ir.add_expr(IrExpr::GetField { receiver: recv, class: cur_id, index: 0 });
+                            // The outer backing field is private — read it through its synthesized getter.
+                            let (class, index, _, _) = self.resolve_method(&outer, &getter_name(&n))?;
+                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: vec![] })
+                        }
                     } else {
-                        // An inner class reads an enclosing member through `this$0` (its field 0).
-                        let cur_id = self.classes.get(&cur)?.id;
-                        let outer = match self.ir.classes[cur_id as usize].fields.first() {
-                            Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
-                            _ => return None,
-                        };
-                        let this0 = self.ir.add_expr(IrExpr::GetField { receiver: recv, class: cur_id, index: 0 });
-                        // The outer backing field is private — read it through its synthesized getter.
-                        let (class, index, _, _) = self.resolve_method(&outer, &getter_name(&n))?;
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: vec![] })
+                        // An extension-function receiver: `fun A.f() = n` reads `this.n` from OUTSIDE
+                        // class A, so go through the property getter (the backing field is private) for a
+                        // user class, the field directly when one resolves, else a classpath accessor.
+                        let internal = this_ty.obj_internal()?.to_string();
+                        if let Some((class, index, _, _)) = self.resolve_method(&internal, &getter_name(&n)) {
+                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                        } else if let Some((fclass, idx, _)) = self.resolve_field(&internal, &n) {
+                            self.ir.add_expr(IrExpr::GetField { receiver: recv, class: fclass, index: idx })
+                        } else {
+                            let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                            let mapped = crate::resolve::collection_mapped_accessor(&n).map(|s| s.to_string());
+                            let m = [Some(n.clone()), Some(getter_name(&n)), mapped].into_iter().flatten()
+                                .find_map(|c| crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)))?;
+                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] })
+                        }
                     }
                 }
             }

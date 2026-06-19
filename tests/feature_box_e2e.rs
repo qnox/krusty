@@ -29,6 +29,25 @@ fun box(): String {
     return if (s == 25 && r == 25 && t == 12) "OK" else "F:$s,$r,$t"
 }
 "#),
+    // An extension function body referencing the receiver's members implicitly (`n` = `this.n`,
+    // including inside a string template) — read through the property getter since the body is outside
+    // the class. Plus an ordinary-named extension on a *nullable* reference receiver (`A?.foo()`), whose
+    // body branches on `this == null`. (Operator extensions on nullable receivers stay unsupported.)
+    ("ExtensionImplicitReceiver", r#"
+class A(val n: Int)
+fun A.twice(): Int = n + n
+fun A.label(): String = "n=$n"
+fun A?.orZero(): Int = if (this == null) 0 else n
+fun box(): String {
+    val a = A(5)
+    if (a.twice() != 10) return "f1:${a.twice()}"
+    if (a.label() != "n=5") return "f2:${a.label()}"
+    val nn: A? = null
+    if (a.orZero() != 5) return "f3"
+    if (nn.orZero() != 0) return "f4"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
