@@ -282,6 +282,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Mixed-primitive `a.compareTo(b)` → `{Integer,Long,Float,Double}.compare` after promoting both to
+    // their common type. Plus: a negated float/double literal is the negative constant (`-0.0` keeps its
+    // sign, so `Double.compare(0.0, -0.0) == 1`), not `0.0 - 0.0` (which would be `+0.0`).
+    ("CompareToAndNegZero", r#"
+fun box(): String {
+    if (1.compareTo(1.1) >= 0) return "f1"
+    if (2.compareTo(1.0) <= 0) return "f2"
+    if (5L.compareTo(3) <= 0) return "f3"
+    if (0.toByte().compareTo(5.0) >= 0) return "f4"
+    if (0.0.compareTo(-0.0) != 1) return "f5"           // +0.0 > -0.0 in the total order
+    if ((-0.0).compareTo(0.0) != -1) return "f6"
+    if ((-2.5).toString() != "-2.5") return "f7"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
