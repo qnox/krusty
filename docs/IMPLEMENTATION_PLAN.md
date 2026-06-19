@@ -2188,6 +2188,13 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 368 — a property reference is a function value** (`C::n` as `(C)->Int`). `KProperty1`/
+  `KProperty0` accepted where a `Function1`/`Function0` of the matching arity is expected — in the checker
+  (`expect_assignable`), the JVM library overload resolution (`arg_fits`, so `list.map(C::n)` works), and
+  the lowering of a function-typed local (slot type from the annotation's `Ty::Fun`, so `f(arg)` invokes
+  through `Function1.invoke`). Lowers to the existing `PropertyReference{1,0}Impl` — no new IR.
+  `tests/feature_box_e2e.rs::PropertyRefFn`.
+
 > Note: the next coverage levers (stdlib higher-order-function inlining for mutable-capture `forEach`/`map`;
 > classpath companion-constants via `ConstantValue`; `UIntRange` value iteration with inline-class mangled
 > getters; coroutines; inner classes; nullable primitives `Int?`) are each multi-file, infrastructure-scale

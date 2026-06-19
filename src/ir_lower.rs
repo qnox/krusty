@@ -2294,6 +2294,10 @@ impl<'a> Lower<'a> {
                 // Resolve the declared type: a builtin, else a known file class (`A?` → reference
                 // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
                 let kty = match ty.as_ref() {
+                    // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`, not
+                    // the initializer's type — a property reference `C::n` is typed `KProperty1`, but the
+                    // slot (and any `f(arg)` invoke) must see the function type it was declared as.
+                    Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => ty_of(self.afile, r),
                     // A nullable primitive (`Char?`) is its boxed wrapper, not the primitive — keep the
                     // slot a reference (consistent with the checker), else a boxed value is stored raw.
                     Some(r) if Ty::from_name(&r.name).map_or(false, |t| r.nullable && !t.is_reference() && crate::resolve::nullable_prim_wrapper(t).is_some()) => {
@@ -4953,6 +4957,12 @@ fn class_internal(file: &ast::File, name: &str) -> String {
 /// file (`A` → its internal name), else an erased reference (generic type param / external type →
 /// `Object`). Without this, class-typed fields resolve to `Error` and emit a bad descriptor.
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
+    // Function type `(A, B) -> R` (parsed with `fun_params` non-empty / `name == "<fun>"`).
+    if !r.fun_params.is_empty() || r.name == "<fun>" {
+        let params: Vec<Ty> = r.fun_params.iter().map(|p| ty_of(file, p)).collect();
+        let ret = r.arg.as_ref().map(|a| ty_of(file, a)).unwrap_or(Ty::Unit);
+        return Ty::fun(params, ret);
+    }
     if let Some(t) = Ty::from_name(&r.name) {
         // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`), consistent with the
         // checker — otherwise a boxed value would be stored in a primitive field and unboxed wrong.

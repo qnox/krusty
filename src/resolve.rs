@@ -2457,6 +2457,19 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // A property reference is a function: `KProperty1<T,R>` IS a `(T)->R` and `KProperty0<R>` a
+        // `()->R` (kotlinc's `PropertyReference{1,0}` implements the matching `FunctionN` via
+        // `invoke = get`), so it's assignable to a function type of the matching arity.
+        if let Ty::Fun(e) = &expected {
+            let prop_arity = actual.obj_internal().and_then(|ai| match ai {
+                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
+                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
+                _ => None,
+            });
+            if prop_arity == Some(e.params.len()) {
+                return;
+            }
+        }
         // Known classpath supertypes of `String` (`String : CharSequence, Comparable, Serializable`).
         if actual == Ty::String {
             if let Some(ei) = expected.obj_internal() {

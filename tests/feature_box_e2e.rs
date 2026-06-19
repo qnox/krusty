@@ -1091,6 +1091,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A property reference is a function value: `C::n` (a `KProperty1`) is a `(C)->Int`, usable where a
+    // `Function1` is expected — stored in a function-typed local and invoked, passed to a user
+    // higher-order function, and passed to a stdlib `Iterable.map` (a `Function1` parameter).
+    ("PropertyRefFn", r#"
+class C(val n: Int)
+fun apply1(f: (C) -> Int, c: C): Int = f(c)
+fun box(): String {
+    val g: (C) -> Int = C::n
+    if (g(C(7)) != 7) return "f1"
+    if (apply1(C::n, C(42)) != 42) return "f2"
+    val xs = listOf(C(5), C(9)).map(C::n)
+    if (xs[0] != 5 || xs[1] != 9) return "f3"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
