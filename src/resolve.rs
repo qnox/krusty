@@ -1278,7 +1278,7 @@ fn ty_of_ref(r: &TypeRef, classes: &HashMap<String, String>, tparams: &std::coll
             Ty::obj_args(internal, &args)
         }
     } else {
-        diags.error(r.span, format!("unresolved reference: {}", r.name));
+        diags.error(r.span, format!("unresolved reference '{}'.", r.name));
         Ty::Error
     };
     // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`); a non-wrappable
@@ -2410,8 +2410,15 @@ impl<'a> Checker<'a> {
             }
         }
         if expected != actual {
-            let _ = ctx;
-            self.diags.error(span, format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name()));
+            // Match kotlinc 2.4.0's phrasing. A return position (an expression body or a getter body)
+            // reads as "return type mismatch: expected 'T', actual 'U'."; every other context keeps the
+            // general inferred-vs-expected wording.
+            let msg = if matches!(ctx, "function body" | "getter body") {
+                format!("return type mismatch: expected '{}', actual '{}'.", expected.name(), actual.name())
+            } else {
+                format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name())
+            };
+            self.diags.error(span, msg);
         }
     }
 
@@ -2638,13 +2645,13 @@ impl<'a> Checker<'a> {
                     match self.lookup(&name).map(|l| (l.ty, l.is_var)).or_else(|| self.syms.props.get(&name).copied()) {
                         Some((_, is_var)) => {
                             if !is_var {
-                                self.diags.error(self.span(e), "val cannot be reassigned".to_string());
+                                self.diags.error(self.span(e), "'val' cannot be reassigned.".to_string());
                             }
                             if !tt.is_numeric() && tt != Ty::Char {
                                 self.diags.error(self.span(e), "krusty: '++'/'--' is only supported on a numeric variable".to_string());
                             }
                         }
-                        None => self.diags.error(self.span(e), format!("unresolved reference: {name}")),
+                        None => self.diags.error(self.span(e), format!("unresolved reference '{name}'.")),
                     }
                 } else {
                     self.diags.error(self.span(e), "krusty: '++'/'--' as a value is only supported on a simple variable".to_string());
@@ -2768,7 +2775,7 @@ impl<'a> Checker<'a> {
                     match self.syms.props.get(&n) {
                         Some(&(ty, _)) => ty, // top-level property
                         None => {
-                            self.diags.error(self.span(e), format!("unresolved reference: {n}"));
+                            self.diags.error(self.span(e), format!("unresolved reference '{n}'."));
                             Ty::Error
                         }
                     }
@@ -3632,7 +3639,7 @@ impl<'a> Checker<'a> {
                                     sig.ret
                                 }
                                 None => {
-                                    self.diags.error(span, format!("unresolved reference: {name}"));
+                                    self.diags.error(span, format!("unresolved reference '{name}'."));
                                     Ty::Error
                                 }
                             };
@@ -4351,13 +4358,13 @@ impl<'a> Checker<'a> {
                 match found {
                     Some((ty, is_var)) => {
                         if !is_var {
-                            self.diags.error(span, "val cannot be reassigned".to_string());
+                            self.diags.error(span, "'val' cannot be reassigned.".to_string());
                         }
                         if !ty.is_numeric() && ty != Ty::Char {
                             self.diags.error(span, "krusty: '++'/'--' is only supported on a numeric variable".to_string());
                         }
                     }
-                    None => self.diags.error(span, format!("unresolved reference: {name}")),
+                    None => self.diags.error(span, format!("unresolved reference '{name}'.")),
                 }
             }
             Stmt::Assign { name, value } => {
@@ -4370,7 +4377,7 @@ impl<'a> Checker<'a> {
                     Some(l) => {
                         let (lty, is_var) = (l.ty, l.is_var);
                         if !is_var {
-                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("val cannot be reassigned"));
+                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' cannot be reassigned."));
                         }
                         self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
                     }
@@ -4381,12 +4388,12 @@ impl<'a> Checker<'a> {
                     None => match self.syms.props.get(&name).copied() {
                         Some((lty, is_var)) => {
                             if !is_var {
-                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("val cannot be reassigned"));
+                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' cannot be reassigned."));
                             }
                             self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
                         }
                         None => {
-                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference: {name}"));
+                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference '{name}'."));
                         }
                     },
                 } }
@@ -4398,7 +4405,7 @@ impl<'a> Checker<'a> {
                 // Extension-property write: `recv.name = value` for a `var` extension property.
                 if let Some((lty, is_var)) = self.syms.ext_props.get(&(rt.descriptor(), name.clone())).copied() {
                     if !is_var {
-                        self.diags.error(span, "val cannot be reassigned".to_string());
+                        self.diags.error(span, "'val' cannot be reassigned.".to_string());
                     }
                     self.expect_assignable(lty, vt, span, "assignment");
                 } else {
@@ -4407,7 +4414,7 @@ impl<'a> Checker<'a> {
                         Ty::Obj(internal, _) => match self.syms.prop_of(internal, &name) {
                             Some((lty, is_var)) => {
                                 if !is_var {
-                                    self.diags.error(span, "val cannot be reassigned".to_string());
+                                    self.diags.error(span, "'val' cannot be reassigned.".to_string());
                                 }
                                 self.expect_assignable(lty, vt, span, "assignment");
                             }
@@ -4752,12 +4759,12 @@ mod tests {
 
     #[test]
     fn return_type_mismatch() {
-        err_contains("fun f(a: Int): String = a", "type mismatch: inferred type is Int but String was expected");
+        err_contains("fun f(a: Int): String = a", "return type mismatch: expected 'String', actual 'Int'.");
     }
 
     #[test]
     fn unresolved_reference() {
-        err_contains("fun f(): Int = q", "unresolved reference: q");
+        err_contains("fun f(): Int = q", "unresolved reference 'q'.");
     }
 
     #[test]
@@ -4812,7 +4819,7 @@ mod tests {
     fn reference_type_errors() {
         err_contains("class Point(val x: Int)\nfun f(p: Point): Int = p.z", "unresolved member 'z'");
         err_contains("class Point(val x: Int)\nfun f(): Point = Point()", "expects 1 args");
-        err_contains("fun f(p: Widget): Int = 0", "unresolved reference: Widget");
+        err_contains("fun f(p: Widget): Int = 0", "unresolved reference 'Widget'.");
     }
 
     #[test]

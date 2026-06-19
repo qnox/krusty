@@ -470,3 +470,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   shadow the builtin/member operator for *every* `String + …` (even non-null), recursing infinitely in a
   body that uses the same operator — kotlinc disambiguates by static nullability, which krusty cannot.
   A duplicate or nullable/non-null pair with the same erased `(receiver, name)` is also rejected.
+
+- **Diagnostic wording tracks kotlinc 2.4.0** (a drop-in replacement should print the same errors). An
+  unresolved name reads `unresolved reference 'q'.` (quoted, trailing period); a reassigned `val` reads
+  `'val' cannot be reassigned.`; a return-position type error (an expression/getter body) reads
+  `return type mismatch: expected 'String', actual 'Int'.`, while a non-return context keeps the general
+  `type mismatch: inferred type is Int but String was expected`. Verified by the differential
+  `diagnostics_match_kotlinc` test, which compiles each snippet with both compilers and asserts the first
+  `error:` text matches exactly.
