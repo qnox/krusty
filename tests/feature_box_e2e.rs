@@ -342,6 +342,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Array stdlib extensions `isEmpty()`/`isNotEmpty()`/`count()` → the `arraylength` intrinsic
+    // (`size == 0` / `size != 0` / `size`), for both primitive and reference arrays.
+    ("ArrayIsEmpty", r#"
+fun box(): String {
+    val a = intArrayOf(1, 2, 3)
+    val e = IntArray(0)
+    if (a.isEmpty() || !a.isNotEmpty() || a.count() != 3) return "f1"
+    if (!e.isEmpty() || e.isNotEmpty() || e.count() != 0) return "f2"
+    val r = arrayOf("x", "y")
+    if (!r.isNotEmpty() || r.count() != 2) return "f3"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u

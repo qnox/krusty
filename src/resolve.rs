@@ -3949,6 +3949,8 @@ impl<'a> Checker<'a> {
                     match (name.as_str(), arg_tys.len()) {
                         ("contentEquals", 1) => return Ty::Boolean,
                         ("contentHashCode", 0) => return Ty::Int,
+                        ("isEmpty", 0) | ("isNotEmpty", 0) => return Ty::Boolean,
+                        ("count", 0) => return Ty::Int,
                         _ => {}
                     }
                 }

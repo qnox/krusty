@@ -4349,6 +4349,27 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // Array `isEmpty()`/`isNotEmpty()`/`count()` (stdlib extensions) → the `arraylength`
+                    // intrinsic: `size == 0` / `size != 0` / `size`.
+                    if self.info.ty(receiver).array_elem().is_some() && args.is_empty() {
+                        let cmp = match name.as_str() {
+                            "isEmpty" => Some(Some(IrBinOp::Eq)),
+                            "isNotEmpty" => Some(Some(IrBinOp::Ne)),
+                            "count" => Some(None),
+                            _ => None,
+                        };
+                        if let Some(op) = cmp {
+                            let a = self.expr(receiver)?;
+                            let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] });
+                            return Some(match op {
+                                Some(c) => {
+                                    let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: c, lhs: size, rhs: z })
+                                }
+                                None => size,
+                            });
+                        }
+                    }
                     // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer,
                     // args)`: the checker typed the call as the inner class (whose first field is the
                     // synthetic `this$0`), so pass the receiver as the leading constructor argument.
