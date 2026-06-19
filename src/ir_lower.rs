@@ -3439,6 +3439,26 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A library operator function on a reference receiver (`list + x` → `CollectionsKt.plus(list,
+                // x)`): re-resolve through the library set (most-specific overload) and emit the call,
+                // lowering the receiver and argument to the callee's parameter types (a primitive element
+                // boxes to `Object`).
+                if let Some(opn) = op_name {
+                    let lt = self.info.ty(lhs);
+                    if lt.is_reference() && self.info.ty(rhs) != Ty::Error {
+                        let rt = self.info.ty(rhs);
+                        if let Some(c) = self.syms.libraries.resolve_callable(opn, Some(lt), &[rt], &[]) {
+                            if c.params.len() == 2 {
+                                let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
+                                let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
+                                return Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline },
+                                    dispatch_receiver: None, args: vec![l, r],
+                                }));
+                            }
+                        }
+                    }
+                }
                 if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
                     // Flatten the left-nested concat chain (`a + b + c + …`) iteratively, then fold —
                     // a deep chain (a stress test with hundreds of `+`) would otherwise recurse through

@@ -27,6 +27,12 @@ impl JvmLibraries {
     /// passes `false`, so it never resolves a non-callable method (an `IllegalAccessError`).
     fn extension_callable(&self, name: &str, receiver: Ty, args: &[Ty], type_args: &[Ty], allow_non_public: bool) -> Option<LibraryCallable> {
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
+            // Collect every candidate of this name on this receiver that fits the arguments, then pick the
+            // MOST SPECIFIC by its parameter types — `Iterable.plus(element: T)` and
+            // `Iterable.plus(elements: Iterable<T>)` both accept a `List` argument (the first via the
+            // erased `Object` parameter), but Kotlin selects the more specific `Iterable` overload. Without
+            // this, first-match would resolve `list + list` to the element overload (a nested list).
+            let mut matches: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = Vec::new();
             for c in self.cp.find_extensions(&recv_desc, name) {
                 if !c.public && !allow_non_public {
                     continue;
@@ -36,14 +42,16 @@ impl JvmLibraries {
                 if params.len() != args.len() + 1 {
                     continue;
                 }
-                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
+                // Subtype-aware fit so a `List` argument matches an `Iterable` parameter (`list + list`
+                // selects the `Iterable` concat overload); the most-specific pick below then disambiguates
+                // against the erased-`Object` element overload.
+                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits_subtype(&self.cp, p, a)) {
                     continue;
                 }
-                let gsig = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig));
                 // Disambiguate by the receiver's type arguments: reject an overload whose declared
                 // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
                 if !receiver.type_args().is_empty() {
-                    if let Some((_, psigs, _)) = &gsig {
+                    if let Some((_, psigs, _)) = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)) {
                         if let Some(recv_sig) = psigs.first() {
                             if !sig_compatible(recv_sig, receiver) {
                                 continue;
@@ -51,21 +59,35 @@ impl JvmLibraries {
                         }
                     }
                 }
-                // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the
-                // type variables bind from the receiver (the first parameter) and the arguments.
-                let ret_ty = gsig.map(|(formals, psigs, rsig)| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
-                    for (ps, a) in psigs.iter().zip(&actuals) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&rsig, &binds)
-                }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem: None });
+                matches.push((c, params, ret));
             }
+            if matches.is_empty() {
+                continue;
+            }
+            // Pick the candidate whose non-receiver parameters are at least as specific as every other's
+            // (each parameter a subtype of the corresponding one). When two are incomparable, keep the
+            // first — stable, and good enough for the stdlib's overload sets.
+            let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
+                a.iter().zip(b).all(|(pa, pb)| arg_fits_subtype(&self.cp, pb, pa))
+            };
+            let best = (0..matches.len())
+                .find(|&i| (0..matches.len()).all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..])))
+                .unwrap_or(0);
+            let (c, params, ret) = matches.swap_remove(best);
+            // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the type variables
+            // bind from the receiver (the first parameter) and the arguments.
+            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
+                let mut binds = std::collections::HashMap::new();
+                for (f, t) in formals.iter().zip(type_args) {
+                    binds.insert(f.clone(), *t);
+                }
+                let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
+                for (ps, a) in psigs.iter().zip(&actuals) {
+                    unify_gsig(ps, *a, &mut binds);
+                }
+                gsig_to_ty(&rsig, &binds)
+            }).unwrap_or(ret);
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem: None });
         }
         None
     }

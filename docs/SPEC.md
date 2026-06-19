@@ -638,3 +638,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the counter is `Int` and the bounds coerce up (`Short.rangeTo(Short): IntRange`). The loop `step` is
   coerced to the counter's type — `for (i in 0L..n step 3)` adapts the `Int` step `3` to `Long`, else an
   `int` would be stored into a `long` slot (a verify error). Both mirror the range-value path (phase 369).
+
+- **Operator overloading via a library function + most-specific overload selection.** A binary operator
+  on a reference receiver desugars to its operator function (`a + b` → `a.plus(b)`, `-`→`minus`, `*`→
+  `times`, `/`→`div`, `%`→`rem`) resolved through the library set — so `list + element` →
+  `CollectionsKt.plus`. Resolving this required fixing extension-overload selection generally: the
+  candidate filter is now subtype-aware (`arg_fits_subtype`, so a `List` argument matches an `Iterable`
+  parameter), and among all fitting candidates the **most specific** is chosen — the one whose non-receiver
+  parameters are each a subtype of every other candidate's. Without this, `list + list` would bind the
+  erased-`Object` element overload (`plus(Iterable<T>, T)`) and nest the list instead of selecting the
+  concat overload (`plus(Iterable<T>, Iterable<T>)`). The lowering re-resolves and emits the call
+  (`inline` per the callee). Incomparable candidates fall back to first-match (stable).
