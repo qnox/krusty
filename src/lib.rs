@@ -18,5 +18,6 @@ pub mod libraries;
 pub mod metadata;
 pub mod parser;
 pub mod resolve;
+pub mod synthetics;
 pub mod token;
 pub mod types;
