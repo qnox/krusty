@@ -2287,16 +2287,24 @@ impl<'a> Lower<'a> {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.ir.add_expr(IrExpr::SetStatic { index: idx, value: val }))
                 } else {
-                    // Unqualified write to a `var` field of the enclosing class (`this.<field> = …`).
-                    let (this_v, _) = self.lookup("this")?;
-                    let (class, idx, field_ty) = {
-                        let ci = self.cur_class.as_ref().and_then(|c| self.classes.get(c))?;
-                        let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)? as u32;
-                        (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
-                    };
-                    let val = self.lower_arg(value, &field_ty)?;
+                    // Unqualified write to a `var` member of `this`. Inside the owning class it is the
+                    // backing field (`this.<field> = …`, a direct `putfield`); when `this` is an external
+                    // receiver (an inlined `apply`/`run` whose backing field is private), it must go
+                    // through the property setter `setX(v)`.
+                    let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    Some(self.ir.add_expr(IrExpr::SetField { receiver: recv, class, index: idx, value: val }))
+                    let own_field = self.cur_class.as_ref().and_then(|c| self.classes.get(c))
+                        .and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == name).map(|i| (ci.id, i as u32, ty_to_ir(ci.fields[i].1))));
+                    if let Some((class, idx, field_ty)) = own_field {
+                        let val = self.lower_arg(value, &field_ty)?;
+                        Some(self.ir.add_expr(IrExpr::SetField { receiver: recv, class, index: idx, value: val }))
+                    } else {
+                        let internal = this_ty.obj_internal()?.to_string();
+                        let (sclass, sindex, sfid, _) = self.resolve_method(&internal, &setter_name(&name))?;
+                        let pty = self.ir.functions[sfid as usize].params.first().cloned().unwrap_or_else(|| ty_to_ir(Ty::obj("kotlin/Any")));
+                        let val = self.lower_arg(value, &pty)?;
+                        Some(self.ir.add_expr(IrExpr::MethodCall { class: sclass, index: sindex, receiver: recv, args: vec![Some(val)] }))
+                    }
                 }
             }
             // `name++` / `name--` on a local numeric variable → `name = name ± 1`. (In statement
@@ -4047,6 +4055,24 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
                         self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: a.into_iter().map(Some).collect() })
+                    } else if let Some((class, index, mfid, _)) = {
+                        // A bare instance-method call on an external `this` receiver (an inlined
+                        // `apply`/`run`, where `cur_class` is cleared and `this` is the receiver slot,
+                        // not value 0): `m(args)` → `this.m(args)`.
+                        let internal = self.lookup("this").map(|(_, t)| t).and_then(|t| t.obj_internal().map(|s| s.to_string()));
+                        internal.and_then(|i| self.resolve_method(&i, &fname))
+                    } {
+                        let (this_v, _) = self.lookup("this")?;
+                        let params = self.ir.functions[mfid as usize].params.clone();
+                        if args.len() != params.len() {
+                            return None;
+                        }
+                        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, pt)?);
+                        }
+                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() })
                     } else if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| !self.classes.contains_key(*i)) {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
                         // `StringBuilder()`. The constructor descriptor comes from the classpath.
@@ -4186,7 +4212,11 @@ impl<'a> Lower<'a> {
                     // bytecode — no per-function desugar, no hardcoded name list. The route self-gates on
                     // the resolved callee's `is_inline` + spliceability, so non-spliceable inline fns
                     // (`map`/`filter`, branchy) and user methods simply fall through.
-                    if args.len() == 1 && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
+                    // `run`/`apply` are receiver lambdas (the lambda's `this` is the receiver); the
+                    // bytecode splice routes them as ordinary value-lambdas, mishandling that receiver, so
+                    // they go to the receiver-aware fallback below instead.
+                    if args.len() == 1 && !matches!(name.as_str(), "run" | "apply")
+                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
                         if let Some(call) = self.try_route_lambda_inline(&name, receiver, args[0], self.info.ty(receiver)) {
                             return Some(call);
                         }
@@ -4195,19 +4225,43 @@ impl<'a> Lower<'a> {
                     // closure form, so no `IrExpr::Lambda` to inline); it inlines the body directly.
                     // (Removing it costs ~13 box tests until this-capturing lambdas are modelled; the
                     // common closure-form cases already inline from real bytecode via the route above.)
-                    if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
+                    // `let`/`also` bind the receiver to the lambda's value parameter (`it`); `run`/`apply`
+                    // are receiver lambdas — the receiver is `this`, so member access in the body resolves
+                    // against its class (bind `this` and set `cur_class` to the receiver's user class; a
+                    // library receiver, whose members krusty can't reach through a bare `this`, falls
+                    // through). `let`/`run` yield the body value; `also`/`apply` yield the receiver.
+                    let is_recv_lambda = matches!(name.as_str(), "run" | "apply");
+                    let scope_fn = matches!(name.as_str(), "let" | "also") || is_recv_lambda;
+                    if scope_fn && args.len() == 1 {
                         if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
                             let rty = self.info.ty(receiver);
+                            // A receiver lambda needs the receiver's user class for `this`-member access.
+                            let recv_class = if is_recv_lambda {
+                                match rty.obj_internal().filter(|i| self.classes.contains_key(*i)) {
+                                    Some(i) => Some(i.to_string()),
+                                    None => return None,
+                                }
+                            } else { None };
                             let recv = self.expr(receiver)?;
                             let depth = self.scope.len();
                             let p_slot = self.fresh_value();
-                            let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                            let pname = if is_recv_lambda { "this".to_string() }
+                                        else { params.first().cloned().unwrap_or_else(|| "it".to_string()) };
+                            // An inlined receiver lambda runs in the *caller's* method, so the receiver's
+                            // members are accessed externally (getter/setter), never as the enclosing
+                            // class's own private fields — clear `cur_class` for the body. (`recv_class`
+                            // having resolved confirms the receiver is a reachable user class.)
+                            let _ = &recv_class;
+                            let saved_cur = self.cur_class.clone();
+                            if is_recv_lambda { self.cur_class = None; }
                             self.scope.push((pname, p_slot, rty));
                             let var_p = self.ir.add_expr(IrExpr::Variable { index: p_slot, ty: ty_to_ir(rty), init: Some(recv) });
                             let body_val = self.expr(lbody);
                             self.scope.truncate(depth);
+                            self.cur_class = saved_cur;
                             let body_val = body_val?;
-                            let result = if name == "let" {
+                            let returns_receiver = matches!(name.as_str(), "also" | "apply");
+                            let result = if !returns_receiver {
                                 self.ir.add_expr(IrExpr::Block { stmts: vec![var_p], value: Some(body_val) })
                             } else {
                                 let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
