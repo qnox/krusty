@@ -1803,6 +1803,23 @@ impl<'a> Parser<'a> {
             self.bump();
             RangeKind::DownTo
         } else {
+            // No range operator: a plain iterable. It may still carry trailing infix calls that the
+            // bp-9 start didn't consume (`for (x in progression step 2)`, `… step 2 step 0`) — continue
+            // them so the whole expression (e.g. `progression.step(2)`) becomes the ForEach iterable.
+            let mut rstart = rstart;
+            while self.at(TokenKind::Ident) {
+                let name = self.text();
+                let next_starts_expr = self.t.get(self.i + 1).map_or(false, |t| starts_expr(t.kind));
+                if matches!(name, "is" | "as" | "in") || !next_starts_expr { break; }
+                let name = name.to_string();
+                let lspan = self.file.expr_spans[rstart.0 as usize];
+                self.bump(); // infix function name
+                self.skip_newlines();
+                let rhs = self.parse_bp(9);
+                let rspan = self.file.expr_spans[rhs.0 as usize];
+                let callee = self.file.add_expr(Expr::Member { receiver: rstart, name }, Span::new(lspan.lo, rspan.hi));
+                rstart = self.file.add_expr(Expr::Call { callee, args: vec![rhs] }, Span::new(lspan.lo, rspan.hi));
+            }
             self.expect(TokenKind::RParen, "')'");
             self.skip_newlines();
             let body = self.parse_branch();

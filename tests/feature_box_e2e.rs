@@ -14,6 +14,21 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // `for (x in <iterable> step n)` where the iterable is not a `..` literal (a progression val, a
+    // `.reversed()` result, a chained `step`): the for-range parser continues the trailing `step`
+    // infix call so the whole `progression.step(n)` becomes the loop iterable.
+    ("StepOnProgression", r#"
+fun box(): String {
+    val p = 1..10
+    var s = 0
+    for (i in p step 2) { s += i }                 // 1,3,5,7,9 = 25
+    var r = 0
+    for (i in (1..9).reversed() step 2) { r += i } // 9,7,5,3,1 = 25
+    var t = 0
+    for (i in p step 2 step 3) { t += i }          // fromClosedRange(1,9,3): 1,4,7 = 12
+    return if (s == 25 && r == 25 && t == 12) "OK" else "F:$s,$r,$t"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
