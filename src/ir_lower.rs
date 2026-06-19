@@ -3780,13 +3780,17 @@ impl<'a> Lower<'a> {
                         let size = self.expr(args[0])?;
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
-                    // Primitive-array init constructor `IntArray(n) { i -> elem }`: kotlinc inlines the
-                    // index lambda into a fill loop. Desugar to
+                    // Array init constructor `IntArray(n) { i -> elem }` / `Array<T>(n) { i -> elem }`:
+                    // kotlinc inlines the index lambda into a fill loop. Desugar to
                     //   { val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }
-                    // reusing the existing size-alloc and `kotlin/Array.set` intrinsics (the backend picks
-                    // `iastore`/… by the array's element type). The lambda's single parameter is the index.
+                    // The element type is the array's element (a primitive for `IntArray`, the reference
+                    // element for `Array<T>` — a primitive `Array<Int>` boxes per element, not modeled, so
+                    // it's skipped). `NewArray` allocates (`newarray`/`anewarray`); `kotlin/Array.set`
+                    // stores (the backend picks `iastore`/`aastore`/… by the array's element type).
                     if array_intrinsic_ok && args.len() == 2 {
-                      if let Some(elem) = prim_array_elem(&fname) {
+                      let elem = prim_array_elem(&fname).or_else(||
+                          if fname == "Array" { self.info.ty(e).array_elem().filter(|t| t.is_reference()) } else { None });
+                      if let Some(elem) = elem {
                         if let Expr::Lambda { params, body } = self.afile.expr(args[1]).clone() {
                             let elem_ir = ty_to_ir(elem);
                             let int_ir = ty_to_ir(Ty::Int);
@@ -3796,7 +3800,7 @@ impl<'a> Lower<'a> {
                             let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: int_ir.clone(), init: Some(size) });
                             // val a = new T[n]
                             let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
-                            let alloc = self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![gn0] });
+                            let alloc = self.ir.add_expr(IrExpr::NewArray { element_type: elem_ir.clone(), size: gn0 });
                             let arr_v = self.fresh_value();
                             let arr_ir = ty_to_ir(Ty::array(elem));
                             let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: arr_ir, init: Some(alloc) });

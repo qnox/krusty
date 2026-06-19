@@ -178,6 +178,10 @@ pub enum IrExpr {
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
     Vararg { element_type: IrType, elements: Vec<ExprId> },
+    /// Allocate an uninitialized array of `size` elements (`anewarray` for a reference element,
+    /// `newarray` for a primitive) — the sized constructor `Array<T>(n) { … }` / `arrayOfNulls<T>(n)`
+    /// fills it afterwards. (`Vararg` is the *literal* form with a statically-known element list.)
+    NewArray { element_type: IrType, size: ExprId },
     /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when
     /// used as a statement). Each catch binds the exception to a value index and runs its body. A
     /// `finally` block runs on every exit (normal, each catch, and an uncaught exception via a

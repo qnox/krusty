@@ -99,6 +99,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Reference array init constructor `Array<T>(n) { i -> elem }` (anewarray + fill loop), plus the
+    // `x == null` / `x != null` reference null-check compiling to `ifnull`/`ifnonnull` even when the
+    // element value is read through a local (a frame-pinned `if_icmp*` on a ref would not verify).
+    ("RefArrayInit", r#"
+fun box(): String {
+    val a = Array(3) { i -> "s$i" }
+    if (a[0] != "s0" || a[2] != "s2" || a.size != 3) return "f1"
+    val b = Array<String?>(2) { null }
+    val x = b[0]
+    if (x != null) return "f2"
+    if (b[1] != null) return "f3"
+    val n = Array(3) { if (it == 1) "mid" else "x" }   // branchy body
+    if (n[1] != "mid" || n[0] != "x") return "f4"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
