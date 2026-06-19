@@ -585,6 +585,27 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                         }
                         sup = bc.base_class.clone();
                     }
+                    // Sibling/inherited method returns (explicit annotations) so a method with an inferred
+                    // expression body can resolve a call to another method of this class or a superclass
+                    // (`fun b() = a()` where `a(): Int`). Own methods take precedence over a superclass's.
+                    let mut local_rets = fun_rets.clone();
+                    let mut sup_m = c.base_class.clone();
+                    let mut gm = 0;
+                    while let Some(bn) = sup_m {
+                        gm += 1; if gm > 32 { break; }
+                        let Some(bc) = file.decls.iter().filter_map(|&d| match file.decl(d) { Decl::Class(x) => Some(x), _ => None }).find(|x| x.name == bn) else { break };
+                        for m in &bc.methods {
+                            if let Some(r) = &m.ret {
+                                local_rets.insert(m.name.clone(), ty_of_ref(r, &class_names, &ctp, diags));
+                            }
+                        }
+                        sup_m = bc.base_class.clone();
+                    }
+                    for m in &c.methods {
+                        if let Some(r) = &m.ret {
+                            local_rets.insert(m.name.clone(), ty_of_ref(r, &class_names, &ctp, diags));
+                        }
+                    }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
@@ -594,7 +615,7 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty_p(file, *e, &class_names, &fun_rets, &props);
+                                    let t = infer_lit_ty_p(file, *e, &class_names, &local_rets, &props);
                                     if t != Ty::Error { return t; }
                                 }
                                 // The overridable members `Comparable.compareTo`/`Any.equals`/`hashCode`
@@ -1223,12 +1244,19 @@ fn infer_lit_ty_p(file: &File, e: ExprId, class_names: &HashMap<String, String>,
                 // A primitive conversion method (`2.toByte()`, `n.toLong()`) returns its named
                 // primitive regardless of receiver — Kotlin's `Number`/`Char` conversion family.
                 // `toString()` is `String` on any receiver (`Any.toString`).
-                Expr::Member { name, .. } => {
+                Expr::Member { receiver, name } => {
                     if let Some(t) = prim_conversion_ret(name) {
                         return t;
                     }
                     if name == "toString" {
                         return Ty::String;
+                    }
+                    // `this.method()` — resolve the receiver-`this` method via the rets map (extended
+                    // with this class's + superclasses' methods at the method-inference call site).
+                    if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
+                        if let Some(ret) = fun_rets.get(name.as_str()) {
+                            return *ret;
+                        }
                     }
                 }
                 _ => {}

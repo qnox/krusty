@@ -207,6 +207,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A method with an inferred expression body can resolve a call to another method of the same class
+    // (`fun b() = a()`), via `this`, or to an inherited method — the return-type inference scope is seeded
+    // with this class's and its superclasses' explicitly-typed method returns.
+    ("MethodCallInference", r#"
+open class A { fun base(): Int = 100 }
+class C : A() {
+    fun a(): Int = 5
+    fun b() = a()
+    fun c() = this.a() + a()
+    fun d() = base() + a()
+}
+fun box(): String {
+    val o = C()
+    if (o.b() != 5) return "f1"
+    if (o.c() != 10) return "f2:${o.c()}"
+    if (o.d() != 105) return "f3:${o.d()}"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
