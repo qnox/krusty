@@ -2087,6 +2087,8 @@ impl<'a> Lower<'a> {
             Ty::Long => self.static_call("java/lang/Long.hashCode", vec![v]),
             Ty::Double => self.static_call("java/lang/Double.hashCode", vec![v]),
             Ty::Float => self.static_call("java/lang/Float.hashCode", vec![v]),
+            // An array property hashes by reference identity (`Objects.hashCode`), matching kotlinc — a
+            // data class does NOT content-hash arrays (consistent with its reference-based `equals`).
             _ => self.static_call("java/util/Objects.hashCode", vec![v]),
         }
     }
@@ -2108,7 +2110,8 @@ impl<'a> Lower<'a> {
                     rhs: z,
                 })
             }
-            // Int/Long/… → native compare; reference → `!Intrinsics.areEqual` via the reference Ne path.
+            // Int/Long/… → native compare; reference (incl. an array property, which a data class
+            // compares by reference, not content) → `!Intrinsics.areEqual` via the reference Ne path.
             _ => self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Ne,
                 lhs: a,
@@ -2169,7 +2172,23 @@ impl<'a> Lower<'a> {
                 };
                 let s = self.ir_const_str(sep);
                 acc = self.str_plus(acc, s);
-                let fv = self.this_field(class_id, i as u32);
+                let mut fv = self.this_field(class_id, i as u32);
+                // A data class renders an array property with `java.util.Arrays.toString(field)` (so
+                // `[true]`, not the default `[Z@hash`), matching kotlinc.
+                if let Some(param) =
+                    data_array_param(&self.ir.classes[class_id as usize].fields[i].1)
+                {
+                    fv = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Static {
+                            owner: "java/util/Arrays".to_string(),
+                            name: "toString".to_string(),
+                            descriptor: format!("({param})Ljava/lang/String;"),
+                            inline: false,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![fv],
+                    });
+                }
                 acc = self.str_plus(acc, fv);
             }
             let close = self.ir_const_str(")".to_string());
@@ -8098,6 +8117,27 @@ fn class_internal(file: &ast::File, name: &str) -> String {
 /// Resolve a written type to a `Ty`: a builtin (`Int`, `String`, …), else a class declared in this
 /// file (`A` → its internal name), else an erased reference (generic type param / external type →
 /// `Object`). Without this, class-typed fields resolve to `Error` and emit a bad descriptor.
+/// For an array-typed IR field, the `java.util.Arrays.toString` array-parameter
+/// descriptor (`[Z`, `[Ljava/lang/Object;` for a reference array); `None` if the field isn't an array.
+/// A `data class` renders/compares/hashes array properties through `java.util.Arrays`, like kotlinc.
+fn data_array_param(t: &IrType) -> Option<&'static str> {
+    let IrType::Class { fq_name, .. } = t else {
+        return None;
+    };
+    Some(match fq_name.as_str() {
+        "kotlin/BooleanArray" => "[Z",
+        "kotlin/CharArray" => "[C",
+        "kotlin/ByteArray" => "[B",
+        "kotlin/ShortArray" => "[S",
+        "kotlin/IntArray" => "[I",
+        "kotlin/LongArray" => "[J",
+        "kotlin/FloatArray" => "[F",
+        "kotlin/DoubleArray" => "[D",
+        "kotlin/Array" => "[Ljava/lang/Object;",
+        _ => return None,
+    })
+}
+
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
     // Function type `(A, B) -> R` (parsed with `fun_params` non-empty / `name == "<fun>"`).
     if !r.fun_params.is_empty() || r.name == "<fun>" {
@@ -8114,6 +8154,21 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
             }
         }
         return t;
+    }
+    // A specialized primitive array (`IntArray` → `int[]`), or a reference `Array<T>` (element from the
+    // type argument). Without this an array-typed field/param would erase to `Object`.
+    if let Some(elem) = Ty::primitive_array_element(&r.name) {
+        return Ty::array(elem);
+    }
+    if r.name == "Array" {
+        let elem = r
+            .arg
+            .as_ref()
+            .map(|a| ty_of(file, a))
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+        if elem.is_reference() {
+            return Ty::array(elem);
+        }
     }
     let is_class = file
         .decls

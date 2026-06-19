@@ -2130,16 +2130,6 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                         {
                             c.diags.error(cl.span, format!("krusty: data class overriding synthesized member '{sn}' needs a bridge method (unsupported)"));
                         }
-                        // An array property erases to an `Object` field, and the synthesized
-                        // equals/hashCode/toString use reference semantics instead of kotlinc's
-                        // `Arrays.equals`/`hashCode`/`toString` — skip until array data fields are modeled.
-                        if props.iter().any(|(_, t, _)| matches!(t, Ty::Array(_))) {
-                            c.diags.error(
-                                cl.span,
-                                "krusty: a data class with an array property is not supported"
-                                    .to_string(),
-                            );
-                        }
                     }
                 }
                 for m in &cl.methods {
