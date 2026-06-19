@@ -2691,11 +2691,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .zip(&impl_sig.params)
                     .all(|(e, c)| e == c || *e == obj);
-            if (params_differ || ret_differs)
-                && params_bridgeable
-                // A differing *return* that is primitive would need boxing in the bridge — skip.
-                && !(ret_differs && impl_sig.ret.is_primitive())
-            {
+            if (params_differ || ret_differs) && params_bridgeable {
                 // Record a synthetic bridge `name(erased)` that downcasts its args and delegates to
                 // the concrete `name(impl)`. (Primitive params would need (un)boxing in the bridge —
                 // left out of this pass.)
@@ -2721,22 +2717,8 @@ impl<'a> Checker<'a> {
         // returning the supertype's (erased) type — the lowering synthesizes it (an `ACC_BRIDGE` getter
         // delegating to the concrete one). A primitive own-type would need (un)boxing in that bridge,
         // which the property-bridge path doesn't emit yet — reject only that case.
-        for sup in self.syms.supertype_internals(internal) {
-            let Some(sc) = self.syms.class_by_internal(&sup) else {
-                continue;
-            };
-            for (pname, sty, _) in sc.props.clone() {
-                if let Some((own_ty, _)) = self.syms.prop_of(internal, &pname) {
-                    if sty.descriptor() != own_ty.descriptor() && own_ty.is_primitive() {
-                        self.diags.error(
-                            span,
-                            format!("krusty: property '{pname}' getter bridge with a primitive type is not supported"),
-                        );
-                        return;
-                    }
-                }
-            }
-        }
+        // A property overriding a supertype property with a different erased type needs a getter bridge,
+        // which the lowering synthesizes (boxing a primitive own type in the bridge as needed).
     }
 
     /// Report (and thereby skip the file for) functions whose erased signatures collide.

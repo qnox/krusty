@@ -1482,6 +1482,22 @@ fun box(): String {
 }
 "#,
     ),
+    // Bridges whose concrete member returns a PRIMITIVE: the synthetic `ACC_BRIDGE` boxes it to the
+    // erased reference type — a generic property `val value: T` (erased `Object`) overridden `: Int`,
+    // and a generic method `fun pick(): T` overridden returning `Int`.
+    (
+        "PrimitiveBridges",
+        r#"
+interface Holder<T> { val value: T; fun pick(): T }
+class IntHolder(override val value: Int) : Holder<Int> { override fun pick(): Int = value + 1 }
+fun box(): String {
+    val h: Holder<Int> = IntHolder(41)
+    if (h.value != 41) return "f1: ${h.value}"
+    if (h.pick() != 42) return "f2: ${h.pick()}"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
