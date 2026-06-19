@@ -67,6 +67,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Char arithmetic: `Char + Int`/`Char - Int` → Char (truncated mod 2^16 with i2c, so it wraps),
+    // `Char - Char` → Int (the distance). No promotion between Char and Int — the op runs on ints.
+    ("CharArithmetic", r#"
+fun box(): String {
+    if ('a' + 2 != 'c') return "f1"
+    if ('z' - 1 != 'y') return "f2"
+    if ('z' - 'a' != 25) return "f3"
+    val lo: Char = Char.MIN_VALUE
+    if ((lo - 1) <= lo) return "f4"          // 0 - 1 -> 0xFFFF, wraps high
+    val hi: Char = Char.MAX_VALUE
+    if ((hi + 1) >= hi) return "f5"          // 0xFFFF + 1 -> 0, wraps low
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u

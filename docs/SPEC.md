@@ -163,6 +163,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   isn't byte-equal). Note: the Kotlin compiler exposes **no metadata** marking these intrinsics — the
   operation→helper mapping is a hardcoded registry in its backend (`IrIntrinsicMethods.kt`, keyed by
   built-in IR symbols), which krusty mirrors.
+- **`Char` arithmetic**: `Char + Int` and `Char - Int` yield `Char`; `Char - Char` yields `Int` (the only
+  `Char.plus`/`Char.minus` overloads — there is no `Char + Char`, `Char * …`, etc.). There is no numeric
+  *promotion* between `Char` and `Int`, but both share the int stack slot, so the op runs on ints; a `Char`
+  result is truncated back with `i2c` (Kotlin wraps mod 2^16, so `Char.MAX_VALUE + 1 == Char.MIN_VALUE`),
+  matching kotlinc's `isub`/`iadd` + `i2c`. A `Char - Char` distance stays a plain `Int`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
