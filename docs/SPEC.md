@@ -301,6 +301,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ULong`/`Char` counters (not just `Int`): the counter takes the uniform bound type, signed/`Long`/`Char`
   compare with the direct opcode, and the unsigned case compares with `Integer.compareUnsigned`/
   `Long.compareUnsigned` (a signed `<=` would misorder values past the sign bit). `tests/range_value_e2e.rs`.
+  The `for`-range header parses the iterable at additive precedence so a trailing `..`/`until`/`downTo`
+  is handled by the range path; when the iterable is **not** a `..` literal (a stored progression, a
+  `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
+  calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
+  stopping at the bare iterable and reporting `expected ')'`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; the checker rejects a *primitive* element — `arrayOf(1, 2)` — since `Array<Int>` is
