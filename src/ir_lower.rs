@@ -498,6 +498,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 }
                             }
                         }
+                        // A *classpath* generic interface (`Comparable<Foo>`, `Iterable<E>`, …) isn't in
+                        // `self.classes`, so its erased single-abstract-method comes from the library set.
+                        // When the class's override has a specialized descriptor (`compareTo(Foo)` vs the
+                        // interface's erased `compareTo(Object)`), emit the `ACC_BRIDGE` the JVM needs to
+                        // dispatch an interface-typed call — without it `(x as Comparable).compareTo(y)`
+                        // hits `AbstractMethodError` instead of running the override (or throwing CCE).
+                        if !lo.classes.contains_key(itf) {
+                            if let Some(m) = lo.syms.libraries.sam_method(itf) {
+                                if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &m.name) {
+                                    let ip: Vec<IrType> = m.params.iter().map(|t| ty_to_ir(*t)).collect();
+                                    let ir_ = ty_to_ir(m.ret);
+                                    let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                    let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                    if (ip != cp || ir_ != cr) && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_)) {
+                                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                            name: m.name.clone(), erased_params: ip, erased_ret: ir_,
+                                            concrete_params: cp, concrete_ret: cr,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 // An interface's methods are abstract — leave their bodies `None`; nothing to lower.
@@ -2100,6 +2122,14 @@ impl<'a> Lower<'a> {
         } else if self.classes.contains_key(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
+        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+            Ty::obj(&cs.internal)
+        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
+            // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
+            // the same name→internal map the checker resolves `is`/`as` targets against. `"__ty/<prim>"`
+            // is an alias to a primitive, which `is`/`as` here doesn't model (skip).
+            if internal.starts_with("__ty/") { return None; }
+            Ty::obj(internal)
         } else {
             return None;
         };

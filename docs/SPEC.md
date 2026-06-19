@@ -295,7 +295,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `{ val t = x; if (t is T) t as T else null }` — `instanceof` then `checkcast` on a match, `null` on a
   mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive
   `as? Int` would yield the boxed `Int?` wrapper — not yet modeled, so it skips). `SafeCast` in
-  `tests/feature_box_e2e.rs`. A literal-boolean `if` condition (`if (false) { … }`) is
+  `tests/feature_box_e2e.rs`. `is`/`as`/`as?` targets resolve through the **same** name→internal map the
+  checker uses (`syms.class_names`), so a **classpath** type (`CharSequence`, `Number`, `Runnable`, a Java
+  class) works, not just builtins and user classes. A class implementing a **generic classpath interface**
+  (`Comparable<Foo>`) also gets the `ACC_BRIDGE` method the JVM needs (`compareTo(Object)` delegating to
+  the specialized `compareTo(Foo)`): the interface's erased single-abstract-method comes from the library
+  set's `sam_method`, and a bridge is added whenever the override's descriptor differs — without it an
+  interface-typed call (`(x as Comparable).compareTo(y)`) faults with `AbstractMethodError`
+  (`ClasspathIsAs` in `tests/feature_box_e2e.rs`). A literal-boolean `if` condition (`if (false) { … }`) is
   constant-folded (only the taken branch is emitted), like kotlinc's dead-code elimination.
 - Generic functions (`fun <T> f(x: T): T`) erase the type parameter to `Object` in the JVM signature.
   At a call site, a result of erased type `Object` flowing into a more specific reference context (a

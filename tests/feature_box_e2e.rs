@@ -133,6 +133,29 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // `is`/`as`/`as?` against a classpath type (`CharSequence`, `Number`, `Comparable`), plus the
+    // `ACC_BRIDGE` `compareTo(Object)` a class implementing a generic classpath interface needs so an
+    // interface-typed call dispatches to the specialized override (here the bridge's checkcast throws CCE).
+    ("ClasspathIsAs", r#"
+class Foo(val s: String) : Comparable<Foo> {
+    override fun compareTo(other: Foo): Int = s.compareTo(other.s)
+}
+fun box(): String {
+    val a: Any = "hi"
+    if (a !is CharSequence) return "f1"
+    val num: Any = 5
+    if (num !is Number || (a as? Number) != null) return "f2"
+    if ("x" is Number) return "f3"
+    val n = a as CharSequence
+    if (n.length != 2) return "f4"
+    if (Foo("a").compareTo(Foo("b")) >= 0) return "f5"
+    try {
+        (Foo("1") as Comparable<Any>).compareTo(2)
+        return "f6"
+    } catch (e: ClassCastException) {}
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
