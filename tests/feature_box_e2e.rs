@@ -250,6 +250,23 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // An arithmetic operand that is branchy (`5 + if (c) 1 else 2`, `r += if (…) … else …`) spills the
+    // other operand to a temp so it isn't stranded on the stack across the branch's merge frame.
+    ("BranchyArithmetic", r#"
+fun box(): String {
+    val c = true
+    val z = 5 + (if (c) 1 else 2)
+    if (z != 6) return "f1:$z"
+    var r = 20
+    r += if (r > 0) 3 else 4
+    if (r != 23) return "f2:$r"
+    val w = 3L * (if (!c) 2L else 4L)
+    if (w != 12L) return "f3"
+    val m = (if (c) 10 else 0) and (if (c) 6 else 0)   // bitwise + branchy
+    if (m != 2) return "f4:$m"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
