@@ -2188,6 +2188,18 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- 🚧 **Phase 386 — value/inline classes, step 2: name mangling** (886, building block). New
+  `src/jvm/inline_class.rs`: kotlinc's inline-class member-name mangling, ported exactly from
+  `compiler/backend/.../inlineClassManglingUtils.kt` (new K2 rules). A function whose signature mentions
+  a `value` class gets a `-<hash>` suffix where `<hash> = base64url_nopad(MD5(signature)[0..5])`; a value
+  parameter contributes `L<fqName>[?];`, a mangled return contributes `:` + that element. Includes a
+  small pure MD5 + URL-safe-base64 (no crypto dependency). Unit-tested against kotlinc 2.4.0 output:
+  `value class S(val string)` → getter `getS-C-fiWsc` (return-mangled, `:LS;`), `fun useS(s: S)` →
+  `useS-gSa4wCw` (param-mangled, `LS;`); top-level returns are NOT return-mangled (`mkS(): S` stays
+  `mkS`). Pure utility, no compile-path wiring yet → 886/0-FAIL. NEXT (step 3+): value-class member
+  synthesis (`box-impl`/`unbox-impl`/`constructor-impl`/getter) + underlying-type erasure + call-site
+  routing through these names.
+
 - 🚧 **Phase 385 — value/inline classes, step 1: corpus reaches the compiler** (886, scaffolding).
   The owner chose value/inline classes (~745 `inlineClasses/` box files) as the next frontier. The
   corpus files carry a literal `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder line that the Kotlin test

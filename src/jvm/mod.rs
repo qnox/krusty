@@ -5,6 +5,7 @@ pub mod classfile;
 pub mod classpath;
 pub mod classreader;
 pub mod inline;
+pub mod inline_class;
 pub mod ir_emit;
 pub mod jvm_class_map;
 pub mod jvm_libraries;
