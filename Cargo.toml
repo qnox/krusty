@@ -12,7 +12,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 rayon = "1"
 libc = "0.2"
 # Sampling profiler → flamegraph SVG (gated behind KRUSTY_FLAMEGRAPH in the conformance harness).
-pprof = { version = "0.14", features = ["flamegraph"] }
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 [lib]
 name = "krusty"
