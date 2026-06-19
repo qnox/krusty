@@ -703,3 +703,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   runtime). Branch types are compared by their JVM internal name when deciding whether a merge is needed —
   `Ty::String` and `Ty::Obj("java/lang/String")` are the same type but distinct `Ty` values, so a
   same-class merge keeps its precise frame and only a genuinely different class falls back to `Object`.
+
+- **Property getter bridges (covariant / generic-erased overrides).** A property that overrides a
+  supertype property with a different erased type — a covariant `override val from: NodeImpl` over
+  `val from: Node`, or a generic interface `val x: T` (erased to `Object`) overridden with a concrete
+  type — gets a synthetic `ACC_BRIDGE` getter `getX()` returning the *supertype's* (erased) type that
+  delegates (`invokevirtual`) to the concrete `getX()`. Without it, a read through the supertype reference
+  resolves to the absent erased getter (an `AbstractMethodError`). The concrete getter's return is a
+  subtype of the bridge's, so no cast is needed. Synthesized in the lowering (reusing the method-bridge
+  emit); a primitive own type (which would need (un)boxing in the getter bridge) is still rejected.

@@ -2188,6 +2188,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 379 — property getter bridges (covariant / generic-erased overrides)** (856→861). A property
+  overriding a supertype property with a different erased type gets a synthetic `ACC_BRIDGE` `getX()`
+  returning the supertype's type, delegating to the concrete getter (reuses the method-bridge emit).
+  `tests/feature_box_e2e.rs::PropertyGetterBridge`.
+
 - ✅ **Phase 378 — `if`/`when` unrelated-reference branch join → common supertype (`Object`)** (849→856).
   Different reference classes join to `Any`; the emitter writes `Object` for the merge frame (each branch
   verifies as a subtype) and compares branch types by JVM internal name (so `Ty::String` vs

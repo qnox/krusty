@@ -1242,6 +1242,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A property overriding a supertype property with a more specific (covariant) or generic-erased type
+    // gets a synthetic `ACC_BRIDGE` getter returning the supertype's type, delegating to the concrete
+    // getter — so a read through the supertype reference reaches the override.
+    ("PropertyGetterBridge", r#"
+interface Node
+class NodeImpl(val tag: String) : Node
+interface Edge { val from: Node }
+class EdgeImpl(override val from: NodeImpl) : Edge
+interface Box<T> { val item: T }
+class StrBox(override val item: String) : Box<String>
+fun box(): String {
+    val e: Edge = EdgeImpl(NodeImpl("n"))
+    if ((e.from as NodeImpl).tag != "n") return "f1"
+    val b: Box<String> = StrBox("hi")
+    if (b.item != "hi") return "f2"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
