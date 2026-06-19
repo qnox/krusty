@@ -2188,6 +2188,21 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- 🚧 **Phase 388 — value/inline classes, step 4: member synthesis** (886, codegen). The JVM emitter now
+  emits `static` class members (`emit_class` passes `instance = !f.is_static`; `emit_method` already
+  supported the no-`this` path used by top-level functions). A `@JvmInline value class X(val v: U)` is
+  admitted to the IR path and synthesizes kotlinc's unboxed-support members on `X.class`:
+  `box-impl(U):X` and `constructor-impl(U):U` (static, via the new `add_synth_static_method`) and
+  `unbox-impl():U` (instance); the `U` field, `<init>(U)`, and `getV()` getter come from the ordinary
+  single-field class path. The static `-impl` members carry `dispatch_receiver = Some(owner)` so they
+  stay off the top-level facade. Verified against kotlinc 2.4.0 (`tests/value_class_e2e.rs`): the
+  emitted descriptors + `ACC_STATIC` flags match (`box-impl(int):S` static-final, `constructor-impl(int):int`,
+  `unbox-impl():int`, `getX():int`). Use-site unboxing isn't wired yet, so the resolver still rejects
+  value-class *files* (they skip, not FAIL) — admission here is for synthesis; 886/0-FAIL.
+  NEXT: (step 4b) the remaining members — `equals`/`hashCode`/`toString` + their `-impl`/`-impl0` forms,
+  and the private `<init>` + `DefaultConstructorMarker` synthetic ctor — to fully match kotlinc's
+  `X.class`; then (step 5) use-site unboxing lifts the rejection.
+
 - 🚧 **Phase 387 — value/inline classes, step 3: symbol-table representation** (886, foundation).
   `ClassSig` gains `value_field: Option<(String, Ty)>` — for a `@JvmInline value class X(val v: U)`, the
   sole underlying property `(name, U)`, populated in `collect_signatures`. This is the data layer for the

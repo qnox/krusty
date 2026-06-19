@@ -491,6 +491,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 lo.synth_data_members(&internal, id, ctor_param_count as usize);
             }
+            // A `@JvmInline value class X(val v: U)` carries kotlinc's unboxed-support members:
+            // `box-impl(U):X`, `unbox-impl():U`, `constructor-impl(U):U` (the normal path already
+            // emitted the `U` field, the `<init>(U)`, and the `getV()` getter).
+            if c.is_value {
+                if let Some((_, u)) = lo
+                    .syms
+                    .classes
+                    .get(&c.name)
+                    .and_then(|s| s.value_field.clone())
+                {
+                    lo.synth_value_members(&internal, id, u);
+                }
+            }
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
             if !c.delegations.is_empty() {
@@ -1314,11 +1327,12 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // Interface supertypes (`class C : I`) are allowed when each is a file interface (checked at
     // registration); a base class is allowed when it's a simple/open file class.
     // `abstract class` is allowed: its abstract methods (no body) are emitted as `ACC_ABSTRACT`,
-    // concrete methods normally. `value`/inline classes need unboxing and are excluded.
+    // concrete methods normally. A `@JvmInline value class` is structurally a single-field class; its
+    // unboxed-support members are synthesized (see `synth_value_members`). Use-site unboxing isn't done
+    // yet, so the resolver still rejects value-class *files* — admission here is for member synthesis.
     // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
     // companion with properties (`val`/`const val`) is not yet.
-    !c.is_value && !c.is_object && !c.is_enum && !c.is_interface
-        && c.companion_props.is_empty()
+    !c.is_object && !c.is_enum && !c.is_interface && c.companion_props.is_empty()
         // Secondary constructors delegating to the primary (`constructor(p) : this(args)`) are
         // emitted as extra `<init>` methods; `super(…)` delegation isn't supported.
         && c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
@@ -2270,6 +2284,98 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(cond), blk)],
         })
+    }
+
+    /// Register a synthesized `static` method on a class (e.g. a value class's `box-impl`): no `this`
+    /// receiver, value index 0 is the first parameter. Pushed onto the class's method list so the
+    /// emitter writes it (with `ACC_STATIC`); not name-resolved (the lowering calls it via `Static`).
+    fn add_synth_static_method(
+        &mut self,
+        internal: &str,
+        class_id: ClassId,
+        name: &str,
+        params: Vec<IrType>,
+        ret: Ty,
+        body: u32,
+    ) {
+        let fid = self.ir.add_fun(IrFunction {
+            name: name.to_string(),
+            params,
+            ret: ty_to_ir(ret),
+            body: Some(body),
+            is_static: true,
+            // `Some(owner)` keeps it OUT of the top-level facade (which emits dispatch-receiver-less
+            // functions); it is emitted as a `static` member of its class. `is_static` (not this field)
+            // is what suppresses the `this` slot.
+            dispatch_receiver: Some(internal.to_string()),
+            param_checks: Vec::new(),
+        });
+        self.ir.classes[class_id as usize].methods.push(fid);
+    }
+
+    /// Synthesize a `@JvmInline value class X(val v: U)`'s unboxed-support members: `unbox-impl(): U`
+    /// (instance — returns the field), `box-impl(U): X` (static — `new X(u)`), and `constructor-impl(U):
+    /// U` (static — returns its argument; the underlying-value-validating factory). The `U` field, the
+    /// `<init>(U)`, and the `getV()` getter come from the ordinary single-field class path.
+    fn synth_value_members(&mut self, internal: &str, class_id: ClassId, underlying: Ty) {
+        let u_ir = ty_to_ir(underlying);
+        // unbox-impl(): U  —  `return this.field0`
+        {
+            let get = self.this_field(class_id, 0);
+            let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            self.add_synth_method(
+                internal,
+                class_id,
+                "unbox-impl",
+                vec![],
+                underlying,
+                body,
+                false,
+            );
+        }
+        // box-impl(U): X  —  `return new X(u)`
+        {
+            let arg = self.ir.add_expr(IrExpr::GetValue(0));
+            let new = self.ir.add_expr(IrExpr::New {
+                class: class_id,
+                args: vec![arg],
+                ctor_params: Some(vec![u_ir.clone()]),
+            });
+            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            self.add_synth_static_method(
+                internal,
+                class_id,
+                "box-impl",
+                vec![u_ir.clone()],
+                Ty::obj(internal),
+                body,
+            );
+        }
+        // constructor-impl(U): U  —  `return u`  (the unboxed underlying value)
+        {
+            let arg = self.ir.add_expr(IrExpr::GetValue(0));
+            let ret = self.ir.add_expr(IrExpr::Return(Some(arg)));
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            self.add_synth_static_method(
+                internal,
+                class_id,
+                "constructor-impl",
+                vec![u_ir],
+                underlying,
+                body,
+            );
+        }
     }
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
