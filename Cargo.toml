@@ -6,7 +6,7 @@ description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline
 
 [dependencies]
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 rayon = "1"
