@@ -712,3 +712,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resolves to the absent erased getter (an `AbstractMethodError`). The concrete getter's return is a
   subtype of the bridge's, so no cast is needed. Synthesized in the lowering (reusing the method-bridge
   emit); a primitive own type (which would need (un)boxing in the getter bridge) is still rejected.
+
+- **Bridges with a primitive concrete type.** A getter or method bridge whose concrete member returns a
+  primitive (a generic `val x: T`/`fun f(): T` erased to `Object` overridden with `: Int`, or a covariant
+  primitive-backed return) is now synthesized: the `ACC_BRIDGE` boxes the primitive return to the erased
+  reference type (`Integer` for an `Object` bridge). The bridge emitter already performed this boxing —
+  the checker/lowering were over-conservatively rejecting the case, so the guards were removed.

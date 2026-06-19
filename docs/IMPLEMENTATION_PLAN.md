@@ -2188,6 +2188,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 380 — bridges with a primitive concrete type** (861→871). A getter/method bridge whose
+  concrete member returns a primitive (generic `T` erased to `Object` overridden `: Int`) now boxes the
+  primitive in the `ACC_BRIDGE` — the emitter already did this, so the over-conservative checker/lowering
+  guards were removed. `tests/feature_box_e2e.rs::PrimitiveBridges`.
+
 - ✅ **Phase 379 — property getter bridges (covariant / generic-erased overrides)** (856→861). A property
   overriding a supertype property with a different erased type gets a synthetic `ACC_BRIDGE` `getX()`
   returning the supertype's type, delegating to the concrete getter (reuses the method-bridge emit).

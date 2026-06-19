@@ -718,8 +718,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         };
                         for (pname, sty, _) in sc.props.clone() {
                             if let Some((own_ty, _)) = lo.syms.prop_of(&internal, &pname) {
-                                if sty.descriptor() != own_ty.descriptor() && !own_ty.is_primitive()
-                                {
+                                if sty.descriptor() != own_ty.descriptor() {
                                     let gname = getter_name(&pname);
                                     let already = lo.ir.classes[cid as usize]
                                         .bridges
