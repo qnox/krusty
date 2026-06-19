@@ -359,6 +359,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
+  body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
+  (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through
+  *external* access — the inlined code runs in the caller, not inside the receiver's class, so its private
+  backing fields aren't directly reachable. `run` yields the body value, `apply` the receiver. Restricted
+  to a user-class receiver (a library receiver, whose members aren't reachable through a bare `this`,
+  falls through to skip). `run`/`apply` are excluded from the bytecode-splice route (which mishandles the
+  receiver lambda). `ApplyRun` in `tests/feature_box_e2e.rs`. (`let`/`also` — value lambdas, param `it` —
+  are unchanged.)
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.

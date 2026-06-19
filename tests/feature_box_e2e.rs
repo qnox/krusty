@@ -156,6 +156,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Receiver scope functions `run`/`apply` (the receiver is `this`): the body's bare member reads,
+    // writes, and method calls resolve against the receiver through its getter/setter/method (external
+    // access, since the inlined body runs in the caller). `run` yields the body, `apply` the receiver.
+    ("ApplyRun", r#"
+class C(val n: Int) { var x = 0; var y = 0; fun a() = n; fun b() = n * 2 }
+fun box(): String {
+    val c = C(1).apply { x = 5; y = x + 2 }     // write + read-own-write, yields receiver
+    if (c.x != 5 || c.y != 7) return "f1:${c.x},${c.y}"
+    val r = C(3).run { x = 10; x + n }           // write then read, yields body
+    if (r != 13) return "f2:$r"
+    val s = C(4).run { a(); b() }                // method calls, yields last
+    if (s != 8) return "f3:$s"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
