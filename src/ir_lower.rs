@@ -2179,6 +2179,9 @@ impl<'a> Lower<'a> {
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
         self.cur_ret_ty = ret_ty.clone();
+        // Defensive: the stack is push/pop-balanced within a body, but a bail mid-lowering of a previous
+        // body must not leak an enclosing `finally` into this one.
+        self.try_finally_stack.clear();
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
