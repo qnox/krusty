@@ -43,9 +43,16 @@ jobs:
           key: kotlinc-${{ hashFiles('kotlin-versions') }}
       - name: provision reference kotlinc
         run: echo "KRUSTY_KOTLINC=$(just kotlinc)" >> "$GITHUB_ENV"
-      # Also provision the Kotlin codegen/box corpus and export KRUSTY_KOTLIN_BOX_DIR so the
-      # conformance suite actually runs (vendored, git submodule, release asset — your call). Without
-      # it, `just conformance` errors and the badge step is skipped.
+      # Kotlin codegen/box corpus: blobless + sparse clone of just that directory at the matching
+      # tag, so the full conformance suite has cases to run against. Cheap (no full Kotlin checkout).
+      - name: fetch Kotlin box corpus
+        run: |
+          set -euo pipefail
+          tag="v$(just max-version)"
+          git clone --depth 1 --filter=blob:none --sparse --branch "$tag" \
+            https://github.com/JetBrains/kotlin.git "$RUNNER_TEMP/kotlin"
+          git -C "$RUNNER_TEMP/kotlin" sparse-checkout set compiler/testData/codegen/box
+          echo "KRUSTY_KOTLIN_BOX_DIR=$RUNNER_TEMP/kotlin/compiler/testData/codegen/box" >> "$GITHUB_ENV"
       - name: compute conformance
         id: c
         run: |
