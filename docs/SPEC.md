@@ -359,6 +359,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **A branchy arithmetic operand spills.** When one operand of a primitive `+`/`-`/`*`/`/`/`%`/bitwise/
+  shift is branchy (records a stackmap frame — `5 + if (c) 1 else 2`, `r += if (…) … else …`), the
+  emitter routes both operands through `emit_operands`, which stores the already-pushed operand to a temp
+  so it isn't stranded on the operand stack across the branch's merge frame (`VerifyError: Inconsistent
+  stackmap frames`). Non-branchy operands emit in place, so the common-case bytecode is unchanged.
+  `BranchyArithmetic` in `tests/feature_box_e2e.rs`.
+- **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
+  primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them

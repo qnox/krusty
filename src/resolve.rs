@@ -3227,8 +3227,16 @@ impl<'a> Checker<'a> {
                 // literal, so `A.b === B.b`); krusty emits such a const as a runtime concatenation (a
                 // fresh object), so it can't reproduce String identity yet — skip rather than miscompile.
                 // Object and boxed-primitive identity is unaffected.
+                let is_prim_wrapper = |t: Ty| t.obj_internal().and_then(prim_of_wrapper).is_some();
                 if lt == Ty::String || rt == Ty::String {
                     self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
+                    Ty::Error
+                } else if is_prim_wrapper(lt) || is_prim_wrapper(rt) {
+                    // A nullable-primitive wrapper (`Int?`/`Double?`) compared with `===`/`!==`: boxed
+                    // identity vs the unboxed primitive (and `Double`/`Float`'s `-0.0`/`NaN`) has subtle
+                    // semantics krusty doesn't model — skip rather than miscompile (`if_icmp*` on a boxed
+                    // operand would be a VerifyError).
+                    self.diags.error(span, "krusty: referential equality (=== / !==) on a nullable-primitive operand is not supported".to_string());
                     Ty::Error
                 } else {
                     Ty::Boolean

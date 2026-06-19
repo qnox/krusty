@@ -1962,8 +1962,11 @@ impl<'a> Emitter<'a> {
         let lt = self.value_ty(lhs);
         match op {
             Add | Sub | Mul | Div | Rem => {
-                self.emit_value(lhs, code);
-                self.emit_value(rhs, code);
+                // `emit_operands` spills the lhs to a temp when the rhs records a stackmap frame (a
+                // branchy operand, `5 + if (c) 1 else 2`) — else it just emits both in order, so the
+                // bytecode is unchanged for the common case. Without it the lhs is stranded on the stack
+                // across the rhs's merge frame (`VerifyError: Inconsistent stackmap frames`).
+                self.emit_operands(&[lhs, rhs], code);
                 match lt {
                     Ty::Long => match op { Add => code.ladd(), Sub => code.lsub(), Mul => code.lmul(), Div => code.ldiv(), Rem => code.lrem(), _ => unreachable!() },
                     Ty::Double => match op { Add => code.dadd(), Sub => code.dsub(), Mul => code.dmul(), Div => code.ddiv(), Rem => code.drem(), _ => unreachable!() },
@@ -1989,16 +1992,14 @@ impl<'a> Emitter<'a> {
                 self.slots.remove(&key);
             }
             BitAnd | BitOr | BitXor => {
-                self.emit_value(lhs, code);
-                self.emit_value(rhs, code);
+                self.emit_operands(&[lhs, rhs], code);
                 match lt {
                     Ty::Long => match op { BitAnd => code.land(), BitOr => code.lor(), BitXor => code.lxor(), _ => unreachable!() },
                     _ => match op { BitAnd => code.iand(), BitOr => code.ior(), BitXor => code.ixor(), _ => unreachable!() },
                 }
             }
             Shl | Shr | Ushr => {
-                self.emit_value(lhs, code);
-                self.emit_value(rhs, code); // shift amount is an `Int`
+                self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
                 match lt {
                     Ty::Long => match op { Shl => code.lshl(), Shr => code.lshr(), Ushr => code.lushr(), _ => unreachable!() },
                     _ => match op { Shl => code.ishl(), Shr => code.ishr(), Ushr => code.iushr(), _ => unreachable!() },
