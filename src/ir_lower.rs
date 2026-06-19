@@ -3691,6 +3691,14 @@ impl<'a> Lower<'a> {
                 match op {
                     // `-x` → `0 - x` (zero typed to match); `!x` → `x == false`.
                     UnOp::Neg => {
+                        // A negated `Double`/`Float` literal is the negative *constant* — not `0.0 - lit`,
+                        // which yields `+0.0` for `-0.0` (losing the sign IEEE-754 comparisons distinguish,
+                        // e.g. `Double.compare(0.0, -0.0) == 1`).
+                        match self.afile.expr(operand) {
+                            Expr::DoubleLit(d) => return Some(self.ir.add_expr(IrExpr::Const(IrConst::Double(-d)))),
+                            Expr::FloatLit(f) => return Some(self.ir.add_expr(IrExpr::Const(IrConst::Float(-f)))),
+                            _ => {}
+                        }
                         // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
                         // share one numeric type (Byte/Short/Char negate in the `int` category).
                         let zero = match self.info.ty(operand) {
@@ -4499,6 +4507,32 @@ impl<'a> Lower<'a> {
                                     let r = self.expr(receiver)?;
                                     return Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: ty_to_ir(target) }));
                                 }
+                            }
+                        }
+                    }
+                    // `a.compareTo(b)` on numeric primitives → `{Integer,Long,Float,Double}.compare(a, b)`
+                    // (returns -1/0/1), after promoting both operands to their common type — so a mixed
+                    // comparison like `1.compareTo(1.1)` becomes `Double.compare(1.0, 1.1)`. `Byte`/`Short`/
+                    // `Char` compare in the `int` category (`Integer.compare`). A user `operator compareTo`
+                    // has a reference receiver and is handled elsewhere; this is the builtin intrinsic.
+                    {
+                        let rty = self.info.ty(receiver);
+                        if name == "compareTo" && args.len() == 1 && rty.is_primitive() {
+                            let at = self.info.ty(args[0]);
+                            if let Some(p) = Ty::promote(rty, at).filter(|p| p.is_primitive() && *p != Ty::Boolean) {
+                                let pir = ty_to_ir(p);
+                                let l = self.lower_arg(receiver, &pir)?;
+                                let r = self.lower_arg(args[0], &pir)?;
+                                let (owner, prim) = match p {
+                                    Ty::Long => ("java/lang/Long", "J"),
+                                    Ty::Float => ("java/lang/Float", "F"),
+                                    Ty::Double => ("java/lang/Double", "D"),
+                                    _ => ("java/lang/Integer", "I"), // Int/Byte/Short/Char compare as int
+                                };
+                                return Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Static { owner: owner.to_string(), name: "compare".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
+                                    dispatch_receiver: None, args: vec![l, r],
+                                }));
                             }
                         }
                     }

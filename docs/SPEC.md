@@ -359,6 +359,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Mixed-primitive `a.compareTo(b)`** (`1.compareTo(1.1)`, `0.toByte().compareTo(5.0)`) → promote both
+  operands to their common numeric type, then `{Integer,Long,Float,Double}.compare(a, b)` (returns -1/0/1);
+  `Byte`/`Short`/`Char` compare in the `int` category. (A user `operator compareTo` has a reference
+  receiver and is handled separately.)
+- **A negated `Double`/`Float` literal is the negative constant** (`-0.0` → the `-0.0` `ldc`, `-2.5` →
+  `-2.5`), not the `0.0 - x` desugar (which gives `+0.0` for `-0.0`, losing the sign that IEEE-754
+  comparisons — `Double.compare(0.0, -0.0) == 1` — distinguish). `CompareToAndNegZero` in
+  `tests/feature_box_e2e.rs`.
 - **`kotlin.test` (and other default-argument) top-level calls.** A receiver-less library function call
   that omits trailing defaults (`assertEquals(a, b)` — the `message` is defaulted) resolves to the
   `name$default` synthetic (`resolve_callable` falls back to `find_top_level("name$default")` when no
