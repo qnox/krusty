@@ -115,6 +115,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Safe cast `x as? T`: `{ val t = x; if (t is T) t as T else null }` — `instanceof` then
+    // `checkcast` on a match, `null` on a mismatch (never throws). Reference targets only.
+    ("SafeCast", r#"
+open class Base
+class Sub : Base()
+fun box(): String {
+    val a: Any = "hi"
+    if ((a as? String) != "hi") return "f1"
+    if ((a as? Sub) != null) return "f2"
+    val s: Base = Sub()
+    if ((s as? Sub) == null) return "f3"
+    if ((Base() as? Sub) != null) return "f4"
+    val n: Any = 5
+    val r = (n as? String) ?: "OK"
+    if (r != "OK") return "f5"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u

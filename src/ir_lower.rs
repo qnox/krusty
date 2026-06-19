@@ -3497,9 +3497,24 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) })
             }
             Expr::As { operand, ty, nullable } => {
-                // `as?` (safe cast: null on mismatch) isn't modeled — only the throwing `as`.
+                // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
+                // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
+                // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
+                // its `instanceof`/`checkcast` already test/keep the wrapper, per the `TypeOp` backend).
                 if nullable {
-                    return None;
+                    let target = self.ty_ref(&ty)?;
+                    let target_ir = ty_to_ir(target);
+                    let v = self.expr(operand)?;
+                    let ov = self.fresh_value();
+                    let oty = ty_to_ir(self.info.ty(operand));
+                    let var_t = self.ir.add_expr(IrExpr::Variable { index: ov, ty: oty, init: Some(v) });
+                    let g1 = self.ir.add_expr(IrExpr::GetValue(ov));
+                    let is_t = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::InstanceOf, arg: g1, type_operand: target_ir.clone() });
+                    let g2 = self.ir.add_expr(IrExpr::GetValue(ov));
+                    let cast_t = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: g2, type_operand: target_ir });
+                    let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(is_t), cast_t), (None, nullc)] });
+                    return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_t], value: Some(when) }));
                 }
                 let arg = self.expr(operand)?;
                 let target = self.ty_ref(&ty)?;
