@@ -733,3 +733,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array field to an `Object` field and synthesizes `equals`/`hashCode`/`toString` with reference semantics
   rather than kotlinc's `Arrays.equals`/`hashCode`/`toString`, so it would miscompile (a property-type
   array data field is not modeled yet).
+
+- **Data-class array properties (replaces the phase-382 skip).** `ty_of` now resolves `IntArray`/…/
+  `Array<T>` to a real array type instead of erasing to `Any`, so an array field keeps its `[I`/`[Z`/…
+  descriptor (not `Object`). A data class then renders an array property's `toString` with
+  `java.util.Arrays.toString` (content: `[1, 2, 3]`), but its `equals`/`hashCode` keep array REFERENCE
+  identity — matching kotlinc exactly: two data-class instances with equal-content but different array
+  instances are NOT equal (`dataClasses/equals/intarray.kt`), while `toString` shows the content
+  (`dataClasses/toString/primitiveArrays.kt`).

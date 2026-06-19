@@ -1536,6 +1536,24 @@ fun box(): String {
 }
 "#,
     ),
+    // A `data class` with an array property: `toString` renders content (`Arrays.toString`), but `equals`
+    // and `hashCode` use array REFERENCE identity (kotlinc's actual behaviour — different instances with
+    // the same content are NOT equal). The array field keeps its real type (`[I`), not erased to `Object`.
+    (
+        "DataClassArray",
+        r#"
+data class P(val v: IntArray, val s: String)
+fun box(): String {
+    val arr = intArrayOf(1, 2, 3)
+    val a = P(arr, "x")
+    if (a != P(arr, "x")) return "f1"             // same array instance -> equal
+    if (a == P(intArrayOf(1, 2, 3), "x")) return "f2"  // different instance, same content -> NOT equal
+    if (a.hashCode() != P(arr, "x").hashCode()) return "f3"
+    if (a.toString() != "P(v=[1, 2, 3], s=x)") return "f4: $a"  // toString IS content
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]

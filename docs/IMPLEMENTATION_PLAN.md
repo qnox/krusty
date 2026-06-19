@@ -2188,6 +2188,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 383 — data-class array properties (proper support, replaces 382 skip)** (884→886). `ty_of`
+  resolves array type names to `Ty::Array` (was `Any`), so array fields keep their `[I` type; data-class
+  `toString` uses `Arrays.toString` (content) while `equals`/`hashCode` keep array reference identity —
+  exactly kotlinc's behaviour. `tests/feature_box_e2e.rs::DataClassArray`.
+
 - ✅ **Phase 382 — `ByteArray`/`ShortArray`/`FloatArray` constructors + data-class array-property skip**
   (878→884). Added the 3 missing primitive arrays to the checker's `primitive_array_element` (lowering
   already had all 8). Skip a data class with an array property (its erased-to-Object field + reference-
