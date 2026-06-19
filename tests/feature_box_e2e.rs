@@ -81,6 +81,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Primitive-array init constructor `IntArray(n) { i -> elem }`: the index lambda is inlined into a
+    // fill loop (`new T[n]; i=0; while (i<n) { a[i]=body(i); i++ }`). The single param is the index.
+    ("PrimArrayInit", r#"
+fun box(): String {
+    val a = IntArray(4) { it * it }
+    if (a[0] != 0 || a[3] != 9) return "f1:${a[3]}"
+    val c = CharArray(3) { 'a' + it }
+    if (c[2] != 'c') return "f2"
+    val d = DoubleArray(2) { i -> i + 0.5 }
+    if (d[1] != 1.5) return "f3"
+    val b = BooleanArray(3) { it % 2 == 0 }
+    if (!b[0] || b[1] || !b[2]) return "f4"
+    var s = 0L
+    LongArray(3) { (it + 1).toLong() }.forEach { s += it }
+    if (s != 6L) return "f5:$s"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
