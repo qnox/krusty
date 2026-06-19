@@ -226,6 +226,30 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Dead code after a diverging statement (`throw`/`return`) is dropped, like kotlinc — emitting it
+    // would leave a (dead) branch target without the stackmap frame the verifier requires. Plus: a
+    // side-effecting `for`-range `step` is evaluated exactly once (hoisted), not per iteration.
+    ("DeadCodeAndStep", r#"
+val log = StringBuilder()
+fun stepN(): Int { log.append("S"); return 2 }
+fun mid(): String {
+    try {
+        throw RuntimeException("x")
+        @Suppress("UNREACHABLE_CODE") log.append("never")   // dropped
+    } catch (e: Exception) {
+        log.append("C")
+    }
+    return "m"
+}
+fun box(): String {
+    if (mid() != "m") return "f0"
+    var sum = 0
+    for (i in 1 until 9 step stepN()) { sum += i }          // 1+3+5+7 = 16, stepN() once
+    if (sum != 16) return "f1:$sum"
+    if (log.toString() != "CS") return "f2:$log"            // C (catch), S (one step eval)
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
