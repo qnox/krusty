@@ -1429,6 +1429,18 @@ impl<'a> Emitter<'a> {
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
+                Callee::Special { owner, name, descriptor } => {
+                    let (owner, name, descriptor) = (owner.clone(), name.clone(), descriptor.clone());
+                    let recv = dispatch_receiver.expect("special call needs a receiver");
+                    let args = args.clone();
+                    let mut ops = vec![recv];
+                    ops.extend(args.iter().copied());
+                    self.emit_operands(&ops, code);
+                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let ret = ty_from_descriptor_ret(&descriptor);
+                    let m = self.cw.methodref(&owner, &name, &descriptor);
+                    code.invokespecial(m, aw, slot_words(ret) as i32);
+                }
             },
             IrExpr::TypeOp { op, arg, type_operand } => {
                 // A primitive target of `instanceof`/`checkcast` (`x is Int`) tests the boxed wrapper.
@@ -2430,7 +2442,7 @@ impl<'a> Emitter<'a> {
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
                 Callee::External(fq) if prim_array_elem_ty(fq).is_some() => Ty::array(prim_array_elem_ty(fq).unwrap()),
                 Callee::External(fq) => intrinsic_ret(fq),
-                Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } => ty_from_descriptor_ret(descriptor),
+                Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => ty_from_descriptor_ret(descriptor),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::RefEq | IrBinOp::RefNe | IrBinOp::And | IrBinOp::Or => Ty::Boolean,

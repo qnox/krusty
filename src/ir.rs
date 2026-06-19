@@ -57,6 +57,10 @@ pub enum Callee {
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
     Virtual { owner: String, name: String, descriptor: String, interface: bool },
+    /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
+    /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
+    /// receiver's override). `owner` is the base class declaring the method.
+    Special { owner: String, name: String, descriptor: String },
 }
 
 /// A compile-time constant (`IrConst` in Kotlin IR).

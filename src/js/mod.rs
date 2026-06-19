@@ -222,6 +222,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}.{}({})", recv, name, a.join(", "))
             }
+            // `super.name(args)` → JS `<base>.prototype.name.call(this, …)` is the closest, but the JS
+            // backend doesn't track the base name; emit the plain super form.
+            Callee::Special { name, .. } => {
+                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
+                format!("super.{}({})", name, a.join(", "))
+            }
             Callee::External(fq) => match fq.as_str() {
                 "kotlin/String.plus" => {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);

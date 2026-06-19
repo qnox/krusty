@@ -2188,6 +2188,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 376 — `super.method(args)` non-virtual dispatch** (845→848). New `Callee::Special` →
+  `invokespecial` on `this` to the base method (skipping the override). Base method resolved from a user
+  superclass (`method_of`) or a classpath one (`resolve_instance`), so `super.toString()` and a class
+  extending a stdlib type work. Checker + lowering + emit + JS arm. `tests/feature_box_e2e.rs::SuperMethodCall`.
+
 - ✅ **Phase 375 — `if`/`when` primitive+`null` branch join → boxed nullable wrapper** (843→845). A branch
   that is a primitive joined with `null` types as the boxed wrapper (`if (c) true else null` → `Boolean?`);
   the if/when lowering coerces each branch to a reference result type so the primitive branch is boxed at
