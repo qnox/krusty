@@ -2188,6 +2188,10 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 377 — `if`/`when` same-class branch join** (848→849). Two branches of the same class
+  (`List<C>`/`List<D>`) join to that class (erased type args) — frame-safe since the runtime class is
+  identical (the unrelated-class→`Any` join stays unsupported pending frame merging). `tests/feature_box_e2e.rs::SameClassJoin`.
+
 - ✅ **Phase 376 — `super.method(args)` non-virtual dispatch** (845→848). New `Callee::Special` →
   `invokespecial` on `this` to the base method (skipping the override). Base method resolved from a user
   superclass (`method_of`) or a classpath one (`resolve_instance`), so `super.toString()` and a class

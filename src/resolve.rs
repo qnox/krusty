@@ -4414,6 +4414,15 @@ impl<'a> Checker<'a> {
         if b == Ty::Null {
             if let Some(w) = nullable_prim_wrapper(a) { return Ty::obj(w); }
         }
+        // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
+        // `List<D>` → `List<*>`). The runtime class is identical, so the merge stack frame is that class —
+        // well-typed, unlike a join of unrelated references (which would merge to `Object`, a frame
+        // krusty's emitter can't yet reconcile, so those stay unsupported).
+        if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (a, b) {
+            if ai == bi {
+                return Ty::obj(ai);
+            }
+        }
         self.diags.error(span, format!("incompatible if branches: '{}' and '{}'", a.name(), b.name()));
         Ty::Error
     }
