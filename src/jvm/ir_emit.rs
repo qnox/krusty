@@ -442,7 +442,9 @@ fn emit_class(
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
-            emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
+            // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
+            // `this` slot; an ordinary member is an instance method.
+            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
         } else {
             let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
             let ret = ir_ty_to_jvm(&f.ret);
