@@ -11,6 +11,7 @@
 #   just test       full test suite (optionally `just test -- <args>`)
 #   just test-all   suite against every supported Kotlin version, in parallel
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
+#   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
 #   just conformance       print box-suite conformance "<pct> <passed> <scanned>"
 #   just install-hooks    lefthook install
 #   just version          krusty release version, e.g. 2.4.20-build.3
@@ -86,6 +87,13 @@ clippy-baseline-check:
 
 # Full test suite against the default toolchain (kotlinc-gated tests skip without KRUSTY_KOTLINC).
 test *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="$(just max-version)"
+    # Provision the reference toolchain + box corpus (cached, idempotent) and export them, so the
+    # conformance + box e2e tests run rather than fail on a missing env. Honor any ambient overrides.
+    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
     cargo test {{ARGS}}
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
@@ -112,6 +120,27 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
+# Provision the Kotlin codegen/box conformance corpus into one cached dir (.kotlin-box/<ver>/) and
+# print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
+# the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
+# the conformance test FAILS (not skips) without it, so the harness provisions it rather than
+# silently skipping. Point KRUSTY_KOTLIN_BOX_DIR at the printed path.
+box-corpus VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="{{VERSION}}"
+    root="$PWD/.kotlin-box/$ver"
+    box="$root/compiler/testData/codegen/box"
+    if [ -d "$box" ]; then echo "$box"; exit 0; fi
+    echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
+    rm -rf "$root"
+    git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
+        https://github.com/JetBrains/kotlin.git "$root" >&2 \
+        || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
+    git -C "$root" sparse-checkout set compiler/testData/codegen/box >&2
+    [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
+    echo "$box"
+
 # Run the full suite against EVERY supported Kotlin reference version, in parallel — locally and in
 # CI alike. Parallelization lives here, not in a CI matrix, so `just test-all` behaves identically
 # everywhere and needs no GitHub-Actions infra. Each version gets its own CARGO_TARGET_DIR (so the
@@ -123,6 +152,13 @@ test-all *ARGS:
     #!/usr/bin/env bash
     set -uo pipefail
     mkdir -p target
+    # Pre-provision sequentially (idempotent) so the parallel runs below don't race on the same
+    # clone/download. Each version gets its own kotlinc dist + box corpus.
+    while read -r v; do
+        [ -z "$v" ] && continue
+        just kotlinc "$v" >/dev/null || exit 1
+        just box-corpus "$v" >/dev/null || exit 1
+    done < <(just kotlin-versions)
     declare -a pids=() tags=()
     while read -r v; do
         [ -z "$v" ] && continue
@@ -134,6 +170,7 @@ test-all *ARGS:
         ( CARGO_TARGET_DIR="target/kt-$v" \
           KRUSTY_LANGUAGE_VERSION="$v" \
           KRUSTY_KOTLINC="$kc" \
+          KRUSTY_KOTLIN_BOX_DIR="$PWD/.kotlin-box/$v/compiler/testData/codegen/box" \
           cargo test {{ARGS}} > "target/test-$v.log" 2>&1 ) &
         pids+=("$!"); tags+=("$v")
     done < <(just kotlin-versions)
@@ -152,11 +189,15 @@ test-all *ARGS:
 
 # --- Kotlin box-suite conformance (drives the README badge) ---
 
-# Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". Needs the box corpus:
-# set KRUSTY_KOTLIN_BOX_DIR (path to compiler/testData/codegen/box) and JAVA_HOME.
+# Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". Auto-provisions the
+# reference kotlinc + box corpus (cached) so it never silently skips. Coverage <100% is fine — the
+# gate is "never miscompile an accepted case", not a percentage; the % is informational (the badge).
 conformance:
     #!/usr/bin/env bash
     set -euo pipefail
+    v="$(just max-version)"
+    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
     out=$(cargo test --release --test kotlin_box_ir_jvm_conformance -- --nocapture 2>&1 || true)
     line=$(printf '%s\n' "$out" | grep -E 'box\(\)=OK:' | tail -1)
     [ -n "$line" ] || { echo "no conformance summary — set KRUSTY_KOTLIN_BOX_DIR and JAVA_HOME" >&2; exit 1; }
