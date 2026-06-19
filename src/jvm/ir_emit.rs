@@ -1882,6 +1882,9 @@ impl<'a> Emitter<'a> {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_primitive())
+                    // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
+                    // and the value-compare path it remaps to for primitives both do.
+                    || matches!(op, RefEq | RefNe)
                     || self.records_frame(*lhs) || self.records_frame(*rhs)
             }
             IrExpr::Call { dispatch_receiver, args, .. } =>
@@ -1986,12 +1989,31 @@ impl<'a> Emitter<'a> {
                     _ => match op { Shl => code.ishl(), Shr => code.ishr(), Ushr => code.iushr(), _ => unreachable!() },
                 }
             }
-            Lt | Le | Gt | Ge | Eq | Ne => self.emit_compare(op, lhs, rhs, code),
+            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_compare(op, lhs, rhs, code),
         }
     }
 
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         let lt = self.value_ty(lhs);
+        // Referential identity (`===`/`!==`) on *reference* operands: compare the two object refs
+        // directly with `if_acmp*` (never the structural `Intrinsics.areEqual` the `Eq`/`Ne` reference
+        // path uses below). On *primitive* operands Kotlin's `===` is just value `==`, so those fall
+        // through to the ordinary numeric comparison after remapping to `Eq`/`Ne`.
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+            self.emit_operands(&[lhs, rhs], code);
+            let t = code.new_label();
+            let end = code.new_label();
+            self.frame(t, vec![], code);
+            if op == IrBinOp::RefEq { code.if_acmpeq(t) } else { code.if_acmpne(t) }
+            code.push_int(0, self.cw);
+            self.frame(end, vec![VerifType::Integer], code);
+            code.goto(end);
+            code.bind(t);
+            code.push_int(1, self.cw);
+            code.bind(end);
+            return;
+        }
+        let op = match op { IrBinOp::RefEq => IrBinOp::Eq, IrBinOp::RefNe => IrBinOp::Ne, o => o };
         // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
         // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
         // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
@@ -2368,7 +2390,7 @@ impl<'a> Emitter<'a> {
                 Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } => ty_from_descriptor_ret(descriptor),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
-                IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
+                IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::RefEq | IrBinOp::RefNe | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),

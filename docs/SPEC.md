@@ -147,7 +147,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - String concat of mixed types (`Int + String`, `Boolean + String`) and evaluation order.
 - `if`-as-expression typing (common supertype) and as-statement (Unit).
 - Operator precedence/associativity vs Kotlin grammar (Pratt table must match).
-- `==` on `String` (Kotlin `==` = `.equals`, `===` = reference) — v0 supports `==` only. Structural
+- **Referential identity `===` / `!==`** (distinct from structural `==`): on reference operands it
+  compiles to a JVM `if_acmpeq`/`if_acmpne` on the two object refs (`IrBinOp::RefEq`/`RefNe` — never
+  `Intrinsics.areEqual`). On **primitive** operands Kotlin's `===` is just value `==`, so the backend
+  remaps `RefEq`/`RefNe` → `Eq`/`Ne` and emits the ordinary numeric comparison (so `i === i` for `Int`/
+  `Long`/`Double` works). `String` operands are **rejected** (the file skips): String identity depends on
+  kotlinc's compile-time folding/interning of `const val`s (a computed const like `const val b = "1234$a"`
+  folds to one interned literal, so `A.b === B.b`), which krusty does not model yet — it emits such a
+  const as a runtime concatenation (a fresh object), so it can't reproduce String identity without
+  miscompiling.
+- `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the
   bytecode matches (krusty previously used `java/util/Objects.equals`, which behaves identically but

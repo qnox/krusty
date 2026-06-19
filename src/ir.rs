@@ -200,6 +200,9 @@ pub struct IrCatch {
 pub enum IrBinOp {
     Add, Sub, Mul, Div, Rem,
     Lt, Le, Gt, Ge, Eq, Ne,
+    /// Referential identity (`===`/`!==`): a JVM `if_acmp*` on two reference operands, never the
+    /// structural `Intrinsics.areEqual` that `==`/`!=` (`Eq`/`Ne`) uses for references.
+    RefEq, RefNe,
     And, Or,
     /// Bitwise/shift on `Int`/`Long` (Kotlin's `and`/`or`/`xor`/`shl`/`shr`/`ushr` infix functions).
     BitAnd, BitOr, BitXor, Shl, Shr, Ushr,

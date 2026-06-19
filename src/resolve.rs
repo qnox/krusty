@@ -3172,7 +3172,20 @@ impl<'a> Checker<'a> {
                     self.bin_err(op, lt, rt, span)
                 }
             }
-            BinOp::RefEq | BinOp::RefNe => Ty::Boolean,
+            BinOp::RefEq | BinOp::RefNe => {
+                // Referential identity (`===`/`!==`) compiles to a JVM `if_acmp*` on the two object
+                // refs. `String` identity, though, hinges on kotlinc's compile-time folding/interning of
+                // `const val`s (a computed const string like `"1234$a"` is folded to one interned
+                // literal, so `A.b === B.b`); krusty emits such a const as a runtime concatenation (a
+                // fresh object), so it can't reproduce String identity yet — skip rather than miscompile.
+                // Object and boxed-primitive identity is unaffected.
+                if lt == Ty::String || rt == Ty::String {
+                    self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
+                    Ty::Error
+                } else {
+                    Ty::Boolean
+                }
+            }
         }
     }
 

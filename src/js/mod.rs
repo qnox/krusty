@@ -296,6 +296,8 @@ fn js_op(op: IrBinOp) -> &'static str {
         IrBinOp::Ge => ">=",
         IrBinOp::Eq => "===",
         IrBinOp::Ne => "!==",
+        IrBinOp::RefEq => "===",
+        IrBinOp::RefNe => "!==",
         IrBinOp::And => "&&",
         IrBinOp::Or => "||",
         IrBinOp::BitAnd => "&",

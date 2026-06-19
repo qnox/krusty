@@ -48,6 +48,25 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Referential identity `===`/`!==`: object refs compare with `if_acmp*` (distinct instances are
+    // not identical, the same instance is); a boxed Boolean is the cached singleton so `===` holds; on
+    // primitive operands `===` is just value `==`.
+    ("RefIdentity", r#"
+class C(val n: Int)
+fun boxB(b: Boolean): Any = b
+fun box(): String {
+    val a = C(1); val b = C(1); val aa = a
+    if (a === b) return "f1"
+    if (a !== aa) return "f2"
+    if (!(a === a)) return "f3"
+    if (boxB(true) !== boxB(true)) return "f4"
+    if (boxB(true) === boxB(false)) return "f5"
+    val i = 7; val j = 7L
+    if (!(i === i) || i !== i) return "f6"
+    if (!(j === j)) return "f7"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
