@@ -36,31 +36,20 @@ jobs:
         with:
           distribution: zulu
           java-version: '25'
-      - name: cache reference kotlinc
+      # Reference kotlinc dist + codegen/box corpus, cached by manifest hash. `just conformance`
+      # provisions both on a miss (same recipes as local), so this is "download once, then restore".
+      - name: cache kotlin toolchain + box corpus
         uses: actions/cache@v4
         with:
-          path: .kotlinc
-          key: kotlinc-${{ hashFiles('kotlin-versions') }}
-      - name: provision reference kotlinc
-        run: echo "KRUSTY_KOTLINC=$(just kotlinc)" >> "$GITHUB_ENV"
-      # Kotlin codegen/box corpus: blobless + sparse clone of just that directory at the matching
-      # tag, so the full conformance suite has cases to run against. Cheap (no full Kotlin checkout).
-      - name: fetch Kotlin box corpus
-        run: |
-          set -euo pipefail
-          tag="v$(just max-version)"
-          git clone --depth 1 --filter=blob:none --sparse --branch "$tag" \
-            https://github.com/JetBrains/kotlin.git "$RUNNER_TEMP/kotlin"
-          git -C "$RUNNER_TEMP/kotlin" sparse-checkout set compiler/testData/codegen/box
-          echo "KRUSTY_KOTLIN_BOX_DIR=$RUNNER_TEMP/kotlin/compiler/testData/codegen/box" >> "$GITHUB_ENV"
+          path: |
+            .kotlinc
+            .kotlin-box
+          key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: compute conformance
         id: c
         run: |
           set -euo pipefail
-          if ! read -r pct passed scanned < <(just conformance); then
-            echo "conformance corpus unavailable — skipping badge update"
-            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
+          read -r pct passed scanned < <(just conformance)
           color=red
           awk "BEGIN{exit !($pct>=10)}" && color=orange || true
           awk "BEGIN{exit !($pct>=40)}" && color=yellow || true
@@ -70,7 +59,6 @@ jobs:
             echo "color=$color"; echo "version=$(just max-version)"
           } >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
-        if: ${{ steps.c.outputs.skip != 'true' }}
         uses: Schneegans/dynamic-badges-action@v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -80,7 +68,6 @@ jobs:
           message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.scanned }})
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
-        if: ${{ steps.c.outputs.skip != 'true' }}
         uses: Schneegans/dynamic-badges-action@v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
