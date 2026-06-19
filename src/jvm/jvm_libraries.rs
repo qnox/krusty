@@ -64,7 +64,7 @@ impl JvmLibraries {
                     }
                     gsig_to_ty(&rsig, &binds)
                 }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem: None });
             }
         }
         None
@@ -725,7 +725,7 @@ impl LibrarySet for JvmLibraries {
                         }
                         gsig_to_ty(&rsig, &binds)
                     }).unwrap_or(ret);
-                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true });
+                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true, vararg_elem: None });
                 }
             }
             let (c, params, ret) = pick?;
@@ -738,6 +738,11 @@ impl LibrarySet for JvmLibraries {
             // Recover the parameterized return from the generic signature: bind the type variables
             // from the actual arguments (the vararg element unifies with each trailing arg) and
             // substitute into the return node. Falls back to the erased return when absent.
+            // Bind the type variables from the explicit type arguments and the actuals, then realize the
+            // parameterized return — and, for a generic vararg, the bound *element* type the trailing
+            // arguments adapt to (`listOf<Long>(…)` → `Long`), which the backend uses for literal
+            // adaptation (the JVM array element is erased to `Object`).
+            let mut vararg_elem = None;
             let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
                 let mut binds = std::collections::HashMap::new();
                 // Explicit type arguments (`emptyList<Int>()`) bind the formals positionally first, so
@@ -757,6 +762,7 @@ impl LibrarySet for JvmLibraries {
                         for a in &args[fixed..] {
                             unify_gsig(inner, *a, &mut binds);
                         }
+                        vararg_elem = Some(gsig_to_ty(inner, &binds));
                     }
                 } else {
                     for (ps, a) in psigs.iter().zip(args) {
@@ -765,7 +771,7 @@ impl LibrarySet for JvmLibraries {
                 }
                 gsig_to_ty(&rsig, &binds)
             }).unwrap_or(*ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false });
+            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
@@ -821,7 +827,7 @@ impl LibrarySet for JvmLibraries {
                     }
                     gsig_to_ty(&rsig, &binds)
                 }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true });
+                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true, vararg_elem: None });
             }
         }
         None

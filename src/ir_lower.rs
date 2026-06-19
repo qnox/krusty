@@ -1937,8 +1937,18 @@ impl<'a> Lower<'a> {
         let one = self.ir.add_expr(IrExpr::Const(if elem == Ty::Long { IrConst::Long(1) } else { IrConst::Int(1) }));
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
         let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
+        // Break when the counter reaches the inclusive last *before* incrementing, so a range ending at
+        // `Int.MAX_VALUE`/`Long.MAX_VALUE` doesn't wrap past it and loop forever (same overflow-safe
+        // counted-loop shape as `Stmt::For`). The break + increment are the `update` (the `continue`
+        // target), so a `continue` also hits the bound check rather than skipping to the wrapping `i++`.
+        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let ec = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: ic, rhs: ec });
+        let brk = self.ir.add_expr(IrExpr::Break { label: None });
+        let if_break = self.ir.add_expr(IrExpr::When { branches: vec![(Some(at_end), brk)] });
+        let update = self.ir.add_expr(IrExpr::Block { stmts: vec![if_break, incs], value: None });
         let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label });
+        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false, label });
         self.scope.truncate(depth);
         Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_r, var_i, var_n, wh], value: None }))
     }
@@ -3593,12 +3603,17 @@ impl<'a> Lower<'a> {
             }
             Expr::RangeTo { lo, hi, kind } => {
                 use crate::ast::RangeKind;
-                // Operand primitive type (Int/Long/Char) selects the range class and descriptor.
-                let elem = self.info.ty(lo);
-                let (range_internal, prim_desc) = match elem {
-                    Ty::Int => ("kotlin/ranges/IntRange", "I"),
-                    Ty::Long => ("kotlin/ranges/LongRange", "J"),
-                    Ty::Char => ("kotlin/ranges/CharRange", "C"),
+                // The operand types select the range class and the element type its operands widen to:
+                // `Char..Char` → `CharRange`; the integer family widens (`Byte`/`Short`/`Int` → `IntRange`,
+                // anything with a `Long` → `LongRange`), mirroring kotlinc's `rangeTo` overloads. The
+                // bounds are coerced to that element type (`Byte`→`Int` is a no-op on the JVM stack).
+                let lt = self.info.ty(lo);
+                let rt = self.info.ty(hi);
+                let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
+                let (range_internal, prim_desc, elem) = match (lt, rt) {
+                    (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", "C", Ty::Char),
+                    (l, r) if small_int(&l) && small_int(&r) => ("kotlin/ranges/IntRange", "I", Ty::Int),
+                    (l, r) if (small_int(&l) || l == Ty::Long) && (small_int(&r) || r == Ty::Long) => ("kotlin/ranges/LongRange", "J", Ty::Long),
                     _ => return None,
                 };
                 let lo_v = self.lower_arg(lo, &ty_to_ir(elem))?;
@@ -4161,7 +4176,12 @@ impl<'a> Lower<'a> {
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
                         // stdlib facade or descriptor is hardcoded.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &[])
+                        // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
+                        // does — they bind the generic vararg's element type for literal adaptation below.
+                        let call_targs: Vec<Ty> = self.afile.call_type_args.get(&e.0)
+                            .map(|ts| ts.iter().map(|r| crate::types::Ty::from_name(&r.name).filter(|_| !r.nullable).or_else(|| self.ty_ref(r)).unwrap_or(Ty::Error)).collect())
+                            .unwrap_or_default();
+                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &call_targs)
                     } {
                         // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
                         // element to `Object`, so a wider literal would box as `Integer` and a later
@@ -4195,10 +4215,22 @@ impl<'a> Lower<'a> {
                                 a.push(self.lower_arg(args[i], &ty_to_ir(c.params[i]))?);
                             }
                             let elem_ir = ty_to_ir(c.params[fixed].array_elem()?);
+                            let bound = c.vararg_elem;
                             let mut elements = Vec::new();
                             for &arg in &args[fixed..] {
                                 if is_branchy(self.afile, arg) {
                                     return None;
+                                }
+                                // Literal adaptation: an integer literal whose bound element type is `Long`
+                                // (`listOf<Long>(3)`) is the `Long` constant `3L`, boxed as `Long` — kotlinc
+                                // adapts the literal at compile time (no runtime `i2l`, and a non-literal
+                                // `Int` is a kotlinc error here, so only constant literals adapt).
+                                if bound == Some(Ty::Long) {
+                                    if let Expr::IntLit(v) = *self.afile.expr(arg) {
+                                        let lc = self.ir.add_expr(IrExpr::Const(IrConst::Long(v)));
+                                        elements.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: lc, type_operand: elem_ir.clone() }));
+                                        continue;
+                                    }
                                 }
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
