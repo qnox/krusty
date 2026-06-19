@@ -2188,6 +2188,21 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- 🚧 **Phase 385 — value/inline classes, step 1: corpus reaches the compiler** (886, scaffolding).
+  The owner chose value/inline classes (~745 `inlineClasses/` box files) as the next frontier. The
+  corpus files carry a literal `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder line that the Kotlin test
+  runner expands to `@JvmInline`; krusty's harness read raw source, so that bare identifier was the
+  first parse error ("expected a top-level declaration") for every value-class file. The conformance
+  harness now substitutes `OPTIONAL_JVM_INLINE_ANNOTATION` → `@JvmInline`, so these files reach the
+  parser/checker (the parser already maps `value`/`inline` → `is_value`; the checker still rejects with
+  "value/inline classes are not supported"). Behavior-preserving, 0-FAIL (still skipped, now at the
+  checker not the parser). NEXT (step 2+): real unboxed codegen — generalize the existing UInt/ULong
+  inline-class infra (`box_unsigned`/`unbox_unsigned`, `box-impl`/`unbox-impl`) to a user `value class
+  X(val v: T)`: erase to the underlying `T` unboxed in non-nullable position, box to `X` when
+  nullable/generic/`Any`, synthesize `box-impl`/`unbox-impl`, mangle use-site member names. Currently
+  value classes are also excluded from the IR path (`ir_lower` `is_value` guards) — that gate moves as
+  codegen lands. Diff against kotlinc per slice (equal-bytecode rule).
+
 - ✅ **Phase 384 — synthetic-function registry: FQN → IR body** (886, refactor). New `src/synthetics.rs`:
   a simple registry mapping a compiler-**synthetic** function (one kotlinc realizes in codegen with no
   callable classpath body) to its **IR body**. It is the front end's **IR-level override** — during
