@@ -315,6 +315,33 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A `return` inside a `try { … } finally { … }` runs the finally before transferring control; the
+    // return value is captured before the finally so a finally that mutates state can't change it. The
+    // finally also runs on the normal-completion path (kotlinc semantics). (A finally that declares
+    // locals is skipped, not modeled here.)
+    ("ReturnInTryFinally", r#"
+val log = StringBuilder()
+fun early(c: Boolean): String {
+    try {
+        if (c) return "early"
+        log.append("body;")
+    } finally {
+        log.append("fin;")
+    }
+    return "late"
+}
+fun valueCapturedBeforeFinally(): Int {
+    var r = 1
+    try { return r } finally { r = 99 }
+}
+fun box(): String {
+    if (early(true) != "early") return "f1"
+    if (early(false) != "late") return "f2"
+    if (log.toString() != "fin;body;fin;") return "f3:$log"   // true→fin; false→body;fin;
+    if (valueCapturedBeforeFinally() != 1) return "f4"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
