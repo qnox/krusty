@@ -718,3 +718,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   primitive-backed return) is now synthesized: the `ACC_BRIDGE` boxes the primitive return to the erased
   reference type (`Integer` for an `Object` bridge). The bridge emitter already performed this boxing —
   the checker/lowering were over-conservatively rejecting the case, so the guards were removed.
+
+- **`as` to a primitive type (unbox cast).** `x as Int` on a reference operand compiles to `checkcast
+  Integer; intValue()` — the `ImplicitCoercion` reference→primitive path the emitter already provides
+  (`unbox_to`: checkcast the wrapper, then the value method). A wrong dynamic type throws
+  `ClassCastException` at the `checkcast`, matching kotlinc. Each standard primitive is supported; `UInt`/
+  `ULong` are excluded (their cast needs the inline-class box, not `Integer`). A nullable primitive target
+  (`x as Int?`) resolves to the boxed wrapper and is unaffected.
