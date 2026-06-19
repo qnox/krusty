@@ -2188,6 +2188,23 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 384 — synthetic-function registry: FQN → IR body** (886, refactor). New `src/synthetics.rs`:
+  a simple registry mapping a compiler-**synthetic** function (one kotlinc realizes in codegen with no
+  callable classpath body) to its **IR body**. It is the front end's **IR-level override** — during
+  lowering a call is matched *before* classpath resolution (priority over the classpath; still shadowed
+  by a user-declared same-name fn, the kotlinc rule) and the matched body contributes the call's IR
+  directly. Each entry is `{ fqn, name, body }`; `body: fn(&Synthetic, &mut Lower, &SynthCall) ->
+  Option<ExprId>` builds the IR with ordinary nodes (`Vararg`, `NewArray`, a fill loop via
+  `Lower::build_fill_array`) and may *decline* (`None`) when it can't safely override (a branchy element,
+  an undeterminable reified type). Bodies are emitted **inline at the callsite** by construction, so
+  "inline" is not a stored attribute; element knowledge lives inside the array bodies (`prim_elem`), not
+  the core struct, so the registry stays general. First family: the array creators (`arrayOf`,
+  8× `*ArrayOf`, 8× `*Array(n)`/`*Array(n){}`, `Array(n){}`, `arrayOfNulls`, `emptyArray`); the inline
+  fill-loop block + the `prim_array_elem`/`prim_array_of_elem` name tables moved out of `ir_lower`.
+  The complementary **JVM intrinsic registry** (`jvm::ir_emit::emit_intrinsic`) is the **callsite
+  bytecode override** — it realizes an IR `Call`/the single `NewArray` leaf as inline bytecode
+  (`newarray int` for `Array<Int>`, `anewarray Integer` for `Array<Int?>`). Behavior-preserving, 0-FAIL.
+
 - ✅ **Phase 383 — data-class array properties (proper support, replaces 382 skip)** (884→886). `ty_of`
   resolves array type names to `Ty::Array` (was `Any`), so array fields keep their `[I` type; data-class
   `toString` uses `Arrays.toString` (content) while `equals`/`hashCode` keep array reference identity —

@@ -12,7 +12,8 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
+    IrTypeOp,
 };
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
@@ -1459,7 +1460,7 @@ fn setter_name(prop: &str) -> String {
     format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
 }
 
-struct Lower<'a> {
+pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
     syms: &'a SymbolTable,
@@ -1516,6 +1517,145 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    // ---- Builder surface for the synthetic registry (`crate::synthetics`) ------------------------
+    // A synthetic's IR-override body builds its IR against the active `Lower` through these. Kept thin
+    // so the registry (not lowering) owns each synthetic's body.
+
+    /// Append an IR expression, returning its id.
+    pub(crate) fn emit(&mut self, e: IrExpr) -> ExprId {
+        self.ir.add_expr(e)
+    }
+
+    /// Lower an argument expression in value position (no target-element coercion).
+    pub(crate) fn synth_expr(&mut self, e: AstExprId) -> Option<ExprId> {
+        self.expr(e)
+    }
+
+    /// Whether `e` lowers with control flow (records a stackmap frame) — a synthetic that builds a
+    /// value on the stack declines such an element rather than strand operands across the frame.
+    pub(crate) fn synth_is_branchy(&self, e: AstExprId) -> bool {
+        is_branchy(self.afile, e)
+    }
+
+    /// The checker-inferred element type of an array-typed call result (`arrayOf(…)` → its `Array<T>`
+    /// element), used by bodies whose element isn't fixed by the call name.
+    pub(crate) fn synth_array_elem(&self, call: AstExprId) -> Option<Ty> {
+        self.info.ty(call).array_elem()
+    }
+
+    /// Destructure a trailing lambda argument into `(parameter names, body)`, or `None` if `arg` is
+    /// not a lambda.
+    pub(crate) fn synth_arg_lambda(&self, arg: AstExprId) -> Option<(Vec<String>, AstExprId)> {
+        match self.afile.expr(arg).clone() {
+            Expr::Lambda { params, body } => Some((params, body)),
+            _ => None,
+        }
+    }
+
+    /// Build the fill loop shared by `IntArray(n) { i -> e }` and `Array<T>(n) { i -> e }`:
+    ///   `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`
+    /// `NewArray` allocates (`newarray`/`anewarray`); `kotlin/Array.set` stores (the backend picks
+    /// `iastore`/`aastore`/… by the array element type).
+    pub(crate) fn build_fill_array(
+        &mut self,
+        elem: Ty,
+        size_arg: AstExprId,
+        params: Vec<String>,
+        body: AstExprId,
+    ) -> Option<ExprId> {
+        let elem_ir = ty_to_ir(elem);
+        let int_ir = ty_to_ir(Ty::Int);
+        // val n = <size> (evaluated once — the bound is read again in the loop)
+        let size = self.lower_arg(size_arg, &int_ir)?;
+        let n_v = self.fresh_value();
+        let var_n = self.ir.add_expr(IrExpr::Variable {
+            index: n_v,
+            ty: int_ir.clone(),
+            init: Some(size),
+        });
+        // val a = new T[n]
+        let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let alloc = self.ir.add_expr(IrExpr::NewArray {
+            element_type: elem_ir.clone(),
+            size: gn0,
+        });
+        let arr_v = self.fresh_value();
+        let arr_ir = ty_to_ir(Ty::array(elem));
+        let var_arr = self.ir.add_expr(IrExpr::Variable {
+            index: arr_v,
+            ty: arr_ir,
+            init: Some(alloc),
+        });
+        // var i = 0
+        let i_v = self.fresh_value();
+        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let var_i = self.ir.add_expr(IrExpr::Variable {
+            index: i_v,
+            ty: int_ir,
+            init: Some(zero),
+        });
+        // cond: i < n
+        let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Lt,
+            lhs: gi,
+            rhs: gn,
+        });
+        // body: a[i] = <lambda body with the index param bound to i>
+        let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
+        let depth = self.scope.len();
+        self.scope.push((pname, i_v, Ty::Int));
+        let body_val = self.lower_arg(body, &elem_ir);
+        self.scope.truncate(depth);
+        let body_val = body_val?;
+        // Spill the element value into a temp before the store: a branchy body (`{ it % 2 == 0 }`)
+        // records a stackmap frame, and `kotlin/Array.set` pushes the array + index *before* the value
+        // — without the spill those operands would be stranded on the stack across that frame.
+        let tmp_v = self.fresh_value();
+        let var_tmp = self.ir.add_expr(IrExpr::Variable {
+            index: tmp_v,
+            ty: elem_ir,
+            init: Some(body_val),
+        });
+        let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
+        let set = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/Array.set".to_string()),
+            dispatch_receiver: Some(ga),
+            args: vec![gi2, gtmp],
+        });
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_tmp, set],
+            value: None,
+        });
+        // update: i = i + 1
+        let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            lhs: gi3,
+            rhs: one,
+        });
+        let inc = self.ir.add_expr(IrExpr::SetValue {
+            var: i_v,
+            value: inc_val,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: Some(inc),
+            post_test: false,
+            label: None,
+        });
+        let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_n, var_arr, var_i, wh],
+            value: Some(result),
+        }))
     }
 
     /// Resolve a `catch` exception type name to its JVM internal name (mirrors the checker): a file
@@ -3137,7 +3277,7 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
     }
 
-    fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
+    pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
         let at = self.info.ty(arg);
         // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
         // element type (the reified `T`), exactly as kotlinc specializes it, rather than calling the
@@ -6543,176 +6683,22 @@ impl<'a> Lower<'a> {
                             ret,
                         }));
                     }
-                    // The array creators (`arrayOf`/`intArrayOf`/…/`IntArray(n)`) are compiler INTRINSICS
-                    // in kotlinc (they have no callable body — the backend lowers them to array bytecode by
-                    // resolved symbol). Honor that resolution: treat the name as the intrinsic ONLY when it
-                    // is not shadowed by a user-defined function or local of the same name (a user `fun
-                    // arrayOf` wins, exactly as in kotlinc) — never by bare source name alone.
+                    // The array creators (`arrayOf`/`intArrayOf`/…/`IntArray(n)`/`Array(n){}`) are
+                    // compiler synthetics — the synthetic registry (priority over the classpath)
+                    // supplies their IR body directly. Honor user shadowing first: a user-defined `fun
+                    // arrayOf` (or a local of that name) wins, exactly as in kotlinc.
                     let array_intrinsic_ok =
                         self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname);
-                    // Primitive-array size constructor `IntArray(n)` → a per-element intrinsic that
-                    // encodes the element type (so the backend picks the right allocation).
-                    if array_intrinsic_ok && prim_array_elem(&fname).is_some() && args.len() == 1 {
-                        let size = self.expr(args[0])?;
-                        return Some(self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External(format!("kotlin/{fname}.<init>")),
-                            dispatch_receiver: None,
-                            args: vec![size],
-                        }));
-                    }
-                    // Array init constructor `IntArray(n) { i -> elem }` / `Array<T>(n) { i -> elem }`:
-                    // kotlinc inlines the index lambda into a fill loop. Desugar to
-                    //   { val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }
-                    // The element type is the array's element (a primitive for `IntArray`, the reference
-                    // element for `Array<T>` — a primitive `Array<Int>` boxes per element, not modeled, so
-                    // it's skipped). `NewArray` allocates (`newarray`/`anewarray`); `kotlin/Array.set`
-                    // stores (the backend picks `iastore`/`aastore`/… by the array's element type).
-                    if array_intrinsic_ok && args.len() == 2 {
-                        let elem = prim_array_elem(&fname).or_else(|| {
-                            if fname == "Array" {
-                                self.info.ty(e).array_elem().filter(|t| t.is_reference())
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(elem) = elem {
-                            if let Expr::Lambda { params, body } = self.afile.expr(args[1]).clone()
-                            {
-                                let elem_ir = ty_to_ir(elem);
-                                let int_ir = ty_to_ir(Ty::Int);
-                                // val n = <size> (evaluated once — the bound is read again in the loop)
-                                let size = self.lower_arg(args[0], &int_ir)?;
-                                let n_v = self.fresh_value();
-                                let var_n = self.ir.add_expr(IrExpr::Variable {
-                                    index: n_v,
-                                    ty: int_ir.clone(),
-                                    init: Some(size),
-                                });
-                                // val a = new T[n]
-                                let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
-                                let alloc = self.ir.add_expr(IrExpr::NewArray {
-                                    element_type: elem_ir.clone(),
-                                    size: gn0,
-                                });
-                                let arr_v = self.fresh_value();
-                                let arr_ir = ty_to_ir(Ty::array(elem));
-                                let var_arr = self.ir.add_expr(IrExpr::Variable {
-                                    index: arr_v,
-                                    ty: arr_ir,
-                                    init: Some(alloc),
-                                });
-                                // var i = 0
-                                let i_v = self.fresh_value();
-                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                let var_i = self.ir.add_expr(IrExpr::Variable {
-                                    index: i_v,
-                                    ty: int_ir,
-                                    init: Some(zero),
-                                });
-                                // cond: i < n
-                                let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                                let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-                                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::Lt,
-                                    lhs: gi,
-                                    rhs: gn,
-                                });
-                                // body: a[i] = <lambda body with the index param bound to i>
-                                let pname =
-                                    params.first().cloned().unwrap_or_else(|| "it".to_string());
-                                let depth = self.scope.len();
-                                self.scope.push((pname, i_v, Ty::Int));
-                                let body_val = self.lower_arg(body, &elem_ir);
-                                self.scope.truncate(depth);
-                                let body_val = body_val?;
-                                // Spill the element value into a temp before the store: a branchy body
-                                // (`{ it % 2 == 0 }`) records a stackmap frame, and `kotlin/Array.set` pushes
-                                // the array + index *before* the value — without the spill those operands
-                                // would be stranded on the stack across that frame (VerifyError).
-                                let tmp_v = self.fresh_value();
-                                let var_tmp = self.ir.add_expr(IrExpr::Variable {
-                                    index: tmp_v,
-                                    ty: elem_ir,
-                                    init: Some(body_val),
-                                });
-                                let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                                let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                                let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
-                                let set = self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::External("kotlin/Array.set".to_string()),
-                                    dispatch_receiver: Some(ga),
-                                    args: vec![gi2, gtmp],
-                                });
-                                let wbody = self.ir.add_expr(IrExpr::Block {
-                                    stmts: vec![var_tmp, set],
-                                    value: None,
-                                });
-                                // update: i = i + 1
-                                let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                                let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::Add,
-                                    lhs: gi3,
-                                    rhs: one,
-                                });
-                                let inc = self.ir.add_expr(IrExpr::SetValue {
-                                    var: i_v,
-                                    value: inc_val,
-                                });
-                                let wh = self.ir.add_expr(IrExpr::While {
-                                    cond,
-                                    body: wbody,
-                                    update: Some(inc),
-                                    post_test: false,
-                                    label: None,
-                                });
-                                let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                                return Some(self.ir.add_expr(IrExpr::Block {
-                                    stmts: vec![var_n, var_arr, var_i, wh],
-                                    value: Some(result),
-                                }));
-                            }
-                        }
-                    }
-                    // Primitive-array literal `intArrayOf(1, 2, 3)` → a `Vararg` of that primitive type
-                    // (the backend allocates `int[]`/`char[]`/… and stores each element).
                     if array_intrinsic_ok {
-                        if let Some(elem) = prim_array_of_elem(&fname) {
-                            let elem_ir = ty_to_ir(elem);
-                            let mut elements = Vec::new();
-                            for &arg in &args {
-                                if is_branchy(self.afile, arg) {
-                                    return None;
-                                }
-                                elements.push(self.lower_arg(arg, &elem_ir)?);
+                        if let Some(syn) = crate::synthetics::lookup(&fname) {
+                            let call = crate::synthetics::SynthCall {
+                                args: &args,
+                                call: e,
+                            };
+                            if let Some(r) = (syn.body)(syn, self, &call) {
+                                return Some(r);
                             }
-                            return Some(self.ir.add_expr(IrExpr::Vararg {
-                                element_type: elem_ir,
-                                elements,
-                            }));
                         }
-                    }
-                    // Reference array literal `arrayOf(a, b, c)` → a `Vararg` of the (reference) element
-                    // type, which the backend allocates as `T[]` and fills — the same node `intArrayOf`
-                    // uses. The element type is the array's erased element (the checker already typed the
-                    // call `Array<T>` and rejected a primitive element, so this is always a reference).
-                    if array_intrinsic_ok && fname == "arrayOf" {
-                        let elem = self.info.ty(e).array_elem()?;
-                        if !elem.is_reference() {
-                            return None;
-                        }
-                        let elem_ir = ty_to_ir(elem);
-                        let mut elements = Vec::new();
-                        for &arg in &args {
-                            if is_branchy(self.afile, arg) {
-                                return None;
-                            }
-                            elements.push(self.lower_arg(arg, &elem_ir)?);
-                        }
-                        return Some(self.ir.add_expr(IrExpr::Vararg {
-                            element_type: elem_ir,
-                            elements,
-                        }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
@@ -8291,37 +8277,8 @@ fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     }
 }
 
-fn prim_array_elem(name: &str) -> Option<Ty> {
-    Some(match name {
-        "IntArray" => Ty::Int,
-        "LongArray" => Ty::Long,
-        "DoubleArray" => Ty::Double,
-        "FloatArray" => Ty::Float,
-        "BooleanArray" => Ty::Boolean,
-        "CharArray" => Ty::Char,
-        "ByteArray" => Ty::Byte,
-        "ShortArray" => Ty::Short,
-        _ => return None,
-    })
-}
-
-/// The element type of a primitive-array literal builtin (`intArrayOf` → `Int`).
-fn prim_array_of_elem(name: &str) -> Option<Ty> {
-    Some(match name {
-        "intArrayOf" => Ty::Int,
-        "longArrayOf" => Ty::Long,
-        "doubleArrayOf" => Ty::Double,
-        "floatArrayOf" => Ty::Float,
-        "booleanArrayOf" => Ty::Boolean,
-        "charArrayOf" => Ty::Char,
-        "byteArrayOf" => Ty::Byte,
-        "shortArrayOf" => Ty::Short,
-        _ => return None,
-    })
-}
-
 /// Map a krusty `Ty` to a backend-agnostic `IrType` (a Kotlin FqName).
-fn ty_to_ir(t: Ty) -> IrType {
+pub(crate) fn ty_to_ir(t: Ty) -> IrType {
     let fq = match t {
         Ty::Int => "kotlin/Int",
         Ty::Long => "kotlin/Long",
