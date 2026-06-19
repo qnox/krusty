@@ -98,9 +98,10 @@ fn parse_function(body: &[u8]) -> Option<(bool, u64, Option<(u64, u64)>)> {
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
-            (9, 0) => flags = pb.varint()?,             // flags
-            (2, 0) => name_id = pb.varint()?,           // name (name id in table)
-            (100, 2) => {                                // method_signature extension
+            (9, 0) => flags = pb.varint()?,   // flags
+            (2, 0) => name_id = pb.varint()?, // name (name id in table)
+            (100, 2) => {
+                // method_signature extension
                 let n = pb.varint()? as usize;
                 let ext = pb.bytes(n)?;
                 sig = parse_jvm_signature(ext);
@@ -125,7 +126,9 @@ fn package_inline(body: &[u8], d2: &[String]) -> (HashSet<(String, String)>, Has
             (3, 2) => {
                 // repeated Function function = 3
                 let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else { break };
+                let Some(fbody) = pb.bytes(len as usize) else {
+                    break;
+                };
                 if let Some((true, name_id, sig)) = parse_function(fbody) {
                     if let Some(n) = d2.get(name_id as usize) {
                         names.insert(n.clone());

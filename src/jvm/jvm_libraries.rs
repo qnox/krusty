@@ -3,10 +3,12 @@
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
-use crate::libraries::{LibrarySet, LibrarySeed, LibraryType, LibraryMember, LibraryCallable};
-use crate::types::Ty;
 use super::classpath::Classpath;
-use super::jvm_class_map::{to_kotlin_internal, to_jvm_internal, kotlin_builtin_to_jvm, BUILTIN_MAPPED_NAMES};
+use super::jvm_class_map::{
+    kotlin_builtin_to_jvm, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
+};
+use crate::libraries::{LibraryCallable, LibraryMember, LibrarySeed, LibrarySet, LibraryType};
+use crate::types::Ty;
 
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
@@ -25,7 +27,14 @@ impl JvmLibraries {
     /// return recovered from the signature). `allow_non_public` includes `@InlineOnly` package-private
     /// candidates — used ONLY by the inline route (which splices, emitting no call); normal resolution
     /// passes `false`, so it never resolves a non-callable method (an `IllegalAccessError`).
-    fn extension_callable(&self, name: &str, receiver: Ty, args: &[Ty], type_args: &[Ty], allow_non_public: bool) -> Option<LibraryCallable> {
+    fn extension_callable(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+        type_args: &[Ty],
+        allow_non_public: bool,
+    ) -> Option<LibraryCallable> {
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
             // Collect every candidate of this name on this receiver that fits the arguments, then pick the
             // MOST SPECIFIC by its parameter types — `Iterable.plus(element: T)` and
@@ -45,13 +54,19 @@ impl JvmLibraries {
                 // Subtype-aware fit so a `List` argument matches an `Iterable` parameter (`list + list`
                 // selects the `Iterable` concat overload); the most-specific pick below then disambiguates
                 // against the erased-`Object` element overload.
-                if !params[1..].iter().zip(args).all(|(p, a)| arg_fits_subtype(&self.cp, p, a)) {
+                if !params[1..]
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
+                {
                     continue;
                 }
                 // Disambiguate by the receiver's type arguments: reject an overload whose declared
                 // receiver type argument conflicts (`Iterable<Double>.maxOrNull` for a `List<Int>`).
                 if !receiver.type_args().is_empty() {
-                    if let Some((_, psigs, _)) = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)) {
+                    if let Some((_, psigs, _)) =
+                        c.signature.as_ref().and_then(|sig| parse_method_gsig(sig))
+                    {
                         if let Some(recv_sig) = psigs.first() {
                             if !sig_compatible(recv_sig, receiver) {
                                 continue;
@@ -68,26 +83,48 @@ impl JvmLibraries {
             // (each parameter a subtype of the corresponding one). When two are incomparable, keep the
             // first — stable, and good enough for the stdlib's overload sets.
             let specific_over = |a: &[Ty], b: &[Ty]| -> bool {
-                a.iter().zip(b).all(|(pa, pb)| arg_fits_subtype(&self.cp, pb, pa))
+                a.iter()
+                    .zip(b)
+                    .all(|(pa, pb)| arg_fits_subtype(&self.cp, pb, pa))
             };
             let best = (0..matches.len())
-                .find(|&i| (0..matches.len()).all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..])))
+                .find(|&i| {
+                    (0..matches.len())
+                        .all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..]))
+                })
                 .unwrap_or(0);
             let (c, params, ret) = matches.swap_remove(best);
             // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the type variables
             // bind from the receiver (the first parameter) and the arguments.
-            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
-                let mut binds = std::collections::HashMap::new();
-                for (f, t) in formals.iter().zip(type_args) {
-                    binds.insert(f.clone(), *t);
-                }
-                let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
-                for (ps, a) in psigs.iter().zip(&actuals) {
-                    unify_gsig(ps, *a, &mut binds);
-                }
-                gsig_to_ty(&rsig, &binds)
-            }).unwrap_or(ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem: None });
+            let ret_ty = c
+                .signature
+                .as_ref()
+                .and_then(|sig| parse_method_gsig(sig))
+                .map(|(formals, psigs, rsig)| {
+                    let mut binds = std::collections::HashMap::new();
+                    for (f, t) in formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    let actuals: Vec<Ty> = std::iter::once(receiver)
+                        .chain(args.iter().copied())
+                        .collect();
+                    for (ps, a) in psigs.iter().zip(&actuals) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    gsig_to_ty(&rsig, &binds)
+                })
+                .unwrap_or(ret);
+            return Some(LibraryCallable {
+                owner: c.owner.clone(),
+                name: c.name.clone(),
+                params,
+                ret: ret_ty,
+                physical_ret: ret,
+                descriptor: c.descriptor.clone(),
+                is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                default_call: false,
+                vararg_elem: None,
+            });
         }
         None
     }
@@ -106,7 +143,9 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "V" => Ty::Unit,
         s if s == Ty::String.descriptor() => Ty::String,
         s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
-        s if s.starts_with('L') && s.ends_with(';') => Ty::obj(to_kotlin_internal(&s[1..s.len() - 1])),
+        s if s.starts_with('L') && s.ends_with(';') => {
+            Ty::obj(to_kotlin_internal(&s[1..s.len() - 1]))
+        }
         _ => Ty::Error,
     }
 }
@@ -172,7 +211,10 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
                         rest = stripped;
                         continue;
                     }
-                    let r2 = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-')).unwrap_or(rest);
+                    let r2 = rest
+                        .strip_prefix('+')
+                        .or_else(|| rest.strip_prefix('-'))
+                        .unwrap_or(rest);
                     let (a, tail) = parse_gsig(r2)?;
                     args.push(a);
                     rest = tail;
@@ -202,7 +244,9 @@ fn parse_gsig(s: &str) -> Option<(GSig, &str)> {
 /// Parse a leading `<Name:Bound…>` formal-type-parameter block, returning the formal names and the
 /// remaining signature. No block → empty names, input unchanged.
 fn parse_formals(s: &str) -> (Vec<String>, &str) {
-    let Some(rest) = s.strip_prefix('<') else { return (Vec::new(), s) };
+    let Some(rest) = s.strip_prefix('<') else {
+        return (Vec::new(), s);
+    };
     let mut depth = 1;
     let bytes = rest.as_bytes();
     let mut i = 0;
@@ -210,17 +254,28 @@ fn parse_formals(s: &str) -> (Vec<String>, &str) {
     let mut formals = Vec::new();
     while i < bytes.len() && depth > 0 {
         match bytes[i] {
-            b'<' => { depth += 1; at_name_start = false; }
-            b'>' => { depth -= 1; }
-            b':' => { at_name_start = false; }
+            b'<' => {
+                depth += 1;
+                at_name_start = false;
+            }
+            b'>' => {
+                depth -= 1;
+            }
+            b':' => {
+                at_name_start = false;
+            }
             _ if depth == 1 && at_name_start => {
                 let start = i;
-                while i < bytes.len() && bytes[i] != b':' { i += 1; }
+                while i < bytes.len() && bytes[i] != b':' {
+                    i += 1;
+                }
                 formals.push(rest[start..i].to_string());
                 at_name_start = false;
                 continue;
             }
-            b';' if depth == 1 => { at_name_start = true; }
+            b';' if depth == 1 => {
+                at_name_start = true;
+            }
             _ => {}
         }
         i += 1;
@@ -301,7 +356,10 @@ fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut std::collections::HashMap<Stri
 /// `Any`, a class becomes `Ty::obj_args` carrying its (substituted) type arguments.
 fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
     match sig {
-        GSig::Var(n) => binds.get(n).copied().unwrap_or_else(|| Ty::obj("kotlin/Any")),
+        GSig::Var(n) => binds
+            .get(n)
+            .copied()
+            .unwrap_or_else(|| Ty::obj("kotlin/Any")),
         GSig::Prim(t) => *t,
         GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
         GSig::Class(internal, args) => {
@@ -323,7 +381,10 @@ fn function_input_types(sig: &GSig, binds: &std::collections::HashMap<String, Ty
             // A `FunctionN` is generic, so a primitive-typed lambda parameter appears boxed in the
             // signature (`(index: Int, …)` → `Function2<Integer, …>`). The Kotlin lambda parameter is
             // the *unboxed* primitive, so map a known wrapper type argument back to it.
-            return targs[..targs.len() - 1].iter().map(|a| unbox_wrapper(gsig_to_ty(a, binds))).collect();
+            return targs[..targs.len() - 1]
+                .iter()
+                .map(|a| unbox_wrapper(gsig_to_ty(a, binds)))
+                .collect();
         }
     }
     Vec::new()
@@ -361,7 +422,10 @@ fn arg_fits(p: &Ty, a: &Ty) -> bool {
     // `PropertyReference{1,0}Impl` implements the matching `FunctionN` (`invoke = get`). Accept it for
     // a `FunctionN` parameter of the matching arity (`Function1` ← `KProperty1`, `Function0` ← `KProperty0`).
     if let (Ty::Obj(pi, _), Ty::Obj(ai, _)) = (p, a) {
-        if let Some(arity) = pi.strip_prefix("kotlin/jvm/functions/Function").and_then(|n| n.parse::<usize>().ok()) {
+        if let Some(arity) = pi
+            .strip_prefix("kotlin/jvm/functions/Function")
+            .and_then(|n| n.parse::<usize>().ok())
+        {
             let prop_arity = match *ai {
                 "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
                 "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
@@ -384,9 +448,14 @@ fn sig_compatible(sig: &GSig, actual: Ty) -> bool {
     match sig {
         GSig::Var(_) => true,
         GSig::Prim(t) => *t == actual,
-        GSig::Arr(inner) => actual.array_elem().map_or(true, |e| sig_compatible(inner, e)),
+        GSig::Arr(inner) => actual
+            .array_elem()
+            .map_or(true, |e| sig_compatible(inner, e)),
         GSig::Class(name, args) => match actual {
-            Ty::Obj(_, targs) => args.iter().zip(targs.iter()).all(|(s, t)| sig_compatible(s, *t)),
+            Ty::Obj(_, targs) => args
+                .iter()
+                .zip(targs.iter())
+                .all(|(s, t)| sig_compatible(s, *t)),
             t if t.is_primitive() => {
                 name == "kotlin/Any"
                     || super::jvm_class_map::wrapper_internal(t).map_or(false, |w| w == name)
@@ -467,10 +536,15 @@ impl LibrarySet for JvmLibraries {
         // above take precedence (`or_insert`).
         for name in BUILTIN_MAPPED_NAMES {
             if let Some(internal) = kotlin_builtin_to_jvm(name) {
-                class_names.entry(name.to_string()).or_insert_with(|| internal.to_string());
+                class_names
+                    .entry(name.to_string())
+                    .or_insert_with(|| internal.to_string());
             }
         }
-        LibrarySeed { class_names, type_aliases: idx.type_aliases.clone() }
+        LibrarySeed {
+            class_names,
+            type_aliases: idx.type_aliases.clone(),
+        }
     }
 
     fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
@@ -501,7 +575,12 @@ impl LibrarySet for JvmLibraries {
                 continue;
             }
             let (params, ret) = parse_method_desc(&m.descriptor);
-            let member = LibraryMember { name: m.name.clone(), params, ret, descriptor: m.descriptor.clone() };
+            let member = LibraryMember {
+                name: m.name.clone(),
+                params,
+                ret,
+                descriptor: m.descriptor.clone(),
+            };
             if m.name == "<init>" {
                 constructors.push(member);
             } else if m.is_static() {
@@ -514,8 +593,18 @@ impl LibrarySet for JvmLibraries {
         // Every JDK `Throwable` has a no-arg and a single-message constructor; synthesize those two
         // shapes when the classpath reader can't surface the jimage constructor descriptors.
         if constructors.is_empty() && super::jvm_class_map::is_throwable_internal(internal) {
-            constructors.push(LibraryMember { name: "<init>".into(), params: vec![], ret: Ty::Unit, descriptor: "()V".into() });
-            constructors.push(LibraryMember { name: "<init>".into(), params: vec![Ty::String], ret: Ty::Unit, descriptor: format!("({})V", Ty::String.descriptor()) });
+            constructors.push(LibraryMember {
+                name: "<init>".into(),
+                params: vec![],
+                ret: Ty::Unit,
+                descriptor: "()V".into(),
+            });
+            constructors.push(LibraryMember {
+                name: "<init>".into(),
+                params: vec![Ty::String],
+                ret: Ty::Unit,
+                descriptor: format!("({})V", Ty::String.descriptor()),
+            });
         }
         let mut supertypes = ci.interfaces.clone();
         if let Some(s) = &ci.super_class {
@@ -552,7 +641,12 @@ impl LibrarySet for JvmLibraries {
                 return None; // more than one abstract method — not a SAM interface
             }
             let (params, ret) = parse_method_desc(&m.descriptor);
-            sam = Some(LibraryMember { name: m.name.clone(), params, ret, descriptor: m.descriptor.clone() });
+            sam = Some(LibraryMember {
+                name: m.name.clone(),
+                params,
+                ret,
+                descriptor: m.descriptor.clone(),
+            });
         }
         sam
     }
@@ -569,7 +663,11 @@ impl LibrarySet for JvmLibraries {
                 break;
             }
             let ci = self.cp.find(&name)?;
-            if let Some(m) = ci.methods.iter().find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix)) {
+            if let Some(m) = ci
+                .methods
+                .iter()
+                .find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix))
+            {
                 return Some((m.name.clone(), m.descriptor.clone()));
             }
             cur = ci.super_class.clone();
@@ -578,7 +676,9 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
-        let Ty::Obj(start, start_args) = recv else { return None };
+        let Ty::Obj(start, start_args) = recv else {
+            return None;
+        };
         if start_args.is_empty() {
             return None; // no type arguments to propagate — the erased return is already correct
         }
@@ -592,16 +692,23 @@ impl LibrarySet for JvmLibraries {
             if !seen.insert(internal.clone()) {
                 continue;
             }
-            let Some(ci) = self.cp.find(&internal) else { continue };
+            let Some(ci) = self.cp.find(&internal) else {
+                continue;
+            };
             let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
             let formals = formals.unwrap_or_default();
             let binds: std::collections::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
             // A member declared here whose parameters match the call.
-            let found = ci.methods.iter().filter(|m| m.is_public() && !m.is_static() && m.name == name).find(|m| {
-                let (params, _) = parse_method_desc(&m.descriptor);
-                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-            });
+            let found = ci
+                .methods
+                .iter()
+                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
+                .find(|m| {
+                    let (params, _) = parse_method_desc(&m.descriptor);
+                    params.len() == args.len()
+                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                });
             if let Some(m) = found {
                 let sig = m.signature.as_deref()?;
                 let (_, _, rsig) = parse_method_gsig(sig)?;
@@ -611,7 +718,8 @@ impl LibrarySet for JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs: Vec<Ty> = sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        let sup_targs: Vec<Ty> =
+                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
                         q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
                     }
                 }
@@ -626,32 +734,52 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        self.cp.method_code(owner, name, descriptor)
-            .map_or(false, |body| crate::jvm::inline::is_lambda_spliceable(&body))
+        self.cp
+            .method_code(owner, name, descriptor)
+            .map_or(false, |body| {
+                crate::jvm::inline::is_lambda_spliceable(&body)
+            })
     }
 
     fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        self.cp.method_code(owner, name, descriptor).map_or(false, |body| {
-            // Structurally spliceable (branchless, single return, no lambda invoke) AND actually
-            // relocatable: dry-run the SAME `splice_branchless` the emitter uses, into a throwaway
-            // `ClassWriter`. This exercises constant-pool relocation, so an un-relocatable body
-            // (invokedynamic, a pool entry `relocate_const` rejects, …) fails the gate — never routed
-            // and then fallen back to an `invokestatic` on the private method (an `IllegalAccessError`).
-            crate::jvm::inline::is_call_spliceable(&body) && {
-                let mut dummy = crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy).is_some()
-            }
-        })
+        self.cp
+            .method_code(owner, name, descriptor)
+            .map_or(false, |body| {
+                // Structurally spliceable (branchless, single return, no lambda invoke) AND actually
+                // relocatable: dry-run the SAME `splice_branchless` the emitter uses, into a throwaway
+                // `ClassWriter`. This exercises constant-pool relocation, so an un-relocatable body
+                // (invokedynamic, a pool entry `relocate_const` rejects, …) fails the gate — never routed
+                // and then fallen back to an `invokestatic` on the private method (an `IllegalAccessError`).
+                crate::jvm::inline::is_call_spliceable(&body) && {
+                    let mut dummy =
+                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                    crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy)
+                        .is_some()
+                }
+            })
     }
 
-    fn resolve_scope_inline(&self, name: &str, receiver: Ty, args: &[Ty]) -> Option<LibraryCallable> {
+    fn resolve_scope_inline(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+    ) -> Option<LibraryCallable> {
         self.extension_callable(name, receiver, args, &[], true)
     }
 
-    fn toplevel_lambda_param_types(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+    fn toplevel_lambda_param_types(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
         for c in self.cp.find_top_level(name) {
-            let Some(sig) = c.signature.as_deref() else { continue };
-            let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
+            let Some(sig) = c.signature.as_deref() else {
+                continue;
+            };
+            let Some((_, psigs, _)) = parse_method_gsig(sig) else {
+                continue;
+            };
             if psigs.len() != arg_tys.len() {
                 continue;
             }
@@ -661,17 +789,29 @@ impl LibrarySet for JvmLibraries {
                     unify_gsig(ps, *t, &mut binds);
                 }
             }
-            let out: Vec<Vec<Ty>> = psigs.iter().map(|ps| function_input_types(ps, &binds)).collect();
+            let out: Vec<Vec<Ty>> = psigs
+                .iter()
+                .map(|ps| function_input_types(ps, &binds))
+                .collect();
             // Accept this overload only if a *lambda* position (an untyped `None` argument) actually
             // recovered parameter types — so an overload whose lambda is elsewhere isn't mis-picked.
-            if out.iter().zip(arg_tys).any(|(v, at)| at.is_none() && !v.is_empty()) {
+            if out
+                .iter()
+                .zip(arg_tys)
+                .any(|(v, at)| at.is_none() && !v.is_empty())
+            {
                 return Some(out);
             }
         }
         None
     }
 
-    fn extension_lambda_param_types(&self, recv: Ty, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+    fn extension_lambda_param_types(
+        &self,
+        recv: Ty,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
         // Find a generic extension named `name` on the receiver (or a supertype) that takes a function
         // argument; bind its type variables from the receiver and the already-typed non-lambda
         // arguments, then report each lambda argument's element-typed parameters (`Function1<? super
@@ -684,8 +824,12 @@ impl LibrarySet for JvmLibraries {
                 if !c.public {
                     continue;
                 }
-                let Some(sig) = c.signature.as_deref() else { continue };
-                let Some((_, psigs, _)) = parse_method_gsig(sig) else { continue };
+                let Some(sig) = c.signature.as_deref() else {
+                    continue;
+                };
+                let Some((_, psigs, _)) = parse_method_gsig(sig) else {
+                    continue;
+                };
                 if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
                     continue;
                 }
@@ -696,7 +840,10 @@ impl LibrarySet for JvmLibraries {
                         unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
                     }
                 }
-                let out: Vec<Vec<Ty>> = psigs[1..].iter().map(|ps| function_input_types(ps, &binds)).collect();
+                let out: Vec<Vec<Ty>> = psigs[1..]
+                    .iter()
+                    .map(|ps| function_input_types(ps, &binds))
+                    .collect();
                 if out.iter().any(|v| !v.is_empty()) {
                     return Some(out);
                 }
@@ -705,7 +852,13 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
-    fn resolve_callable(&self, name: &str, receiver: Option<Ty>, args: &[Ty], type_args: &[Ty]) -> Option<LibraryCallable> {
+    fn resolve_callable(
+        &self,
+        name: &str,
+        receiver: Option<Ty>,
+        args: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
         let Some(receiver) = receiver else {
             // Receiver-less top-level function (`listOf(…)`): find every static method of this name
             // and pick the overload matching `args` — an exact-arity match (boxing-aware), else a
@@ -714,23 +867,40 @@ impl LibrarySet for JvmLibraries {
             // candidate must never be picked here — it would fault with `IllegalAccessError` at runtime.
             // (The inline route reaches non-public scope fns through `resolve_scope_inline`, not this.)
             let cands = self.cp.find_top_level(name);
-            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands.into_iter().filter(|c| c.public).map(|c| {
-                let (params, ret) = parse_method_desc(&c.descriptor);
-                (c, params, ret)
-            }).collect();
+            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands
+                .into_iter()
+                .filter(|c| c.public)
+                .map(|c| {
+                    let (params, ret) = parse_method_desc(&c.descriptor);
+                    (c, params, ret)
+                })
+                .collect();
             // Exact arity first.
-            let pick = parsed.iter().find(|(_, params, _)| {
-                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-            }).or_else(|| parsed.iter().find(|(_, params, _)| {
-                // Vararg: fixed leading params match positionally, the last (array) param's element
-                // type absorbs the rest.
-                if params.is_empty() { return args.len() == 0; }
-                let fixed = params.len() - 1;
-                let Some(elem) = params[fixed].array_elem() else { return false };
-                args.len() >= fixed
-                    && params[..fixed].iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                    && args[fixed..].iter().all(|a| arg_fits(&elem, a))
-            }));
+            let pick = parsed
+                .iter()
+                .find(|(_, params, _)| {
+                    params.len() == args.len()
+                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                })
+                .or_else(|| {
+                    parsed.iter().find(|(_, params, _)| {
+                        // Vararg: fixed leading params match positionally, the last (array) param's element
+                        // type absorbs the rest.
+                        if params.is_empty() {
+                            return args.len() == 0;
+                        }
+                        let fixed = params.len() - 1;
+                        let Some(elem) = params[fixed].array_elem() else {
+                            return false;
+                        };
+                        args.len() >= fixed
+                            && params[..fixed]
+                                .iter()
+                                .zip(args)
+                                .all(|(p, a)| arg_fits(p, a))
+                            && args[fixed..].iter().all(|a| arg_fits(&elem, a))
+                    })
+                });
             // No exact/vararg match — try the `name$default` synthetic for a top-level function with
             // default parameters (`assertEquals(a, b)` → `assertEquals$default(a, b, null, mask, null)`).
             // Its descriptor is `(real…, int mask, Object marker)ret`; the call fills a prefix of the real
@@ -753,21 +923,40 @@ impl LibrarySet for JvmLibraries {
                     if args.len() > real_count {
                         continue;
                     }
-                    if !params[..args.len()].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
+                    if !params[..args.len()]
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| arg_fits(p, a))
+                    {
                         continue;
                     }
                     let kept: Vec<Ty> = params[..real_count].to_vec();
-                    let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
-                        let mut binds = std::collections::HashMap::new();
-                        for (f, t) in formals.iter().zip(type_args) {
-                            binds.insert(f.clone(), *t);
-                        }
-                        for (ps, a) in psigs.iter().zip(args) {
-                            unify_gsig(ps, *a, &mut binds);
-                        }
-                        gsig_to_ty(&rsig, &binds)
-                    }).unwrap_or(ret);
-                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true, vararg_elem: None });
+                    let ret_ty = c
+                        .signature
+                        .as_ref()
+                        .and_then(|sig| parse_method_gsig(sig))
+                        .map(|(formals, psigs, rsig)| {
+                            let mut binds = std::collections::HashMap::new();
+                            for (f, t) in formals.iter().zip(type_args) {
+                                binds.insert(f.clone(), *t);
+                            }
+                            for (ps, a) in psigs.iter().zip(args) {
+                                unify_gsig(ps, *a, &mut binds);
+                            }
+                            gsig_to_ty(&rsig, &binds)
+                        })
+                        .unwrap_or(ret);
+                    return Some(LibraryCallable {
+                        owner: c.owner.clone(),
+                        name: c.name.clone(),
+                        params: kept,
+                        ret: ret_ty,
+                        physical_ret: ret,
+                        descriptor: c.descriptor.clone(),
+                        is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                        default_call: true,
+                        vararg_elem: None,
+                    });
                 }
             }
             let (c, params, ret) = pick?;
@@ -785,35 +974,50 @@ impl LibrarySet for JvmLibraries {
             // arguments adapt to (`listOf<Long>(…)` → `Long`), which the backend uses for literal
             // adaptation (the JVM array element is erased to `Object`).
             let mut vararg_elem = None;
-            let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
-                let mut binds = std::collections::HashMap::new();
-                // Explicit type arguments (`emptyList<Int>()`) bind the formals positionally first, so
-                // a call with no value arguments still parameterizes the return.
-                for (f, t) in formals.iter().zip(type_args) {
-                    binds.insert(f.clone(), *t);
-                }
-                let vararg = params.len() != args.len();
-                if vararg && !psigs.is_empty() {
-                    let fixed = psigs.len() - 1;
-                    for (i, ps) in psigs.iter().take(fixed).enumerate() {
-                        if let Some(a) = args.get(i) {
+            let ret_ty = c
+                .signature
+                .as_ref()
+                .and_then(|sig| parse_method_gsig(sig))
+                .map(|(formals, psigs, rsig)| {
+                    let mut binds = std::collections::HashMap::new();
+                    // Explicit type arguments (`emptyList<Int>()`) bind the formals positionally first, so
+                    // a call with no value arguments still parameterizes the return.
+                    for (f, t) in formals.iter().zip(type_args) {
+                        binds.insert(f.clone(), *t);
+                    }
+                    let vararg = params.len() != args.len();
+                    if vararg && !psigs.is_empty() {
+                        let fixed = psigs.len() - 1;
+                        for (i, ps) in psigs.iter().take(fixed).enumerate() {
+                            if let Some(a) = args.get(i) {
+                                unify_gsig(ps, *a, &mut binds);
+                            }
+                        }
+                        if let GSig::Arr(inner) = &psigs[fixed] {
+                            for a in &args[fixed..] {
+                                unify_gsig(inner, *a, &mut binds);
+                            }
+                            vararg_elem = Some(gsig_to_ty(inner, &binds));
+                        }
+                    } else {
+                        for (ps, a) in psigs.iter().zip(args) {
                             unify_gsig(ps, *a, &mut binds);
                         }
                     }
-                    if let GSig::Arr(inner) = &psigs[fixed] {
-                        for a in &args[fixed..] {
-                            unify_gsig(inner, *a, &mut binds);
-                        }
-                        vararg_elem = Some(gsig_to_ty(inner, &binds));
-                    }
-                } else {
-                    for (ps, a) in psigs.iter().zip(args) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                }
-                gsig_to_ty(&rsig, &binds)
-            }).unwrap_or(*ret);
-            return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: params.clone(), ret: ret_ty, physical_ret: *ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: false, vararg_elem });
+                    gsig_to_ty(&rsig, &binds)
+                })
+                .unwrap_or(*ret);
+            return Some(LibraryCallable {
+                owner: c.owner.clone(),
+                name: c.name.clone(),
+                params: params.clone(),
+                ret: ret_ty,
+                physical_ret: *ret,
+                descriptor: c.descriptor.clone(),
+                is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                default_call: false,
+                vararg_elem,
+            });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
         // receiver may be a supertype (kotlinc's `String.repeat` is a `CharSequence` extension), or a
@@ -845,31 +1049,52 @@ impl LibrarySet for JvmLibraries {
                     continue; // need at least receiver + mask + marker
                 }
                 let real_count = params.len() - 3; // exclude receiver, int mask, Object marker
-                // The provided arguments fill a prefix of the real parameters; each must fit its
-                // parameter (subtype-aware) so a wrong overload (`contains(CharSequence)` for a `Char`
-                // argument) is rejected rather than miscompiled.
+                                                   // The provided arguments fill a prefix of the real parameters; each must fit its
+                                                   // parameter (subtype-aware) so a wrong overload (`contains(CharSequence)` for a `Char`
+                                                   // argument) is rejected rather than miscompiled.
                 if args.len() > real_count {
                     continue;
                 }
-                if !params[1..1 + args.len()].iter().zip(args).all(|(p, a)| arg_fits_subtype(&self.cp, p, a)) {
+                if !params[1..1 + args.len()]
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
+                {
                     continue;
                 }
                 // Keep the receiver + real parameters (drop the trailing mask + marker), like the
                 // non-`$default` case — the backend appends the placeholders, mask, and marker.
                 let kept: Vec<Ty> = params[..params.len() - 2].to_vec();
-                let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
-                    let mut binds = std::collections::HashMap::new();
-                    for (f, t) in formals.iter().zip(type_args) {
-                        binds.insert(f.clone(), *t);
-                    }
-                    // psigs for `$default` are `[recv, real…, int, Object]`; unify the receiver + provided.
-                    let actuals: Vec<Ty> = std::iter::once(receiver).chain(args.iter().copied()).collect();
-                    for (ps, a) in psigs.iter().zip(&actuals) {
-                        unify_gsig(ps, *a, &mut binds);
-                    }
-                    gsig_to_ty(&rsig, &binds)
-                }).unwrap_or(ret);
-                return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true, vararg_elem: None });
+                let ret_ty = c
+                    .signature
+                    .as_ref()
+                    .and_then(|sig| parse_method_gsig(sig))
+                    .map(|(formals, psigs, rsig)| {
+                        let mut binds = std::collections::HashMap::new();
+                        for (f, t) in formals.iter().zip(type_args) {
+                            binds.insert(f.clone(), *t);
+                        }
+                        // psigs for `$default` are `[recv, real…, int, Object]`; unify the receiver + provided.
+                        let actuals: Vec<Ty> = std::iter::once(receiver)
+                            .chain(args.iter().copied())
+                            .collect();
+                        for (ps, a) in psigs.iter().zip(&actuals) {
+                            unify_gsig(ps, *a, &mut binds);
+                        }
+                        gsig_to_ty(&rsig, &binds)
+                    })
+                    .unwrap_or(ret);
+                return Some(LibraryCallable {
+                    owner: c.owner.clone(),
+                    name: c.name.clone(),
+                    params: kept,
+                    ret: ret_ty,
+                    physical_ret: ret,
+                    descriptor: c.descriptor.clone(),
+                    is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                    default_call: true,
+                    vararg_elem: None,
+                });
             }
         }
         None

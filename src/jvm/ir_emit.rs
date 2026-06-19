@@ -13,7 +13,11 @@ use crate::types::Ty;
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
-pub fn emit_all(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Option<Vec<(String, Vec<u8>)>> {
+pub fn emit_all(
+    ir: &IrFile,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
     }
@@ -42,12 +46,18 @@ pub fn emit_all(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Option<
 fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &IrType) -> bool {
         match t {
-            IrType::Function { params, ret } => params.len() <= 22 && params.iter().all(ty_ok) && ty_ok(ret),
+            IrType::Function { params, ret } => {
+                params.len() <= 22 && params.iter().all(ty_ok) && ty_ok(ret)
+            }
             IrType::Class { type_args, .. } => type_args.iter().all(ty_ok),
             _ => true,
         }
     }
-    if ir.functions.iter().any(|f| !ty_ok(&f.ret) || !f.params.iter().all(ty_ok)) {
+    if ir
+        .functions
+        .iter()
+        .any(|f| !ty_ok(&f.ret) || !f.params.iter().all(ty_ok))
+    {
         return false;
     }
     if ir.statics.iter().any(|s| !ty_ok(&s.ty)) {
@@ -95,9 +105,23 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         return;
     }
     for s in &ir.statics {
-        cw.add_field(0x0009 /* PUBLIC | STATIC */, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
+        cw.add_field(
+            0x0009, /* PUBLIC | STATIC */
+            &s.name,
+            &ir_ty_to_jvm(&s.ty).descriptor(),
+        );
     }
-    let mut e = Emitter { ir, cw, bodies, owner: facade.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+    let mut e = Emitter {
+        ir,
+        cw,
+        bodies,
+        owner: facade.to_string(),
+        facade: facade.to_string(),
+        slots: HashMap::new(),
+        next_slot: 0,
+        ret: Ty::Unit,
+        loop_stack: Vec::new(),
+    };
     let mut code = CodeBuilder::new(0);
     for s in &ir.statics {
         e.emit_value(s.init, &mut code);
@@ -111,7 +135,12 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     e.cw.add_method(0x0008 /* STATIC */, "<clinit>", "()V", &code);
 }
 
-fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
+fn emit_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, bodies);
     }
@@ -128,10 +157,17 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
     let extended = ir.classes.iter().any(|o| o.superclass == c.fq_name);
-    let has_abstract = c.methods.iter().any(|&fid| ir.functions[fid as usize].body.is_none());
+    let has_abstract = c
+        .methods
+        .iter()
+        .any(|&fid| ir.functions[fid as usize].body.is_none());
     let mut access = 0x0001 | 0x0020; // PUBLIC | SUPER
-    if !extended && !has_abstract { access |= 0x0010; } // FINAL
-    if has_abstract { access |= 0x0400; } // ABSTRACT
+    if !extended && !has_abstract {
+        access |= 0x0010;
+    } // FINAL
+    if has_abstract {
+        access |= 0x0400;
+    } // ABSTRACT
     cw.set_access(access);
     for itf in &c.interfaces {
         cw.add_interface(itf);
@@ -143,7 +179,12 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     let base_field_acc: u16 = 0x0002;
     for (i, (name, ty)) in c.fields.iter().enumerate() {
         // A `val` backing field is `final`.
-        let acc = base_field_acc | if c.field_final.get(i).copied().unwrap_or(false) { 0x0010 } else { 0 };
+        let acc = base_field_acc
+            | if c.field_final.get(i).copied().unwrap_or(false) {
+                0x0010
+            } else {
+                0
+            };
         cw.add_field(acc, name, &ir_ty_to_jvm(ty).descriptor());
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
@@ -162,21 +203,39 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     let mut ctor = CodeBuilder::new(1 + params_words);
     // The superclass constructor's parameter types (empty for the erased top type — the front end
     // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
-    let super_param_tys: Vec<Ty> = if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
-        Vec::new()
-    } else {
-        ir.classes.iter().find(|sc| sc.fq_name == c.superclass)
-            .map(|sc| if sc.ctor_args.is_empty() {
-                sc.fields[..sc.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect()
-            } else {
-                sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
-            })
-            .unwrap_or_default()
-    };
+    let super_param_tys: Vec<Ty> =
+        if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
+            Vec::new()
+        } else {
+            ir.classes
+                .iter()
+                .find(|sc| sc.fq_name == c.superclass)
+                .map(|sc| {
+                    if sc.ctor_args.is_empty() {
+                        sc.fields[..sc.ctor_param_count as usize]
+                            .iter()
+                            .map(|(_, t)| ir_ty_to_jvm(t))
+                            .collect()
+                    } else {
+                        sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                    }
+                })
+                .unwrap_or_default()
+        };
     let max_slot;
     let mut init_diverges = false;
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + params_words, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter {
+            ir,
+            cw: &mut cw,
+            bodies,
+            owner: c.fq_name.clone(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            next_slot: 1 + params_words,
+            ret: Ty::Unit,
+            loop_stack: Vec::new(),
+        };
         e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
         let mut s = 1u16;
         for (vi, t) in param_tys.iter().enumerate() {
@@ -191,7 +250,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
                 if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
                     ctor.aload(slot);
                     ctor.push_string(name, e.cw);
-                    let m = e.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNullParameter", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                    let m = e.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNullParameter",
+                        "(Ljava/lang/Object;Ljava/lang/String;)V",
+                    );
                     ctor.invokestatic(m, 2, 0);
                 }
             }
@@ -201,14 +264,24 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         if super_args.iter().any(|&a| e.records_frame(a)) {
             let temps = e.spill_to_temps(&super_args, &mut ctor);
             ctor.aload(0);
-            for &(slot, t, _) in &temps { load(t, slot, &mut ctor); }
-            for &(_, _, key) in &temps { e.slots.remove(&key); }
+            for &(slot, t, _) in &temps {
+                load(t, slot, &mut ctor);
+            }
+            for &(_, _, key) in &temps {
+                e.slots.remove(&key);
+            }
         } else {
             ctor.aload(0);
-            for &a in &super_args { e.emit_value(a, &mut ctor); }
+            for &a in &super_args {
+                e.emit_value(a, &mut ctor);
+            }
         }
         let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-        let super_init = e.cw.methodref(&c.superclass, "<init>", &method_descriptor(&super_param_tys, Ty::Unit));
+        let super_init = e.cw.methodref(
+            &c.superclass,
+            "<init>",
+            &method_descriptor(&super_param_tys, Ty::Unit),
+        );
         ctor.invokespecial(super_init, aw, 0);
         // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
         // stored to its field (the property fields are `fields[0..]` in declaration order among params);
@@ -247,8 +320,19 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
     ctor.link();
     // An `object`'s constructor is private; a `C$Companion`'s is package-private (so the outer class's
     // `<clinit>` can call it without nestmate attributes); a normal class's is public.
-    let ctor_access = if c.is_object { 0x0002 } else if c.is_companion { 0x0000 } else { 0x0001 };
-    cw.add_method(ctor_access, "<init>", &method_descriptor(&param_tys, Ty::Unit), &ctor);
+    let ctor_access = if c.is_object {
+        0x0002
+    } else if c.is_companion {
+        0x0000
+    } else {
+        0x0001
+    };
+    cw.add_method(
+        ctor_access,
+        "<init>",
+        &method_descriptor(&param_tys, Ty::Unit),
+        &ctor,
+    );
 
     // Secondary constructors: each `<init>(p)` calls `this(delegate_args)` (the primary `<init>`) then
     // runs its body. `this` is slot 0, parameters follow.
@@ -259,7 +343,17 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         let sec_max;
         let mut sec_diverges = false;
         {
-            let mut e = Emitter { ir, cw: &mut cw, bodies, owner: c.fq_name.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 1 + sc_words, ret: Ty::Unit, loop_stack: Vec::new() };
+            let mut e = Emitter {
+                ir,
+                cw: &mut cw,
+                bodies,
+                owner: c.fq_name.clone(),
+                facade: facade.to_string(),
+                slots: HashMap::new(),
+                next_slot: 1 + sc_words,
+                ret: Ty::Unit,
+                loop_stack: Vec::new(),
+            };
             e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
             let mut s = 1u16;
             for (vi, t) in sc_param_tys.iter().enumerate() {
@@ -272,14 +366,24 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
             if dargs.iter().any(|&a| e.records_frame(a)) {
                 let temps = e.spill_to_temps(&dargs, &mut sctor);
                 sctor.aload(0);
-                for &(slot, t, _) in &temps { load(t, slot, &mut sctor); }
-                for &(_, _, key) in &temps { e.slots.remove(&key); }
+                for &(slot, t, _) in &temps {
+                    load(t, slot, &mut sctor);
+                }
+                for &(_, _, key) in &temps {
+                    e.slots.remove(&key);
+                }
             } else {
                 sctor.aload(0);
-                for &a in &dargs { e.emit_value(a, &mut sctor); }
+                for &a in &dargs {
+                    e.emit_value(a, &mut sctor);
+                }
             }
             let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-            let prim_init = e.cw.methodref(&c.fq_name, "<init>", &method_descriptor(&param_tys, Ty::Unit));
+            let prim_init = e.cw.methodref(
+                &c.fq_name,
+                "<init>",
+                &method_descriptor(&param_tys, Ty::Unit),
+            );
             sctor.invokespecial(prim_init, aw, 0);
             if let Some(body) = sc.body {
                 e.emit(body, &mut sctor);
@@ -292,7 +396,12 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         }
         sctor.ensure_locals(sec_max);
         sctor.link();
-        cw.add_method(0x0001, "<init>", &method_descriptor(&sc_param_tys, Ty::Unit), &sctor);
+        cw.add_method(
+            0x0001,
+            "<init>",
+            &method_descriptor(&sc_param_tys, Ty::Unit),
+            &sctor,
+        );
     }
     // A class with a `companion object`: a `public static final Companion` field of the companion
     // type, constructed in this class's `<clinit>`.
@@ -337,7 +446,11 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
         } else {
             let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
             let ret = ir_ty_to_jvm(&f.ret);
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ret));
+            cw.add_abstract_method(
+                0x0001 | 0x0400,
+                &f.name,
+                &method_descriptor(&param_tys, ret),
+            );
         }
         // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
         // synthetic stub (the JVM realization of default arguments).
@@ -353,13 +466,22 @@ fn emit_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn Me
 /// package-private `final` class with one constructor `(String name, int ordinal, <user fields>)V`
 /// that delegates to the enum's `(String,int,<user>)V` constructor, plus the entry's overriding
 /// methods. It has no fields of its own — overrides read the enum's fields via the inherited `this`.
-fn emit_enum_entry_subclass(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies, user_tys: &[IrType]) -> Vec<u8> {
+fn emit_enum_entry_subclass(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+    user_tys: &[IrType],
+) -> Vec<u8> {
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
     // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`.
     let user_jvm: Vec<Ty> = user_tys.iter().map(ir_ty_to_jvm).collect();
-    let ctor_params: Vec<Ty> = std::iter::once(Ty::String).chain(std::iter::once(Ty::Int)).chain(user_jvm.iter().copied()).collect();
+    let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
+        .chain(std::iter::once(Ty::Int))
+        .chain(user_jvm.iter().copied())
+        .collect();
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + ctor_words);
     ctor.aload(0);
@@ -368,13 +490,22 @@ fn emit_enum_entry_subclass(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, b
         load(*t, slot, &mut ctor);
         slot += slot_words(*t);
     }
-    let super_init = cw.methodref(&c.superclass, "<init>", &method_descriptor(&ctor_params, Ty::Unit));
+    let super_init = cw.methodref(
+        &c.superclass,
+        "<init>",
+        &method_descriptor(&ctor_params, Ty::Unit),
+    );
     let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     ctor.invokespecial(super_init, argw, 0);
     ctor.ret_void();
     ctor.ensure_locals(1 + ctor_words);
     ctor.link();
-    cw.add_method(0x0000, "<init>", &method_descriptor(&ctor_params, Ty::Unit), &ctor);
+    cw.add_method(
+        0x0000,
+        "<init>",
+        &method_descriptor(&ctor_params, Ty::Unit),
+        &ctor,
+    );
 
     // The overriding methods (always concrete — an entry body has bodied overrides only).
     for &fid in &c.methods {
@@ -410,7 +541,11 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
     ctor.push_int(0, &mut cw);
-    let sup = cw.methodref(&c.superclass, "<init>", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
+    let sup = cw.methodref(
+        &c.superclass,
+        "<init>",
+        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+    );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
     ctor.ensure_locals(1);
@@ -430,7 +565,12 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
     get.areturn();
     get.ensure_locals(2);
     get.link();
-    cw.add_method(0x0001, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", &get);
+    cw.add_method(
+        0x0001,
+        "get",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        &get,
+    );
 
     // `<clinit>`: INSTANCE = new.
     let mut clinit = CodeBuilder::new(0);
@@ -469,7 +609,11 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
     ctor.push_int(0, &mut cw);
-    let sup = cw.methodref(&c.superclass, "<init>", "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
+    let sup = cw.methodref(
+        &c.superclass,
+        "<init>",
+        "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+    );
     ctor.invokespecial(sup, 5, 0);
     ctor.ret_void();
     ctor.ensure_locals(2);
@@ -552,7 +696,12 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         emit_return(er, &mut code);
         code.ensure_locals(1 + pw);
         code.link();
-        cw.add_method(0x0001 | 0x0040 | 0x1000, &b.name, &method_descriptor(&ep, er), &code);
+        cw.add_method(
+            0x0001 | 0x0040 | 0x1000,
+            &b.name,
+            &method_descriptor(&ep, er),
+            &code,
+        );
     }
 }
 
@@ -604,7 +753,11 @@ fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
         let f = &ir.functions[fid as usize];
         let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
         let ret = ir_ty_to_jvm(&f.ret);
-        cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ret)); // PUBLIC | ABSTRACT
+        cw.add_abstract_method(
+            0x0001 | 0x0400,
+            &f.name,
+            &method_descriptor(&param_tys, ret),
+        ); // PUBLIC | ABSTRACT
     }
     cw.finish()
 }
@@ -612,7 +765,12 @@ fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
 /// Emit an `enum class`: extends `java/lang/Enum`, a private `(String name, int ordinal, …)` ctor →
 /// `super(name, ordinal)`, a `public static final` field per entry plus a `$VALUES` array, a
 /// `<clinit>` that constructs the entries and fills `$VALUES`, and synthetic `values()`/`valueOf`.
-fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8> {
+fn emit_enum_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+) -> Vec<u8> {
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name.clone();
@@ -621,11 +779,18 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     let mut cw = ClassWriter::new(&fq, "java/lang/Enum");
     // An enum with an abstract member is `ACC_ABSTRACT`; one with any bodied entry (so a subclass
     // extends it) must not be `final`. A plain enum stays `final`.
-    let has_abstract = c.methods.iter().any(|&fid| ir.functions[fid as usize].body.is_none());
+    let has_abstract = c
+        .methods
+        .iter()
+        .any(|&fid| ir.functions[fid as usize].body.is_none());
     let has_subclass = c.enum_entry_subclass.iter().any(|s| s.is_some());
     let mut access = 0x0001 | 0x0020 | ACC_ENUM; // PUBLIC | SUPER | ENUM
-    if has_abstract { access |= 0x0400; } // ABSTRACT
-    if !has_abstract && !has_subclass { access |= 0x0010; } // FINAL
+    if has_abstract {
+        access |= 0x0400;
+    } // ABSTRACT
+    if !has_abstract && !has_subclass {
+        access |= 0x0010;
+    } // FINAL
     cw.set_access(access);
 
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
@@ -639,10 +804,17 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     for (entry, _) in &c.enum_entries {
         cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, entry, &self_desc);
     }
-    cw.add_field(0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC, "$VALUES", &arr_desc);
+    cw.add_field(
+        0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
+        "$VALUES",
+        &arr_desc,
+    );
 
     // Private constructor: `(Ljava/lang/String;I<user>)V` → `super(name, ordinal)` + store user fields.
-    let ctor_params: Vec<Ty> = std::iter::once(Ty::String).chain(std::iter::once(Ty::Int)).chain(user_tys.iter().copied()).collect();
+    let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
+        .chain(std::iter::once(Ty::Int))
+        .chain(user_tys.iter().copied())
+        .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + ctor_words);
@@ -664,30 +836,56 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     ctor.link();
     // A subclassed enum's constructor must be reachable from its entry subclasses' `<init>` (an
     // `invokespecial` from another class) — package-private, not private.
-    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 | ACC_SYNTHETIC };
+    let base_ctor_acc = if has_subclass {
+        ACC_SYNTHETIC
+    } else {
+        0x0002 | ACC_SYNTHETIC
+    };
     cw.add_method(base_ctor_acc, "<init>", &ctor_desc, &ctor);
 
     // <clinit>: construct each entry, then build `$VALUES`.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     {
-        let mut e = Emitter { ir, cw: &mut cw, bodies, owner: fq.clone(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret: Ty::Unit, loop_stack: Vec::new() };
+        let mut e = Emitter {
+            ir,
+            cw: &mut cw,
+            bodies,
+            owner: fq.clone(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            next_slot: 0,
+            ret: Ty::Unit,
+            loop_stack: Vec::new(),
+        };
         let mut clinit = CodeBuilder::new(0);
         for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
             let spill = args.iter().any(|&a| e.records_frame(a));
-            let temps = if spill { e.spill_to_temps(args, &mut clinit) } else { Vec::new() };
+            let temps = if spill {
+                e.spill_to_temps(args, &mut clinit)
+            } else {
+                Vec::new()
+            };
             // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
             // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
-            let new_class = c.enum_entry_subclass.get(i).and_then(|s| s.clone()).unwrap_or_else(|| fq.clone());
+            let new_class = c
+                .enum_entry_subclass
+                .get(i)
+                .and_then(|s| s.clone())
+                .unwrap_or_else(|| fq.clone());
             let cls = e.cw.class_ref(&new_class);
             clinit.new_obj(cls);
             clinit.dup();
             clinit.push_string(entry, e.cw);
             clinit.push_int(i as i32, e.cw);
             if spill {
-                for &(slot, t, _) in &temps { load(t, slot, &mut clinit); }
-                for &(_, _, key) in &temps { e.slots.remove(&key); }
+                for &(slot, t, _) in &temps {
+                    load(t, slot, &mut clinit);
+                }
+                for &(_, _, key) in &temps {
+                    e.slots.remove(&key);
+                }
             } else {
                 for &a in args {
                     e.emit_value(a, &mut clinit);
@@ -733,14 +931,23 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
     let mut vof = CodeBuilder::new(1);
     vof.ldc_class(&fq, &mut cw);
     vof.aload(0);
-    let veo = cw.methodref("java/lang/Enum", "valueOf", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;");
+    let veo = cw.methodref(
+        "java/lang/Enum",
+        "valueOf",
+        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+    );
     vof.invokestatic(veo, 2, 1);
     let cc = cw.class_ref(&fq);
     vof.checkcast(cc);
     vof.areturn();
     vof.ensure_locals(1);
     vof.link();
-    cw.add_method(0x0009, "valueOf", &format!("(Ljava/lang/String;){self_desc}"), &vof);
+    cw.add_method(
+        0x0009,
+        "valueOf",
+        &format!("(Ljava/lang/String;){self_desc}"),
+        &vof,
+    );
 
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
@@ -750,19 +957,41 @@ fn emit_enum_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str, bodies: &d
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
             let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &method_descriptor(&param_tys, ir_ty_to_jvm(&f.ret)));
+            cw.add_abstract_method(
+                0x0001 | 0x0400,
+                &f.name,
+                &method_descriptor(&param_tys, ir_ty_to_jvm(&f.ret)),
+            );
         }
     }
     cw.finish()
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
-fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, instance: bool, bodies: &dyn MethodBodies) {
+fn emit_method(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    instance: bool,
+    bodies: &dyn MethodBodies,
+) {
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
     let ret = ir_ty_to_jvm(&f.ret);
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter {
+        ir,
+        cw,
+        bodies,
+        owner: owner.to_string(),
+        facade: facade.to_string(),
+        slots: HashMap::new(),
+        next_slot: 0,
+        ret,
+        loop_stack: Vec::new(),
+    };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -783,7 +1012,11 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
             if let Some(&(slot, _)) = e.slots.get(&vi) {
                 code.aload(slot);
                 code.push_string(name, e.cw);
-                let m = e.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNullParameter", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                let m = e.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "checkNotNullParameter",
+                    "(Ljava/lang/Object;Ljava/lang/String;)V",
+                );
                 code.invokestatic(m, 2, 0);
             }
         }
@@ -814,7 +1047,15 @@ fn emit_method(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassW
 /// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
 /// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
 /// 0. This is the JVM realization of default arguments — the `param_defaults` *meaning* is in the IR.
-fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut ClassWriter, defaults: &[Option<u32>], bodies: &dyn MethodBodies) {
+fn emit_default_stub(
+    ir: &IrFile,
+    fid: u32,
+    owner: &str,
+    facade: &str,
+    cw: &mut ClassWriter,
+    defaults: &[Option<u32>],
+    bodies: &dyn MethodBodies,
+) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     let real_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
@@ -822,7 +1063,17 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let n = real_params.len();
     let owner_ty = Ty::obj(owner);
 
-    let mut e = Emitter { ir, cw, bodies, owner: owner.to_string(), facade: facade.to_string(), slots: HashMap::new(), next_slot: 0, ret, loop_stack: Vec::new() };
+    let mut e = Emitter {
+        ir,
+        cw,
+        bodies,
+        owner: owner.to_string(),
+        facade: facade.to_string(),
+        slots: HashMap::new(),
+        next_slot: 0,
+        ret,
+        loop_stack: Vec::new(),
+    };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
     let mut slot = 1u16;
@@ -835,7 +1086,8 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     let mask_slot = slot;
     e.slots.insert(9_000_001, (mask_slot, Ty::Int)); // register so frames type these slots
     slot += 1;
-    e.slots.insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
+    e.slots
+        .insert(9_000_002, (slot, Ty::obj("java/lang/Object")));
     slot += 1;
     e.next_slot = slot;
 
@@ -859,7 +1111,8 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
         load(pty, pslot, &mut code);
     }
     let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
-    let m = e.cw.methodref(owner, &method_name, &method_descriptor(&real_params, ret));
+    let m =
+        e.cw.methodref(owner, &method_name, &method_descriptor(&real_params, ret));
     code.invokevirtual(m, aw, slot_words(ret) as i32);
     emit_return(ret, &mut code);
     code.ensure_locals(e.next_slot);
@@ -870,7 +1123,12 @@ fn emit_default_stub(ir: &IrFile, fid: u32, owner: &str, facade: &str, cw: &mut 
     stub_params.push(Ty::Int);
     stub_params.push(Ty::obj("java/lang/Object"));
     let desc = method_descriptor(&stub_params, ret);
-    e.cw.add_method(0x1009 /* PUBLIC | STATIC | SYNTHETIC */, &format!("{method_name}$default"), &desc, &code);
+    e.cw.add_method(
+        0x1009, /* PUBLIC | STATIC | SYNTHETIC */
+        &format!("{method_name}$default"),
+        &desc,
+        &code,
+    );
 }
 
 struct Emitter<'a> {
@@ -922,7 +1180,12 @@ impl<'a> Emitter<'a> {
     /// params → the on-stack args), then emit the body as a value — leaving the result on the stack. A
     /// user `return` inside the body emits a real `*return` from the enclosing method, i.e. a correct
     /// non-local return (no synthetic-return rewriting needed).
-    fn emit_fn_body_inline(&mut self, inline_body: u32, param_slots: &[(u16, Ty)], code: &mut CodeBuilder) {
+    fn emit_fn_body_inline(
+        &mut self,
+        inline_body: u32,
+        param_slots: &[(u16, Ty)],
+        code: &mut CodeBuilder,
+    ) {
         let saved_slots = std::mem::take(&mut self.slots);
         for (i, &(slot, ty)) in param_slots.iter().enumerate() {
             self.slots.insert(i as u32, (slot, ty));
@@ -944,18 +1207,31 @@ impl<'a> Emitter<'a> {
         base: u16,
         code: &mut CodeBuilder,
     ) -> bool {
-        let IrExpr::Lambda { impl_fn, arity, captures, inline_body, .. } = self.ir.expr(lam_expr).clone() else {
+        let IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            inline_body,
+            ..
+        } = self.ir.expr(lam_expr).clone()
+        else {
             return false;
         };
-        let Some(inline_body) = inline_body else { return false }; // a callable ref has no inlinable body
+        let Some(inline_body) = inline_body else {
+            return false;
+        }; // a callable ref has no inlinable body
         let arity = arity as usize;
-        let Some(params) = parse_descriptor_params(descriptor) else { return false };
+        let Some(params) = parse_descriptor_params(descriptor) else {
+            return false;
+        };
         if lam_idx >= params.len() {
             return false;
         }
         // Slot offset of the lambda parameter within the (shifted) body frame.
         let lambda_off: u16 = params[..lam_idx].iter().map(|t| slot_words(*t)).sum();
-        let Some((before, after)) = crate::jvm::inline::branchless_lambda_segments(body, base, lambda_off, self.cw) else {
+        let Some((before, after)) =
+            crate::jvm::inline::branchless_lambda_segments(body, base, lambda_off, self.cw)
+        else {
             return false;
         };
         // Reserve the spliced body's own local range (`base..base+max_locals`, e.g. kotlinc's `$i$f`
@@ -963,7 +1239,9 @@ impl<'a> Emitter<'a> {
         self.next_slot = self.next_slot.max(base + body.max_locals);
         // The lambda impl's parameters are `[captures…, lambda_params…]`.
         let impl_f = &self.ir.functions[impl_fn as usize];
-        let Some(n_cap) = impl_f.params.len().checked_sub(arity) else { return false };
+        let Some(n_cap) = impl_f.params.len().checked_sub(arity) else {
+            return false;
+        };
         if n_cap != captures.len() {
             return false;
         }
@@ -974,8 +1252,12 @@ impl<'a> Emitter<'a> {
         // lambda body propagates to the enclosing variable (`var s; recv.let { s += it }`).
         let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(n_cap);
         for (i, &cap) in captures.iter().enumerate() {
-            let IrExpr::GetValue(v) = self.ir.expr(cap) else { return false };
-            let Some(&(slot, _)) = self.slots.get(v) else { return false };
+            let IrExpr::GetValue(v) = self.ir.expr(cap) else {
+                return false;
+            };
+            let Some(&(slot, _)) = self.slots.get(v) else {
+                return false;
+            };
             cap_slots.push((slot, cap_tys[i]));
         }
 
@@ -1021,13 +1303,24 @@ impl<'a> Emitter<'a> {
             box_prim_free(self.cw, code, impl_ret);
         }
         // `after`: the relocated body past the invoke (the trailing return dropped) — yields the value.
-        self.append_segment(&after, body.max_stack, code, slot_words(ty_from_descriptor_ret(descriptor)) as i32);
+        self.append_segment(
+            &after,
+            body.max_stack,
+            code,
+            slot_words(ty_from_descriptor_ret(descriptor)) as i32,
+        );
         true
     }
 
     /// Append a pre-relocated, branchless instruction segment (from `branchless_lambda_segments`) as raw
     /// bytes, reserving `body_stack` of headroom and setting the resulting stack height to `result_slots`.
-    fn append_segment(&mut self, seg: &[crate::jvm::inline::Insn], body_stack: u16, code: &mut CodeBuilder, result_slots: i32) {
+    fn append_segment(
+        &mut self,
+        seg: &[crate::jvm::inline::Insn],
+        body_stack: u16,
+        code: &mut CodeBuilder,
+        result_slots: i32,
+    ) {
         let bytes = crate::jvm::inline::assemble(seg);
         let base_stack = code.stack_height();
         code.set_stack((base_stack as u16).saturating_add(body_stack)); // reserve peak headroom
@@ -1043,7 +1336,14 @@ impl<'a> Emitter<'a> {
     /// ⇒ the caller emits an ordinary `invokestatic`, so an un-spliceable inline call is never
     /// miscompiled. The splice itself (StackMapTable relocation for branchy bodies + lambda-argument
     /// splicing) lands in the next phase — until then this always falls back.
-    fn try_inline_static(&mut self, owner: &str, name: &str, descriptor: &str, args: &[u32], code: &mut CodeBuilder) -> bool {
+    fn try_inline_static(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        args: &[u32],
+        code: &mut CodeBuilder,
+    ) -> bool {
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
             return false;
         };
@@ -1052,10 +1352,13 @@ impl<'a> Emitter<'a> {
         // reserved-but-unstored).
         let base = self.next_slot.max(code.max_locals);
         // Route (b): a literal lambda argument → inline its body at the body's `FunctionN.invoke` site.
-        if let Some((lam_idx, lam_expr)) = args.iter().enumerate()
+        if let Some((lam_idx, lam_expr)) = args
+            .iter()
+            .enumerate()
             .find_map(|(i, &a)| matches!(self.ir.expr(a), IrExpr::Lambda { .. }).then_some((i, a)))
         {
-            return self.try_inline_lambda_call(descriptor, args, lam_idx, lam_expr, &body, base, code);
+            return self
+                .try_inline_lambda_call(descriptor, args, lam_idx, lam_expr, &body, base, code);
         }
         // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) isn't
         // spliceable — fall back to a normal call.
@@ -1065,9 +1368,13 @@ impl<'a> Emitter<'a> {
         let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
         let top_local = base + body.max_locals;
         // Branchless single-exit body: append the spliced bytes, no frames needed.
-        if let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw) {
+        if let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw)
+        {
             self.emit_operands(args, code);
-            let arg_words: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+            let arg_words: i32 = args
+                .iter()
+                .map(|&a| slot_words(self.value_ty(a)) as i32)
+                .sum();
             let bytes = crate::jvm::inline::assemble(&insns);
             code.splice_inline(&bytes, body.max_stack, top_local, arg_words, ret_words);
             return true;
@@ -1082,7 +1389,10 @@ impl<'a> Emitter<'a> {
             return false;
         };
         self.emit_operands(args, code);
-        let arg_words: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+        let arg_words: i32 = args
+            .iter()
+            .map(|&a| slot_words(self.value_ty(a)) as i32)
+            .sum();
         let splice_start = code.bytes.len();
         let prefix = self.verif_locals_upto(base);
         for (rel, body_locals, stack) in &bs.frames {
@@ -1137,7 +1447,10 @@ impl<'a> Emitter<'a> {
                 let mut dead = false;
                 for s in stmts {
                     self.emit(s, code);
-                    if self.diverges(s) { dead = true; break; } // rest of the block is unreachable
+                    if self.diverges(s) {
+                        dead = true;
+                        break;
+                    } // rest of the block is unreachable
                 }
                 if !dead {
                     if let Some(v) = value {
@@ -1176,7 +1489,12 @@ impl<'a> Emitter<'a> {
                 self.emit_value(value, code);
                 store(jt, slot, code);
             }
-            IrExpr::SetField { receiver, class, index, value } => {
+            IrExpr::SetField {
+                receiver,
+                class,
+                index,
+                value,
+            } => {
                 let c = &self.ir.classes[class as usize];
                 let (name, fty) = c.fields[index as usize].clone();
                 let jt = ir_ty_to_jvm(&fty);
@@ -1195,7 +1513,13 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.putstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::While { cond, body, update, post_test, label } => {
+            IrExpr::While {
+                cond,
+                body,
+                update,
+                post_test,
+                label,
+            } => {
                 let start = code.new_label();
                 let cont = code.new_label();
                 let end = code.new_label();
@@ -1284,7 +1608,11 @@ impl<'a> Emitter<'a> {
                 let (slot, jt) = self.slots[i];
                 load(jt, slot, code);
             }
-            IrExpr::GetField { receiver, class, index } => {
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => {
                 let c = &self.ir.classes[*class as usize];
                 let (name, fty) = c.fields[*index as usize].clone();
                 let jt = ir_ty_to_jvm(&fty);
@@ -1301,15 +1629,24 @@ impl<'a> Emitter<'a> {
                 let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
                 code.getstatic(fref, slot_words(jt) as i32);
             }
-            IrExpr::New { class, args, ctor_params } => {
+            IrExpr::New {
+                class,
+                args,
+                ctor_params,
+            } => {
                 let c = &self.ir.classes[*class as usize];
                 let owner = c.fq_name.clone();
                 // The constructor takes only the parameter fields (primary), or a secondary
                 // constructor's explicit parameter types; body properties are set inside it.
                 let field_tys: Vec<Ty> = match ctor_params {
                     Some(ps) => ps.iter().map(ir_ty_to_jvm).collect(),
-                    None if !c.ctor_args.is_empty() => c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect(),
-                    None => c.fields[..c.ctor_param_count as usize].iter().map(|(_, t)| ir_ty_to_jvm(t)).collect(),
+                    None if !c.ctor_args.is_empty() => {
+                        c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                    }
+                    None => c.fields[..c.ctor_param_count as usize]
+                        .iter()
+                        .map(|(_, t)| ir_ty_to_jvm(t))
+                        .collect(),
                 };
                 let args = args.clone();
                 let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
@@ -1321,8 +1658,12 @@ impl<'a> Emitter<'a> {
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
-                    for &(slot, t, _) in &temps { load(t, slot, code); }
-                    for &(_, _, key) in &temps { self.slots.remove(&key); }
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
                     let m = self.cw.methodref(&owner, "<init>", &desc);
                     code.invokespecial(m, aw, 0);
                 } else {
@@ -1336,7 +1677,12 @@ impl<'a> Emitter<'a> {
                     code.invokespecial(m, aw, 0);
                 }
             }
-            IrExpr::MethodCall { class, index, receiver, args } => {
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => {
                 let c = &self.ir.classes[*class as usize];
                 let fid = c.methods[*index as usize];
                 let f = &self.ir.functions[fid as usize];
@@ -1355,7 +1701,10 @@ impl<'a> Emitter<'a> {
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
                             Some(a) => self.emit_value(*a, code),
-                            None => { push_zero(param_tys[i], code, self.cw); mask |= 1 << i; }
+                            None => {
+                                push_zero(param_tys[i], code, self.cw);
+                                mask |= 1 << i;
+                            }
                         }
                     }
                     code.push_int(mask, self.cw);
@@ -1365,7 +1714,11 @@ impl<'a> Emitter<'a> {
                     stub_params.push(Ty::Int);
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let m = self.cw.methodref(&owner, &format!("{name}$default"), &method_descriptor(&stub_params, ret));
+                    let m = self.cw.methodref(
+                        &owner,
+                        &format!("{name}$default"),
+                        &method_descriptor(&stub_params, ret),
+                    );
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                     return;
                 }
@@ -1383,7 +1736,11 @@ impl<'a> Emitter<'a> {
                     code.invokevirtual(m, aw, slot_words(ret) as i32);
                 }
             }
-            IrExpr::Call { callee, dispatch_receiver, args } => match callee {
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                args,
+            } => match callee {
                 Callee::Local(fid) => {
                     let f = &self.ir.functions[*fid as usize];
                     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
@@ -1393,12 +1750,20 @@ impl<'a> Emitter<'a> {
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
-                    let m = self.cw.methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    let m = self
+                        .cw
+                        .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
-                Callee::Static { owner, name, descriptor, inline } => {
-                    let (owner, name, descriptor, inline) = (owner.clone(), name.clone(), descriptor.clone(), *inline);
+                Callee::Static {
+                    owner,
+                    name,
+                    descriptor,
+                    inline,
+                } => {
+                    let (owner, name, descriptor, inline) =
+                        (owner.clone(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
                     // A cross-module `inline fun`: try to splice its compiled body here (the bytecode
                     // inliner). On any unsupported shape `try_inline_static` returns false and we emit the
@@ -1407,19 +1772,31 @@ impl<'a> Emitter<'a> {
                         return;
                     }
                     self.emit_operands(&args, code);
-                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let aw: i32 = args
+                        .iter()
+                        .map(|&a| slot_words(self.value_ty(a)) as i32)
+                        .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
                     let m = self.cw.methodref(&owner, &name, &descriptor);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
-                Callee::Virtual { owner, name, descriptor, interface } => {
-                    let (owner, name, descriptor, interface) = (owner.clone(), name.clone(), descriptor.clone(), *interface);
+                Callee::Virtual {
+                    owner,
+                    name,
+                    descriptor,
+                    interface,
+                } => {
+                    let (owner, name, descriptor, interface) =
+                        (owner.clone(), name.clone(), descriptor.clone(), *interface);
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
                     let args = args.clone();
                     let mut ops = vec![recv];
                     ops.extend(args.iter().copied());
                     self.emit_operands(&ops, code);
-                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let aw: i32 = args
+                        .iter()
+                        .map(|&a| slot_words(self.value_ty(a)) as i32)
+                        .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, &name, &descriptor);
@@ -1429,24 +1806,38 @@ impl<'a> Emitter<'a> {
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
-                Callee::Special { owner, name, descriptor } => {
-                    let (owner, name, descriptor) = (owner.clone(), name.clone(), descriptor.clone());
+                Callee::Special {
+                    owner,
+                    name,
+                    descriptor,
+                } => {
+                    let (owner, name, descriptor) =
+                        (owner.clone(), name.clone(), descriptor.clone());
                     let recv = dispatch_receiver.expect("special call needs a receiver");
                     let args = args.clone();
                     let mut ops = vec![recv];
                     ops.extend(args.iter().copied());
                     self.emit_operands(&ops, code);
-                    let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                    let aw: i32 = args
+                        .iter()
+                        .map(|&a| slot_words(self.value_ty(a)) as i32)
+                        .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
                     let m = self.cw.methodref(&owner, &name, &descriptor);
                     code.invokespecial(m, aw, slot_words(ret) as i32);
                 }
             },
-            IrExpr::TypeOp { op, arg, type_operand } => {
+            IrExpr::TypeOp {
+                op,
+                arg,
+                type_operand,
+            } => {
                 // A primitive target of `instanceof`/`checkcast` (`x is Int`) tests the boxed wrapper.
                 let jvm_ty = ir_ty_to_jvm(type_operand);
                 let internal = if jvm_ty.is_primitive() {
-                    crate::jvm::jvm_class_map::wrapper_internal(jvm_ty).map(|s| s.to_string()).unwrap_or_else(|| ref_internal(jvm_ty))
+                    crate::jvm::jvm_class_map::wrapper_internal(jvm_ty)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| ref_internal(jvm_ty))
                 } else {
                     ref_internal(jvm_ty)
                 };
@@ -1473,8 +1864,15 @@ impl<'a> Emitter<'a> {
                             _ => "kotlin.Any".to_string(),
                         };
                         code.dup();
-                        code.push_string(&format!("null cannot be cast to non-null type {kotlin_name}"), self.cw);
-                        let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNull", "(Ljava/lang/Object;Ljava/lang/String;)V");
+                        code.push_string(
+                            &format!("null cannot be cast to non-null type {kotlin_name}"),
+                            self.cw,
+                        );
+                        let m = self.cw.methodref(
+                            "kotlin/jvm/internal/Intrinsics",
+                            "checkNotNull",
+                            "(Ljava/lang/Object;Ljava/lang/String;)V",
+                        );
                         code.invokestatic(m, 2, 0);
                         let ci = self.cw.class_ref(&internal);
                         code.checkcast(ci);
@@ -1517,7 +1915,9 @@ impl<'a> Emitter<'a> {
             IrExpr::EnumValueOf { class, arg } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
                 self.emit_value(*arg, code);
-                let m = self.cw.methodref(&fq, "valueOf", &format!("(Ljava/lang/String;)L{fq};"));
+                let m = self
+                    .cw
+                    .methodref(&fq, "valueOf", &format!("(Ljava/lang/String;)L{fq};"));
                 code.invokestatic(m, 1, 1);
             }
             IrExpr::When { branches } => self.emit_when(branches, code),
@@ -1528,7 +1928,10 @@ impl<'a> Emitter<'a> {
                 let mut dead = false;
                 for s in stmts {
                     self.emit(*s, code);
-                    if self.diverges(*s) { dead = true; break; }
+                    if self.diverges(*s) {
+                        dead = true;
+                        break;
+                    }
                 }
                 if !dead {
                     if let Some(v) = value {
@@ -1537,7 +1940,13 @@ impl<'a> Emitter<'a> {
                 }
                 self.slots = saved;
             }
-            IrExpr::Lambda { impl_fn, arity, captures, sam, .. } => {
+            IrExpr::Lambda {
+                impl_fn,
+                arity,
+                captures,
+                sam,
+                ..
+            } => {
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
@@ -1559,21 +1968,35 @@ impl<'a> Emitter<'a> {
                     }
                     None => {
                         let iface = format!("kotlin/jvm/functions/Function{arity}");
-                        let inst_params: Vec<String> = lam_tys.iter().map(|t| boxed_descriptor(*t)).collect();
-                        let inst_desc = format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
-                        (iface, "invoke".to_string(), sam_descriptor(*arity), inst_desc)
+                        let inst_params: Vec<String> =
+                            lam_tys.iter().map(|t| boxed_descriptor(*t)).collect();
+                        let inst_desc =
+                            format!("({}){}", inst_params.concat(), boxed_descriptor(impl_ret));
+                        (
+                            iface,
+                            "invoke".to_string(),
+                            sam_descriptor(*arity),
+                            inst_desc,
+                        )
                     }
                 };
                 let facade = self.facade.clone();
                 let meta = self.cw.method_handle_static(
-                    "java/lang/invoke/LambdaMetafactory", "metafactory", LMF_METAFACTORY_DESC);
+                    "java/lang/invoke/LambdaMetafactory",
+                    "metafactory",
+                    LMF_METAFACTORY_DESC,
+                );
                 let sam_mt = self.cw.method_type(&sam_desc);
-                let impl_mh = self.cw.method_handle_static(&facade, &impl_name, &impl_desc);
+                let impl_mh = self
+                    .cw
+                    .method_handle_static(&facade, &impl_name, &impl_desc);
                 let inst_mt = self.cw.method_type(&inst_desc);
                 let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
                 // The `invokedynamic` takes the captured values and yields the interface instance.
                 let cap_descs: String = cap_tys.iter().map(|t| t.descriptor()).collect();
-                let indy = self.cw.invoke_dynamic(bsm, &sam_method, &format!("({cap_descs})L{iface};"));
+                let indy =
+                    self.cw
+                        .invoke_dynamic(bsm, &sam_method, &format!("({cap_descs})L{iface};"));
                 let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 for &c in captures {
                     self.emit_value(c, code);
@@ -1587,14 +2010,21 @@ impl<'a> Emitter<'a> {
             IrExpr::NotNullAssert { operand } => {
                 self.emit_value(*operand, code);
                 code.dup();
-                let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "checkNotNull", "(Ljava/lang/Object;)V");
+                let m = self.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "checkNotNull",
+                    "(Ljava/lang/Object;)V",
+                );
                 code.invokestatic(m, 1, 0);
             }
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
-            IrExpr::Vararg { element_type, elements } => {
+            IrExpr::Vararg {
+                element_type,
+                elements,
+            } => {
                 let et = ir_ty_to_jvm(element_type);
                 let elements = elements.clone();
                 code.push_int(elements.len() as i32, self.cw);
@@ -1622,18 +2052,30 @@ impl<'a> Emitter<'a> {
                     code.anewarray(ci);
                 }
             }
-            IrExpr::Try { body, catches, finally, result } => {
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                result,
+            } => {
                 let catches = catches.clone();
                 let result = result.clone();
                 self.emit_try(*body, &catches, *finally, &result, code);
             }
-            IrExpr::NewExternal { internal, ctor_desc, args } => {
+            IrExpr::NewExternal {
+                internal,
+                ctor_desc,
+                args,
+            } => {
                 let owner = internal.clone();
                 let desc = ctor_desc.clone();
                 let args = args.clone();
                 // Arguments were coerced to the constructor's parameter types in lowering, so each
                 // argument's `value_ty` is its parameter — the descriptor's argument-word count.
-                let aw: i32 = args.iter().map(|&a| slot_words(self.value_ty(a)) as i32).sum();
+                let aw: i32 = args
+                    .iter()
+                    .map(|&a| slot_words(self.value_ty(a)) as i32)
+                    .sum();
                 if args.iter().any(|&a| self.records_frame(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack (its merge frame
                     // would omit them) — evaluate args into temps first, then build.
@@ -1641,8 +2083,12 @@ impl<'a> Emitter<'a> {
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
-                    for &(slot, t, _) in &temps { load(t, slot, code); }
-                    for &(_, _, key) in &temps { self.slots.remove(&key); }
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
                     let m = self.cw.methodref(&owner, "<init>", &desc);
                     code.invokespecial(m, aw, 0);
                 } else {
@@ -1668,8 +2114,12 @@ impl<'a> Emitter<'a> {
                     let m = self.cw.methodref(cls, "<init>", "()V");
                     code.invokespecial(m, 0, 0);
                     code.dup();
-                    for &(slot, t, _) in &temps { load(t, slot, code); }
-                    for &(_, _, key) in &temps { self.slots.remove(&key); }
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
                 } else {
                     let ci = self.cw.class_ref(cls);
                     code.new_obj(ci);
@@ -1694,7 +2144,11 @@ impl<'a> Emitter<'a> {
                     code.checkcast(cc);
                 }
             }
-            IrExpr::RefSet { holder, elem, value } => {
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => {
                 self.emit_value(*holder, code);
                 self.emit_value(*value, code);
                 let (cls, fdesc) = ref_class(elem);
@@ -1727,17 +2181,34 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 let iface = format!("kotlin/jvm/functions/Function{n}");
-                let m = self.cw.interface_methodref(&iface, "invoke", &sam_descriptor(n as u8));
+                let m = self
+                    .cw
+                    .interface_methodref(&iface, "invoke", &sam_descriptor(n as u8));
                 code.invokeinterface(m, n as i32, 1);
                 // The interface returns `Object`; cast/unbox to the function's declared return type.
                 let rt = ir_ty_to_jvm(ret);
                 match rt {
-                    Ty::Int | Ty::Long | Ty::Double | Ty::Float | Ty::Boolean | Ty::Char
-                    | Ty::Byte | Ty::Short => self.unbox_to(rt, code),
+                    Ty::Int
+                    | Ty::Long
+                    | Ty::Double
+                    | Ty::Float
+                    | Ty::Boolean
+                    | Ty::Char
+                    | Ty::Byte
+                    | Ty::Short => self.unbox_to(rt, code),
                     Ty::Unit | Ty::Nothing => code.pop(),
-                    Ty::String => { let ci = self.cw.class_ref("java/lang/String"); code.checkcast(ci); }
-                    Ty::Obj(internal, _) => { let ci = self.cw.class_ref(internal); code.checkcast(ci); }
-                    Ty::Array(_) => { let ci = self.cw.class_ref(&rt.descriptor()); code.checkcast(ci); }
+                    Ty::String => {
+                        let ci = self.cw.class_ref("java/lang/String");
+                        code.checkcast(ci);
+                    }
+                    Ty::Obj(internal, _) => {
+                        let ci = self.cw.class_ref(internal);
+                        code.checkcast(ci);
+                    }
+                    Ty::Array(_) => {
+                        let ci = self.cw.class_ref(&rt.descriptor());
+                        code.checkcast(ci);
+                    }
                     _ => {}
                 }
             }
@@ -1745,11 +2216,20 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_intrinsic(&mut self, fq: &str, recv: &Option<u32>, args: &[u32], code: &mut CodeBuilder) {
+    fn emit_intrinsic(
+        &mut self,
+        fq: &str,
+        recv: &Option<u32>,
+        args: &[u32],
+        code: &mut CodeBuilder,
+    ) {
         match fq {
             // Static numeric helpers used by synthesized data-class equals/hashCode.
-            "java/lang/Double.hashCode" | "java/lang/Long.hashCode" | "java/lang/Float.hashCode"
-            | "java/lang/Boolean.hashCode" | "java/util/Objects.hashCode" => {
+            "java/lang/Double.hashCode"
+            | "java/lang/Long.hashCode"
+            | "java/lang/Float.hashCode"
+            | "java/lang/Boolean.hashCode"
+            | "java/util/Objects.hashCode" => {
                 self.emit_value(args[0], code);
                 let (cls, d) = match fq {
                     "java/lang/Double.hashCode" => ("java/lang/Double", "(D)I"),
@@ -1765,7 +2245,11 @@ impl<'a> Emitter<'a> {
             "java/lang/Double.compare" | "java/lang/Float.compare" => {
                 self.emit_value(args[0], code);
                 self.emit_value(args[1], code);
-                let (cls, d, aw) = if fq == "java/lang/Double.compare" { ("java/lang/Double", "(DD)I", 4) } else { ("java/lang/Float", "(FF)I", 2) };
+                let (cls, d, aw) = if fq == "java/lang/Double.compare" {
+                    ("java/lang/Double", "(DD)I", 4)
+                } else {
+                    ("java/lang/Float", "(FF)I", 2)
+                };
                 let m = self.cw.methodref(cls, "compare", d);
                 code.invokestatic(m, aw, 1);
             }
@@ -1779,7 +2263,9 @@ impl<'a> Emitter<'a> {
                     let temps = self.spill_to_temps(&[recv, arg], code);
                     code.new_obj(sb);
                     code.dup();
-                    let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                    let init = self
+                        .cw
+                        .methodref("java/lang/StringBuilder", "<init>", "()V");
                     code.invokespecial(init, 0, 0);
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
@@ -1791,12 +2277,18 @@ impl<'a> Emitter<'a> {
                 } else {
                     code.new_obj(sb);
                     code.dup();
-                    let init = self.cw.methodref("java/lang/StringBuilder", "<init>", "()V");
+                    let init = self
+                        .cw
+                        .methodref("java/lang/StringBuilder", "<init>", "()V");
                     code.invokespecial(init, 0, 0);
                     self.append(recv, code);
                     self.append(arg, code);
                 }
-                let ts = self.cw.methodref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+                let ts = self.cw.methodref(
+                    "java/lang/StringBuilder",
+                    "toString",
+                    "()Ljava/lang/String;",
+                );
                 code.invokevirtual(ts, 0, 1);
             }
             // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()I` / `Enum.name()String`.
@@ -1807,7 +2299,9 @@ impl<'a> Emitter<'a> {
             }
             "java/lang/Enum.name" => {
                 self.emit_value(recv.unwrap(), code);
-                let m = self.cw.methodref("java/lang/Enum", "name", "()Ljava/lang/String;");
+                let m = self
+                    .cw
+                    .methodref("java/lang/Enum", "name", "()Ljava/lang/String;");
                 code.invokevirtual(m, 0, 1);
             }
             // `s.length` → `String.length()`.
@@ -1913,27 +2407,47 @@ impl<'a> Emitter<'a> {
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
                     || self.records_frame(*lhs) || self.records_frame(*rhs)
             }
-            IrExpr::Call { dispatch_receiver, args, .. } =>
-                dispatch_receiver.map_or(false, |r| self.records_frame(r)) || args.iter().any(|&a| self.records_frame(a)),
-            IrExpr::MethodCall { receiver, args, .. } =>
-                self.records_frame(*receiver) || args.iter().any(|a| a.map_or(false, |x| self.records_frame(x))),
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => {
+                dispatch_receiver.map_or(false, |r| self.records_frame(r))
+                    || args.iter().any(|&a| self.records_frame(a))
+            }
+            IrExpr::MethodCall { receiver, args, .. } => {
+                self.records_frame(*receiver)
+                    || args
+                        .iter()
+                        .any(|a| a.map_or(false, |x| self.records_frame(x)))
+            }
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::GetField { receiver, .. } => self.records_frame(*receiver),
-            IrExpr::SetField { receiver, value, .. } => self.records_frame(*receiver) || self.records_frame(*value),
-            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => self.records_frame(*value),
-            IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => self.records_frame(*arg),
+            IrExpr::SetField {
+                receiver, value, ..
+            } => self.records_frame(*receiver) || self.records_frame(*value),
+            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
+                self.records_frame(*value)
+            }
+            IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
+                self.records_frame(*arg)
+            }
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
-            IrExpr::RefSet { holder, value, .. } => self.records_frame(*holder) || self.records_frame(*value),
+            IrExpr::RefSet { holder, value, .. } => {
+                self.records_frame(*holder) || self.records_frame(*value)
+            }
             IrExpr::RefNew { init, .. } => self.records_frame(*init),
             IrExpr::Throw { operand } => self.records_frame(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
             IrExpr::NewArray { size, .. } => self.records_frame(*size),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
-            IrExpr::Block { stmts, value } =>
-                stmts.iter().any(|&s| self.records_frame(s)) || value.map_or(false, |v| self.records_frame(v)),
+            IrExpr::Block { stmts, value } => {
+                stmts.iter().any(|&s| self.records_frame(s))
+                    || value.map_or(false, |v| self.records_frame(v))
+            }
             _ => false, // Const, GetValue, GetStatic, EnumEntry, EnumValues — no frames
         }
     }
@@ -1944,10 +2458,16 @@ impl<'a> Emitter<'a> {
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
-            for &(slot, t, _) in &temps { load(t, slot, code); }
-            for &(_, _, key) in &temps { self.slots.remove(&key); }
+            for &(slot, t, _) in &temps {
+                load(t, slot, code);
+            }
+            for &(_, _, key) in &temps {
+                self.slots.remove(&key);
+            }
         } else {
-            for &o in ops { self.emit_value(o, code); }
+            for &o in ops {
+                self.emit_value(o, code);
+            }
         }
     }
 
@@ -1980,10 +2500,38 @@ impl<'a> Emitter<'a> {
                 // across the rhs's merge frame (`VerifyError: Inconsistent stackmap frames`).
                 self.emit_operands(&[lhs, rhs], code);
                 match lt {
-                    Ty::Long => match op { Add => code.ladd(), Sub => code.lsub(), Mul => code.lmul(), Div => code.ldiv(), Rem => code.lrem(), _ => unreachable!() },
-                    Ty::Double => match op { Add => code.dadd(), Sub => code.dsub(), Mul => code.dmul(), Div => code.ddiv(), Rem => code.drem(), _ => unreachable!() },
-                    Ty::Float => match op { Add => code.fadd(), Sub => code.fsub(), Mul => code.fmul(), Div => code.fdiv(), Rem => code.frem(), _ => unreachable!() },
-                    _ => match op { Add => code.iadd(), Sub => code.isub(), Mul => code.imul(), Div => code.idiv(), Rem => code.irem(), _ => unreachable!() },
+                    Ty::Long => match op {
+                        Add => code.ladd(),
+                        Sub => code.lsub(),
+                        Mul => code.lmul(),
+                        Div => code.ldiv(),
+                        Rem => code.lrem(),
+                        _ => unreachable!(),
+                    },
+                    Ty::Double => match op {
+                        Add => code.dadd(),
+                        Sub => code.dsub(),
+                        Mul => code.dmul(),
+                        Div => code.ddiv(),
+                        Rem => code.drem(),
+                        _ => unreachable!(),
+                    },
+                    Ty::Float => match op {
+                        Add => code.fadd(),
+                        Sub => code.fsub(),
+                        Mul => code.fmul(),
+                        Div => code.fdiv(),
+                        Rem => code.frem(),
+                        _ => unreachable!(),
+                    },
+                    _ => match op {
+                        Add => code.iadd(),
+                        Sub => code.isub(),
+                        Mul => code.imul(),
+                        Div => code.idiv(),
+                        Rem => code.irem(),
+                        _ => unreachable!(),
+                    },
                 }
             }
             And | Or => {
@@ -2000,21 +2548,45 @@ impl<'a> Emitter<'a> {
                 code.istore(tmp);
                 self.emit_value(rhs, code);
                 code.iload(tmp);
-                if op == And { code.iand() } else { code.ior() }
+                if op == And {
+                    code.iand()
+                } else {
+                    code.ior()
+                }
                 self.slots.remove(&key);
             }
             BitAnd | BitOr | BitXor => {
                 self.emit_operands(&[lhs, rhs], code);
                 match lt {
-                    Ty::Long => match op { BitAnd => code.land(), BitOr => code.lor(), BitXor => code.lxor(), _ => unreachable!() },
-                    _ => match op { BitAnd => code.iand(), BitOr => code.ior(), BitXor => code.ixor(), _ => unreachable!() },
+                    Ty::Long => match op {
+                        BitAnd => code.land(),
+                        BitOr => code.lor(),
+                        BitXor => code.lxor(),
+                        _ => unreachable!(),
+                    },
+                    _ => match op {
+                        BitAnd => code.iand(),
+                        BitOr => code.ior(),
+                        BitXor => code.ixor(),
+                        _ => unreachable!(),
+                    },
                 }
             }
             Shl | Shr | Ushr => {
                 self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
                 match lt {
-                    Ty::Long => match op { Shl => code.lshl(), Shr => code.lshr(), Ushr => code.lushr(), _ => unreachable!() },
-                    _ => match op { Shl => code.ishl(), Shr => code.ishr(), Ushr => code.iushr(), _ => unreachable!() },
+                    Ty::Long => match op {
+                        Shl => code.lshl(),
+                        Shr => code.lshr(),
+                        Ushr => code.lushr(),
+                        _ => unreachable!(),
+                    },
+                    _ => match op {
+                        Shl => code.ishl(),
+                        Shr => code.ishr(),
+                        Ushr => code.iushr(),
+                        _ => unreachable!(),
+                    },
                 }
             }
             Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_compare(op, lhs, rhs, code),
@@ -2027,12 +2599,19 @@ impl<'a> Emitter<'a> {
         // directly with `if_acmp*` (never the structural `Intrinsics.areEqual` the `Eq`/`Ne` reference
         // path uses below). On *primitive* operands Kotlin's `===` is just value `==`, so those fall
         // through to the ordinary numeric comparison after remapping to `Eq`/`Ne`.
-        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
+            && lt.is_reference()
+            && self.value_ty(rhs).is_reference()
+        {
             self.emit_operands(&[lhs, rhs], code);
             let t = code.new_label();
             let end = code.new_label();
             self.frame(t, vec![], code);
-            if op == IrBinOp::RefEq { code.if_acmpeq(t) } else { code.if_acmpne(t) }
+            if op == IrBinOp::RefEq {
+                code.if_acmpeq(t)
+            } else {
+                code.if_acmpne(t)
+            }
             code.push_int(0, self.cw);
             self.frame(end, vec![VerifType::Integer], code);
             code.goto(end);
@@ -2041,7 +2620,11 @@ impl<'a> Emitter<'a> {
             code.bind(end);
             return;
         }
-        let op = match op { IrBinOp::RefEq => IrBinOp::Eq, IrBinOp::RefNe => IrBinOp::Ne, o => o };
+        let op = match op {
+            IrBinOp::RefEq => IrBinOp::Eq,
+            IrBinOp::RefNe => IrBinOp::Ne,
+            o => o,
+        };
         // `x == null` / `x != null`: compare against null directly with `ifnull`/`ifnonnull` (kotlinc's
         // bytecode), regardless of the operand's static value type. `Intrinsics.areEqual` below is only
         // for two reference operands neither of which is the `null` literal — and a plain `if_icmp*` on
@@ -2055,7 +2638,11 @@ impl<'a> Emitter<'a> {
             let t = code.new_label();
             let end = code.new_label();
             self.frame(t, vec![], code);
-            if op == IrBinOp::Eq { code.ifnull(t) } else { code.ifnonnull(t) }
+            if op == IrBinOp::Eq {
+                code.ifnull(t)
+            } else {
+                code.ifnonnull(t)
+            }
             code.push_int(0, self.cw);
             self.frame(end, vec![VerifType::Integer], code);
             code.goto(end);
@@ -2068,10 +2655,17 @@ impl<'a> Emitter<'a> {
         // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
         // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
         // `if_icmp*`/3-way-compare path below.
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+            && lt.is_reference()
+            && self.value_ty(rhs).is_reference()
+        {
             // Spill if rhs is branchy (`x == when{…}`) so lhs isn't live across its merge frames.
             self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref("kotlin/jvm/internal/Intrinsics", "areEqual", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+            let m = self.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "areEqual",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+            );
             code.invokestatic(m, 2, 1);
             if op == IrBinOp::Ne {
                 code.push_int(1, self.cw);
@@ -2082,9 +2676,18 @@ impl<'a> Emitter<'a> {
         self.emit_operands(&[lhs, rhs], code);
         // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`.
         match lt {
-            Ty::Long => { code.lcmp(); code.push_int(0, self.cw); }
-            Ty::Double => { code.dcmpg(); code.push_int(0, self.cw); }
-            Ty::Float => { code.fcmpg(); code.push_int(0, self.cw); }
+            Ty::Long => {
+                code.lcmp();
+                code.push_int(0, self.cw);
+            }
+            Ty::Double => {
+                code.dcmpg();
+                code.push_int(0, self.cw);
+            }
+            Ty::Float => {
+                code.fcmpg();
+                code.push_int(0, self.cw);
+            }
             _ => {}
         }
         let t = code.new_label();
@@ -2113,7 +2716,11 @@ impl<'a> Emitter<'a> {
         // A `when` with no `else`, or one whose value is `Unit`, is a statement: branch values are
         // discarded and nothing reaches the operand stack at `end`.
         let is_stmt = !has_else || self.value_ty_of_when(branches) == Ty::Unit;
-        let result_stack = if is_stmt { vec![] } else { self.verif_stack(self.value_ty_of_when(branches)) };
+        let result_stack = if is_stmt {
+            vec![]
+        } else {
+            self.verif_stack(self.value_ty_of_when(branches))
+        };
         // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
         // no-`else` statement always has the implicit no-match fallthrough.
         let mut end_reachable = !has_else;
@@ -2125,7 +2732,9 @@ impl<'a> Emitter<'a> {
                     self.frame(next, vec![], code);
                     code.ifeq(next);
                     self.emit_value(*body, code);
-                    if is_stmt { discard(self.value_ty(*body), code); }
+                    if is_stmt {
+                        discard(self.value_ty(*body), code);
+                    }
                     if !self.diverges(*body) {
                         // Only a falling-through branch jumps to (and needs a frame at) `end`.
                         self.frame(end, result_stack.clone(), code);
@@ -2136,8 +2745,12 @@ impl<'a> Emitter<'a> {
                 }
                 None => {
                     self.emit_value(*body, code);
-                    if is_stmt { discard(self.value_ty(*body), code); }
-                    if !self.diverges(*body) { end_reachable = true; }
+                    if is_stmt {
+                        discard(self.value_ty(*body), code);
+                    }
+                    if !self.diverges(*body) {
+                        end_reachable = true;
+                    }
                     // The else is last — it falls through to `end` (no goto needed).
                 }
             }
@@ -2155,7 +2768,14 @@ impl<'a> Emitter<'a> {
     /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
     /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
     /// `top` there, since an exception may occur before they are assigned).
-    fn emit_try(&mut self, body: u32, catches: &[crate::ir::IrCatch], finally: Option<u32>, result: &IrType, code: &mut CodeBuilder) {
+    fn emit_try(
+        &mut self,
+        body: u32,
+        catches: &[crate::ir::IrCatch],
+        finally: Option<u32>,
+        result: &IrType,
+        code: &mut CodeBuilder,
+    ) {
         let rt = ir_ty_to_jvm(result);
         let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
         let result_slot = if is_stmt {
@@ -2185,7 +2805,9 @@ impl<'a> Emitter<'a> {
         code.bind(end);
         let mut after_reachable = false;
         if !body_diverges {
-            if let Some(f) = finally { self.emit(f, code); } // `finally` inlined on the normal path
+            if let Some(f) = finally {
+                self.emit(f, code);
+            } // `finally` inlined on the normal path
             if !fin_diverges {
                 code.goto(after);
                 after_reachable = true;
@@ -2212,7 +2834,9 @@ impl<'a> Emitter<'a> {
             }
             self.slots.remove(&c.var);
             if !cbody_diverges {
-                if let Some(f) = finally { self.emit(f, code); } // `finally` inlined after the catch
+                if let Some(f) = finally {
+                    self.emit(f, code);
+                } // `finally` inlined after the catch
                 if !fin_diverges {
                     code.goto(after);
                     after_reachable = true;
@@ -2270,7 +2894,11 @@ impl<'a> Emitter<'a> {
     /// label isn't found (a compilable program always has the labeled loop in scope).
     fn loop_target(&self, label: &Option<String>) -> (Label, Label) {
         let entry = match label {
-            Some(l) => self.loop_stack.iter().rev().find(|(_, _, sl)| sl.as_deref() == Some(l.as_str()))
+            Some(l) => self
+                .loop_stack
+                .iter()
+                .rev()
+                .find(|(_, _, sl)| sl.as_deref() == Some(l.as_str()))
                 .or_else(|| self.loop_stack.last()),
             None => self.loop_stack.last(),
         };
@@ -2281,7 +2909,10 @@ impl<'a> Emitter<'a> {
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         match self.ir.expr(e) {
-            IrExpr::Return(_) | IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
+            IrExpr::Return(_)
+            | IrExpr::Throw { .. }
+            | IrExpr::Break { .. }
+            | IrExpr::Continue { .. } => true,
             IrExpr::Block { stmts, value } => match value {
                 Some(v) => self.diverges(*v),
                 None => stmts.last().map_or(false, |s| self.diverges(*s)),
@@ -2292,7 +2923,12 @@ impl<'a> Emitter<'a> {
             }
             // A `try` diverges if its `finally` diverges, or if the body and every catch diverge (no
             // path falls through to the merge).
-            IrExpr::Try { body, catches, finally, .. } => {
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                ..
+            } => {
                 finally.map_or(false, |f| self.diverges(f))
                     || (self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body)))
             }
@@ -2349,7 +2985,12 @@ impl<'a> Emitter<'a> {
         // The value type comes from a branch that *falls through* — a diverging branch (`else ->
         // return …`/`throw`) contributes nothing to the merge, so its `Unit`/`Nothing` must not make
         // the whole `when` look like a statement.
-        let last = branches.iter().rev().find(|(_, b)| !self.diverges(*b)).map(|(_, b)| self.value_ty(*b)).unwrap_or(Ty::Unit);
+        let last = branches
+            .iter()
+            .rev()
+            .find(|(_, b)| !self.diverges(*b))
+            .map(|(_, b)| self.value_ty(*b))
+            .unwrap_or(Ty::Unit);
         // A `null`/`Nothing` branch carries no concrete type and would verify-type the merge stack as
         // `top`; use a concrete fall-through branch type instead (`null` is assignable to any reference).
         if matches!(last, Ty::Null | Ty::Nothing | Ty::Error) {
@@ -2378,7 +3019,8 @@ impl<'a> Emitter<'a> {
                     _ => None,
                 }
             };
-            let mut names = branches.iter()
+            let mut names = branches
+                .iter()
                 .filter(|(_, b)| !self.diverges(*b))
                 .map(|(_, b)| self.value_ty(*b))
                 .filter(|t| !matches!(t, Ty::Null | Ty::Nothing | Ty::Error))
@@ -2455,38 +3097,67 @@ impl<'a> Emitter<'a> {
                 IrConst::Null => Ty::Null,
             },
             IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
-            IrExpr::GetField { class, index, .. } => ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1),
+            IrExpr::GetField { class, index, .. } => {
+                ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1)
+            }
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
             IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 ir_ty_to_jvm(&self.ir.functions[fid as usize].ret)
             }
-            IrExpr::Call { callee, dispatch_receiver, .. } => match callee {
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                ..
+            } => match callee {
                 Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
-                Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver.map(|r| self.array_elem(r)).unwrap_or(Ty::Error),
-                Callee::External(fq) if prim_array_elem_ty(fq).is_some() => Ty::array(prim_array_elem_ty(fq).unwrap()),
+                Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
+                    .map(|r| self.array_elem(r))
+                    .unwrap_or(Ty::Error),
+                Callee::External(fq) if prim_array_elem_ty(fq).is_some() => {
+                    Ty::array(prim_array_elem_ty(fq).unwrap())
+                }
                 Callee::External(fq) => intrinsic_ret(fq),
-                Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => ty_from_descriptor_ret(descriptor),
+                Callee::Static { descriptor, .. }
+                | Callee::Virtual { descriptor, .. }
+                | Callee::Special { descriptor, .. } => ty_from_descriptor_ret(descriptor),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
-                IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne | IrBinOp::RefEq | IrBinOp::RefNe | IrBinOp::And | IrBinOp::Or => Ty::Boolean,
+                IrBinOp::Lt
+                | IrBinOp::Le
+                | IrBinOp::Gt
+                | IrBinOp::Ge
+                | IrBinOp::Eq
+                | IrBinOp::Ne
+                | IrBinOp::RefEq
+                | IrBinOp::RefNe
+                | IrBinOp::And
+                | IrBinOp::Or => Ty::Boolean,
                 _ => self.value_ty(*lhs),
             },
             IrExpr::When { branches } => self.value_ty_of_when(branches),
-            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),
+            IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => {
+                Ty::obj(&self.ir.classes[*class as usize].fq_name)
+            }
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,
-            IrExpr::EnumValues { class } => Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name)),
+            IrExpr::EnumValues { class } => {
+                Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name))
+            }
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
-            IrExpr::TypeOp { op, type_operand, .. } => match op {
+            IrExpr::TypeOp {
+                op, type_operand, ..
+            } => match op {
                 IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
                 _ => ir_ty_to_jvm(type_operand),
             },
-            IrExpr::Lambda { arity, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")),
+            IrExpr::Lambda { arity, .. } => {
+                Ty::obj(&format!("kotlin/jvm/functions/Function{arity}"))
+            }
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
@@ -2563,7 +3234,11 @@ fn ty_from_field_descriptor(d: &str) -> Ty {
         Some(b'F') => Ty::Float,
         Some(b'D') => Ty::Double,
         Some(b'V') => Ty::Unit,
-        Some(b'L') => Ty::obj(d.strip_prefix('L').and_then(|s| s.strip_suffix(';')).unwrap_or(d)),
+        Some(b'L') => Ty::obj(
+            d.strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or(d),
+        ),
         Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
         _ => Ty::Error,
     }
@@ -2571,16 +3246,34 @@ fn ty_from_field_descriptor(d: &str) -> Ty {
 
 fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
     use Ty::*;
-    if from == to { return; }
-    let wide = |t: Ty| match t { Byte | Short | Char | Int => Int, o => o };
+    if from == to {
+        return;
+    }
+    let wide = |t: Ty| match t {
+        Byte | Short | Char | Int => Int,
+        o => o,
+    };
     match (wide(from), wide(to)) {
-        (Int, Long) => code.i2l(), (Int, Float) => code.i2f(), (Int, Double) => code.i2d(),
-        (Long, Int) => code.l2i(), (Long, Float) => code.l2f(), (Long, Double) => code.l2d(),
-        (Float, Int) => code.f2i(), (Float, Long) => code.f2l(), (Float, Double) => code.f2d(),
-        (Double, Int) => code.d2i(), (Double, Long) => code.d2l(), (Double, Float) => code.d2f(),
+        (Int, Long) => code.i2l(),
+        (Int, Float) => code.i2f(),
+        (Int, Double) => code.i2d(),
+        (Long, Int) => code.l2i(),
+        (Long, Float) => code.l2f(),
+        (Long, Double) => code.l2d(),
+        (Float, Int) => code.f2i(),
+        (Float, Long) => code.f2l(),
+        (Float, Double) => code.f2d(),
+        (Double, Int) => code.d2i(),
+        (Double, Long) => code.d2l(),
+        (Double, Float) => code.d2f(),
         _ => {} // same wide category (e.g. Byte→Int): the value is already correct on the stack
     }
-    match to { Byte => code.i2b(), Short => code.i2s(), Char => code.i2c(), _ => {} }
+    match to {
+        Byte => code.i2b(),
+        Short => code.i2s(),
+        Char => code.i2c(),
+        _ => {}
+    }
 }
 
 fn ref_internal(t: Ty) -> String {
@@ -2638,8 +3331,13 @@ fn prim_array_elem_ty(fq: &str) -> Option<Ty> {
 /// `(opcode, value-words)` for an array element load (`Xaload`).
 fn array_load_op(elem: Ty) -> (u8, i32) {
     match elem {
-        Ty::Int => (0x2e, 1), Ty::Long => (0x2f, 2), Ty::Float => (0x30, 1), Ty::Double => (0x31, 2),
-        Ty::Boolean | Ty::Byte => (0x33, 1), Ty::Char => (0x34, 1), Ty::Short => (0x35, 1),
+        Ty::Int => (0x2e, 1),
+        Ty::Long => (0x2f, 2),
+        Ty::Float => (0x30, 1),
+        Ty::Double => (0x31, 2),
+        Ty::Boolean | Ty::Byte => (0x33, 1),
+        Ty::Char => (0x34, 1),
+        Ty::Short => (0x35, 1),
         _ => (0x32, 1), // aaload
     }
 }
@@ -2652,15 +3350,22 @@ fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
         Ty::Long => code.lconst_0(),
         Ty::Double => code.dconst_0(),
         Ty::Float => code.fconst_0(),
-        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => { code.push_int(0, cw); }
+        Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char => {
+            code.push_int(0, cw);
+        }
         _ => code.aconst_null(),
     }
 }
 
 fn array_store_op(elem: Ty) -> (u8, i32) {
     match elem {
-        Ty::Int => (0x4f, 1), Ty::Long => (0x50, 2), Ty::Float => (0x51, 1), Ty::Double => (0x52, 2),
-        Ty::Boolean | Ty::Byte => (0x54, 1), Ty::Char => (0x55, 1), Ty::Short => (0x56, 1),
+        Ty::Int => (0x4f, 1),
+        Ty::Long => (0x50, 2),
+        Ty::Float => (0x51, 1),
+        Ty::Double => (0x52, 2),
+        Ty::Boolean | Ty::Byte => (0x54, 1),
+        Ty::Char => (0x55, 1),
+        Ty::Short => (0x56, 1),
         _ => (0x53, 1), // aastore
     }
 }
@@ -2668,8 +3373,13 @@ fn array_store_op(elem: Ty) -> (u8, i32) {
 /// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
 fn prim_newarray_atype(elem: Ty) -> u8 {
     match elem {
-        Ty::Boolean => 4, Ty::Char => 5, Ty::Float => 6, Ty::Double => 7,
-        Ty::Byte => 8, Ty::Short => 9, Ty::Long => 11,
+        Ty::Boolean => 4,
+        Ty::Char => 5,
+        Ty::Float => 6,
+        Ty::Double => 7,
+        Ty::Byte => 8,
+        Ty::Short => 9,
+        Ty::Long => 11,
         _ => 10, // int
     }
 }
@@ -2678,7 +3388,9 @@ fn ir_ty_to_jvm(t: &IrType) -> Ty {
     match t {
         IrType::Unit => Ty::Unit,
         IrType::Nothing => Ty::Nothing,
-        IrType::Class { fq_name, type_args, .. } => match fq_name.as_str() {
+        IrType::Class {
+            fq_name, type_args, ..
+        } => match fq_name.as_str() {
             "kotlin/Int" => Ty::Int,
             "kotlin/Long" => Ty::Long,
             "kotlin/Short" => Ty::Short,
@@ -2697,11 +3409,18 @@ fn ir_ty_to_jvm(t: &IrType) -> Ty {
             "kotlin/CharArray" => Ty::array(Ty::Char),
             "kotlin/ByteArray" => Ty::array(Ty::Byte),
             "kotlin/ShortArray" => Ty::array(Ty::Short),
-            "kotlin/Array" => Ty::array(type_args.first().map(ir_ty_to_jvm).unwrap_or(Ty::obj("java/lang/Object"))),
+            "kotlin/Array" => Ty::array(
+                type_args
+                    .first()
+                    .map(ir_ty_to_jvm)
+                    .unwrap_or(Ty::obj("java/lang/Object")),
+            ),
             _ => Ty::obj(fq_name),
         },
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`.
-        IrType::Function { params, .. } => Ty::obj(&format!("kotlin/jvm/functions/Function{}", params.len())),
+        IrType::Function { params, .. } => {
+            Ty::obj(&format!("kotlin/jvm/functions/Function{}", params.len()))
+        }
         _ => Ty::Error,
     }
 }

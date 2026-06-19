@@ -4,6 +4,17 @@
   <img src="docs/assets/krusty-mascot.webp" alt="krusty mascot" width="320">
 </p>
 
+<p align="center">
+  <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2FGIST_ID%2Fraw%2Fkrusty-kotlin.json" alt="Supported Kotlin">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2FGIST_ID%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance">
+</p>
+
+<!-- Conformance badge = share of the Kotlin `codegen/box` suite whose `box()` returns "OK" on
+     krusty-emitted bytecode. The master build recomputes it and writes the badge JSON to a Gist
+     (no repo commit) — see .github/workflows/conformance.yml. Replace GIST_ID above with the gist
+     once created (and set the GIST_TOKEN secret + CONFORMANCE_GIST_ID variable). -->
+
 > *"Hey hey! It compiles Kotlin, kids!"*
 
 A **memory-lean Kotlin → JVM bytecode compiler** written in Rust, built as a proof of concept for a

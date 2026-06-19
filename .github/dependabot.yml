@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep GitHub Actions current (supply-chain): alerts + PRs when a pinned action
+  # publishes a new version. Pairs with the workflows; review/merge to advance pins.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Rust dependencies.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly

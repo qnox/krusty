@@ -35,7 +35,10 @@ fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
         VerifType::Double => out.push(3),
         VerifType::Long => out.push(4),
         VerifType::Null => out.push(5),
-        VerifType::Object(idx) => { out.push(7); u2(out, *idx); }
+        VerifType::Object(idx) => {
+            out.push(7);
+            u2(out, *idx);
+        }
     }
 }
 
@@ -43,7 +46,7 @@ fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
 enum Const {
     Utf8(String),
     Integer(i32),
-    Float(u32),  // bit pattern (f32 isn't Hash/Eq)
+    Float(u32), // bit pattern (f32 isn't Hash/Eq)
     Long(i64),
     Double(u64), // bit pattern (f64 isn't Hash/Eq)
     Class(u16),
@@ -292,19 +295,39 @@ impl ClassWriter {
     pub fn add_abstract_method(&mut self, access: u16, name: &str, desc: &str) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
-        self.methods.push(MethodInfo { access: access | ACC_ABSTRACT, name: n, desc: d, max_stack: 0, max_locals: 0, code: None, exceptions: Vec::new(), stackmap: None });
+        self.methods.push(MethodInfo {
+            access: access | ACC_ABSTRACT,
+            name: n,
+            desc: d,
+            max_stack: 0,
+            max_locals: 0,
+            code: None,
+            exceptions: Vec::new(),
+            stackmap: None,
+        });
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
     pub fn add_field(&mut self, access: u16, name: &str, desc: &str) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
-        self.fields.push(FieldInfo { access, name: n, desc: d });
+        self.fields.push(FieldInfo {
+            access,
+            name: n,
+            desc: d,
+        });
     }
 
     /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
     /// `d1`/`d2` are the encoded protobuf payload + string table.
-    pub fn set_kotlin_metadata(&mut self, k: i32, mv: &[i32], xi: i32, d1: &[String], d2: &[String]) {
+    pub fn set_kotlin_metadata(
+        &mut self,
+        k: i32,
+        mv: &[i32],
+        xi: i32,
+        d1: &[String],
+        d2: &[String],
+    ) {
         let anno_type = self.cp.utf8("Lkotlin/Metadata;");
         let n_mv = self.cp.utf8("mv");
         let n_k = self.cp.utf8("k");
@@ -393,7 +416,11 @@ impl ClassWriter {
     /// Register a `BootstrapMethods` entry — `method_handle` is a `MethodHandle` cp index, `args` are
     /// the static-argument cp indices. Returns the `bootstrap_method_attr_index` (deduped).
     pub fn add_bootstrap(&mut self, method_handle: u16, args: Vec<u16>) -> u16 {
-        if let Some(i) = self.bootstrap_methods.iter().position(|e| e.0 == method_handle && e.1 == args) {
+        if let Some(i) = self
+            .bootstrap_methods
+            .iter()
+            .position(|e| e.0 == method_handle && e.1 == args)
+        {
             return i as u16;
         }
         self.bootstrap_methods.push((method_handle, args));
@@ -483,7 +510,8 @@ impl ClassWriter {
                     };
                     let num_code_attrs: u16 = if m.stackmap.is_some() { 1 } else { 0 };
                     // Code attr body: max_stack(2) + max_locals(2) + code_len(4) + code + exception_count(2) + exceptions + code_attrs_count(2) + [stackmap]
-                    let attr_len = 2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2 + sm_overhead;
+                    let attr_len =
+                        2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2 + sm_overhead;
                     u4(&mut out, attr_len as u32);
                     u2(&mut out, m.max_stack);
                     u2(&mut out, m.max_locals);
@@ -532,7 +560,7 @@ pub struct CodeBuilder {
     pub max_stack: u16,
     pub max_locals: u16,
     cur_stack: i32,
-    labels: Vec<usize>,        // label id -> bound byte offset (usize::MAX until bound)
+    labels: Vec<usize>, // label id -> bound byte offset (usize::MAX until bound)
     fixups: Vec<(usize, u32)>, // (operand position, label id) to patch in link()
     /// Exception-table entries by label: `(start, end, handler, catch_type)`, resolved in `link()`.
     exceptions: Vec<(Label, Label, Label, u16)>,
@@ -567,7 +595,12 @@ impl CodeBuilder {
     /// Record the frame at `label` (given locals + stack) if not already recorded.
     /// First registration wins — early callers capture the "outer" scope before inner vars appear.
     /// `stack` is the operand-stack verification types at this label (empty in most cases).
-    pub fn add_frame_if_new(&mut self, label: Label, locals: Vec<VerifType>, stack: Vec<VerifType>) {
+    pub fn add_frame_if_new(
+        &mut self,
+        label: Label,
+        locals: Vec<VerifType>,
+        stack: Vec<VerifType>,
+    ) {
         let lid = label.0;
         if !self.frames.iter().any(|(id, _, _)| *id == lid) {
             self.frames.push((lid, locals, stack));
@@ -582,7 +615,9 @@ impl CodeBuilder {
         }
         // Resolve label ids to bytecode offsets and sort by offset.
         let code_len = self.bytes.len();
-        let mut entries: Vec<(u32, &Vec<VerifType>, &Vec<VerifType>)> = self.frames.iter()
+        let mut entries: Vec<(u32, &Vec<VerifType>, &Vec<VerifType>)> = self
+            .frames
+            .iter()
             .map(|(lid, locals, stack)| (self.labels[*lid as usize] as u32, locals, stack))
             // Drop frames whose offset is outside the bytecode (e.g. an `end` label bound one past
             // the last `ireturn`/`athrow` when every branch of a `when` diverges). The JVM verifier
@@ -600,7 +635,11 @@ impl CodeBuilder {
         // Offset deltas: the first entry's delta = offset; subsequent = offset - prev_offset - 1.
         let mut prev: i64 = -1;
         for (offset, locals, stack) in entries {
-            let delta = if prev < 0 { offset } else { offset - prev as u32 - 1 };
+            let delta = if prev < 0 {
+                offset
+            } else {
+                offset - prev as u32 - 1
+            };
             prev = offset as i64;
             body.push(255u8); // full_frame
             u2(&mut body, delta as u16);
@@ -629,7 +668,12 @@ impl CodeBuilder {
         self.exceptions
             .iter()
             .map(|&(s, e, h, t)| {
-                (self.labels[s.0 as usize] as u16, self.labels[e.0 as usize] as u16, self.labels[h.0 as usize] as u16, t)
+                (
+                    self.labels[s.0 as usize] as u16,
+                    self.labels[e.0 as usize] as u16,
+                    self.labels[h.0 as usize] as u16,
+                    t,
+                )
             })
             .filter(|&(start, end, _, _)| start < end)
             .collect()
@@ -644,7 +688,14 @@ impl CodeBuilder {
     /// at the call site. The arguments are already on the stack (`arg_words` slots); the body's prologue
     /// stores them into locals `base..top_local`, runs, and leaves `ret_words` slots. `body_stack` is the
     /// body's own peak operand height. No StackMapTable frame is recorded (the bytes contain no branch).
-    pub fn splice_inline(&mut self, bytes: &[u8], body_stack: u16, top_local: u16, arg_words: i32, ret_words: i32) {
+    pub fn splice_inline(
+        &mut self,
+        bytes: &[u8],
+        body_stack: u16,
+        top_local: u16,
+        arg_words: i32,
+        ret_words: i32,
+    ) {
         let baseline = self.cur_stack - arg_words; // stack height once the prologue consumes the args
         if top_local > self.max_locals {
             self.max_locals = top_local;
@@ -691,23 +742,57 @@ impl CodeBuilder {
         self.bytes.extend_from_slice(&[0, 0]);
         self.adjust(delta);
     }
-    pub fn goto(&mut self, l: Label) { self.branch(0xa7, l, 0); }
-    pub fn ifeq(&mut self, l: Label) { self.branch(0x99, l, -1); }
-    pub fn ifne(&mut self, l: Label) { self.branch(0x9a, l, -1); }
-    pub fn if_icmpeq(&mut self, l: Label) { self.branch(0x9f, l, -2); }
-    pub fn if_icmpne(&mut self, l: Label) { self.branch(0xa0, l, -2); }
-    pub fn if_icmplt(&mut self, l: Label) { self.branch(0xa1, l, -2); }
-    pub fn if_icmpge(&mut self, l: Label) { self.branch(0xa2, l, -2); }
-    pub fn if_icmpgt(&mut self, l: Label) { self.branch(0xa3, l, -2); }
-    pub fn if_icmple(&mut self, l: Label) { self.branch(0xa4, l, -2); }
-    pub fn lcmp(&mut self) { self.op(0x94, -3); }
-    pub fn dcmpg(&mut self) { self.op(0x98, -3); }
-    pub fn ifnull(&mut self, l: Label) { self.branch(0xc6, l, -1); }
-    pub fn ifnonnull(&mut self, l: Label) { self.branch(0xc7, l, -1); }
-    pub fn iflt(&mut self, l: Label) { self.branch(0x9b, l, -1); }
-    pub fn ifge(&mut self, l: Label) { self.branch(0x9c, l, -1); }
-    pub fn ifgt(&mut self, l: Label) { self.branch(0x9d, l, -1); }
-    pub fn ifle(&mut self, l: Label) { self.branch(0x9e, l, -1); }
+    pub fn goto(&mut self, l: Label) {
+        self.branch(0xa7, l, 0);
+    }
+    pub fn ifeq(&mut self, l: Label) {
+        self.branch(0x99, l, -1);
+    }
+    pub fn ifne(&mut self, l: Label) {
+        self.branch(0x9a, l, -1);
+    }
+    pub fn if_icmpeq(&mut self, l: Label) {
+        self.branch(0x9f, l, -2);
+    }
+    pub fn if_icmpne(&mut self, l: Label) {
+        self.branch(0xa0, l, -2);
+    }
+    pub fn if_icmplt(&mut self, l: Label) {
+        self.branch(0xa1, l, -2);
+    }
+    pub fn if_icmpge(&mut self, l: Label) {
+        self.branch(0xa2, l, -2);
+    }
+    pub fn if_icmpgt(&mut self, l: Label) {
+        self.branch(0xa3, l, -2);
+    }
+    pub fn if_icmple(&mut self, l: Label) {
+        self.branch(0xa4, l, -2);
+    }
+    pub fn lcmp(&mut self) {
+        self.op(0x94, -3);
+    }
+    pub fn dcmpg(&mut self) {
+        self.op(0x98, -3);
+    }
+    pub fn ifnull(&mut self, l: Label) {
+        self.branch(0xc6, l, -1);
+    }
+    pub fn ifnonnull(&mut self, l: Label) {
+        self.branch(0xc7, l, -1);
+    }
+    pub fn iflt(&mut self, l: Label) {
+        self.branch(0x9b, l, -1);
+    }
+    pub fn ifge(&mut self, l: Label) {
+        self.branch(0x9c, l, -1);
+    }
+    pub fn ifgt(&mut self, l: Label) {
+        self.branch(0x9d, l, -1);
+    }
+    pub fn ifle(&mut self, l: Label) {
+        self.branch(0x9e, l, -1);
+    }
 
     /// Resolve all branch offsets. Call once after the method body is built.
     pub fn link(&mut self) {
@@ -809,8 +894,8 @@ impl CodeBuilder {
     pub fn push_int(&mut self, v: i32, cw: &mut ClassWriter) {
         match v {
             -1..=5 => self.op((0x03i16 + v as i16) as u8, 1), // iconst_m1..iconst_5 = 0x02..0x08
-            -128..=127 => self.op_u1(0x10, v as u8, 1),                // bipush
-            -32768..=32767 => self.op_u2(0x11, v as u16, 1),           // sipush
+            -128..=127 => self.op_u1(0x10, v as u8, 1),       // bipush
+            -32768..=32767 => self.op_u2(0x11, v as u16, 1),  // sipush
             _ => {
                 let i = cw.const_int(v);
                 self.ldc(i);
@@ -853,46 +938,120 @@ impl CodeBuilder {
     }
 
     // arithmetic (pop 2 push 1 => -1 for int/ref words; long/double pop 4 push 2 => -2)
-    pub fn iadd(&mut self) { self.op(0x60, -1); }
-    pub fn isub(&mut self) { self.op(0x64, -1); }
-    pub fn imul(&mut self) { self.op(0x68, -1); }
-    pub fn idiv(&mut self) { self.op(0x6c, -1); }
-    pub fn irem(&mut self) { self.op(0x70, -1); }
-    pub fn ineg(&mut self) { self.op(0x74, 0); }
-    pub fn ladd(&mut self) { self.op(0x61, -2); }
-    pub fn lsub(&mut self) { self.op(0x65, -2); }
-    pub fn lmul(&mut self) { self.op(0x69, -2); }
-    pub fn ldiv(&mut self) { self.op(0x6d, -2); }
-    pub fn lrem(&mut self) { self.op(0x71, -2); }
-    pub fn lneg(&mut self) { self.op(0x75, 0); }
-    pub fn dadd(&mut self) { self.op(0x63, -2); }
-    pub fn dsub(&mut self) { self.op(0x67, -2); }
-    pub fn dmul(&mut self) { self.op(0x6b, -2); }
-    pub fn ddiv(&mut self) { self.op(0x6f, -2); }
-    pub fn drem(&mut self) { self.op(0x73, -2); }
-    pub fn dneg(&mut self) { self.op(0x77, 0); }
-    pub fn fadd(&mut self) { self.op(0x62, -1); }
-    pub fn fsub(&mut self) { self.op(0x66, -1); }
-    pub fn fmul(&mut self) { self.op(0x6a, -1); }
-    pub fn fdiv(&mut self) { self.op(0x6e, -1); }
-    pub fn frem(&mut self) { self.op(0x72, -1); }
-    pub fn fneg(&mut self) { self.op(0x76, 0); }
+    pub fn iadd(&mut self) {
+        self.op(0x60, -1);
+    }
+    pub fn isub(&mut self) {
+        self.op(0x64, -1);
+    }
+    pub fn imul(&mut self) {
+        self.op(0x68, -1);
+    }
+    pub fn idiv(&mut self) {
+        self.op(0x6c, -1);
+    }
+    pub fn irem(&mut self) {
+        self.op(0x70, -1);
+    }
+    pub fn ineg(&mut self) {
+        self.op(0x74, 0);
+    }
+    pub fn ladd(&mut self) {
+        self.op(0x61, -2);
+    }
+    pub fn lsub(&mut self) {
+        self.op(0x65, -2);
+    }
+    pub fn lmul(&mut self) {
+        self.op(0x69, -2);
+    }
+    pub fn ldiv(&mut self) {
+        self.op(0x6d, -2);
+    }
+    pub fn lrem(&mut self) {
+        self.op(0x71, -2);
+    }
+    pub fn lneg(&mut self) {
+        self.op(0x75, 0);
+    }
+    pub fn dadd(&mut self) {
+        self.op(0x63, -2);
+    }
+    pub fn dsub(&mut self) {
+        self.op(0x67, -2);
+    }
+    pub fn dmul(&mut self) {
+        self.op(0x6b, -2);
+    }
+    pub fn ddiv(&mut self) {
+        self.op(0x6f, -2);
+    }
+    pub fn drem(&mut self) {
+        self.op(0x73, -2);
+    }
+    pub fn dneg(&mut self) {
+        self.op(0x77, 0);
+    }
+    pub fn fadd(&mut self) {
+        self.op(0x62, -1);
+    }
+    pub fn fsub(&mut self) {
+        self.op(0x66, -1);
+    }
+    pub fn fmul(&mut self) {
+        self.op(0x6a, -1);
+    }
+    pub fn fdiv(&mut self) {
+        self.op(0x6e, -1);
+    }
+    pub fn frem(&mut self) {
+        self.op(0x72, -1);
+    }
+    pub fn fneg(&mut self) {
+        self.op(0x76, 0);
+    }
     /// `fcmpg`: pops two floats, pushes an int (-1/0/1).
-    pub fn fcmpg(&mut self) { self.op(0x96, -1); }
+    pub fn fcmpg(&mut self) {
+        self.op(0x96, -1);
+    }
 
     // conversions
-    pub fn i2l(&mut self) { self.op(0x85, 1); }
-    pub fn i2d(&mut self) { self.op(0x87, 1); }
-    pub fn l2d(&mut self) { self.op(0x8a, 0); }
-    pub fn i2f(&mut self) { self.op(0x86, 0); }
-    pub fn l2f(&mut self) { self.op(0x89, -1); }
-    pub fn f2d(&mut self) { self.op(0x8d, 1); }
-    pub fn l2i(&mut self) { self.op(0x88, -1); }
-    pub fn f2i(&mut self) { self.op(0x8b, 0); }
-    pub fn f2l(&mut self) { self.op(0x8c, 1); }
-    pub fn d2i(&mut self) { self.op(0x8e, -1); }
-    pub fn d2l(&mut self) { self.op(0x8f, 0); }
-    pub fn d2f(&mut self) { self.op(0x90, -1); }
+    pub fn i2l(&mut self) {
+        self.op(0x85, 1);
+    }
+    pub fn i2d(&mut self) {
+        self.op(0x87, 1);
+    }
+    pub fn l2d(&mut self) {
+        self.op(0x8a, 0);
+    }
+    pub fn i2f(&mut self) {
+        self.op(0x86, 0);
+    }
+    pub fn l2f(&mut self) {
+        self.op(0x89, -1);
+    }
+    pub fn f2d(&mut self) {
+        self.op(0x8d, 1);
+    }
+    pub fn l2i(&mut self) {
+        self.op(0x88, -1);
+    }
+    pub fn f2i(&mut self) {
+        self.op(0x8b, 0);
+    }
+    pub fn f2l(&mut self) {
+        self.op(0x8c, 1);
+    }
+    pub fn d2i(&mut self) {
+        self.op(0x8e, -1);
+    }
+    pub fn d2l(&mut self) {
+        self.op(0x8f, 0);
+    }
+    pub fn d2f(&mut self) {
+        self.op(0x90, -1);
+    }
     /// `iinc index, const` — increment a local int in place (no stack effect).
     pub fn iinc(&mut self, idx: u16, delta: i8) {
         self.bytes.push(0x84);
@@ -900,17 +1059,35 @@ impl CodeBuilder {
         self.bytes.push(delta as u8);
         self.ensure_locals(idx + 1);
     }
-    pub fn i2b(&mut self) { self.op(0x91, 0); }
-    pub fn i2c(&mut self) { self.op(0x92, 0); }
-    pub fn i2s(&mut self) { self.op(0x93, 0); }
+    pub fn i2b(&mut self) {
+        self.op(0x91, 0);
+    }
+    pub fn i2c(&mut self) {
+        self.op(0x92, 0);
+    }
+    pub fn i2s(&mut self) {
+        self.op(0x93, 0);
+    }
 
     // returns
-    pub fn ireturn(&mut self) { self.op(0xac, -1); }
-    pub fn lreturn(&mut self) { self.op(0xad, -2); }
-    pub fn freturn(&mut self) { self.op(0xae, -1); }
-    pub fn dreturn(&mut self) { self.op(0xaf, -2); }
-    pub fn areturn(&mut self) { self.op(0xb0, -1); }
-    pub fn ret_void(&mut self) { self.op(0xb1, 0); }
+    pub fn ireturn(&mut self) {
+        self.op(0xac, -1);
+    }
+    pub fn lreturn(&mut self) {
+        self.op(0xad, -2);
+    }
+    pub fn freturn(&mut self) {
+        self.op(0xae, -1);
+    }
+    pub fn dreturn(&mut self) {
+        self.op(0xaf, -2);
+    }
+    pub fn areturn(&mut self) {
+        self.op(0xb0, -1);
+    }
+    pub fn ret_void(&mut self) {
+        self.op(0xb1, 0);
+    }
 
     // calls / fields. `arg_words`/`ret_words` describe the stack effect from the descriptor.
     pub fn invokestatic(&mut self, methodref: u16, arg_words: i32, ret_words: i32) {
@@ -950,49 +1127,107 @@ impl CodeBuilder {
     pub fn putfield(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb5, fieldref, -(1 + words));
     }
-    pub fn pop(&mut self) { self.op(0x57, -1); }
-    pub fn pop2(&mut self) { self.op(0x58, -2); }
-    pub fn dup(&mut self) { self.op(0x59, 1); }
+    pub fn pop(&mut self) {
+        self.op(0x57, -1);
+    }
+    pub fn pop2(&mut self) {
+        self.op(0x58, -2);
+    }
+    pub fn dup(&mut self) {
+        self.op(0x59, 1);
+    }
 
     // ---- arrays ----
     /// `arraylength`: pops arrayref, pushes int.
-    pub fn arraylength(&mut self) { self.op(0xbe, 0); }
+    pub fn arraylength(&mut self) {
+        self.op(0xbe, 0);
+    }
     /// `newarray <atype>`: pops count, pushes a primitive arrayref. (boolean=4 char=5 float=6
     /// double=7 byte=8 short=9 int=10 long=11)
-    pub fn newarray(&mut self, atype: u8) { self.op_u1(0xbc, atype, 0); }
+    pub fn newarray(&mut self, atype: u8) {
+        self.op_u1(0xbc, atype, 0);
+    }
     /// `anewarray <class>`: pops count, pushes a reference arrayref.
-    pub fn anewarray(&mut self, class_index: u16) { self.op_u2(0xbd, class_index, 0); }
+    pub fn anewarray(&mut self, class_index: u16) {
+        self.op_u2(0xbd, class_index, 0);
+    }
     /// Array load `Xaload`: pops arrayref + index, pushes a value `words` wide.
-    pub fn array_load(&mut self, opcode: u8, words: i32) { self.op(opcode, words - 2); }
+    pub fn array_load(&mut self, opcode: u8, words: i32) {
+        self.op(opcode, words - 2);
+    }
     /// Array store `Xastore`: pops arrayref + index + value (`words` wide).
-    pub fn array_store(&mut self, opcode: u8, words: i32) { self.op(opcode, -(2 + words)); }
-    pub fn ixor(&mut self) { self.op(0x82, -1); }
-    pub fn iand(&mut self) { self.op(0x7e, -1); }
-    pub fn ior(&mut self) { self.op(0x80, -1); }
-    pub fn ishl(&mut self) { self.op(0x78, -1); }
-    pub fn ishr(&mut self) { self.op(0x7a, -1); }
-    pub fn iushr(&mut self) { self.op(0x7c, -1); }
+    pub fn array_store(&mut self, opcode: u8, words: i32) {
+        self.op(opcode, -(2 + words));
+    }
+    pub fn ixor(&mut self) {
+        self.op(0x82, -1);
+    }
+    pub fn iand(&mut self) {
+        self.op(0x7e, -1);
+    }
+    pub fn ior(&mut self) {
+        self.op(0x80, -1);
+    }
+    pub fn ishl(&mut self) {
+        self.op(0x78, -1);
+    }
+    pub fn ishr(&mut self) {
+        self.op(0x7a, -1);
+    }
+    pub fn iushr(&mut self) {
+        self.op(0x7c, -1);
+    }
     // Long bitwise/shift: `and`/`or`/`xor` pop two longs (push one) → -2; shifts take long + int → -1.
-    pub fn land(&mut self) { self.op(0x7f, -2); }
-    pub fn lor(&mut self) { self.op(0x81, -2); }
-    pub fn lxor(&mut self) { self.op(0x83, -2); }
-    pub fn lshl(&mut self) { self.op(0x79, -1); }
-    pub fn lshr(&mut self) { self.op(0x7b, -1); }
-    pub fn lushr(&mut self) { self.op(0x7d, -1); }
-    pub fn aconst_null(&mut self) { self.op(0x01, 1); }
-    pub fn lconst_0(&mut self) { self.op(0x09, 2); }
-    pub fn fconst_0(&mut self) { self.op(0x0b, 1); }
-    pub fn dconst_0(&mut self) { self.op(0x0e, 2); }
-    pub fn athrow(&mut self) { self.op(0xbf, -1); }
+    pub fn land(&mut self) {
+        self.op(0x7f, -2);
+    }
+    pub fn lor(&mut self) {
+        self.op(0x81, -2);
+    }
+    pub fn lxor(&mut self) {
+        self.op(0x83, -2);
+    }
+    pub fn lshl(&mut self) {
+        self.op(0x79, -1);
+    }
+    pub fn lshr(&mut self) {
+        self.op(0x7b, -1);
+    }
+    pub fn lushr(&mut self) {
+        self.op(0x7d, -1);
+    }
+    pub fn aconst_null(&mut self) {
+        self.op(0x01, 1);
+    }
+    pub fn lconst_0(&mut self) {
+        self.op(0x09, 2);
+    }
+    pub fn fconst_0(&mut self) {
+        self.op(0x0b, 1);
+    }
+    pub fn dconst_0(&mut self) {
+        self.op(0x0e, 2);
+    }
+    pub fn athrow(&mut self) {
+        self.op(0xbf, -1);
+    }
 
     /// `instanceof <class>` (pops ref, pushes int 0/1).
-    pub fn instance_of(&mut self, class_index: u16) { self.op_u2(0xc1, class_index, 0); }
+    pub fn instance_of(&mut self, class_index: u16) {
+        self.op_u2(0xc1, class_index, 0);
+    }
     /// `checkcast <class>` (ref -> ref).
-    pub fn checkcast(&mut self, class_index: u16) { self.op_u2(0xc0, class_index, 0); }
+    pub fn checkcast(&mut self, class_index: u16) {
+        self.op_u2(0xc0, class_index, 0);
+    }
     /// `if_acmpeq` — branch if two refs ARE the same object.
-    pub fn if_acmpeq(&mut self, l: Label) { self.branch(0xa5, l, -2); }
+    pub fn if_acmpeq(&mut self, l: Label) {
+        self.branch(0xa5, l, -2);
+    }
     /// `if_acmpne` — branch if two refs are not the same object.
-    pub fn if_acmpne(&mut self, l: Label) { self.branch(0xa6, l, -2); }
+    pub fn if_acmpne(&mut self, l: Label) {
+        self.branch(0xa6, l, -2);
+    }
 
     /// `new <class>` (push uninitialized ref).
     pub fn new_obj(&mut self, class_index: u16) {

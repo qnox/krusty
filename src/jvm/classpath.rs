@@ -36,15 +36,21 @@ impl Entry {
 
 /// Process-global `scan_types` results keyed by the entry path set. The JDK jimage and stdlib jars
 /// are identical across every compiled file, so this collapses N re-scans into one.
-fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>> = std::sync::OnceLock::new();
+fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// Process-global jimage index (name → file offset/size), keyed by the jimage path. The jimage is
 /// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
-fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>>> = std::sync::OnceLock::new();
+fn global_jimage_cache(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -52,8 +58,11 @@ fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync
 /// jar's static methods is identical for a given classpath, so it happens once per process rather than
 /// once per worker thread (the box harness compiles thousands of files across all cores against the
 /// same stdlib classpath) — the same sharing as [`global_type_cache`]/[`global_jimage_cache`].
-fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>> = std::sync::OnceLock::new();
+fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -135,7 +144,15 @@ impl Classpath {
                 }
             })
             .collect();
-        Classpath { entries, cache: RefCell::new(HashMap::new()), ext: RefCell::new(None), types: RefCell::new(None), jimage: RefCell::new(None), bodies: RefCell::new(HashMap::new()), inline_names: RefCell::new(HashMap::new()) }
+        Classpath {
+            entries,
+            cache: RefCell::new(HashMap::new()),
+            ext: RefCell::new(None),
+            types: RefCell::new(None),
+            jimage: RefCell::new(None),
+            bodies: RefCell::new(HashMap::new()),
+            inline_names: RefCell::new(HashMap::new()),
+        }
     }
 
     pub fn empty() -> Classpath {
@@ -152,7 +169,11 @@ impl Classpath {
         if let Some(idx) = self.types.borrow().as_ref() {
             return idx.clone();
         }
-        let key: Vec<PathBuf> = self.entries.iter().map(|e| e.path().to_path_buf()).collect();
+        let key: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|e| e.path().to_path_buf())
+            .collect();
         if let Some(idx) = global_type_cache().lock().unwrap().get(&key) {
             *self.types.borrow_mut() = Some(idx.clone());
             return idx.clone();
@@ -196,7 +217,13 @@ impl Classpath {
         if self.jimage.borrow().is_some() {
             return;
         }
-        let path = self.entries.iter().find_map(|e| if let Entry::Jimage(p) = e { Some(p.clone()) } else { None });
+        let path = self.entries.iter().find_map(|e| {
+            if let Entry::Jimage(p) = e {
+                Some(p.clone())
+            } else {
+                None
+            }
+        });
         let entry = match path {
             Some(p) => {
                 let mut g = global_jimage_cache().lock().unwrap();
@@ -239,7 +266,9 @@ impl Classpath {
                 }
             }
         }
-        self.cache.borrow_mut().insert(internal.to_string(), found.clone());
+        self.cache
+            .borrow_mut()
+            .insert(internal.to_string(), found.clone());
         found
     }
 
@@ -264,11 +293,17 @@ impl Classpath {
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
-        let key = (internal.to_string(), name.to_string(), descriptor.to_string());
+        let key = (
+            internal.to_string(),
+            name.to_string(),
+            descriptor.to_string(),
+        );
         if let Some(hit) = self.bodies.borrow().get(&key) {
             return hit.clone();
         }
-        let mut code = self.class_bytes(internal).and_then(|b| read_method_code(&b, name, descriptor));
+        let mut code = self
+            .class_bytes(internal)
+            .and_then(|b| read_method_code(&b, name, descriptor));
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
@@ -277,7 +312,10 @@ impl Classpath {
                 if s == "java/lang/Object" {
                     break;
                 }
-                if let Some(mc) = self.class_bytes(&s).and_then(|b| read_method_code(&b, name, descriptor)) {
+                if let Some(mc) = self
+                    .class_bytes(&s)
+                    .and_then(|b| read_method_code(&b, name, descriptor))
+                {
                     code = Some(mc);
                     break;
                 }
@@ -296,7 +334,10 @@ impl Classpath {
             return set.contains(name);
         }
         let ci = self.find(internal);
-        let mut names = ci.as_ref().map(super::metadata::inline_method_names).unwrap_or_default();
+        let mut names = ci
+            .as_ref()
+            .map(super::metadata::inline_method_names)
+            .unwrap_or_default();
         // A multifile facade has no function metadata — `inline` flags live in its part classes, which it
         // *extends* (a superclass chain). Merge their inline names in.
         let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
@@ -314,7 +355,9 @@ impl Classpath {
         }
         let set = std::rc::Rc::new(names);
         let hit = set.contains(name);
-        self.inline_names.borrow_mut().insert(internal.to_string(), set);
+        self.inline_names
+            .borrow_mut()
+            .insert(internal.to_string(), set);
         hit
     }
 
@@ -351,7 +394,11 @@ impl Classpath {
         }
         // Built once per classpath process-wide (scanning every jar's statics is identical for a given
         // classpath) — shared across worker threads via the global cache, like the type/jimage indexes.
-        let key: Vec<PathBuf> = self.entries.iter().map(|e| e.path().to_path_buf()).collect();
+        let key: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|e| e.path().to_path_buf())
+            .collect();
         if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
             *self.ext.borrow_mut() = Some(idx.clone());
             return;
@@ -385,7 +432,9 @@ impl Classpath {
                 }
                 let Some(c) = all.get(&cn) else { break };
                 for (mname, mdesc, msig, public) in &c.statics {
-                    let Some(ret_desc) = descriptor_ret(mdesc) else { continue };
+                    let Some(ret_desc) = descriptor_ret(mdesc) else {
+                        continue;
+                    };
                     let cand = ExtCandidate {
                         owner: name.clone(),
                         name: mname.clone(),
@@ -438,13 +487,29 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
         .methods
         .iter()
         .filter(|m| m.is_static() && !m.name.starts_with('<'))
-        .map(|m| (m.name.clone(), m.descriptor.clone(), m.signature.clone(), m.is_public()))
+        .map(|m| {
+            (
+                m.name.clone(),
+                m.descriptor.clone(),
+                m.signature.clone(),
+                m.is_public(),
+            )
+        })
         .collect();
-    all.insert(ci.this_class.clone(), ClassLite { is_public: ci.is_public(), super_class: ci.super_class, statics });
+    all.insert(
+        ci.this_class.clone(),
+        ClassLite {
+            is_public: ci.is_public(),
+            super_class: ci.super_class,
+            statics,
+        },
+    );
 }
 
 fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassLite>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -459,9 +524,13 @@ fn collect_dir(dir: &Path, all: &mut HashMap<String, ClassLite>) {
 
 fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
     let Ok(f) = File::open(jar) else { return };
-    let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
+    let Ok(mut archive) = zip::ZipArchive::new(f) else {
+        return;
+    };
     for i in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(i) else { continue };
+        let Ok(mut entry) = archive.by_index(i) else {
+            continue;
+        };
         if !entry.name().ends_with(".class") {
             continue;
         }
@@ -527,15 +596,28 @@ fn read_jar_entry(jar: &Path, name: &str) -> Option<Vec<u8>> {
 /// tracking ambiguity. **Name-based** — does not parse the class file. This is the lazy path:
 /// kotlinc/javac likewise index by entry/package name and only read a `.class` when its members
 /// are actually needed (see `find`).
-fn register_class_name(internal: &str, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
-    if internal.is_empty() { return; }
+fn register_class_name(
+    internal: &str,
+    idx: &mut TypeIndex,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
+    if internal.is_empty() {
+        return;
+    }
     let simple = internal.rsplit('/').next().unwrap_or(internal);
     // Skip synthetic/anonymous/nested (`$`) and module/package descriptors.
-    if simple.contains('$') || simple == "module-info" || simple == "package-info" { return; }
+    if simple.contains('$') || simple == "module-info" || simple == "package-info" {
+        return;
+    }
     match idx.class_names.get(simple) {
-        Some(existing) if existing != internal => { ambiguous.insert(simple.to_string()); }
+        Some(existing) if existing != internal => {
+            ambiguous.insert(simple.to_string());
+        }
         Some(_) => {}
-        None => { idx.class_names.insert(simple.to_string(), internal.to_string()); }
+        None => {
+            idx.class_names
+                .insert(simple.to_string(), internal.to_string());
+        }
     }
 }
 
@@ -548,8 +630,12 @@ fn class_internal_from_entry(name: &str) -> Option<&str> {
 /// files are ever parsed for the type index — every other class is indexed by name alone.
 fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
-    if ci.kotlin_d2.is_empty() { return; }
-    let alias_names: Vec<String> = ci.methods.iter()
+    if ci.kotlin_d2.is_empty() {
+        return;
+    }
+    let alias_names: Vec<String> = ci
+        .methods
+        .iter()
         .filter(|m| m.name.ends_with("$annotations"))
         .map(|m| m.name.trim_end_matches("$annotations").to_string())
         .collect();
@@ -571,32 +657,53 @@ fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
 }
 
 fn is_type_aliases_kt(internal: &str) -> bool {
-    internal.rsplit('/').next().unwrap_or(internal).ends_with("TypeAliasesKt")
+    internal
+        .rsplit('/')
+        .next()
+        .unwrap_or(internal)
+        .ends_with("TypeAliasesKt")
 }
 
 /// Convert a JVM class descriptor `Lsome/Class;` to internal name `some/Class`.
 fn desc_to_internal(desc: &str) -> Option<String> {
     let s = desc.strip_prefix('L')?.strip_suffix(';')?;
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
     Some(s.to_string())
 }
 
-fn scan_types_dir(dir: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+fn scan_types_dir(
+    dir: &Path,
+    idx: &mut TypeIndex,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
     scan_types_dir_rooted(dir, dir, idx, ambiguous);
 }
 
 /// Walk `dir`, registering each `*.class` by its path relative to `root` (the internal name).
 /// Only `*TypeAliasesKt.class` files are read+parsed (for aliases); all others are name-only.
-fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+fn scan_types_dir_rooted(
+    root: &Path,
+    dir: &Path,
+    idx: &mut TypeIndex,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
             scan_types_dir_rooted(root, &p, idx, ambiguous);
         } else if p.extension().map_or(false, |x| x == "class") {
-            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let Ok(rel) = p.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            let Some(internal) = class_internal_from_entry(&rel) else { continue };
+            let Some(internal) = class_internal_from_entry(&rel) else {
+                continue;
+            };
             register_class_name(internal, idx, ambiguous);
             if is_type_aliases_kt(internal) {
                 if let Ok(b) = std::fs::read(&p) {
@@ -607,13 +714,23 @@ fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex, ambiguous
     }
 }
 
-fn scan_types_jar(jar: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+fn scan_types_jar(
+    jar: &Path,
+    idx: &mut TypeIndex,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
     let Ok(f) = File::open(jar) else { return };
-    let Ok(mut archive) = zip::ZipArchive::new(f) else { return };
+    let Ok(mut archive) = zip::ZipArchive::new(f) else {
+        return;
+    };
     for i in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(i) else { continue };
+        let Ok(mut entry) = archive.by_index(i) else {
+            continue;
+        };
         let name = entry.name().to_string();
-        let Some(internal) = class_internal_from_entry(&name) else { continue };
+        let Some(internal) = class_internal_from_entry(&name) else {
+            continue;
+        };
         register_class_name(internal, idx, ambiguous);
         // Parse bytes only for the rare alias-carrier classes — everything else is name-only.
         if is_type_aliases_kt(internal) {
@@ -712,24 +829,38 @@ fn build_jimage_index(path: &Path) -> Option<HashMap<String, (u64, usize)>> {
     Some(idx)
 }
 
-fn scan_types_jimage(path: &Path, idx: &mut TypeIndex, ambiguous: &mut std::collections::HashSet<String>) {
+fn scan_types_jimage(
+    path: &Path,
+    idx: &mut TypeIndex,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
     let Ok(b) = std::fs::read(path) else { return };
-    if b.len() < 28 { return; }
+    if b.len() < 28 {
+        return;
+    }
     let u32le = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    if u32le(0) != 0xCAFE_DADA { return; }
+    if u32le(0) != 0xCAFE_DADA {
+        return;
+    }
     let table_length = u32le(16) as usize;
     let locations_size = u32le(20) as usize;
     let header = 28;
     let offsets = header + table_length * 4; // skip redirect table (table_length × i32)
     let locations = offsets + table_length * 4;
     let strings = locations + locations_size;
-    if strings > b.len() { return; }
+    if strings > b.len() {
+        return;
+    }
     // A jimage string is NUL-terminated modified-UTF8 at `strings + off` (off 0 = empty).
     let read_str = |off: usize| -> &str {
-        if off == 0 { return ""; }
+        if off == 0 {
+            return "";
+        }
         let start = strings + off;
         let mut e = start;
-        while e < b.len() && b[e] != 0 { e += 1; }
+        while e < b.len() && b[e] != 0 {
+            e += 1;
+        }
         std::str::from_utf8(&b[start..e]).unwrap_or("")
     };
     // Decode an ImageLocation attribute stream into (module, parent, base, extension) string offsets.
@@ -739,11 +870,15 @@ fn scan_types_jimage(path: &Path, idx: &mut TypeIndex, ambiguous: &mut std::coll
             let byte = b[p];
             p += 1;
             let kind = byte >> 3;
-            if kind == 0 { break; } // ATTRIBUTE_END
+            if kind == 0 {
+                break;
+            } // ATTRIBUTE_END
             let len = ((byte & 0x7) + 1) as usize;
             let mut v = 0usize;
             for _ in 0..len {
-                if p >= b.len() { break; }
+                if p >= b.len() {
+                    break;
+                }
                 v = (v << 8) | b[p] as usize;
                 p += 1;
             }
@@ -752,20 +887,26 @@ fn scan_types_jimage(path: &Path, idx: &mut TypeIndex, ambiguous: &mut std::coll
                 2 => par = v,  // PARENT (package, '/'-separated)
                 3 => base = v, // BASE (simple file name, incl. extension separator handling below)
                 4 => ext = v,  // EXTENSION
-                _ => {}        // OFFSET/COMPRESSED/UNCOMPRESSED — content attrs, unused for the index
+                _ => {} // OFFSET/COMPRESSED/UNCOMPRESSED — content attrs, unused for the index
             }
         }
         (m, par, base, ext)
     };
     for i in 0..table_length {
         let loc_off = u32le(offsets + i * 4) as usize;
-        if loc_off == 0 { continue; }
+        if loc_off == 0 {
+            continue;
+        }
         let (m, par, base, ext) = decode(locations + loc_off);
         // Index java module classes (`java.base`, `java.*`); skip the JDK's own `jdk.*`/`sun.*`
         // implementation modules' resources only by what they expose by name + ambiguity rules.
-        if read_str(ext) != "class" { continue; }
+        if read_str(ext) != "class" {
+            continue;
+        }
         let parent = read_str(par);
-        if parent.is_empty() { continue; }
+        if parent.is_empty() {
+            continue;
+        }
         let internal = format!("{parent}/{}", read_str(base));
         let _ = m;
         register_class_name(&internal, idx, ambiguous);

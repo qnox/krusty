@@ -82,7 +82,9 @@ impl ClassInfo {
     }
 
     pub fn method(&self, name: &str, descriptor: &str) -> Option<&MethodSig> {
-        self.methods.iter().find(|m| m.name == name && m.descriptor == descriptor)
+        self.methods
+            .iter()
+            .find(|m| m.name == name && m.descriptor == descriptor)
     }
     /// All overloads of a method name (to resolve a call when only arg types are known).
     pub fn methods_named(&self, name: &str) -> Vec<&MethodSig> {
@@ -102,16 +104,16 @@ pub enum ReadError {
 #[derive(Clone, Debug)]
 pub enum C {
     Utf8(String),
-    Class(u16),                  // name_index
-    NameAndType(u16, u16),       // name_index, descriptor_index
-    Fieldref(u16, u16),          // class_index, name_and_type_index
+    Class(u16),            // name_index
+    NameAndType(u16, u16), // name_index, descriptor_index
+    Fieldref(u16, u16),    // class_index, name_and_type_index
     Methodref(u16, u16),
     InterfaceMethodref(u16, u16),
-    String(u16),                 // utf8_index
+    String(u16), // utf8_index
     Integer(i32),
-    Float(u32),                  // raw bits
+    Float(u32), // raw bits
     Long(i64),
-    Double(u64),                 // raw bits
+    Double(u64), // raw bits
     Other,
 }
 
@@ -134,14 +136,25 @@ fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {
             9 => C::Fieldref(r.u2()?, r.u2()?),
             10 => C::Methodref(r.u2()?, r.u2()?),
             11 => C::InterfaceMethodref(r.u2()?, r.u2()?),
-            17 | 18 => { r.u2()?; r.u2()?; C::Other } // dynamic / invokedynamic
+            17 | 18 => {
+                r.u2()?;
+                r.u2()?;
+                C::Other
+            } // dynamic / invokedynamic
             8 => C::String(r.u2()?),
-            16 | 19 | 20 => { r.u2()?; C::Other } // methodtype / module / package
+            16 | 19 | 20 => {
+                r.u2()?;
+                C::Other
+            } // methodtype / module / package
             3 => C::Integer(r.u4()? as i32),
             4 => C::Float(r.u4()?),
             5 => C::Long(((r.u4()? as i64) << 32) | r.u4()? as i64),
             6 => C::Double(((r.u4()? as u64) << 32) | r.u4()? as u64),
-            15 => { r.u1()?; r.u2()?; C::Other }
+            15 => {
+                r.u1()?;
+                r.u2()?;
+                C::Other
+            }
             _ => return Err(ReadError::BadConstant(tag)),
         };
         let two_slots = matches!(tag, 5 | 6);
@@ -225,7 +238,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                 let code = r.take(code_len).ok()?.to_vec();
                 let exc_len = r.u2().ok()?;
                 r.take(exc_len as usize * 8).ok()?; // each entry is 4 × u2
-                // Code-attribute attributes: find `StackMapTable` (the verifier frames).
+                                                    // Code-attribute attributes: find `StackMapTable` (the verifier frames).
                 let nca = r.u2().ok()?;
                 let mut stackmap = None;
                 for _ in 0..nca {
@@ -236,7 +249,14 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                         stackmap = Some(body.to_vec());
                     }
                 }
-                return Some(MethodCode { max_stack, max_locals, code, source_cp: cp, stackmap, has_handlers: exc_len > 0 });
+                return Some(MethodCode {
+                    max_stack,
+                    max_locals,
+                    code,
+                    source_cp: cp,
+                    stackmap,
+                    has_handlers: exc_len > 0,
+                });
             }
             r.take(attr_len).ok()?;
         }
@@ -272,7 +292,11 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     let access = r.u2()?;
     let this_class = class_name(r.u2()?);
     let super_idx = r.u2()?;
-    let super_class = if super_idx == 0 { None } else { Some(class_name(super_idx)) };
+    let super_class = if super_idx == 0 {
+        None
+    } else {
+        Some(class_name(super_idx))
+    };
 
     let ifaces = r.u2()?;
     let mut interfaces = Vec::with_capacity(ifaces as usize);
@@ -280,7 +304,10 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         interfaces.push(class_name(r.u2()?));
     }
 
-    let read_members = |r: &mut Reader| -> Result<Vec<(u16, String, String, Option<String>, Option<ConstVal>)>, ReadError> {
+    let read_members = |r: &mut Reader| -> Result<
+        Vec<(u16, String, String, Option<String>, Option<ConstVal>)>,
+        ReadError,
+    > {
         let n = r.u2()?;
         let mut v = Vec::new();
         for _ in 0..n {
@@ -295,22 +322,46 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
 
     let fields = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, _, const_value)| FieldSig { access, name, descriptor, const_value })
+        .map(|(access, name, descriptor, _, const_value)| FieldSig {
+            access,
+            name,
+            descriptor,
+            const_value,
+        })
         .collect();
     let methods = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, signature, _)| MethodSig { access, name, descriptor, signature })
+        .map(|(access, name, descriptor, signature, _)| MethodSig {
+            access,
+            name,
+            descriptor,
+            signature,
+        })
         .collect();
 
     // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, and the generic `Signature` attr.
     let (kotlin_d1, kotlin_d2, signature) = read_class_attrs(&mut r, &cp);
 
-    Ok(ClassInfo { major, access, this_class, super_class, interfaces, fields, methods, kotlin_d1: kotlin_d1.unwrap_or_default(), kotlin_d2: kotlin_d2.unwrap_or_default(), signature })
+    Ok(ClassInfo {
+        major,
+        access,
+        this_class,
+        super_class,
+        interfaces,
+        fields,
+        methods,
+        kotlin_d1: kotlin_d1.unwrap_or_default(),
+        kotlin_d2: kotlin_d2.unwrap_or_default(),
+        signature,
+    })
 }
 
 /// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin/Metadata → `d2`, and the
 /// generic `Signature` attribute. Accumulates both (does not early-return) so neither is missed.
-fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<Vec<String>>, Option<String>) {
+fn read_class_attrs(
+    r: &mut Reader,
+    cp: &[C],
+) -> (Option<Vec<String>>, Option<Vec<String>>, Option<String>) {
     let utf8 = |i: u16| -> &str {
         match cp.get(i as usize) {
             Some(C::Utf8(s)) => s.as_str(),
@@ -320,7 +371,9 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> (Option<Vec<String>>, Option<Ve
     let mut d1 = None;
     let mut d2 = None;
     let mut signature = None;
-    let Ok(n_attrs) = r.u2() else { return (d1, d2, signature) };
+    let Ok(n_attrs) = r.u2() else {
+        return (d1, d2, signature);
+    };
     for _ in 0..n_attrs {
         let Ok(ni) = r.u2() else { break };
         let name = utf8(ni).to_string();
@@ -381,8 +434,13 @@ fn skip_element_value_extract_string_array(
 
     let tag = r.u1()? as char;
     match tag {
-        'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' | 'c' => { r.u2()?; }
-        'e' => { r.u2()?; r.u2()?; }
+        'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' | 'c' => {
+            r.u2()?;
+        }
+        'e' => {
+            r.u2()?;
+            r.u2()?;
+        }
         '@' => {
             r.u2()?; // annotation type
             let n = r.u2()?;
@@ -426,7 +484,10 @@ fn skip_attributes(r: &mut Reader) -> Result<(), ReadError> {
 
 /// Read a field/method's attributes, returning its generic `Signature` attribute string and (for a
 /// field) its `ConstantValue` if present (and skipping the rest). Same wire shape as [`skip_attributes`].
-fn read_member_signature(r: &mut Reader, cp: &[C]) -> Result<(Option<String>, Option<ConstVal>), ReadError> {
+fn read_member_signature(
+    r: &mut Reader,
+    cp: &[C],
+) -> Result<(Option<String>, Option<ConstVal>), ReadError> {
     let n = r.u2()?;
     let mut signature = None;
     let mut const_value = None;
@@ -454,7 +515,9 @@ fn read_member_signature(r: &mut Reader, cp: &[C]) -> Result<(Option<String>, Op
                     _ => None,
                 };
             }
-            _ => { r.take(len)?; }
+            _ => {
+                r.take(len)?;
+            }
         }
     }
     Ok((signature, const_value))
@@ -499,7 +562,9 @@ fn decode_modified_utf8(bytes: &[u8]) -> String {
             s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
             i += 2;
         } else if b & 0xf0 == 0xe0 && i + 2 < bytes.len() {
-            let c = (((b & 0x0f) as u32) << 12) | (((bytes[i + 1] & 0x3f) as u32) << 6) | (bytes[i + 2] & 0x3f) as u32;
+            let c = (((b & 0x0f) as u32) << 12)
+                | (((bytes[i + 1] & 0x3f) as u32) << 6)
+                | (bytes[i + 2] & 0x3f) as u32;
             s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
             i += 3;
         } else {

@@ -28,7 +28,10 @@ pub fn bytes_to_strings(bytes: &[u8]) -> Vec<String> {
 
 /// Inverse of [bytes_to_strings] (each char's low byte). Used for round-trip tests.
 pub fn strings_to_bytes(strings: &[String]) -> Vec<u8> {
-    strings.iter().flat_map(|s| s.chars().map(|c| c as u8)).collect()
+    strings
+        .iter()
+        .flat_map(|s| s.chars().map(|c| c as u8))
+        .collect()
 }
 
 fn utf8_width(c: u32) -> usize {
@@ -114,7 +117,10 @@ mod tests {
         let bytes: &[u8] = &[0x00, 0x30, 0x01];
         let s = &bytes_to_strings(bytes)[0];
         let enc = modified_utf8(s);
-        assert!(!enc.contains(&0x00), "modified UTF-8 must not contain a plain NUL: {enc:?}");
+        assert!(
+            !enc.contains(&0x00),
+            "modified UTF-8 must not contain a plain NUL: {enc:?}"
+        );
         assert_eq!(enc, vec![0xc0, 0x80, 0x30, 0x01]);
     }
 }

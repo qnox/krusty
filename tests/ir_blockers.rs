@@ -17,7 +17,11 @@ fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_dir() { collect_kt(&p, out); } else if p.extension().map_or(false, |x| x == "kt") { out.push(p); }
+        if p.is_dir() {
+            collect_kt(&p, out);
+        } else if p.extension().is_some_and(|x| x == "kt") {
+            out.push(p);
+        }
     }
 }
 
@@ -57,25 +61,62 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
     for id in 0..file.decl_arena.len() {
         match file.decl(krusty::ast::DeclId(id as u32)) {
             Decl::Fun(f) => {
-                if f.receiver.is_some() { out.push("fun: extension receiver"); }
-                if f.is_inline { out.push("fun: inline"); }
+                if f.receiver.is_some() {
+                    out.push("fun: extension receiver");
+                }
+                if f.is_inline {
+                    out.push("fun: inline");
+                }
             }
             Decl::Class(c) => {
-                if c.is_data { out.push("class: data"); }
-                if c.is_object { out.push("class: object"); }
-                if c.is_enum { out.push("class: enum"); }
-                if c.is_interface { out.push("class: interface"); }
-                if c.is_abstract { out.push("class: abstract"); }
-                if c.is_open { out.push("class: open"); }
-                if c.base_class.is_some() { out.push("class: base class"); }
-                if !c.supertypes.is_empty() { out.push("class: supertypes"); }
-                if !c.body_props.is_empty() { out.push("class: body properties"); }
-                if !c.companion_methods.is_empty() { out.push("class: companion"); }
-                if !c.secondary_ctors.is_empty() { out.push("class: secondary ctor"); }
-                if !c.init_order.is_empty() { out.push("class: init block"); }
-                if c.props.iter().any(|p| !p.is_property) { out.push("class: ctor non-property param"); }
-                if c.methods.iter().any(|m| m.receiver.is_some()) { out.push("class: method receiver"); }
-                if c.methods.iter().any(|m| !matches!(m.body, FunBody::Expr(_))) { out.push("class: block-body method"); }
+                if c.is_data {
+                    out.push("class: data");
+                }
+                if c.is_object {
+                    out.push("class: object");
+                }
+                if c.is_enum {
+                    out.push("class: enum");
+                }
+                if c.is_interface {
+                    out.push("class: interface");
+                }
+                if c.is_abstract {
+                    out.push("class: abstract");
+                }
+                if c.is_open {
+                    out.push("class: open");
+                }
+                if c.base_class.is_some() {
+                    out.push("class: base class");
+                }
+                if !c.supertypes.is_empty() {
+                    out.push("class: supertypes");
+                }
+                if !c.body_props.is_empty() {
+                    out.push("class: body properties");
+                }
+                if !c.companion_methods.is_empty() {
+                    out.push("class: companion");
+                }
+                if !c.secondary_ctors.is_empty() {
+                    out.push("class: secondary ctor");
+                }
+                if !c.init_order.is_empty() {
+                    out.push("class: init block");
+                }
+                if c.props.iter().any(|p| !p.is_property) {
+                    out.push("class: ctor non-property param");
+                }
+                if c.methods.iter().any(|m| m.receiver.is_some()) {
+                    out.push("class: method receiver");
+                }
+                if c.methods
+                    .iter()
+                    .any(|m| !matches!(m.body, FunBody::Expr(_)))
+                {
+                    out.push("class: block-body method");
+                }
             }
             Decl::Property(_) => out.push("top-level property"),
             _ => out.push("other top-level decl"),
@@ -86,11 +127,18 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
 
 #[test]
 fn ir_blockers() {
-    std::thread::Builder::new().stack_size(512 * 1024 * 1024).spawn(run).unwrap().join().unwrap();
+    std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(run)
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 fn run() {
-    let Ok(box_dir) = std::env::var("KRUSTY_KOTLIN_BOX_DIR") else { return; };
+    let Ok(box_dir) = std::env::var("KRUSTY_KOTLIN_BOX_DIR") else {
+        return;
+    };
     let mut files = Vec::new();
     collect_kt(Path::new(&box_dir), &mut files);
 
@@ -105,16 +153,22 @@ fn run() {
             continue;
         }
         if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-            if !l.split(',').any(|t| t.contains("JVM")) { continue; }
+            if !l.split(',').any(|t| t.contains("JVM")) {
+                continue;
+            }
         }
         total += 1;
         let mut d = DiagSink::new();
         let toks = lex(&src, &mut d);
         let f1 = vec![parse(&src, &toks, &mut d)];
-        if d.has_errors() { continue; }
+        if d.has_errors() {
+            continue;
+        }
         let syms = collect_signatures(&f1, &mut d);
         let info = check_file(&f1[0], &syms, &mut d);
-        if d.has_errors() { continue; }
+        if d.has_errors() {
+            continue;
+        }
         if lower_file(&f1[0], &info, &syms).is_some() {
             lowered += 1;
         } else {
@@ -138,7 +192,9 @@ fn run() {
     }
     let mut v: Vec<_> = tally.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
-    println!("box(JVM): {total}  | IR-lowered: {lowered}  | parse+check OK but NOT lowered: {nearmiss}");
+    println!(
+        "box(JVM): {total}  | IR-lowered: {lowered}  | parse+check OK but NOT lowered: {nearmiss}"
+    );
     println!("  of those, {clean_but_unlowered} have NO unsupported expr/stmt (blocked by a decl-level feature: class shape, inheritance, lambdas-as-args resolved elsewhere, etc.)");
     println!("unsupported expr/stmt node variants, by # of near-miss files containing them:");
     for (name, n) in v {

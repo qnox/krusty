@@ -27,33 +27,75 @@ fn top_level_properties_run_and_round_trip() {
     fs::create_dir_all(&root).unwrap();
 
     fs::write(root.join("Lib.kt"), "package demo\nval greeting: String = \"hi\"\nvar counter: Int = 10\nfun bump(): Int { counter = counter + 1; return counter }\n").unwrap();
-    let kc = Command::new(krusty).args(["-d", lib.to_str().unwrap()]).arg(root.join("Lib.kt")).output().expect("krusty");
-    if !kc.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&kc.stderr)); return; }
+    let kc = Command::new(krusty)
+        .args(["-d", lib.to_str().unwrap()])
+        .arg(root.join("Lib.kt"))
+        .output()
+        .expect("krusty");
+    if !kc.status.success() {
+        eprintln!(
+            "skip (IR unsupported): {}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
 
     // (1) Run via Java: getter + var mutation through the generated accessors.
     let main = "public class M { public static void main(String[] a) { System.out.println(demo.LibKt.getGreeting() + \":\" + demo.LibKt.bump() + \":\" + demo.LibKt.bump()); } }";
     fs::write(root.join("M.java"), main).unwrap();
     // The IR backend emits top-level `val`/`var` as public static fields, not Kotlin's
     // private-field + getter/setter ABI yet — skip the accessor check until it does.
-    if !Command::new(&javac).args(["-cp", lib.to_str().unwrap(), "-d", lib.to_str().unwrap()]).arg(root.join("M.java")).output().unwrap().status.success() {
+    if !Command::new(&javac)
+        .args(["-cp", lib.to_str().unwrap(), "-d", lib.to_str().unwrap()])
+        .arg(root.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success()
+    {
         eprintln!("skip (IR property ABI: no getters yet)");
         let _ = fs::remove_dir_all(&root);
         return;
     }
-    let run = Command::new(&java).args(["-Xverify:all", "-cp", lib.to_str().unwrap(), "M"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "hi:11:12", "stderr={}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", lib.to_str().unwrap(), "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "hi:11:12",
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 
     // (2) A Kotlin consumer (real kotlinc) imports + uses the properties via metadata.
     if let Some(kotlinc) = env("KRUSTY_KOTLINC") {
         fs::write(root.join("C.kt"), "import demo.greeting\nimport demo.counter\nfun main() {\n  counter = counter + 1\n  println(greeting + \":\" + counter)\n}\n").unwrap();
         let mut cmd = Command::new(&kotlinc);
-        cmd.arg(root.join("C.kt")).args(["-cp", lib.to_str().unwrap(), "-d", root.join("cout").to_str().unwrap()]);
+        cmd.arg(root.join("C.kt")).args([
+            "-cp",
+            lib.to_str().unwrap(),
+            "-d",
+            root.join("cout").to_str().unwrap(),
+        ]);
         cmd.env("JAVA_HOME", &java_home);
         let cc = cmd.output().expect("kotlinc");
-        assert!(cc.status.success(), "kotlinc failed to consume top-level properties: {}", String::from_utf8_lossy(&cc.stderr));
+        assert!(
+            cc.status.success(),
+            "kotlinc failed to consume top-level properties: {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
         if let Some(stdlib) = env("KRUSTY_KOTLIN_STDLIB") {
-            let cp = format!("{}:{}:{}", root.join("cout").to_str().unwrap(), lib.to_str().unwrap(), stdlib);
-            let r = Command::new(&java).args(["-cp", &cp, "CKt"]).output().unwrap();
+            let cp = format!(
+                "{}:{}:{}",
+                root.join("cout").to_str().unwrap(),
+                lib.to_str().unwrap(),
+                stdlib
+            );
+            let r = Command::new(&java)
+                .args(["-cp", &cp, "CKt"])
+                .output()
+                .unwrap();
             if r.status.success() {
                 assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hi:11");
             }

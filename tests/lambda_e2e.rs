@@ -43,12 +43,40 @@ if (call2({ a, b -> a + b }) != 42) return \"f4\"\n\
 return \"OK\"\n\
 }\n";
     fs::write(dir.join("L.kt"), src).unwrap();
-    let kc = Command::new(krusty).args(["-d", dir.to_str().unwrap()]).arg(dir.join("L.kt")).output().unwrap();
-    if !kc.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&kc.stderr)); return; }
-    fs::write(dir.join("M.java"), "public class M { public static void main(String[] a) { System.out.println(LKt.box()); } }").unwrap();
-    assert!(Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap().status.success());
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("L.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        eprintln!(
+            "skip (IR unsupported): {}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(LKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java).args(["-Xverify:all", "-cp", &cp, "M"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "OK", "stderr={}", String::from_utf8_lossy(&r.stderr));
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
     let _ = fs::remove_dir_all(&dir);
 }

@@ -10,7 +10,9 @@ fn env(k: &str) -> Option<String> {
 
 /// Extract the first `error: <msg>` text (without the `file:line:col:` prefix) from compiler output.
 fn first_error(output: &str) -> Option<String> {
-    output.lines().find_map(|l| l.split_once("error:").map(|(_, m)| m.trim().to_string()))
+    output
+        .lines()
+        .find_map(|l| l.split_once("error:").map(|(_, m)| m.trim().to_string()))
 }
 
 #[test]
@@ -38,8 +40,12 @@ fn error_messages_match_kotlinc() {
         let kt = root.join(format!("t{i}.kt"));
         fs::write(&kt, src).unwrap();
 
-        let kr = Command::new(krusty).args(["-d", root.join("o").to_str().unwrap()]).arg(&kt).output().unwrap();
-        let kr_msg = first_error(&String::from_utf8_lossy(&kr.stderr).to_string())
+        let kr = Command::new(krusty)
+            .args(["-d", root.join("o").to_str().unwrap()])
+            .arg(&kt)
+            .output()
+            .unwrap();
+        let kr_msg = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
             .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
 
         let mut cmd = Command::new(&kotlinc);
@@ -50,7 +56,10 @@ fn error_messages_match_kotlinc() {
         let kc = cmd.output().unwrap();
         let kc_msg = first_error(&String::from_utf8_lossy(&kc.stderr));
 
-        assert_eq!(kr_msg, kc_msg, "diagnostic mismatch for {src:?}\n krusty: {kr_msg:?}\n kotlinc: {kc_msg:?}");
+        assert_eq!(
+            kr_msg, kc_msg,
+            "diagnostic mismatch for {src:?}\n krusty: {kr_msg:?}\n kotlinc: {kc_msg:?}"
+        );
     }
     let _ = fs::remove_dir_all(&root);
 }

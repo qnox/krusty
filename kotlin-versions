@@ -1,0 +1,20 @@
+# Kotlin REFERENCE versions krusty supports — the single source of truth.
+#
+# One full Kotlin reference version per line (major.minor.PATCH, e.g. 2.4.20) — the kotlinc build
+# the differential harness validates against. Meaning:
+#   * The HIGHEST entry is krusty's headline release version: `krusty <max>-build.<n>` signals the
+#     exact Kotlin it targets (e.g. 2.4.20).
+#   * EVERY entry is validated in parallel by CI against that kotlinc release.
+#
+# Format (whitespace-separated):
+#   <reference-version>  <baseline-git-ref>
+#
+# Build number <n> = (commits in <baseline-git-ref>..HEAD) + 1.
+#   - Resets to 1 per reference version, increases by 1 per commit, fully ordered.
+#   - Reproducible from a local clone (`just version`) — no CI state involved.
+#   - Set <baseline-git-ref> to the commit at which support for that version began. "-" => root.
+#
+# Add a line only once that reference version actually passes the harness (it is a correctness claim).
+#
+# reference   baseline
+2.4.0         a29a891

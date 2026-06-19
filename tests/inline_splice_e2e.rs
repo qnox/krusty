@@ -53,7 +53,11 @@ fn branchless_inline_fn_is_spliced_not_called() {
         .arg(&lib_kt)
         .output()
         .unwrap();
-    assert!(kc.status.success(), "kotlinc(lib): {}", String::from_utf8_lossy(&kc.stderr));
+    assert!(
+        kc.status.success(),
+        "kotlinc(lib): {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
 
     // 2. A caller that uses the inline fn, compiled by krusty with the lib on its classpath.
     let main_kt = work.join("Main.kt");
@@ -64,13 +68,20 @@ fn branchless_inline_fn_is_spliced_not_called() {
         "import lib.triple\nimport lib.atLeast\nimport lib.applyIt\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    val e = applyIt(b) { it + 1 }\n    return if (a == 5 && b == 15 && c == 20 && d == 15 && e == 16) \"OK\" else \"fail:a=$a b=$b c=$c d=$d e=$e\"\n}\n",
     )
     .unwrap();
-    let compile_cp = format!("{libout}:{stdlib}:{jdk_modules}", libout = libout.to_str().unwrap());
+    let compile_cp = format!(
+        "{libout}:{stdlib}:{jdk_modules}",
+        libout = libout.to_str().unwrap()
+    );
     let kr = Command::new(krusty)
         .args(["-cp", &compile_cp, "-d", mainout.to_str().unwrap()])
         .arg(&main_kt)
         .output()
         .unwrap();
-    assert!(kr.status.success(), "krusty(main): {}", String::from_utf8_lossy(&kr.stderr));
+    assert!(
+        kr.status.success(),
+        "krusty(main): {}",
+        String::from_utf8_lossy(&kr.stderr)
+    );
 
     // 3. The inline fn was *spliced*, not called: no reference to `triple` survives in MainKt.
     let main_class = fs::read(mainout.join("MainKt.class")).unwrap();
@@ -91,15 +102,27 @@ public class BoxRun {
   }
 }"#;
     fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
-    assert!(jc.status.success(), "javac(BoxRun): {}", String::from_utf8_lossy(&jc.stderr));
+    let jc = Command::new(&javac)
+        .args(["-d", runner.to_str().unwrap()])
+        .arg(runner.join("BoxRun.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac(BoxRun): {}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
     let run = Command::new(&java)
         .args(["-Xverify:all", "-cp"])
         .arg(format!("{}:{stdlib}", runner.to_str().unwrap()))
         .args(["BoxRun", mainout.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(run.status.success(), "BoxRun: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "BoxRun: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let out = String::from_utf8_lossy(&run.stdout);
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
 

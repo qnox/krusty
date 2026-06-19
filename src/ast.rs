@@ -12,10 +12,21 @@ pub struct DeclId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-    RefEq, RefNe, // === and !==
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    RefEq,
+    RefNe, // === and !==
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -40,57 +51,126 @@ pub enum Expr {
     NullLit,
     Name(String),
     /// `operand!!` — not-null assertion (throws NPE if null, else the value).
-    NotNull { operand: ExprId },
+    NotNull {
+        operand: ExprId,
+    },
     /// `lhs ?: rhs` — Elvis (lhs if non-null, else rhs).
-    Elvis { lhs: ExprId, rhs: ExprId },
+    Elvis {
+        lhs: ExprId,
+        rhs: ExprId,
+    },
     /// A string template `"a${e}b$c"` — alternating literal and interpolated-expression parts.
     Template(Vec<TemplatePart>),
     /// `receiver?.name` (args `None`) or `receiver?.name(args)` — a safe call: evaluates to `null`
     /// when the receiver is null, else the member access / call result.
-    SafeCall { receiver: ExprId, name: String, args: Option<Vec<ExprId>> },
+    SafeCall {
+        receiver: ExprId,
+        name: String,
+        args: Option<Vec<ExprId>>,
+    },
     /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
-    Throw { operand: ExprId },
+    Throw {
+        operand: ExprId,
+    },
     /// A lambda literal `{ param -> body }` / `{ body }` (implicit `it`). krusty only supports it as
     /// the trailing argument of an *inlined* scope function (`let`/`also`); `body` is a `Block`.
-    Lambda { params: Vec<String>, body: ExprId },
+    Lambda {
+        params: Vec<String>,
+        body: ExprId,
+    },
     /// `try { body } catch (e: T) { … } … [finally { … }]` — the value is the body's, or a matching
     /// catch's; `finally` runs on every exit (for effect). Each `body`/handler/finally is a `Block`.
-    Try { body: ExprId, catches: Vec<CatchClause>, finally: Option<ExprId> },
+    Try {
+        body: ExprId,
+        catches: Vec<CatchClause>,
+        finally: Option<ExprId>,
+    },
     /// `operand is T` / `operand !is T` — a type test (`instanceof`), evaluates to `Boolean`.
-    Is { operand: ExprId, ty: TypeRef, negated: bool },
+    Is {
+        operand: ExprId,
+        ty: TypeRef,
+        negated: bool,
+    },
     /// `operand as T` / `operand as? T` — a cast (`checkcast`). `nullable` ⇒ `as?` (instanceof,
     /// `null` on mismatch). Result type is `T`.
-    As { operand: ExprId, ty: TypeRef, nullable: bool },
+    As {
+        operand: ExprId,
+        ty: TypeRef,
+        nullable: bool,
+    },
     /// `value in start..end` / `value !in start..end` — range membership, evaluates to `Boolean`.
     /// `kind` is the range form (`..`/`until`/`downTo`); `negated` ⇒ `!in`. (Range membership only;
     /// a non-range container would resolve `contains`, not yet modeled.)
-    InRange { value: ExprId, start: ExprId, end: ExprId, kind: RangeKind, negated: bool },
+    InRange {
+        value: ExprId,
+        start: ExprId,
+        end: ExprId,
+        kind: RangeKind,
+        negated: bool,
+    },
     /// `lo..hi` / `lo..<hi` / `lo until hi` / `lo downTo hi` as a *value* — constructs a range
     /// (`IntRange`/`LongRange`) or progression (`IntProgression` for `downTo`). Distinct from the
     /// `for`/`in` forms, which lower to counted loops / membership without materializing the object.
-    RangeTo { lo: ExprId, hi: ExprId, kind: RangeKind },
+    RangeTo {
+        lo: ExprId,
+        hi: ExprId,
+        kind: RangeKind,
+    },
     /// `target++` / `target--` / `++target` / `--target` in *expression* (value) position — yields the
     /// old value (postfix) or new value (prefix) while updating the lvalue. Statement position keeps
     /// `Stmt::IncDec` / the member-index desugar (value discarded). `target` is currently a `Name`.
-    IncDec { target: ExprId, dec: bool, prefix: bool },
-    Unary { op: UnOp, operand: ExprId },
-    Binary { op: BinOp, lhs: ExprId, rhs: ExprId },
+    IncDec {
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+    },
+    Unary {
+        op: UnOp,
+        operand: ExprId,
+    },
+    Binary {
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
     /// `receiver.name` (no call). For a bare name use `Name`.
-    Member { receiver: ExprId, name: String },
+    Member {
+        receiver: ExprId,
+        name: String,
+    },
     /// `array[index]` — array element read.
-    Index { array: ExprId, index: ExprId },
+    Index {
+        array: ExprId,
+        index: ExprId,
+    },
     /// `callee(args)`. `callee` is `Name` (free function) or `Member` (method).
-    Call { callee: ExprId, args: Vec<ExprId> },
-    If { cond: ExprId, then_branch: ExprId, else_branch: Option<ExprId> },
+    Call {
+        callee: ExprId,
+        args: Vec<ExprId>,
+    },
+    If {
+        cond: ExprId,
+        then_branch: ExprId,
+        else_branch: Option<ExprId>,
+    },
     /// `{ stmts; trailing? }` — block as an expression; trailing expr is its value.
-    Block { stmts: Vec<StmtId>, trailing: Option<ExprId> },
+    Block {
+        stmts: Vec<StmtId>,
+        trailing: Option<ExprId>,
+    },
     /// `when (subject?) { conditions -> body ; else -> body }`. An arm with empty `conditions` is
     /// the `else`. With a subject, each condition is a value matched by `==`; without, each is a
     /// boolean expression.
-    When { subject: Option<ExprId>, arms: Vec<WhenArm> },
+    When {
+        subject: Option<ExprId>,
+        arms: Vec<WhenArm>,
+    },
     /// `receiver::name` or `::name` (top-level) — a callable reference or class literal.
     /// krusty parses these to avoid cascade errors but does not implement them at runtime.
-    CallableRef { receiver: Option<ExprId>, name: String },
+    CallableRef {
+        receiver: Option<ExprId>,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -116,32 +196,72 @@ pub enum TemplatePart {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     /// `val`/`var name (: type)? = init`
-    Local { is_var: bool, name: String, ty: Option<TypeRef>, init: ExprId },
+    Local {
+        is_var: bool,
+        name: String,
+        ty: Option<TypeRef>,
+        init: ExprId,
+    },
     /// `val (a, b, …) = init` — destructuring; each entry binds `init.componentN()`.
     /// An entry named `_` is skipped (no binding, no `componentN` call), per Kotlin.
-    Destructure { entries: Vec<(String, bool)>, init: ExprId },
+    Destructure {
+        entries: Vec<(String, bool)>,
+        init: ExprId,
+    },
     /// `name = value`
-    Assign { name: String, value: ExprId },
+    Assign {
+        name: String,
+        value: ExprId,
+    },
     /// `name++` / `name--` / `++name` / `--name` in statement position — the increment/decrement
     /// operator on a simple variable. Kept as a real node (not desugared) because `inc`/`dec` are
     /// overloadable operators; the checker resolves built-in numeric inc/dec vs a user operator.
-    IncDec { name: String, dec: bool },
+    IncDec {
+        name: String,
+        dec: bool,
+    },
     /// `receiver.name = value` — write a (mutable) property via its setter.
-    AssignMember { receiver: ExprId, name: String, value: ExprId },
+    AssignMember {
+        receiver: ExprId,
+        name: String,
+        value: ExprId,
+    },
     /// `array[index] = value` — array element store.
-    AssignIndex { array: ExprId, index: ExprId, value: ExprId },
+    AssignIndex {
+        array: ExprId,
+        index: ExprId,
+        value: ExprId,
+    },
     Return(Option<ExprId>),
     /// `break` / `continue` — loop control. `Some(label)` targets the enclosing loop carrying that
     /// `label@` (`break@outer`); `None` targets the innermost loop.
     Break(Option<String>),
     Continue(Option<String>),
-    While { cond: ExprId, body: ExprId, label: Option<String> }, // body is a Block expr
+    While {
+        cond: ExprId,
+        body: ExprId,
+        label: Option<String>,
+    }, // body is a Block expr
     /// `do { body } while (cond)` — post-test loop (body runs at least once).
-    DoWhile { body: ExprId, cond: ExprId, label: Option<String> },
+    DoWhile {
+        body: ExprId,
+        cond: ExprId,
+        label: Option<String>,
+    },
     /// `for (name in start <op> end (step s)?) body` over an integer range.
-    For { name: String, range: ForRange, body: ExprId, label: Option<String> },
+    For {
+        name: String,
+        range: ForRange,
+        body: ExprId,
+        label: Option<String>,
+    },
     /// `for (name in iterable) body` over an array (element iteration).
-    ForEach { name: String, iterable: ExprId, body: ExprId, label: Option<String> },
+    ForEach {
+        name: String,
+        iterable: ExprId,
+        body: ExprId,
+        label: Option<String>,
+    },
     Expr(ExprId),
     /// A local function declaration: `fun name(params): Ret { body }` inside a function body.
     /// Emitted as a private static method on the file/class with a mangled name.
@@ -447,28 +567,67 @@ impl File {
     /// delegate their uniform recursion here, overriding only the variants whose handling differs
     /// (scope boundaries, leaf checks); a new `Expr` variant is then covered by adding one arm
     /// *here*, not in every walker.
-    pub fn any_child_expr(&self, e: ExprId, fe: &mut impl FnMut(ExprId) -> bool, fs: &mut impl FnMut(StmtId) -> bool) -> bool {
+    pub fn any_child_expr(
+        &self,
+        e: ExprId,
+        fe: &mut impl FnMut(ExprId) -> bool,
+        fs: &mut impl FnMut(StmtId) -> bool,
+    ) -> bool {
         match self.expr(e) {
-            Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
-            | Expr::DoubleLit(_) | Expr::FloatLit(_)
-            | Expr::BoolLit(_) | Expr::StringLit(_) | Expr::CharLit(_) | Expr::NullLit
+            Expr::IntLit(_)
+            | Expr::LongLit(_)
+            | Expr::UIntLit(_)
+            | Expr::ULongLit(_)
+            | Expr::DoubleLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::CharLit(_)
+            | Expr::NullLit
             | Expr::Name(_) => false,
             Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
-            Expr::NotNull { operand } | Expr::Throw { operand } | Expr::Unary { operand, .. }
-            | Expr::Is { operand, .. } | Expr::As { operand, .. } | Expr::Lambda { body: operand, .. } => fe(*operand),
+            Expr::NotNull { operand }
+            | Expr::Throw { operand }
+            | Expr::Unary { operand, .. }
+            | Expr::Is { operand, .. }
+            | Expr::As { operand, .. }
+            | Expr::Lambda { body: operand, .. } => fe(*operand),
             Expr::Elvis { lhs, rhs } | Expr::Binary { lhs, rhs, .. } => fe(*lhs) || fe(*rhs),
             Expr::RangeTo { lo, hi, .. } => fe(*lo) || fe(*hi),
             Expr::IncDec { target, .. } => fe(*target),
-            Expr::InRange { value, start, end, .. } => fe(*value) || fe(*start) || fe(*end),
+            Expr::InRange {
+                value, start, end, ..
+            } => fe(*value) || fe(*start) || fe(*end),
             Expr::Member { receiver, .. } => fe(*receiver),
             Expr::Index { array, index } => fe(*array) || fe(*index),
             Expr::Call { callee, args } => fe(*callee) || args.iter().any(|&a| fe(a)),
-            Expr::SafeCall { receiver, args, .. } => fe(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| fe(x))),
-            Expr::Template(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(x) if fe(*x))),
-            Expr::If { cond, then_branch, else_branch } => fe(*cond) || fe(*then_branch) || else_branch.map_or(false, |x| fe(x)),
-            Expr::Block { stmts, trailing } => stmts.iter().any(|&s| fs(s)) || trailing.map_or(false, |t| fe(t)),
-            Expr::Try { body, catches, finally } => fe(*body) || catches.iter().any(|c| fe(c.body)) || finally.map_or(false, |f| fe(f)),
-            Expr::When { subject, arms } => subject.map_or(false, |s| fe(s)) || arms.iter().any(|a| a.conditions.iter().any(|&c| fe(c)) || fe(a.body)),
+            Expr::SafeCall { receiver, args, .. } => {
+                fe(*receiver) || args.as_ref().map_or(false, |a| a.iter().any(|&x| fe(x)))
+            }
+            Expr::Template(parts) => parts
+                .iter()
+                .any(|p| matches!(p, TemplatePart::Expr(x) if fe(*x))),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => fe(*cond) || fe(*then_branch) || else_branch.map_or(false, |x| fe(x)),
+            Expr::Block { stmts, trailing } => {
+                stmts.iter().any(|&s| fs(s)) || trailing.map_or(false, |t| fe(t))
+            }
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
+                fe(*body) || catches.iter().any(|c| fe(c.body)) || finally.map_or(false, |f| fe(f))
+            }
+            Expr::When { subject, arms } => {
+                subject.map_or(false, |s| fe(s))
+                    || arms
+                        .iter()
+                        .any(|a| a.conditions.iter().any(|&c| fe(c)) || fe(a.body))
+            }
         }
     }
 
@@ -478,12 +637,28 @@ impl File {
     pub fn any_child_stmt(&self, s: StmtId, fe: &mut impl FnMut(ExprId) -> bool) -> bool {
         match self.stmt(s) {
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) | Stmt::IncDec { .. } => false,
-            Stmt::Local { init, .. } | Stmt::Destructure { init, .. } | Stmt::Assign { value: init, .. }
-            | Stmt::Return(Some(init)) | Stmt::Expr(init) => fe(*init),
-            Stmt::AssignMember { receiver, value, .. } => fe(*receiver) || fe(*value),
-            Stmt::AssignIndex { array, index, value } => fe(*array) || fe(*index) || fe(*value),
-            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => fe(*cond) || fe(*body),
-            Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || range.step.map_or(false, |st| fe(st)) || fe(*body),
+            Stmt::Local { init, .. }
+            | Stmt::Destructure { init, .. }
+            | Stmt::Assign { value: init, .. }
+            | Stmt::Return(Some(init))
+            | Stmt::Expr(init) => fe(*init),
+            Stmt::AssignMember {
+                receiver, value, ..
+            } => fe(*receiver) || fe(*value),
+            Stmt::AssignIndex {
+                array,
+                index,
+                value,
+            } => fe(*array) || fe(*index) || fe(*value),
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
+                fe(*cond) || fe(*body)
+            }
+            Stmt::For { range, body, .. } => {
+                fe(range.start)
+                    || fe(range.end)
+                    || range.step.map_or(false, |st| fe(st))
+                    || fe(*body)
+            }
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
         }
@@ -505,7 +680,11 @@ impl File {
     fn write_decl(&self, id: DeclId, out: &mut String) {
         match self.decl(id) {
             Decl::Property(p) => {
-                out.push_str(&format!("({} {}", if p.is_var { "var" } else { "val" }, p.name));
+                out.push_str(&format!(
+                    "({} {}",
+                    if p.is_var { "var" } else { "val" },
+                    p.name
+                ));
                 if let Some(t) = &p.ty {
                     out.push_str(&format!(" :{}", t.name));
                 }
@@ -531,9 +710,18 @@ impl File {
                 out.push(')');
             }
             Decl::Class(c) => {
-                out.push_str(&format!("({} {}", if c.is_object { "object" } else { "class" }, c.name));
+                out.push_str(&format!(
+                    "({} {}",
+                    if c.is_object { "object" } else { "class" },
+                    c.name
+                ));
                 for p in &c.props {
-                    out.push_str(&format!(" ({} {} {})", if p.is_var { "var" } else { "val" }, p.name, p.ty.name));
+                    out.push_str(&format!(
+                        " ({} {} {})",
+                        if p.is_var { "var" } else { "val" },
+                        p.name,
+                        p.ty.name
+                    ));
                 }
                 for m in &c.methods {
                     out.push(' ');
@@ -599,7 +787,14 @@ impl File {
                 out.push(')');
             }
             Expr::Lambda { params, body } => {
-                out.push_str(&format!("(lambda {} ", if params.is_empty() { "it".to_string() } else { params.join(",") }));
+                out.push_str(&format!(
+                    "(lambda {} ",
+                    if params.is_empty() {
+                        "it".to_string()
+                    } else {
+                        params.join(",")
+                    }
+                ));
                 self.write_expr(*body, out);
                 out.push(')');
             }
@@ -610,7 +805,11 @@ impl File {
                 self.write_expr(*index, out);
                 out.push(')');
             }
-            Expr::Try { body, catches, finally } => {
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
                 out.push_str("(try ");
                 self.write_expr(*body, out);
                 for c in catches {
@@ -623,20 +822,38 @@ impl File {
                 }
                 out.push(')');
             }
-            Expr::Is { operand, ty, negated } => {
+            Expr::Is {
+                operand,
+                ty,
+                negated,
+            } => {
                 out.push_str(if *negated { "(!is " } else { "(is " });
                 self.write_expr(*operand, out);
                 out.push_str(&format!(" {})", ty.name));
             }
-            Expr::As { operand, ty, nullable } => {
+            Expr::As {
+                operand,
+                ty,
+                nullable,
+            } => {
                 out.push_str(if *nullable { "(as? " } else { "(as " });
                 self.write_expr(*operand, out);
                 out.push_str(&format!(" {})", ty.name));
             }
-            Expr::InRange { value, start, end, kind, negated } => {
+            Expr::InRange {
+                value,
+                start,
+                end,
+                kind,
+                negated,
+            } => {
                 out.push_str(if *negated { "(!in " } else { "(in " });
                 self.write_expr(*value, out);
-                let op = match kind { RangeKind::Through => "..", RangeKind::Until => "until", RangeKind::DownTo => "downTo" };
+                let op = match kind {
+                    RangeKind::Through => "..",
+                    RangeKind::Until => "until",
+                    RangeKind::DownTo => "downTo",
+                };
                 out.push_str(&format!(" {op} "));
                 self.write_expr(*start, out);
                 out.push(' ');
@@ -644,20 +861,32 @@ impl File {
                 out.push(')');
             }
             Expr::RangeTo { lo, hi, kind } => {
-                let op = match kind { RangeKind::Through => "..", RangeKind::Until => "..<", RangeKind::DownTo => "downTo" };
+                let op = match kind {
+                    RangeKind::Through => "..",
+                    RangeKind::Until => "..<",
+                    RangeKind::DownTo => "downTo",
+                };
                 out.push_str(&format!("({op} "));
                 self.write_expr(*lo, out);
                 out.push(' ');
                 self.write_expr(*hi, out);
                 out.push(')');
             }
-            Expr::IncDec { target, dec, prefix } => {
+            Expr::IncDec {
+                target,
+                dec,
+                prefix,
+            } => {
                 out.push_str(if *prefix { "(pre" } else { "(post" });
                 out.push_str(if *dec { "-- " } else { "++ " });
                 self.write_expr(*target, out);
                 out.push(')');
             }
-            Expr::SafeCall { receiver, name, args } => {
+            Expr::SafeCall {
+                receiver,
+                name,
+                args,
+            } => {
                 out.push_str("(?. ");
                 self.write_expr(*receiver, out);
                 out.push_str(&format!(" {name}"));
@@ -708,7 +937,11 @@ impl File {
                 }
                 out.push(')');
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 out.push_str("(if ");
                 self.write_expr(*cond, out);
                 out.push(' ');
@@ -763,7 +996,9 @@ impl File {
 
     fn write_stmt(&self, id: StmtId, out: &mut String) {
         match self.stmt(id) {
-            Stmt::Local { is_var, name, init, .. } => {
+            Stmt::Local {
+                is_var, name, init, ..
+            } => {
                 out.push_str(&format!("({} {name} ", if *is_var { "var" } else { "val" }));
                 self.write_expr(*init, out);
                 out.push(')');
@@ -782,14 +1017,22 @@ impl File {
             Stmt::IncDec { name, dec } => {
                 out.push_str(&format!("({} {name})", if *dec { "dec" } else { "inc" }));
             }
-            Stmt::AssignMember { receiver, name, value } => {
+            Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+            } => {
                 out.push_str("(set-member ");
                 self.write_expr(*receiver, out);
                 out.push_str(&format!(" {name} "));
                 self.write_expr(*value, out);
                 out.push(')');
             }
-            Stmt::AssignIndex { array, index, value } => {
+            Stmt::AssignIndex {
+                array,
+                index,
+                value,
+            } => {
                 out.push_str("(set-index ");
                 self.write_expr(*array, out);
                 out.push(' ');
@@ -798,8 +1041,14 @@ impl File {
                 self.write_expr(*value, out);
                 out.push(')');
             }
-            Stmt::Break(l) => out.push_str(&format!("(break{})", l.as_ref().map(|s| format!("@{s}")).unwrap_or_default())),
-            Stmt::Continue(l) => out.push_str(&format!("(continue{})", l.as_ref().map(|s| format!("@{s}")).unwrap_or_default())),
+            Stmt::Break(l) => out.push_str(&format!(
+                "(break{})",
+                l.as_ref().map(|s| format!("@{s}")).unwrap_or_default()
+            )),
+            Stmt::Continue(l) => out.push_str(&format!(
+                "(continue{})",
+                l.as_ref().map(|s| format!("@{s}")).unwrap_or_default()
+            )),
             Stmt::Return(e) => {
                 out.push_str("(return");
                 if let Some(e) = e {
@@ -822,7 +1071,9 @@ impl File {
                 self.write_expr(*cond, out);
                 out.push(')');
             }
-            Stmt::For { name, range, body, .. } => {
+            Stmt::For {
+                name, range, body, ..
+            } => {
                 let op = match range.kind {
                     crate::ast::RangeKind::Through => "..",
                     crate::ast::RangeKind::Until => "until",
@@ -840,7 +1091,12 @@ impl File {
                 self.write_expr(*body, out);
                 out.push(')');
             }
-            Stmt::ForEach { name, iterable, body, .. } => {
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
                 out.push_str(&format!("(for-each {name} "));
                 self.write_expr(*iterable, out);
                 out.push(' ');
@@ -857,10 +1113,21 @@ impl File {
 
 fn binop(op: BinOp) -> &'static str {
     match op {
-        BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/", BinOp::Rem => "%",
-        BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Le => "<=",
-        BinOp::Gt => ">", BinOp::Ge => ">=", BinOp::And => "&&", BinOp::Or => "||",
-        BinOp::RefEq => "===", BinOp::RefNe => "!==",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        BinOp::RefEq => "===",
+        BinOp::RefNe => "!==",
     }
 }
 fn unop(op: UnOp) -> &'static str {

@@ -1,0 +1,18 @@
+# Git hooks via lefthook (https://lefthook.dev). Install: `just install-hooks` (runs `lefthook install`).
+#
+# Hooks shell out to the `just` recipes so lint/test logic has a single source of truth. They are
+# ADVISORY today — `just lint` surfaces fmt/clippy issues but fails only on hard errors, not the
+# existing fmt/warning debt. To make the gate enforcing once that debt is paid, point pre-commit at
+# `just lint-strict` instead of `just lint`.
+#
+# Bypass in an emergency: `git commit --no-verify` / `git push --no-verify`.
+
+pre-commit:
+  commands:
+    lint:
+      run: just lint
+
+pre-push:
+  commands:
+    test:
+      run: just test
