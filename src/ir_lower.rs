@@ -3780,6 +3780,63 @@ impl<'a> Lower<'a> {
                         let size = self.expr(args[0])?;
                         return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
                     }
+                    // Primitive-array init constructor `IntArray(n) { i -> elem }`: kotlinc inlines the
+                    // index lambda into a fill loop. Desugar to
+                    //   { val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }
+                    // reusing the existing size-alloc and `kotlin/Array.set` intrinsics (the backend picks
+                    // `iastore`/… by the array's element type). The lambda's single parameter is the index.
+                    if array_intrinsic_ok && args.len() == 2 {
+                      if let Some(elem) = prim_array_elem(&fname) {
+                        if let Expr::Lambda { params, body } = self.afile.expr(args[1]).clone() {
+                            let elem_ir = ty_to_ir(elem);
+                            let int_ir = ty_to_ir(Ty::Int);
+                            // val n = <size> (evaluated once — the bound is read again in the loop)
+                            let size = self.lower_arg(args[0], &int_ir)?;
+                            let n_v = self.fresh_value();
+                            let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: int_ir.clone(), init: Some(size) });
+                            // val a = new T[n]
+                            let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
+                            let alloc = self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![gn0] });
+                            let arr_v = self.fresh_value();
+                            let arr_ir = ty_to_ir(Ty::array(elem));
+                            let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: arr_ir, init: Some(alloc) });
+                            // var i = 0
+                            let i_v = self.fresh_value();
+                            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                            let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: int_ir, init: Some(zero) });
+                            // cond: i < n
+                            let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                            let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+                            let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
+                            // body: a[i] = <lambda body with the index param bound to i>
+                            let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                            let depth = self.scope.len();
+                            self.scope.push((pname, i_v, Ty::Int));
+                            let body_val = self.lower_arg(body, &elem_ir);
+                            self.scope.truncate(depth);
+                            let body_val = body_val?;
+                            // Spill the element value into a temp before the store: a branchy body
+                            // (`{ it % 2 == 0 }`) records a stackmap frame, and `kotlin/Array.set` pushes
+                            // the array + index *before* the value — without the spill those operands
+                            // would be stranded on the stack across that frame (VerifyError).
+                            let tmp_v = self.fresh_value();
+                            let var_tmp = self.ir.add_expr(IrExpr::Variable { index: tmp_v, ty: elem_ir, init: Some(body_val) });
+                            let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                            let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                            let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
+                            let set = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.set".to_string()), dispatch_receiver: Some(ga), args: vec![gi2, gtmp] });
+                            let wbody = self.ir.add_expr(IrExpr::Block { stmts: vec![var_tmp, set], value: None });
+                            // update: i = i + 1
+                            let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                            let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
+                            let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
+                            let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc), post_test: false, label: None });
+                            let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                            return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_n, var_arr, var_i, wh], value: Some(result) }));
+                        }
+                      }
+                    }
                     // Primitive-array literal `intArrayOf(1, 2, 3)` → a `Vararg` of that primitive type
                     // (the backend allocates `int[]`/`char[]`/… and stores each element).
                     if array_intrinsic_ok {

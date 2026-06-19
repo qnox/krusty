@@ -332,6 +332,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
   mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
+- **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
+  `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
+  desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`
+  — reusing the existing size-alloc and `kotlin/Array.set` intrinsics (the backend selects `iastore`/… by
+  the array's element type). The single lambda parameter is the **index** (bound to the loop counter); the
+  body yields the element. The element value is spilled to a temp before the store, since a branchy body
+  (`{ it % 2 == 0 }`) records a stackmap frame and `Array.set` pushes the array+index before the value —
+  without the spill those would be stranded across the frame (VerifyError). Reference `Array<T>(n) { … }`
+  still needs a sized `anewarray` node (not yet modeled) and is unsupported. `PrimArrayInit` in `tests/feature_box_e2e.rs`.
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
