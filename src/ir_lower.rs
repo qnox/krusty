@@ -2332,6 +2332,41 @@ impl<'a> Lower<'a> {
                     let hv2 = self.ir.add_expr(IrExpr::GetValue(holder));
                     return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv2, elem: ty_to_ir(elem), value: nv }));
                 }
+                // A `var` field of the enclosing class (`this.x++` written bare) inside its own method —
+                // `this.x = this.x ± 1` via a direct field read/write. (`obj.x++`/`arr[i]++` were already
+                // desugared to a compound assignment by the parser; an external `this`, e.g. an inlined
+                // `apply`, isn't handled here.)
+                if self.lookup(&name).is_none() {
+                    let (this_v, _) = self.lookup("this")?;
+                    let cur = self.cur_class.clone()?;
+                    let (class, idx) = {
+                        let ci = self.classes.get(&cur)?;
+                        let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)?;
+                        (ci.id, idx as u32)
+                    };
+                    let (fty, is_var) = self.syms.prop_of(&cur, &name)?;
+                    if !is_var { return None; }
+                    let one_c = match fty {
+                        Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
+                        Ty::Long => IrConst::Long(1),
+                        Ty::Double => IrConst::Double(1.0),
+                        Ty::Float => IrConst::Float(1.0),
+                        _ => return None,
+                    };
+                    let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let cur_val = self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx });
+                    let one = self.ir.add_expr(IrExpr::Const(one_c));
+                    let nv = if matches!(fty, Ty::Byte | Ty::Short | Ty::Char) {
+                        let cur_i = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: cur_val, type_operand: ty_to_ir(Ty::Int) });
+                        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_i, rhs: one });
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: sum, type_operand: ty_to_ir(fty) })
+                    } else {
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_val, rhs: one })
+                    };
+                    let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    return Some(self.ir.add_expr(IrExpr::SetField { receiver: recv2, class, index: idx, value: nv }));
+                }
                 let (v, ty) = self.lookup(&name)?;
                 let one = match ty {
                     Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),

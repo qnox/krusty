@@ -359,6 +359,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Bare `x++` / `x--` on a `var` field** (implicit `this.x`, statement position): `this.x = this.x ± 1`
+  via a direct field read/write inside the owning class, reusing the local-`++` `Byte`/`Short`/`Char`
+  width-wrap (widen to `Int`, op, narrow back). The field's type comes from `syms.prop_of`. (`obj.x++` and
+  `arr[i]++` were already parser-desugared to a compound assignment; a non-`var` or external-`this`
+  receiver isn't handled here.) `MemberIncDec` in `tests/feature_box_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

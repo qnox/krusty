@@ -171,6 +171,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A bare `x++` / `x--` on a `var` field of the enclosing class (implicit `this.x`) in statement
+    // position — `this.x = this.x ± 1` via direct field read/write, with Byte/Short/Char width-wrap.
+    ("MemberIncDec", r#"
+class C {
+    var i = 0
+    var n = 5L
+    var b: Byte = 127
+    fun go() { i++; i++; n--; b++ }
+}
+fun box(): String {
+    val c = C()
+    c.go()
+    if (c.i != 2) return "f1:${c.i}"
+    if (c.n != 4L) return "f2"
+    if (c.b.toInt() != -128) return "f3:${c.b}"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
