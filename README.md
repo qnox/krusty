@@ -6,14 +6,14 @@
 
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2FGIST_ID%2Fraw%2Fkrusty-kotlin.json" alt="Supported Kotlin">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2FGIST_ID%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Supported Kotlin">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance">
 </p>
 
 <!-- Conformance badge = share of the Kotlin `codegen/box` suite whose `box()` returns "OK" on
      krusty-emitted bytecode. The master build recomputes it and writes the badge JSON to a Gist
-     (no repo commit) — see .github/workflows/conformance.yml. Replace GIST_ID above with the gist
-     once created (and set the GIST_TOKEN secret + CONFORMANCE_GIST_ID variable). -->
+     (no repo commit) — see .github/workflows/conformance.yml. The gist id is wired via the
+     CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
 > *"Hey hey! It compiles Kotlin, kids!"*
 
