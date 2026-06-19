@@ -1,0 +1,58 @@
+1	src/ast.rs	large size difference between variants: the entire enum is at least 384 bytes
+1	src/bin/blockers.rs	consider using `sort_by_key`
+1	src/bin/survey.rs	consider using `sort_by_key`
+1	src/ir_lower.rs	calling `as_bytes` after slicing a string: help: try: `&desc.as_bytes()[1..end]`
+1	src/ir_lower.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `*i`
+1	src/ir_lower.rs	enclosing `Some` and `?` operator are unneeded
+1	src/ir_lower.rs	function `body_has_nonlocal_exit` is never used
+1	src/ir_lower.rs	the loop variable `i` is used to index `args`
+1	src/ir_lower.rs	this `if` has identical blocks
+1	src/ir_lower.rs	this boolean expression can be simplified: help: try: `!c.body_props.iter().any(|p| p.is_const) || c.methods.is_empty()`
+1	src/ir_lower.rs	unnecessary use of `get(&fname).is_none()`
+1	src/ir_lower.rs	using `clone` on type `(u32, Ty)` which implements the `Copy` trait: help: try removing the `clone` call: `lo.statics[&p.name]`
+1	src/ir_lower.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `body_tys.contains(&Ty::Unit)`
+1	src/jvm/classreader.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/jvm/inline.rs	the loop variable `k` is used to index `insns`
+1	src/jvm/ir_emit.rs	field `owner` is never read
+1	src/jvm/ir_emit.rs	this `repeat().take()` can be written more concisely: help: consider using `repeat_n()` instead: `std::iter::repeat_n((0, Ty::Error), arity)`
+1	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
+1	src/jvm/jvm_libraries.rs	length comparison to zero: help: using `is_empty` is clearer and more explicit: `args.is_empty()`
+1	src/jvm/jvm_libraries.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `supertype_descriptors(cp, *a).contains(&pd)`
+1	src/jvm/metadata.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
+1	src/parser.rs	called `unwrap` on `ty` after checking its variant with `is_some`
+1	src/parser.rs	empty line after doc comment
+1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
+1	src/parser.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/resolve.rs	empty line after doc comment
+1	src/resolve.rs	function `lambda_body_writes_outer` is never used
+1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&is_own_call`
+1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `resolve_super`
+1	src/resolve.rs	this `if` statement can be collapsed
+1	src/resolve.rs	this boolean expression can be simplified: help: try: `narrows_then != for_else`
+1	src/resolve.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `name`
+1	src/resolve.rs	usage of `contains_key` followed by `insert` on a `HashMap`
+1	tests/ir_blockers.rs	unreachable pattern: no value can reach this
+1	tests/kotlin_box_ir_jvm_conformance.rs	consider using `sort_by_key`
+1	tests/kotlin_box_ir_jvm_conformance.rs	unused doc comment
+2	src/ir_lower.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `(*i)`
+2	src/ir_lower.rs	this function has too many arguments (8/7)
+2	src/jvm/ir_emit.rs	unneeded `return` statement
+2	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&v`
+2	src/resolve.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `internal`
+2	src/resolve.rs	useless use of `format!`: help: consider using `.to_string()`: `"'val' cannot be reassigned.".to_string()`
+2	src/resolve.rs	using `clone` on type `Option<Ty>` which implements the `Copy` trait: help: try removing the `clone` call: `self.this_ty`
+2	tests/ir_blockers.rs	consider using `sort_by_key`
+25	src/resolve.rs	this `map_or` can be simplified
+29	src/ir_lower.rs	this `map_or` can be simplified
+3	src/jvm/classpath.rs	this `map_or` can be simplified
+3	src/jvm/classpath.rs	very complex type used. Consider factoring parts into `type` definitions
+3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `d`
+3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `n`
+39	src/parser.rs	this `map_or` can be simplified
+4	src/ir_lower.rs	usage of `contains_key` followed by `insert` on a `HashMap`
+5	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&r`
+6	src/ast.rs	redundant closure: help: replace the closure with the function itself: `&mut fe`
+6	src/jvm/jvm_libraries.rs	this `map_or` can be simplified
+7	src/ast.rs	this `map_or` can be simplified
+8	src/jvm/ir_emit.rs	this `map_or` can be simplified

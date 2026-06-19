@@ -56,8 +56,15 @@ fn vendored_kotlin_box_cases_return_ok() {
         return;
     }
     // Kotlin-conforming output references `kotlin/jvm/internal/Intrinsics` (areEqual,
-    // checkNotNullParameter, …), so kotlin-stdlib must be on the runtime classpath.
-    let stdlib = common::stdlib_jar().map(|p| p.to_string_lossy().into_owned());
+    // checkNotNullParameter, …), so kotlin-stdlib MUST be on the runtime classpath. Fail loudly if
+    // it's missing rather than silently running without it (which miscompiles into runtime errors).
+    let stdlib = common::stdlib_jar()
+        .map(|p| p.to_string_lossy().into_owned())
+        .expect(
+            "kotlin-stdlib jar not found — box cases need it on the runtime classpath. \
+             Provision the reference compiler with `just kotlinc` and export \
+             KRUSTY_KOTLINC=\"$(just kotlinc)\". Refusing to skip.",
+        );
     let krusty = env!("CARGO_BIN_EXE_krusty");
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data");
     let work = std::env::temp_dir().join(format!("krusty_vbox_{}", std::process::id()));
@@ -131,10 +138,8 @@ public class BoxRun {
     // Run all accepted cases in a single JVM: classpath is the runner + stdlib (the parent loader,
     // so `Intrinsics` resolves); each case's own classes load via its `URLClassLoader` argument.
     let mut cp = runner.to_str().unwrap().to_string();
-    if let Some(s) = &stdlib {
-        cp.push(':');
-        cp.push_str(s);
-    }
+    cp.push(':');
+    cp.push_str(&stdlib);
     let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
     for (dir, class, _) in &accepted {
         args.push(dir.clone());

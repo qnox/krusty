@@ -37,19 +37,42 @@ impl Default for Options {
 
 /// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
 const IGNORED_WITH_VALUE: &[&str] = &[
-    "-jvm-target", "-language-version", "-api-version", "-jdk-home", "-kotlin-home",
-    "-jvm-default", "-Xexplicit-api", "-opt-in", "-P", "-script-templates", "-expression", "-e",
+    "-jvm-target",
+    "-language-version",
+    "-api-version",
+    "-jdk-home",
+    "-kotlin-home",
+    "-jvm-default",
+    "-Xexplicit-api",
+    "-opt-in",
+    "-P",
+    "-script-templates",
+    "-expression",
+    "-e",
 ];
 /// kotlinc valueless flags that krusty ignores (accept + drop).
 const IGNORED_FLAGS: &[&str] = &[
-    "-include-runtime", "-no-stdlib", "-no-reflect", "-no-jdk", "-nowarn", "-verbose", "-Werror",
-    "-progressive", "-script", "-java-parameters", "-Xjvm-default", "-Xuse-ir",
+    "-include-runtime",
+    "-no-stdlib",
+    "-no-reflect",
+    "-no-jdk",
+    "-nowarn",
+    "-verbose",
+    "-Werror",
+    "-progressive",
+    "-script",
+    "-java-parameters",
+    "-Xjvm-default",
+    "-Xuse-ir",
 ];
 
 /// Split a classpath string on the platform separator (`:` on Unix).
 fn split_classpath(v: &str) -> Vec<PathBuf> {
     let sep = if cfg!(windows) { ';' } else { ':' };
-    v.split(sep).filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+    v.split(sep)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Recursively collect `.kt` files from a directory; pass through `.kt` files directly. `.java`
@@ -116,7 +139,28 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     opts
 }
 
-pub const VERSION_LINE: &str = concat!("krusty ", env!("CARGO_PKG_VERSION"), " (kotlinc-compatible Kotlin\u{2192}JVM compiler PoC)");
+/// krusty's release version. Injected at build time via the `KRUSTY_VERSION` env var; the `just`
+/// release recipe sets it to `<max-Kotlin-reference-version>-build.<n>` (e.g. 2.4.20-build.3, a
+/// SemVer prerelease so builds stay strictly ordered). Falls back to the crate version for a plain
+/// `cargo build`, so local dev builds still report something sensible.
+pub const VERSION: &str = match option_env!("KRUSTY_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// Kotlin reference versions this build is validated against / supports, injected at build time from
+/// the `kotlin-versions` manifest. Lets `krusty -version` advertise its supported Kotlins.
+pub const KOTLIN_SUPPORT: &str = match option_env!("KRUSTY_KOTLIN_SUPPORT") {
+    Some(v) => v,
+    None => "unknown (dev build)",
+};
+
+/// Human-facing `-version` output.
+pub fn version_line() -> String {
+    format!(
+        "krusty {VERSION} (kotlinc-compatible Kotlin\u{2192}JVM compiler PoC)\nsupported Kotlin: {KOTLIN_SUPPORT}"
+    )
+}
 
 pub const HELP: &str = "\
 usage: krusty [options] <sources>
@@ -146,16 +190,33 @@ mod tests {
 
     #[test]
     fn kotlinc_style_flags() {
-        let o = parse_args(&["-d", "out.jar", "-cp", "a.jar:b/classes", "-module-name", "lib", "x.kt"]);
+        let o = parse_args(&[
+            "-d",
+            "out.jar",
+            "-cp",
+            "a.jar:b/classes",
+            "-module-name",
+            "lib",
+            "x.kt",
+        ]);
         assert_eq!(o.dest, PathBuf::from("out.jar"));
-        assert_eq!(o.classpath, vec![PathBuf::from("a.jar"), PathBuf::from("b/classes")]);
+        assert_eq!(
+            o.classpath,
+            vec![PathBuf::from("a.jar"), PathBuf::from("b/classes")]
+        );
         assert_eq!(o.module_name, "lib");
         assert_eq!(o.sources, vec!["x.kt".to_string()]);
     }
 
     #[test]
     fn ignores_unsupported_with_and_without_value() {
-        let o = parse_args(&["-include-runtime", "-jvm-target", "1.8", "-Xsomething", "f.kt"]);
+        let o = parse_args(&[
+            "-include-runtime",
+            "-jvm-target",
+            "1.8",
+            "-Xsomething",
+            "f.kt",
+        ]);
         // -jvm-target consumed its value (1.8), not treated as a source.
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
         assert!(o.ignored.contains(&"-include-runtime".to_string()));

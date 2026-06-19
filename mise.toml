@@ -1,0 +1,6 @@
+# Dev tooling, pinned via mise (https://mise.jdx.dev). Get everything with `mise install` (or it
+# auto-installs on cd if mise is activated). Keeps local + CI tool versions identical without extra
+# infra. Rust itself stays on rustup; mise just provides the task-runner and hooks manager.
+[tools]
+just = "latest"
+lefthook = "latest"

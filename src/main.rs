@@ -7,17 +7,17 @@ use std::path::Path;
 
 use krusty::cli;
 use krusty::diag::DiagSink;
-use krusty::lexer::lex;
-use krusty::parser::parse;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::lexer::lex;
+use krusty::parser::parse;
 use krusty::resolve::collect_signatures_with_cp;
 
 fn main() {
     let opts = cli::parse(std::env::args().skip(1));
 
     if opts.print_version {
-        println!("{}", cli::VERSION_LINE);
+        println!("{}", cli::version_line());
         return;
     }
     if opts.print_help {
@@ -55,7 +55,14 @@ fn main() {
     // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.
     // The backend shares the same classpath instance (caches) as the library set, for the inliner.
     let backend = krusty::jvm::JvmBackend::new(cp);
-    let outputs = krusty::backend::compile(&files, &stems, &syms, &backend, &opts.module_name, &mut diags);
+    let outputs = krusty::backend::compile(
+        &files,
+        &stems,
+        &syms,
+        &backend,
+        &opts.module_name,
+        &mut diags,
+    );
 
     if diags.has_errors() {
         for (path, src) in opts.sources.iter().zip(&sources) {
@@ -65,17 +72,26 @@ fn main() {
         std::process::exit(1);
     }
 
-    let emitted = outputs.iter().filter(|(p, _)| p.ends_with(".class")).count();
-    let result = if opts.dest.extension().map_or(false, |e| e == "jar") {
+    let emitted = outputs
+        .iter()
+        .filter(|(p, _)| p.ends_with(".class"))
+        .count();
+    let result = if opts.dest.extension().is_some_and(|e| e == "jar") {
         write_jar(&opts.dest, &outputs)
     } else {
         write_dir(&opts.dest, &outputs)
     };
     if let Err(e) = result {
-        eprintln!("krusty: cannot write output to {}: {e}", opts.dest.display());
+        eprintln!(
+            "krusty: cannot write output to {}: {e}",
+            opts.dest.display()
+        );
         std::process::exit(1);
     }
-    println!("ok: emitted {emitted} class file(s) to {}", opts.dest.display());
+    println!(
+        "ok: emitted {emitted} class file(s) to {}",
+        opts.dest.display()
+    );
 }
 
 fn write_dir(dir: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> {
@@ -99,7 +115,8 @@ fn write_jar(path: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> 
     let mut zw = zip::ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zw.start_file("META-INF/MANIFEST.MF", opts).map_err(zip_io)?;
+    zw.start_file("META-INF/MANIFEST.MF", opts)
+        .map_err(zip_io)?;
     zw.write_all(b"Manifest-Version: 1.0\r\nCreated-By: krusty\r\n\r\n")?;
     for (rel, bytes) in outputs {
         zw.start_file(rel, opts).map_err(zip_io)?;
@@ -110,9 +127,13 @@ fn write_jar(path: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> 
 }
 
 fn zip_io(e: zip::result::ZipError) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, e)
+    std::io::Error::other(e)
 }
 
 fn file_stem(path: &str) -> String {
-    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("File").to_string()
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("File")
+        .to_string()
 }
