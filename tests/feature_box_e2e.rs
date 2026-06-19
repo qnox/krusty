@@ -1136,6 +1136,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A library operator function on a reference receiver: `collection + x` desugars to
+    // `Collection.plus(x)` (a stdlib extension). Overload selection is most-specific: `+ element` uses the
+    // `plus(T)` overload, `+ collection` the `plus(Iterable)` concat overload (not a nested element).
+    ("CollectionPlus", r#"
+fun box(): String {
+    val a = listOf(1, 2) + 3
+    if (a != listOf(1, 2, 3)) return "fa: $a"
+    val l = listOf(10L) + 20L
+    if (l != listOf(10L, 20L)) return "fl: $l"
+    val s = setOf(1, 2) + 2
+    if (s != setOf(1, 2)) return "fs: $s"
+    val c = listOf(1, 2) + listOf(3, 4)
+    if (c != listOf(1, 2, 3, 4)) return "fc: $c"
+    return "OK"
+}
+"#),
 ];
 
 #[test]

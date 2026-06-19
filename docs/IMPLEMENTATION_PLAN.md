@@ -2188,6 +2188,12 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 372 — operator overloading via library functions + most-specific overload selection**
+  (838→843). `a + b` on a reference receiver resolves `a.plus(b)` through the library set (`list + x` →
+  `CollectionsKt.plus`). Required fixing extension-overload selection generally: subtype-aware candidate
+  filter (`arg_fits_subtype`) + pick the most-specific overload, so `list + list` selects the `Iterable`
+  concat overload, not the erased-`Object` element one. `tests/feature_box_e2e.rs::CollectionPlus`.
+
 - ✅ **Phase 371 — test-suite speed (owner: round must be <60s)**. (a) The extension/top-level-function
   index is now shared process-wide via a path-keyed global cache (`global_ext_cache`), like the
   type/jimage indexes — the box harness's 16 workers stop each rebuilding it (check −2.7s thread-sum).

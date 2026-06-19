@@ -2911,6 +2911,24 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    // A library operator function on a reference receiver: `a + b` desugars to `a.plus(b)`,
+                    // resolved as a stdlib member/extension (`List + element` → `CollectionsKt.plus`). Use
+                    // its (parameterized) return type. The lowering re-resolves to emit the call.
+                    let op_name = match op {
+                        BinOp::Add => Some("plus"), BinOp::Sub => Some("minus"), BinOp::Mul => Some("times"),
+                        BinOp::Div => Some("div"), BinOp::Rem => Some("rem"), _ => None,
+                    };
+                    // Resolve `a + b` (etc.) as `a.plus(b)` through the library set. Overload selection
+                    // picks the most specific candidate (`list + list` → the `Iterable` concat overload,
+                    // `list + element` → the element overload), so a reference right operand is fine.
+                    if let Some(fname) = op_name {
+                        if rt != Ty::Error {
+                            if let Some(c) = self.syms.libraries.resolve_callable(fname, Some(lt), &[rt], &[]) {
+                                self.ext_calls.insert(e, (c.owner, c.name, c.descriptor));
+                                return self.set(e, c.ret);
+                            }
+                        }
+                    }
                 }
                 self.check_binary(op, lt, rt, self.span(e))
             }
