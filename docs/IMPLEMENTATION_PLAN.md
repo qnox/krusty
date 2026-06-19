@@ -2188,6 +2188,20 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- 🚧 **Phase 387 — value/inline classes, step 3: symbol-table representation** (886, foundation).
+  `ClassSig` gains `value_field: Option<(String, Ty)>` — for a `@JvmInline value class X(val v: U)`, the
+  sole underlying property `(name, U)`, populated in `collect_signatures`. This is the data layer for the
+  unboxed model: an `X` value is represented as its underlying `U`; `X.class` carries the static
+  `box-impl`/`unbox-impl`/`constructor-impl` members for boxed contexts. The decision to compile value
+  classes UNBOXED (not as plain single-field classes) is deliberate — a boxed-always shortcut miscompiles
+  inline-class equality and identity (`X@hash` vs the value, `==` by reference), which a measurement
+  confirmed (45 box FAILs); that is a test-hack, not the compiler kotlinc is. 886/0-FAIL. NEXT (step 4):
+  member synthesis — emit `X.class` with kotlinc's exact members (field, private `<init>`,
+  `constructor-impl`, `box-impl`, `unbox-impl`, getter, `equals`/`hashCode`/`toString` + `-impl` forms),
+  verified by javap-diff vs kotlinc; then (step 5) use-site lowering: construction → `constructor-impl`,
+  sole-property access on an unboxed value → identity, box/unbox only at nullable/generic/`Any` boundaries,
+  mangled member names (phase 386). The resolve rejection + `ir_lower` `is_value` guards lift then.
+
 - 🚧 **Phase 386 — value/inline classes, step 2: name mangling** (886, building block). New
   `src/jvm/inline_class.rs`: kotlinc's inline-class member-name mangling, ported exactly from
   `compiler/backend/.../inlineClassManglingUtils.kt` (new K2 rules). A function whose signature mentions
