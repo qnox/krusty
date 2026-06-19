@@ -670,3 +670,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   first piece of real inline-class infrastructure (the mangled-name lookup); `UByte`/`UShort` and unsigned
   open-ranges/`step` are still unmodeled, so most unsigned-range corpus files (which mix all of these) stay
   skipped — but the range-value iteration itself is correct (verified past the sign bit).
+
+- **`if`/`when` branch join: primitive with `null` → boxed nullable wrapper.** When one branch of an
+  `if`/`when` expression is a primitive and another is `null` (`if (c) true else null`), the result type is
+  the primitive's boxed nullable wrapper (`Boolean?` = `java/lang/Boolean`), matching kotlinc. For this to
+  verify, the branch lowering now coerces each branch to the result type when that type is a reference —
+  the primitive branch is boxed at the merge so all branches agree on the (reference) stack type. (A
+  broader "two unrelated references → `Any`" join was tried and reverted: it unblocked files whose merge
+  frame krusty's emitter couldn't reconcile — a VerifyError — so reference↔reference joins beyond `null`
+  stay unsupported pending correct common-supertype frame merging.)

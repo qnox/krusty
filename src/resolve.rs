@@ -4401,6 +4401,14 @@ impl<'a> Checker<'a> {
         if matches!((a, b), (Ty::Int | Ty::Long, Ty::Int | Ty::Long)) {
             return Ty::Long;
         }
+        // A primitive joins with `null` as its boxed (nullable) wrapper — `if (c) true else null` is a
+        // `Boolean?` (`java/lang/Boolean`), the primitive branch boxed at the merge.
+        if a == Ty::Null {
+            if let Some(w) = nullable_prim_wrapper(b) { return Ty::obj(w); }
+        }
+        if b == Ty::Null {
+            if let Some(w) = nullable_prim_wrapper(a) { return Ty::obj(w); }
+        }
         self.diags.error(span, format!("incompatible if branches: '{}' and '{}'", a.name(), b.name()));
         Ty::Error
     }

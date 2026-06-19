@@ -3584,9 +3584,16 @@ impl<'a> Lower<'a> {
                     _ => {}
                 }
                 let c = self.expr(cond)?;
-                let t = self.expr(then_branch)?;
+                // When the `if`'s result type is a reference but a branch is a primitive (`if (c) true else
+                // null` → `Boolean?`), the primitive branch must be boxed at the merge so both branches
+                // agree on the (reference) stack type — `lower_arg` to the result type inserts the box.
+                let res = self.info.ty(e);
+                let t = if res.is_reference() { self.lower_arg(then_branch, &ty_to_ir(res))? } else { self.expr(then_branch)? };
                 let branches = match else_branch {
-                    Some(els) => { let e2 = self.expr(els)?; vec![(Some(c), t), (None, e2)] }
+                    Some(els) => {
+                        let e2 = if res.is_reference() { self.lower_arg(els, &ty_to_ir(res))? } else { self.expr(els)? };
+                        vec![(Some(c), t), (None, e2)]
+                    }
                     None => vec![(Some(c), t)],
                 };
                 self.ir.add_expr(IrExpr::When { branches })
@@ -3914,9 +3921,12 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 let last = arms.len().saturating_sub(1);
+                // Like `if`, a `when` whose result is a reference but whose arm is a primitive must box that
+                // arm at the merge so every branch agrees on the (reference) stack type.
+                let res = self.info.ty(e);
                 let mut branches = Vec::new();
                 for (ai, arm) in arms.iter().enumerate() {
-                    let body = self.expr(arm.body)?;
+                    let body = if res.is_reference() { self.lower_arg(arm.body, &ty_to_ir(res))? } else { self.expr(arm.body)? };
                     if arm.conditions.is_empty() || (make_last_else && ai == last) {
                         branches.push((None, body)); // else (real, or the exhaustive last arm)
                     } else {

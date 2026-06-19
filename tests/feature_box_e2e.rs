@@ -1186,6 +1186,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // An `if`/`when` whose branches are a primitive and `null` joins to the boxed nullable wrapper
+    // (`if (c) true else null` is `Boolean?`); the primitive branch is boxed at the merge.
+    ("PrimitiveNullJoin", r#"
+fun pick(c: Boolean): Boolean? = if (c) true else null
+fun box(): String {
+    if (pick(true) != true) return "f1"
+    if (pick(false) != null) return "f2"
+    val x: Int? = if (pick(true) == true) 5 else null
+    if (x != 5) return "f3"
+    val y: Char? = when (3) { 3 -> 'z'; else -> null }
+    if (y != 'z') return "f4"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
