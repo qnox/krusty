@@ -2188,6 +2188,12 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 378 — `if`/`when` unrelated-reference branch join → common supertype (`Object`)** (849→856).
+  Different reference classes join to `Any`; the emitter writes `Object` for the merge frame (each branch
+  verifies as a subtype) and compares branch types by JVM internal name (so `Ty::String` vs
+  `Ty::Obj("java/lang/String")` don't spuriously merge — that bug broke a both-`String` `if`).
+  `tests/feature_box_e2e.rs::UnrelatedRefJoin`.
+
 - ✅ **Phase 377 — `if`/`when` same-class branch join** (848→849). Two branches of the same class
   (`List<C>`/`List<D>`) join to that class (erased type args) — frame-safe since the runtime class is
   identical (the unrelated-class→`Any` join stays unsupported pending frame merging). `tests/feature_box_e2e.rs::SameClassJoin`.

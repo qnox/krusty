@@ -2363,6 +2363,32 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
+        // When the falling-through branches are references of DIFFERENT classes (`if (c) Foo() else Bar()`,
+        // joined by the checker to `Any`), the merge-point stack type must be a common supertype — krusty
+        // uses `Object`. Each branch value is a subtype, so the merge frame (`Object`) verifies; the last
+        // branch's own (more specific) class would mismatch the other predecessor's value (a VerifyError).
+        if last.is_reference() {
+            // Compare by the JVM internal name (`String` and `Obj("java/lang/String")` are the same type
+            // but distinct `Ty` values), so only a genuinely differing class triggers the `Object` merge.
+            let internal = |t: &Ty| -> Option<String> {
+                match t {
+                    Ty::String => Some("java/lang/String".to_string()),
+                    Ty::Obj(n, _) => Some(n.to_string()),
+                    Ty::Array(_) => Some(t.descriptor()),
+                    _ => None,
+                }
+            };
+            let mut names = branches.iter()
+                .filter(|(_, b)| !self.diverges(*b))
+                .map(|(_, b)| self.value_ty(*b))
+                .filter(|t| !matches!(t, Ty::Null | Ty::Nothing | Ty::Error))
+                .filter_map(|t| internal(&t));
+            if let Some(first) = names.next() {
+                if names.any(|n| n != first) {
+                    return Ty::obj("kotlin/Any");
+                }
+            }
+        }
         last
     }
 

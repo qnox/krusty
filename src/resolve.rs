@@ -4415,13 +4415,18 @@ impl<'a> Checker<'a> {
             if let Some(w) = nullable_prim_wrapper(a) { return Ty::obj(w); }
         }
         // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
-        // `List<D>` → `List<*>`). The runtime class is identical, so the merge stack frame is that class —
-        // well-typed, unlike a join of unrelated references (which would merge to `Object`, a frame
-        // krusty's emitter can't yet reconcile, so those stay unsupported).
+        // `List<D>` → `List<*>`).
         if let (Ty::Obj(ai, _), Ty::Obj(bi, _)) = (a, b) {
             if ai == bi {
                 return Ty::obj(ai);
             }
+        }
+        // Two values of DIFFERENT reference classes join to their common supertype, which krusty
+        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. The emitter writes
+        // `Object` for the merge-point frame so each branch's (more specific) value verifies against it.
+        // `String`/`Array`/`Fun` are references too, so this also covers `if (c) "s" else SomeObj()`.
+        if a.is_reference() && b.is_reference() {
+            return Ty::obj("kotlin/Any");
         }
         self.diags.error(span, format!("incompatible if branches: '{}' and '{}'", a.name(), b.name()));
         Ty::Error
