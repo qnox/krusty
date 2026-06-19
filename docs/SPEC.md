@@ -291,7 +291,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
   cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
-  casts are a plain `checkcast`/coercion. A literal-boolean `if` condition (`if (false) { … }`) is
+  casts are a plain `checkcast`/coercion. The safe cast `x as? T` lowers to
+  `{ val t = x; if (t is T) t as T else null }` — `instanceof` then `checkcast` on a match, `null` on a
+  mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive
+  `as? Int` would yield the boxed `Int?` wrapper — not yet modeled, so it skips). `SafeCast` in
+  `tests/feature_box_e2e.rs`. A literal-boolean `if` condition (`if (false) { … }`) is
   constant-folded (only the taken branch is emitted), like kotlinc's dead-code elimination.
 - Generic functions (`fun <T> f(x: T): T`) erase the type parameter to `Object` in the JVM signature.
   At a call site, a result of erased type `Object` flowing into a more specific reference context (a
