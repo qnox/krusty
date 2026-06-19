@@ -55,7 +55,10 @@ fn emitted_add_class_verifies_and_runs() {
         .expect("run java");
     let out = String::from_utf8_lossy(&run.stdout);
     let err = String::from_utf8_lossy(&run.stderr);
-    assert!(run.status.success(), "java failed (verify/run):\nstdout={out}\nstderr={err}");
+    assert!(
+        run.status.success(),
+        "java failed (verify/run):\nstdout={out}\nstderr={err}"
+    );
     assert_eq!(out.trim(), "7", "wrong result; stderr={err}");
 
     let _ = fs::remove_dir_all(&dir);

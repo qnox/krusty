@@ -20,23 +20,23 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::os::unix::io::AsRawFd;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use krusty::jvm::names::file_class_name;
-use krusty::ir_lower::lower_file;
-use krusty::jvm::ir_emit;
 use krusty::diag::DiagSink;
+use krusty::ir_lower::lower_file;
+use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
+use krusty::jvm::ir_emit;
+use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::jvm::classpath::Classpath;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 mod common;
@@ -135,7 +135,7 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
             || l.starts_with("// IGNORE_BACKEND_K1:")
             || l.starts_with("// IGNORE_BACKEND_K2:")
     }) {
-        let rest = l.splitn(2, ':').nth(1).unwrap_or("");
+        let rest = l.split_once(':').map(|x| x.1).unwrap_or("");
         if mentions(rest.trim()) {
             return false;
         }
@@ -154,7 +154,7 @@ fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
         for p in entries {
             if p.is_dir() {
                 collect_kt(&p, out);
-            } else if p.extension().map_or(false, |e| e == "kt") {
+            } else if p.extension().is_some_and(|e| e == "kt") {
                 out.push(p);
             }
         }
@@ -179,7 +179,12 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
+fn compile_source(
+    src: &str,
+    stem: &str,
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
@@ -197,7 +202,9 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
     // jimage (the bootclasspath). The compiler never reads `JAVA_HOME` — the harness passes the
     // path, exactly as a `kotlinc -classpath` invocation would.
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
-    if let Some(p) = jdk_modules { cp_paths.push(p.to_path_buf()); }
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
     // Reuse a thread-local `Classpath` for this classpath set (warm caches across files).
     let cp = CP_CACHE.with(|c| {
         c.borrow_mut()
@@ -249,7 +256,10 @@ fn compile_source(src: &str, stem: &str, cp_jars: &[std::path::PathBuf], jdk_mod
 fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
     for (name, bytes) in classes {
         if let Ok(ci) = parse_class(bytes) {
-            if ci.method("box", "()Ljava/lang/String;").map_or(false, |m| m.is_static()) {
+            if ci
+                .method("box", "()Ljava/lang/String;")
+                .is_some_and(|m| m.is_static())
+            {
                 return Some(name.replace('/', "."));
             }
         }
@@ -276,7 +286,11 @@ fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::R
         // re-check the deadline even if remaining is very large.
         let poll_ms = remaining.as_millis().min(1000) as i32;
         let ready = unsafe {
-            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             libc::poll(&mut pfd, 1, poll_ms) > 0 && (pfd.revents & libc::POLLIN != 0)
         };
         if !ready {
@@ -332,7 +346,11 @@ impl BoxRunner {
             .expect("failed to launch BoxRunner JVM");
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        BoxRunner { _child: child, stdin, stdout }
+        BoxRunner {
+            _child: child,
+            stdin,
+            stdout,
+        }
     }
 
     /// Send class bytes and box class name; return the result string.
@@ -341,7 +359,11 @@ impl BoxRunner {
         self.try_run(classes, box_class).ok()
     }
 
-    fn try_run(&mut self, classes: &[(String, Vec<u8>)], box_class: &str) -> std::io::Result<String> {
+    fn try_run(
+        &mut self,
+        classes: &[(String, Vec<u8>)],
+        box_class: &str,
+    ) -> std::io::Result<String> {
         // Write: [u32 n][for each: u16 name_len, name, u32 data_len, data][u16 box_len, box_name]
         let n = classes.len() as u32;
         self.stdin.write_all(&n.to_be_bytes())?;
@@ -377,8 +399,11 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     // Cache the compiled runner in a stable location keyed by the source hash — BoxRunner.java is
     // static, so javac runs once across all test runs, not every invocation (~1.8s saved per run).
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in BOX_RUNNER_SRC.bytes() { hash = (hash ^ b as u64).wrapping_mul(0x100000001b3); }
-    let runner_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/box_runner_{hash:016x}"));
+    for b in BOX_RUNNER_SRC.bytes() {
+        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let runner_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/box_runner_{hash:016x}"));
     if runner_dir.join("BoxRunner.class").is_file() {
         return runner_dir; // already compiled
     }
@@ -387,12 +412,22 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     fs::write(&src_path, BOX_RUNNER_SRC).unwrap();
     let javac = format!("{java_home}/bin/javac");
     let out = Command::new(&javac)
-        .args(["-source", "8", "-target", "8", "-d", runner_dir.to_str().unwrap()])
+        .args([
+            "-source",
+            "8",
+            "-target",
+            "8",
+            "-d",
+            runner_dir.to_str().unwrap(),
+        ])
         .arg(&src_path)
         .output()
         .expect("javac failed to launch");
     if !out.status.success() {
-        panic!("BoxRunner.java compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        panic!(
+            "BoxRunner.java compile failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     runner_dir
 }
@@ -429,12 +464,17 @@ fn kotlin_codegen_box_conformance() {
             common::find_jar("kotlin-stdlib-jdk8", &[]),
             common::find_jar("kotlinx-coroutines-core", &["jdk8"]),
             common::find_jar("annotations-", &[]),
-        ].into_iter().flatten() {
+        ]
+        .into_iter()
+        .flatten()
+        {
             paths.push(p.to_string_lossy().into_owned());
         }
         paths.join(":")
     };
-    let limit: usize = env("KRUSTY_BOX_LIMIT").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let limit: usize = env("KRUSTY_BOX_LIMIT")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
 
     let mut files = Vec::new();
     collect_kt(Path::new(&box_dir), &mut files);
@@ -464,9 +504,7 @@ fn kotlin_codegen_box_conformance() {
         .build()
         .unwrap();
     let n_threads = pool.current_num_threads();
-    let runners: Vec<Mutex<Option<BoxRunner>>> = (0..n_threads)
-        .map(|_| Mutex::new(None))
-        .collect();
+    let runners: Vec<Mutex<Option<BoxRunner>>> = (0..n_threads).map(|_| Mutex::new(None)).collect();
 
     // Phase timers (nanoseconds, accumulated across threads).
     let t_compile = AtomicU64::new(0);
@@ -479,11 +517,13 @@ fn kotlin_codegen_box_conformance() {
     // Optional sampling profiler → flamegraph SVG (KRUSTY_FLAMEGRAPH=1). Captures all rayon worker
     // threads via SIGPROF; off by default so normal runs aren't perturbed.
     let flame_guard = if env("KRUSTY_FLAMEGRAPH").is_some() {
-        Some(pprof::ProfilerGuardBuilder::default()
-            .frequency(997)
-            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-            .build()
-            .expect("start profiler"))
+        Some(
+            pprof::ProfilerGuardBuilder::default()
+                .frequency(997)
+                .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                .build()
+                .expect("start profiler"),
+        )
     } else {
         None
     };
@@ -491,100 +531,113 @@ fn kotlin_codegen_box_conformance() {
     let no_run = env("KRUSTY_NO_RUN").is_some();
 
     // Parallel phase: compile each test in-process, run in the per-thread JVM.
-    let results: Vec<(PathBuf, TestResult)> = pool.install(|| files
-        .par_iter()
-        .map(|file| {
-            let tc0 = std::time::Instant::now();
-            let tr0 = std::time::Instant::now();
-            let src = fs::read_to_string(file).unwrap_or_default();
-            t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let __ret = (|| {
-            // Skip multi-file, multi-module, or no-box tests.
-            if src.contains("// FILE:") || src.contains("// MODULE:") || !src.contains("fun box()") {
-                return (file.clone(), TestResult::Skip);
-            }
-            // Skip tests that require invokedynamic lambdas or features not supported on JVM_IR K2.
-            if src.contains("// LAMBDAS: INDY") || src.contains("IGNORE_BACKEND_K2: JVM_IR") {
-                return (file.clone(), TestResult::Skip);
-            }
-            // Respect the backend directives: a `// TARGET_BACKEND:` that excludes JVM, or an
-            // `// IGNORE_BACKEND[_K1/_K2]:` that names JVM/JVM_IR, means this test is not for us.
-            if !backend_applicable(&src, &["JVM", "JVM_IR"]) {
-                return (file.clone(), TestResult::Skip);
-            }
-            // Skip tests that rely on unsigned-integer-to-string conversion with unsigned semantics.
-            if src.contains("U.toString()") || src.contains("UL.toString()") {
-                return (file.clone(), TestResult::Skip);
-            }
-            // Skip tests that combine typealias-of-function-type with suspend conversion:
-            // krusty doesn't resolve typealiases, so the lambda arity is wrong.
-            if src.contains("typealias") && src.contains(": suspend (") {
-                return (file.clone(), TestResult::Skip);
-            }
+    let results: Vec<(PathBuf, TestResult)> = pool.install(|| {
+        files
+            .par_iter()
+            .map(|file| {
+                let tc0 = std::time::Instant::now();
+                let tr0 = std::time::Instant::now();
+                let src = fs::read_to_string(file).unwrap_or_default();
+                t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                let __ret = (|| {
+                    // Skip multi-file, multi-module, or no-box tests.
+                    if src.contains("// FILE:")
+                        || src.contains("// MODULE:")
+                        || !src.contains("fun box()")
+                    {
+                        return (file.clone(), TestResult::Skip);
+                    }
+                    // Skip tests that require invokedynamic lambdas or features not supported on JVM_IR K2.
+                    if src.contains("// LAMBDAS: INDY") || src.contains("IGNORE_BACKEND_K2: JVM_IR")
+                    {
+                        return (file.clone(), TestResult::Skip);
+                    }
+                    // Respect the backend directives: a `// TARGET_BACKEND:` that excludes JVM, or an
+                    // `// IGNORE_BACKEND[_K1/_K2]:` that names JVM/JVM_IR, means this test is not for us.
+                    if !backend_applicable(&src, &["JVM", "JVM_IR"]) {
+                        return (file.clone(), TestResult::Skip);
+                    }
+                    // Skip tests that rely on unsigned-integer-to-string conversion with unsigned semantics.
+                    if src.contains("U.toString()") || src.contains("UL.toString()") {
+                        return (file.clone(), TestResult::Skip);
+                    }
+                    // Skip tests that combine typealias-of-function-type with suspend conversion:
+                    // krusty doesn't resolve typealiases, so the lambda arity is wrong.
+                    if src.contains("typealias") && src.contains(": suspend (") {
+                        return (file.clone(), TestResult::Skip);
+                    }
 
-            // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
-            // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
-            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("File").to_string();
-            // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
-            let tj0 = std::time::Instant::now();
-            let compile_cp = common::classpath_jars_for(&src);
-            t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let t0 = std::time::Instant::now();
-            let classes = match compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref()) {
-                Some(c) => c,
-                None => return (file.clone(), TestResult::Skip),
-            };
-            t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let box_class = match find_box_class(&classes) {
-                Some(c) => c,
-                None => return (file.clone(), TestResult::Skip),
-            };
+                    // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
+                    // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
+                    let stem = file
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("File")
+                        .to_string();
+                    // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
+                    let tj0 = std::time::Instant::now();
+                    let compile_cp = common::classpath_jars_for(&src);
+                    t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    let t0 = std::time::Instant::now();
+                    let classes =
+                        match compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref()) {
+                            Some(c) => c,
+                            None => return (file.clone(), TestResult::Skip),
+                        };
+                    t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    let box_class = match find_box_class(&classes) {
+                        Some(c) => c,
+                        None => return (file.clone(), TestResult::Skip),
+                    };
 
-            // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
-            // front-end/codegen cost in isolation. A lowered file counts as Pass.
-            if no_run {
-                return (file.clone(), TestResult::Pass);
-            }
+                    // KRUSTY_NO_RUN: compile + lower only (no JVM execution) — for profiling the
+                    // front-end/codegen cost in isolation. A lowered file counts as Pass.
+                    if no_run {
+                        return (file.clone(), TestResult::Pass);
+                    }
 
-            // Execute in the per-thread persistent JVM.
-            let tid = rayon::current_thread_index().unwrap_or(0);
-            let mut guard = runners[tid].lock().unwrap();
-            if guard.is_none() {
-                *guard = Some(BoxRunner::new(&java, &runner_cp_str, &stdlib));
-            }
-            let runner = guard.as_mut().unwrap();
-            let t1 = std::time::Instant::now();
-            let result = match runner.run(&classes, &box_class) {
-                Some(r) => r,
-                None => {
-                    // BoxRunner died (JVM crash/OOM); restart it for the next test.
-                    *guard = None;
-                    "ERROR:BoxRunnerCrash".to_string()
-                }
-            };
-            t_jvm.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    // Execute in the per-thread persistent JVM.
+                    let tid = rayon::current_thread_index().unwrap_or(0);
+                    let mut guard = runners[tid].lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(BoxRunner::new(&java, &runner_cp_str, &stdlib));
+                    }
+                    let runner = guard.as_mut().unwrap();
+                    let t1 = std::time::Instant::now();
+                    let result = match runner.run(&classes, &box_class) {
+                        Some(r) => r,
+                        None => {
+                            // BoxRunner died (JVM crash/OOM); restart it for the next test.
+                            *guard = None;
+                            "ERROR:BoxRunnerCrash".to_string()
+                        }
+                    };
+                    t_jvm.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-            if result == "OK" {
-                (file.clone(), TestResult::Pass)
-            } else {
-                (file.clone(), TestResult::Fail(result))
-            }
-            })();
-            t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            __ret
-        })
-        .collect());
+                    if result == "OK" {
+                        (file.clone(), TestResult::Pass)
+                    } else {
+                        (file.clone(), TestResult::Fail(result))
+                    }
+                })();
+                t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                __ret
+            })
+            .collect()
+    });
 
     // Emit the flamegraph (if profiling was on) before computing summaries.
     if let Some(g) = flame_guard {
         if let Ok(report) = g.report().build() {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
+            let path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/flamegraph.svg");
             if let Ok(f) = std::fs::File::create(&path) {
                 let _ = report.flamegraph(f);
                 eprintln!("flamegraph written to {}", path.display());
             }
             // Terminal-readable hotspots: aggregate samples by leaf frame, print the top 25.
-            let mut leaf: std::collections::HashMap<String, isize> = std::collections::HashMap::new();
+            let mut leaf: std::collections::HashMap<String, isize> =
+                std::collections::HashMap::new();
             let mut total: isize = 0;
             for (frames, count) in &report.data {
                 total += *count;
@@ -624,7 +677,10 @@ fn kotlin_codegen_box_conformance() {
     for (file, r) in &results {
         match r {
             TestResult::Skip => skipped += 1,
-            TestResult::Pass => { compiled += 1; passed += 1; }
+            TestResult::Pass => {
+                compiled += 1;
+                passed += 1;
+            }
             TestResult::Fail(why) => {
                 compiled += 1;
                 failures.push(format!("{}: {why}", file.display()));
@@ -636,11 +692,21 @@ fn kotlin_codegen_box_conformance() {
     // Under target/ (untracked); inspect with `column -ts, target/ir_conformance_trend.csv`.
     {
         use std::io::Write;
-        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ir_conformance_trend.csv");
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/ir_conformance_trend.csv");
         let new = !path.exists();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            if new { let _ = writeln!(f, "epoch,scanned,compiled,passed,failed,wall_ms,compile_ms,lex_ms,parse_ms,sigs_ms,check_ms,emit_ms,jvm_ms"); }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            if new {
+                let _ = writeln!(f, "epoch,scanned,compiled,passed,failed,wall_ms,compile_ms,lex_ms,parse_ms,sigs_ms,check_ms,emit_ms,jvm_ms");
+            }
             let _ = writeln!(f, "{epoch},{},{compiled},{passed},{},{total_ms},{compile_ms},{lex_ms},{parse_ms},{sigs_ms},{check_ms},{emit_ms},{jvm_ms}", files.len(), failures.len());
         }
     }
@@ -654,8 +720,15 @@ fn kotlin_codegen_box_conformance() {
     for f in failures.iter().take(25) {
         eprintln!("  FAIL {f}");
     }
-    assert!(failures.is_empty(), "{} box case(s) miscompiled (see above)", failures.len());
-    assert!(passed > 0, "no box() cases ran — check KRUSTY_KOTLIN_BOX_DIR / JDK");
+    assert!(
+        failures.is_empty(),
+        "{} box case(s) miscompiled (see above)",
+        failures.len()
+    );
+    assert!(
+        passed > 0,
+        "no box() cases ran — check KRUSTY_KOTLIN_BOX_DIR / JDK"
+    );
 }
 
 enum TestResult {

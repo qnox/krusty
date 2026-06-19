@@ -17,7 +17,9 @@ const SNIPPETS: &[(&str, &str)] = &[
     // `for (x in <iterable> step n)` where the iterable is not a `..` literal (a progression val, a
     // `.reversed()` result, a chained `step`): the for-range parser continues the trailing `step`
     // infix call so the whole `progression.step(n)` becomes the loop iterable.
-    ("StepOnProgression", r#"
+    (
+        "StepOnProgression",
+        r#"
 fun box(): String {
     val p = 1..10
     var s = 0
@@ -28,12 +30,15 @@ fun box(): String {
     for (i in p step 2 step 3) { t += i }          // fromClosedRange(1,9,3): 1,4,7 = 12
     return if (s == 25 && r == 25 && t == 12) "OK" else "F:$s,$r,$t"
 }
-"#),
+"#,
+    ),
     // An extension function body referencing the receiver's members implicitly (`n` = `this.n`,
     // including inside a string template) — read through the property getter since the body is outside
     // the class. Plus an ordinary-named extension on a *nullable* reference receiver (`A?.foo()`), whose
     // body branches on `this == null`. (Operator extensions on nullable receivers stay unsupported.)
-    ("ExtensionImplicitReceiver", r#"
+    (
+        "ExtensionImplicitReceiver",
+        r#"
 class A(val n: Int)
 fun A.twice(): Int = n + n
 fun A.label(): String = "n=$n"
@@ -47,11 +52,14 @@ fun box(): String {
     if (nn.orZero() != 0) return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Referential identity `===`/`!==`: object refs compare with `if_acmp*` (distinct instances are
     // not identical, the same instance is); a boxed Boolean is the cached singleton so `===` holds; on
     // primitive operands `===` is just value `==`.
-    ("RefIdentity", r#"
+    (
+        "RefIdentity",
+        r#"
 class C(val n: Int)
 fun boxB(b: Boolean): Any = b
 fun box(): String {
@@ -66,10 +74,13 @@ fun box(): String {
     if (!(j === j)) return "f7"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Char arithmetic: `Char + Int`/`Char - Int` → Char (truncated mod 2^16 with i2c, so it wraps),
     // `Char - Char` → Int (the distance). No promotion between Char and Int — the op runs on ints.
-    ("CharArithmetic", r#"
+    (
+        "CharArithmetic",
+        r#"
 fun box(): String {
     if ('a' + 2 != 'c') return "f1"
     if ('z' - 1 != 'y') return "f2"
@@ -80,10 +91,13 @@ fun box(): String {
     if ((hi + 1) >= hi) return "f5"          // 0xFFFF + 1 -> 0, wraps low
     return "OK"
 }
-"#),
+"#,
+    ),
     // Primitive-array init constructor `IntArray(n) { i -> elem }`: the index lambda is inlined into a
     // fill loop (`new T[n]; i=0; while (i<n) { a[i]=body(i); i++ }`). The single param is the index.
-    ("PrimArrayInit", r#"
+    (
+        "PrimArrayInit",
+        r#"
 fun box(): String {
     val a = IntArray(4) { it * it }
     if (a[0] != 0 || a[3] != 9) return "f1:${a[3]}"
@@ -98,11 +112,14 @@ fun box(): String {
     if (s != 6L) return "f5:$s"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Reference array init constructor `Array<T>(n) { i -> elem }` (anewarray + fill loop), plus the
     // `x == null` / `x != null` reference null-check compiling to `ifnull`/`ifnonnull` even when the
     // element value is read through a local (a frame-pinned `if_icmp*` on a ref would not verify).
-    ("RefArrayInit", r#"
+    (
+        "RefArrayInit",
+        r#"
 fun box(): String {
     val a = Array(3) { i -> "s$i" }
     if (a[0] != "s0" || a[2] != "s2" || a.size != 3) return "f1"
@@ -114,10 +131,13 @@ fun box(): String {
     if (n[1] != "mid" || n[0] != "x") return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Safe cast `x as? T`: `{ val t = x; if (t is T) t as T else null }` — `instanceof` then
     // `checkcast` on a match, `null` on a mismatch (never throws). Reference targets only.
-    ("SafeCast", r#"
+    (
+        "SafeCast",
+        r#"
 open class Base
 class Sub : Base()
 fun box(): String {
@@ -132,11 +152,14 @@ fun box(): String {
     if (r != "OK") return "f5"
     return "OK"
 }
-"#),
+"#,
+    ),
     // `is`/`as`/`as?` against a classpath type (`CharSequence`, `Number`, `Comparable`), plus the
     // `ACC_BRIDGE` `compareTo(Object)` a class implementing a generic classpath interface needs so an
     // interface-typed call dispatches to the specialized override (here the bridge's checkcast throws CCE).
-    ("ClasspathIsAs", r#"
+    (
+        "ClasspathIsAs",
+        r#"
 class Foo(val s: String) : Comparable<Foo> {
     override fun compareTo(other: Foo): Int = s.compareTo(other.s)
 }
@@ -155,11 +178,14 @@ fun box(): String {
     } catch (e: ClassCastException) {}
     return "OK"
 }
-"#),
+"#,
+    ),
     // Receiver scope functions `run`/`apply` (the receiver is `this`): the body's bare member reads,
     // writes, and method calls resolve against the receiver through its getter/setter/method (external
     // access, since the inlined body runs in the caller). `run` yields the body, `apply` the receiver.
-    ("ApplyRun", r#"
+    (
+        "ApplyRun",
+        r#"
 class C(val n: Int) { var x = 0; var y = 0; fun a() = n; fun b() = n * 2 }
 fun box(): String {
     val c = C(1).apply { x = 5; y = x + 2 }     // write + read-own-write, yields receiver
@@ -170,10 +196,13 @@ fun box(): String {
     if (s != 8) return "f3:$s"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A bare `x++` / `x--` on a `var` field of the enclosing class (implicit `this.x`) in statement
     // position — `this.x = this.x ± 1` via direct field read/write, with Byte/Short/Char width-wrap.
-    ("MemberIncDec", r#"
+    (
+        "MemberIncDec",
+        r#"
 class C {
     var i = 0
     var n = 5L
@@ -188,10 +217,13 @@ fun box(): String {
     if (c.b.toInt() != -128) return "f3:${c.b}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Bare access to INHERITED `var`/`val` members from a subclass method: read, write, and `++`/`--`
     // resolve through the class's superclass chain (inherited writes/incdec go via the getter/setter).
-    ("InheritedMembers", r#"
+    (
+        "InheritedMembers",
+        r#"
 open class A(val base: Int) { var count = 0; var label = "x" }
 class B(b: Int) : A(b) {
     fun read() = base + count                 // inherited read (inferred return)
@@ -206,11 +238,14 @@ fun box(): String {
     if (b.read() != 14) return "f4:${b.read()}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A method with an inferred expression body can resolve a call to another method of the same class
     // (`fun b() = a()`), via `this`, or to an inherited method — the return-type inference scope is seeded
     // with this class's and its superclasses' explicitly-typed method returns.
-    ("MethodCallInference", r#"
+    (
+        "MethodCallInference",
+        r#"
 open class A { fun base(): Int = 100 }
 class C : A() {
     fun a(): Int = 5
@@ -225,11 +260,14 @@ fun box(): String {
     if (o.d() != 105) return "f3:${o.d()}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Dead code after a diverging statement (`throw`/`return`) is dropped, like kotlinc — emitting it
     // would leave a (dead) branch target without the stackmap frame the verifier requires. Plus: a
     // side-effecting `for`-range `step` is evaluated exactly once (hoisted), not per iteration.
-    ("DeadCodeAndStep", r#"
+    (
+        "DeadCodeAndStep",
+        r#"
 val log = StringBuilder()
 fun stepN(): Int { log.append("S"); return 2 }
 fun mid(): String {
@@ -249,10 +287,13 @@ fun box(): String {
     if (log.toString() != "CS") return "f2:$log"            // C (catch), S (one step eval)
     return "OK"
 }
-"#),
+"#,
+    ),
     // An arithmetic operand that is branchy (`5 + if (c) 1 else 2`, `r += if (…) … else …`) spills the
     // other operand to a temp so it isn't stranded on the stack across the branch's merge frame.
-    ("BranchyArithmetic", r#"
+    (
+        "BranchyArithmetic",
+        r#"
 fun box(): String {
     val c = true
     val z = 5 + (if (c) 1 else 2)
@@ -266,11 +307,14 @@ fun box(): String {
     if (m != 2) return "f4:$m"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A nullable-primitive FIELD smart-cast to its primitive (`if (value != null) value else 42` where
     // `value: Int?`) unboxes the wrapper on read; a `finally { return … }` overrides a throwing/returning
     // body. (Both surfaced enabling kotlin.test default-arg calls.)
-    ("FieldSmartcastAndFinally", r#"
+    (
+        "FieldSmartcastAndFinally",
+        r#"
 class Box(val value: Int?) { fun get(): Int = if (value != null) value else 42 }
 fun viaFinally(): Int {
     try { throw RuntimeException("x") } finally { return 7 }
@@ -281,11 +325,14 @@ fun box(): String {
     if (viaFinally() != 7) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Mixed-primitive `a.compareTo(b)` → `{Integer,Long,Float,Double}.compare` after promoting both to
     // their common type. Plus: a negated float/double literal is the negative constant (`-0.0` keeps its
     // sign, so `Double.compare(0.0, -0.0) == 1`), not `0.0 - 0.0` (which would be `+0.0`).
-    ("CompareToAndNegZero", r#"
+    (
+        "CompareToAndNegZero",
+        r#"
 fun box(): String {
     if (1.compareTo(1.1) >= 0) return "f1"
     if (2.compareTo(1.0) <= 0) return "f2"
@@ -296,11 +343,14 @@ fun box(): String {
     if ((-2.5).toString() != "-2.5") return "f7"
     return "OK"
 }
-"#),
+"#,
+    ),
     // `when (subject)` with `in`/`!in` *range* condition branches (`in 4..6 -> …`), mixed with
     // comma-list and `is` branches. (`in <range>` is the bounds-check intrinsic — `InRange` — same as
     // kotlinc; `in <collection>` is unsupported and skips, not string-matched.)
-    ("WhenInRange", r#"
+    (
+        "WhenInRange",
+        r#"
 fun cls(x: Int): String = when (x) {
     0 -> "zero"
     in 1..9 -> "low"
@@ -314,12 +364,15 @@ fun box(): String {
     if (cls(50) != "other") return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A `return` inside a `try { … } finally { … }` runs the finally before transferring control; the
     // return value is captured before the finally so a finally that mutates state can't change it. The
     // finally also runs on the normal-completion path (kotlinc semantics). (A finally that declares
     // locals is skipped, not modeled here.)
-    ("ReturnInTryFinally", r#"
+    (
+        "ReturnInTryFinally",
+        r#"
 val log = StringBuilder()
 fun early(c: Boolean): String {
     try {
@@ -341,10 +394,13 @@ fun box(): String {
     if (valueCapturedBeforeFinally() != 1) return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Array stdlib extensions `isEmpty()`/`isNotEmpty()`/`count()` → the `arraylength` intrinsic
     // (`size == 0` / `size != 0` / `size`), for both primitive and reference arrays.
-    ("ArrayIsEmpty", r#"
+    (
+        "ArrayIsEmpty",
+        r#"
 fun box(): String {
     val a = intArrayOf(1, 2, 3)
     val e = IntArray(0)
@@ -354,10 +410,13 @@ fun box(): String {
     if (!r.isNotEmpty() || r.count() != 2) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A class method's expression-body return type is inferred with its own PARAMETERS in scope
     // (`fun m(x: Int) = x + 1` → Int), which also unblocks a bound method reference `obj::m`.
-    ("MethodParamInference", r#"
+    (
+        "MethodParamInference",
+        r#"
 class C(val base: Int) {
     fun inc(x: Int) = x + 1
     fun add(a: Int, b: Int) = a + b + base
@@ -370,8 +429,11 @@ fun box(): String {
     if (r != listOf(2, 3, 4)) return "f3:$r"
     return "OK"
 }
-"#),
-    ("Unsigned", r#"
+"#,
+    ),
+    (
+        "Unsigned",
+        r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
     val u3 = u1 + u2
@@ -406,8 +468,11 @@ fun box(): String {
     if (cnt != 4) return "f23"
     return "OK"
 }
-"#),
-    ("CompanionConst", r#"
+"#,
+    ),
+    (
+        "CompanionConst",
+        r#"
 const val M = Int.MIN_VALUE
 fun box(): String {
     if (Int.MAX_VALUE != 2147483647) return "f1"
@@ -425,10 +490,13 @@ fun box(): String {
     if (c2 != 3) return "f8: $c2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A `let`/`also` body containing a branch (`if`/`when`) can't go through the branchless inline
     // splice — it falls back to the per-function desugar, which lowers the branchy body normally.
-    ("ScopeFnsBranchy", r#"
+    (
+        "ScopeFnsBranchy",
+        r#"
 fun box(): String {
     val a = 5.let { if (it > 3) "big" else "small" }
     if (a != "big") return "f1:$a"
@@ -439,8 +507,11 @@ fun box(): String {
     if (c != "yes") return "f3:$c"
     return "OK"
 }
-"#),
-    ("ScopeFns", r#"
+"#,
+    ),
+    (
+        "ScopeFns",
+        r#"
 fun box(): String {
     val r = "abc".let { it.length }
     if (r != 3) return "f1: $r"
@@ -453,8 +524,11 @@ fun box(): String {
     if (chain != 11) return "f4: $chain"
     return "OK"
 }
-"#),
-    ("ArrayOfRef", r#"
+"#,
+    ),
+    (
+        "ArrayOfRef",
+        r#"
 fun box(): String {
     val a = arrayOf("O", "K")
     if (a[0] + a[1] != "OK") return "f1"
@@ -465,10 +539,13 @@ fun box(): String {
     if (b.size != 3) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // An `inner class` captures the enclosing instance (a synthetic `this$0` field); it is constructed
     // as `outerInstance.Inner(args)` → `new Outer$Inner(outer, args)`.
-    ("InnerClassCtor", r#"
+    (
+        "InnerClassCtor",
+        r#"
 class Outer(val tag: Int) {
     inner class Inner(val n: Int) {
         fun describe(): Int = n
@@ -481,10 +558,13 @@ fun box(): String {
     if (i.n != 42) return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // An inner method reads the enclosing instance's members through `this$0` (via the getter); an
     // inner property initializer can combine outer + own members (`val z = x + y`).
-    ("InnerOuterAccess", r#"
+    (
+        "InnerOuterAccess",
+        r#"
 class Outer(val x: String) {
     fun shout(): String = x + "!"
     inner class Inner(val y: String) {
@@ -500,10 +580,13 @@ fun box(): String {
     if (i.callOuter() != "O!") return "f3:${i.callOuter()}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A `var` captured (even read-only) by a closure but reassigned later in the enclosing scope is
     // boxed, so the closure observes the update (kotlinc's captured-var semantics; KT-4656 style).
-    ("CaptureReassigned", r#"
+    (
+        "CaptureReassigned",
+        r#"
 fun eval(f: () -> Int): Int = f()
 fun box(): String {
     var n = 1
@@ -516,11 +599,14 @@ fun box(): String {
     if (getN() != 5) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A capturing local function is lifted with its captured locals prepended as parameters: a `val`
     // is passed by value, a `var` it writes is boxed into a shared `Ref` holder (so the mutation is
     // visible to the enclosing scope).
-    ("LocalFunCapture", r#"
+    (
+        "LocalFunCapture",
+        r#"
 fun box(): String {
     val base = 100
     fun add(x: Int) = base + x
@@ -531,10 +617,13 @@ fun box(): String {
     if (acc != 7) return "f2:$acc"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A non-capturing local function is lifted to a private static method on the facade; calls route
     // to it. Recursion and multiple local functions in one body are supported.
-    ("LocalFun", r#"
+    (
+        "LocalFun",
+        r#"
 fun box(): String {
     fun dbl(x: Int) = x * 2
     fun fib(n: Int): Int {
@@ -545,10 +634,13 @@ fun box(): String {
     if (fib(7) != 13) return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A mutable local captured and written by a non-inlined lambda (a closure) is boxed into a
     // `kotlin/jvm/internal/Ref$XxxRef` so the closure and the enclosing scope share the cell.
-    ("MutableCapture", r#"
+    (
+        "MutableCapture",
+        r#"
 fun twice(f: () -> Unit) { f(); f() }
 fun call(f: () -> Int): Int = f()
 fun box(): String {
@@ -568,10 +660,13 @@ fun box(): String {
     if (c != -2) return "f4:$c"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Unbound member property reference `A::x` — a synthesized `PropertyReference1Impl` singleton;
     // `.get(receiver)` reads the property via its getter, `.name` is the property name.
-    ("PropertyRef", r#"
+    (
+        "PropertyRef",
+        r#"
 class A(val x: Int)
 fun box(): String {
     val p = A::x
@@ -580,10 +675,13 @@ fun box(): String {
     if (p.name != "x") return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Nullable primitives (`Int?`/`Char?`/…) are their boxed wrappers (`java/lang/Integer`); `!!`
     // unboxes to the primitive after a null check, and a primitive boxes into a nullable slot.
-    ("NullablePrimitive", r#"
+    (
+        "NullablePrimitive",
+        r#"
 fun foo(): Int? = 42
 fun box(): String {
     val a: Int? = 5
@@ -597,10 +695,13 @@ fun box(): String {
     if (r != "OK") return "f5"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Null-check smart-cast of a nullable primitive: after `if (t != null)`, `t` narrows to its
     // unboxed primitive, so it can be used in arithmetic directly.
-    ("NullableSmartCast", r#"
+    (
+        "NullableSmartCast",
+        r#"
 fun box(): String {
     val t: Int? = 7
     if (t != null) {
@@ -612,10 +713,13 @@ fun box(): String {
     if (u == null) return "OK"
     return "f3"
 }
-"#),
+"#,
+    ),
     // Elvis on a nullable primitive (`Int? ?: 0`): the result is the unboxed primitive — the non-null
     // lhs unboxes and the default coerces to it.
-    ("NullableElvis", r#"
+    (
+        "NullableElvis",
+        r#"
 fun box(): String {
     val a: Int? = 5
     if ((a ?: 9) != 5) return "f1"
@@ -624,10 +728,13 @@ fun box(): String {
     if ((a ?: 0) + 10 != 15) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A nullable primitive compares with a primitive (`a == 5`): the primitive is boxed for structural
     // equality. A generic constructor with a primitive type argument coerces a literal to that type.
-    ("NullableEqAndGenericCtor", r#"
+    (
+        "NullableEqAndGenericCtor",
+        r#"
 class Box<T>(val value: T)
 fun box(): String {
     val a: Int? = 5
@@ -640,11 +747,14 @@ fun box(): String {
     if (v != -1L) return "f4:$v"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A nullable-primitive `==`/`!=` a primitive short-circuits like kotlinc: when the wrapper is null
     // the primitive side is NOT evaluated (so `sideEffecting()` runs once, not twice). A `?.` on a null
     // receiver yields null → the comparison resolves without touching the RHS.
-    ("NullableEqShortCircuit", r#"
+    (
+        "NullableEqShortCircuit",
+        r#"
 var result = ""
 fun se(): Int { result += "X"; return 123 }
 class C(val x: Int)
@@ -655,10 +765,13 @@ fun box(): String {
     if (b?.x == se()) return "f2"
     return if (result == "X") "OK" else "f3:$result"
 }
-"#),
+"#,
+    ),
     // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
     // `.get()` (no args) reads `this.receiver`'s property.
-    ("BoundPropertyRef", r#"
+    (
+        "BoundPropertyRef",
+        r#"
 class A(val x: Int)
 fun box(): String {
     val a = A(7)
@@ -667,10 +780,13 @@ fun box(): String {
     if (p.name != "x") return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // The literal `-2147483648` is `Int.MIN_VALUE` (an Int), not a Long — usable as an Int `when`
     // branch and in an Int context (the bare `2147483648` overflows Int and is a Long).
-    ("IntMinLiteral", r#"
+    (
+        "IntMinLiteral",
+        r#"
 fun cls(x: Int): String = when (x) {
     2147483647 -> "MAX"
     -2147483648 -> "MIN"
@@ -683,10 +799,13 @@ fun box(): String {
     if (cls(2147483647) != "MAX") return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Method references: bound `obj::m` (receiver captured) and unbound `Type::m` (receiver is the
     // first argument) — each a closure over a synthesized `(receiver, args) -> receiver.m(args)`.
-    ("MethodRef", r#"
+    (
+        "MethodRef",
+        r#"
 class C(val p: String) {
     fun get(): String = p
     fun plus(x: String): String = p + x
@@ -699,10 +818,13 @@ fun box(): String {
     if (unbound(C("A"), "B") != "AB") return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A `Unit`-returning function reference `::add` wraps the call and returns the Unit singleton
     // (a direct method handle would adapt `void` to `null`, breaking a `FunctionN` consumer).
-    ("UnitFunRef", r#"
+    (
+        "UnitFunRef",
+        r#"
 val sb = StringBuilder()
 fun add(s: String) { sb.append(s) }
 fun apply2(f: (String) -> Unit) { f("O"); f("K") }
@@ -710,9 +832,12 @@ fun box(): String {
     apply2(::add)
     return sb.toString()
 }
-"#),
+"#,
+    ),
     // Constructor reference `::A` — a closure wrapping `new A(args)`, usable as a `FunctionN` value.
-    ("CtorRef", r#"
+    (
+        "CtorRef",
+        r#"
 class A(val result: String)
 class P(val x: Int, val y: Int)
 fun box(): String {
@@ -723,10 +848,13 @@ fun box(): String {
     if (p.x != 3 || p.y != 4) return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Enum entries with a body: each bodied entry is a synthesized subclass (`Op$ADD extends Op`)
     // overriding an abstract member; the override can read an enum constructor `val`.
-    ("EnumEntryBody", r#"
+    (
+        "EnumEntryBody",
+        r#"
 enum class Op(val sym: String) {
     ADD("+") { override fun apply(a: Int, b: Int) = a + b },
     MUL("*") { override fun apply(a: Int, b: Int) = a * b };
@@ -739,10 +867,13 @@ fun box(): String {
     if (Op.MUL.sym != "*") return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // The overridable members compareTo/equals/hashCode have Kotlin-contract return types (Int/Boolean/
     // Int), used when the body can't be inferred locally (`compareTo(o) = v - o.v` references `o`).
-    ("CompareToContract", r#"
+    (
+        "CompareToContract",
+        r#"
 class N(val v: Int) {
     operator fun compareTo(o: N) = v - o.v
 }
@@ -752,10 +883,13 @@ fun box(): String {
     if (!(N(4) <= N(4))) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Class member operators: `a + b` → `a.plus(b)` (and minus/times/div/rem); `a < b` →
     // `a.compareTo(b) < 0`.
-    ("ClassOperators", r#"
+    (
+        "ClassOperators",
+        r#"
 class V(val x: Int) {
     operator fun plus(o: V) = V(x + o.x)
     operator fun minus(o: V) = V(x - o.x)
@@ -771,10 +905,13 @@ fun box(): String {
     if ((V(1) + V(2) + V(3)).x != 6) return "f6"
     return "OK"
 }
-"#),
+"#,
+    ),
     // An expression-bodied extension function with no explicit return type infers it from the body,
     // with `this` bound to the receiver (`fun Int.double() = this * 2` → return Int).
-    ("ExtThisInfer", r#"
+    (
+        "ExtThisInfer",
+        r#"
 fun Int.double() = this * 2
 fun String.shout() = this + "!"
 fun Int.isPos() = this > 0
@@ -784,10 +921,13 @@ fun box(): String {
     if (!4.isPos()) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A deferred `val` (declared with a type, no initializer) is assigned exactly once in an `init`
     // block — a real backing field initialized in the constructor body.
-    ("DeferredValInit", r#"
+    (
+        "DeferredValInit",
+        r#"
 class C(x: Int) {
     val a: Int
     val b: Int
@@ -802,10 +942,13 @@ fun box(): String {
     if (o.b != 6) return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A non-`val`/`var` primary-constructor parameter is an argument only (no field), available in the
     // constructor body for property initializers and `init` blocks — including interleaved with `val`s.
-    ("NonPropertyCtorParam", r#"
+    (
+        "NonPropertyCtorParam",
+        r#"
 class A(x: Int) { val y = x * 2 }
 class B(val a: Int, b: Int, val c: Int) { val sum = a + b + c }
 class C(x: Int) { var z = 0; init { z = x + 10 } }
@@ -818,10 +961,13 @@ fun box(): String {
     if (D("Bob").greeting != "Hi Bob") return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A body property's type is inferred from its initializer with the preceding properties (and
     // val/var ctor params) in scope: `val b = a + 1` sees the earlier `a`.
-    ("SequentialPropInfer", r#"
+    (
+        "SequentialPropInfer",
+        r#"
 class C(val x: Int) {
     val a = 10
     val b = a + 1
@@ -834,20 +980,26 @@ fun box(): String {
     if (o.c != 22) return "f3:${o.c}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A private @InlineOnly String extension (`uppercase`/`lowercase` → `toUpperCase(Locale.ROOT)`) is
     // inlined from its real stdlib bytecode (it has no callable body and no JDK member equivalent).
-    ("StringInlineExt", r#"
+    (
+        "StringInlineExt",
+        r#"
 fun box(): String {
     if ("ab".uppercase() != "AB") return "f1"
     if ("AB".lowercase() != "ab") return "f2"
     if (" Ab ".trim().uppercase() != "AB") return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // String members resolve to their java.lang.String JVM methods (a member wins over a same-named
     // private @InlineOnly extension like StringsKt.isEmpty).
-    ("StringMembers", r#"
+    (
+        "StringMembers",
+        r#"
 fun box(): String {
     if ("abc".isEmpty()) return "f1"
     if (!"".isEmpty()) return "f2"
@@ -855,10 +1007,13 @@ fun box(): String {
     if ("abc".indexOf("b") != 1) return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A data class ALWAYS generates equals/hashCode/toString over an OPEN base member (KT-6206), but
     // INHERITS a `final` base member (can't override it).
-    ("DataClassOverBase", r#"
+    (
+        "DataClassOverBase",
+        r#"
 abstract class Open { override fun toString() = "base" }
 data class D1(val f: String) : Open()
 abstract class Final { final override fun toString() = "kept" }
@@ -868,10 +1023,13 @@ fun box(): String {
     if (D2("x").toString() != "kept") return "f2:${D2("x")}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Kotlin's built-in collection mapped members: `Map.keys`/`entries` resolve to the JVM
     // `keySet()`/`entrySet()` (Map.values/size keep their JVM name and already worked).
-    ("MapMappedMembers", r#"
+    (
+        "MapMappedMembers",
+        r#"
 fun box(): String {
     val m = mapOf(1 to "a", 2 to "b", 3 to "c")
     if (m.keys.size != 3) return "f1"
@@ -881,10 +1039,13 @@ fun box(): String {
     if (!m.keys.contains(2)) return "f5"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Legal nested-scope variable shadowing: an inner block's `val x` shadows an outer `x` (each gets
     // its own slot; the outer is restored at block exit). Same-scope redeclaration is still an error.
-    ("Shadowing", r#"
+    (
+        "Shadowing",
+        r#"
 fun box(): String {
     val x = 1
     var sum = 0
@@ -900,10 +1061,13 @@ fun box(): String {
     }
     return if (x == 1) "OK" else "f4:$x"
 }
-"#),
+"#,
+    ),
     // Nested try/catch (without a finally in the nest) compiles and runs; only a nested-try combined
     // with a finally is rejected (skip), never miscompiled.
-    ("NestedTry", r#"
+    (
+        "NestedTry",
+        r#"
 fun box(): String {
     var r = ""
     try {
@@ -919,10 +1083,13 @@ fun box(): String {
     }
     return if (r == "abc") "OK" else "F:$r"
 }
-"#),
+"#,
+    ),
     // A bare-value lambda types its parameters from its own annotations (`{ x: Int -> … }`), even with
     // no expected function type — so the body and a direct call both check correctly.
-    ("LambdaParamType", r#"
+    (
+        "LambdaParamType",
+        r#"
 fun box(): String {
     val dbl = { x: Int -> x * 2 }
     if (dbl(3) != 6) return "f1"
@@ -932,9 +1099,12 @@ fun box(): String {
     if (len("abcd") != 4) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Labeled loops: `break@label`/`continue@label` target the named enclosing loop.
-    ("LabeledLoops", r#"
+    (
+        "LabeledLoops",
+        r#"
 fun box(): String {
     var s = 0
     outer@ for (i in 0 until 3) {
@@ -953,17 +1123,23 @@ fun box(): String {
     if (t != 3) return "f2:$t"
     return "OK"
 }
-"#),
+"#,
+    ),
     // The array creators are intrinsics keyed on the resolved stdlib symbol: a user function of the
     // same name must shadow the intrinsic (as in kotlinc), not be silently lowered to an array.
-    ("ArrayOfUserShadow", r#"
+    (
+        "ArrayOfUserShadow",
+        r#"
 fun arrayOf(a: String): String = "user:$a"
 fun box(): String {
     val r = arrayOf("x")
     return if (r == "user:x") "OK" else "F:$r"
 }
-"#),
-    ("RepeatInline", r#"
+"#,
+    ),
+    (
+        "RepeatInline",
+        r#"
 fun box(): String {
     var s = 0
     repeat(4) { s += it }
@@ -976,8 +1152,11 @@ fun box(): String {
     if (sb.toString() != "xxx") return "f3"
     return "OK"
 }
-"#),
-    ("ForeachInline", r#"
+"#,
+    ),
+    (
+        "ForeachInline",
+        r#"
 fun box(): String {
     var s = 0
     listOf(1, 2, 3, 4).forEach { s += it }
@@ -1000,8 +1179,11 @@ fun box(): String {
     if (csum != 'a'.code + 'b'.code + 'c'.code) return "f6: $csum"
     return "OK"
 }
-"#),
-    ("MapIndexed", r#"
+"#,
+    ),
+    (
+        "MapIndexed",
+        r#"
 fun box(): String {
     val r = listOf(10, 20, 30).mapIndexed { i, x -> i * x + 1 }
     if (r != listOf(1, 21, 61)) return "f1: $r"
@@ -1009,8 +1191,11 @@ fun box(): String {
     if (r2 != listOf(1, 3, 5)) return "f2: $r2"
     return "OK"
 }
-"#),
-    ("IncDec", r#"
+"#,
+    ),
+    (
+        "IncDec",
+        r#"
 fun ident(n: Int): Int = n
 fun box(): String {
     var i = 5
@@ -1044,8 +1229,11 @@ fun box(): String {
     if (oc != 'a' || ch != 'b') return "f13"
     return "OK"
 }
-"#),
-    ("UserInline", r#"
+"#,
+    ),
+    (
+        "UserInline",
+        r#"
 inline fun twice(block: () -> Unit) { block(); block() }
 inline fun applyN(n: Int, block: (Int) -> Unit) { var i = 0; while (i < n) { block(i); i++ } }
 inline fun pick(c: Boolean, a: () -> Int, b: () -> Int): Int = if (c) a() else b()
@@ -1064,8 +1252,11 @@ fun box(): String {
     if (t != 6) return "f4: $t"
     return "OK"
 }
-"#),
-    ("RangeValue", r#"
+"#,
+    ),
+    (
+        "RangeValue",
+        r#"
 fun box(): String {
     val r = 0..3
     if (r.first != 0) return "f1"
@@ -1090,11 +1281,14 @@ fun box(): String {
     if (lt != 10L) return "f8"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A property reference is a function value: `C::n` (a `KProperty1`) is a `(C)->Int`, usable where a
     // `Function1` is expected — stored in a function-typed local and invoked, passed to a user
     // higher-order function, and passed to a stdlib `Iterable.map` (a `Function1` parameter).
-    ("PropertyRefFn", r#"
+    (
+        "PropertyRefFn",
+        r#"
 class C(val n: Int)
 fun apply1(f: (C) -> Int, c: C): Int = f(c)
 fun box(): String {
@@ -1105,11 +1299,14 @@ fun box(): String {
     if (xs[0] != 5 || xs[1] != 9) return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Integer-family `rangeTo` widening: `Byte..Byte`/`Short..Short` build an `IntRange`; a `Long` operand
     // makes a `LongRange`. Plus `listOf<Long>` literal adaptation (the int literals box as `Long`) and the
     // overflow-safe counted loop for a range ending at `Int.MAX_VALUE` (must not wrap and spin).
-    ("RangeWidenAndVararg", r#"
+    (
+        "RangeWidenAndVararg",
+        r#"
 fun box(): String {
     val b1: Byte = 1; val b5: Byte = 5
     val rb = b1..b5
@@ -1135,11 +1332,14 @@ fun box(): String {
     if (cnt != 3) return "fc"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A library operator function on a reference receiver: `collection + x` desugars to
     // `Collection.plus(x)` (a stdlib extension). Overload selection is most-specific: `+ element` uses the
     // `plus(T)` overload, `+ collection` the `plus(Iterable)` concat overload (not a nested element).
-    ("CollectionPlus", r#"
+    (
+        "CollectionPlus",
+        r#"
 fun box(): String {
     val a = listOf(1, 2) + 3
     if (a != listOf(1, 2, 3)) return "fa: $a"
@@ -1151,10 +1351,13 @@ fun box(): String {
     if (c != listOf(1, 2, 3, 4)) return "fc: $c"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Unsigned `in`-range membership (`x in a..b` for UInt/ULong) is the bounds-check intrinsic with
     // UNSIGNED comparison (`Integer/Long.compareUnsigned`), so values past the sign bit order correctly.
-    ("UnsignedInRange", r#"
+    (
+        "UnsignedInRange",
+        r#"
 fun box(): String {
     if (2u !in 1u..3u) return "f1"
     if (5u in 1u..3u) return "f2"
@@ -1165,11 +1368,14 @@ fun box(): String {
     if (20000000000uL !in 0uL..30000000000uL) return "f6"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Iterating an unsigned range *value* (`val r = 0u..5u; for (i in r)`): builds a `UIntRange`/
     // `ULongRange` (the ctor takes a synthetic marker) and iterates via the MANGLED inline-class getters
     // (`getFirst-pVg5ArA`, resolved from the classpath by prefix) with unsigned comparison.
-    ("UnsignedRangeIterate", r#"
+    (
+        "UnsignedRangeIterate",
+        r#"
 fun box(): String {
     val r = 0u..5u
     var s = 0
@@ -1185,10 +1391,13 @@ fun box(): String {
     if (c != 3) return "f3: $c"
     return "OK"
 }
-"#),
+"#,
+    ),
     // An `if`/`when` whose branches are a primitive and `null` joins to the boxed nullable wrapper
     // (`if (c) true else null` is `Boolean?`); the primitive branch is boxed at the merge.
-    ("PrimitiveNullJoin", r#"
+    (
+        "PrimitiveNullJoin",
+        r#"
 fun pick(c: Boolean): Boolean? = if (c) true else null
 fun box(): String {
     if (pick(true) != true) return "f1"
@@ -1199,10 +1408,13 @@ fun box(): String {
     if (y != 'z') return "f4"
     return "OK"
 }
-"#),
+"#,
+    ),
     // `super.method(args)` → a non-virtual `invokespecial` to the base method, for a user base class
     // and for a classpath base (`super.toString()` reaching `Object`/an open stdlib method).
-    ("SuperMethodCall", r#"
+    (
+        "SuperMethodCall",
+        r#"
 open class Base { open fun tag(s: String): String = "base:$s" }
 class Derived : Base() { override fun tag(s: String): String = super.tag(s) + "+derived" }
 open class Animal { override fun toString(): String = "animal" }
@@ -1212,10 +1424,13 @@ fun box(): String {
     if (Dog().toString() != "animal+dog") return "f2: ${Dog()}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Two `if`/`when` branches of the SAME class join to that class (erased type args): the runtime class
     // is identical so the merge frame is well-typed.
-    ("SameClassJoin", r#"
+    (
+        "SameClassJoin",
+        r#"
 fun box(): String {
     val a = listOf(1, 2)
     val b = listOf("x", "y", "z")
@@ -1225,10 +1440,13 @@ fun box(): String {
     if (d.size != 2) return "f2: ${d.size}"
     return "OK"
 }
-"#),
+"#,
+    ),
     // Two `if`/`when` branches of UNRELATED classes join to their common supertype, which krusty
     // approximates as `Any` (`Object`): the merge stack frame is `Object`, which every branch satisfies.
-    ("UnrelatedRefJoin", r#"
+    (
+        "UnrelatedRefJoin",
+        r#"
 open class P
 class Foo : P() { fun who() = "foo" }
 class Bar : P() { fun who() = "bar" }
@@ -1241,11 +1459,14 @@ fun box(): String {
     if ((z as Foo).who() != "foo") return "f3"
     return "OK"
 }
-"#),
+"#,
+    ),
     // A property overriding a supertype property with a more specific (covariant) or generic-erased type
     // gets a synthetic `ACC_BRIDGE` getter returning the supertype's type, delegating to the concrete
     // getter — so a read through the supertype reference reaches the override.
-    ("PropertyGetterBridge", r#"
+    (
+        "PropertyGetterBridge",
+        r#"
 interface Node
 class NodeImpl(val tag: String) : Node
 interface Edge { val from: Node }
@@ -1259,7 +1480,8 @@ fun box(): String {
     if (b.item != "hi") return "f2"
     return "OK"
 }
-"#),
+"#,
+    ),
 ];
 
 #[test]
@@ -1302,8 +1524,16 @@ public class BoxRun {
 }
 "#;
     fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
-    assert!(jc.status.success(), "javac(BoxRun): {}", String::from_utf8_lossy(&jc.stderr));
+    let jc = Command::new(&javac)
+        .args(["-d", runner.to_str().unwrap()])
+        .arg(runner.join("BoxRun.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac(BoxRun): {}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
 
     // Compile every snippet in-process (sharing the process-global classpath caches) and write its
     // class bytes into its own dir — a per-snippet dir keeps the JVM runner's class loaders isolated, so
@@ -1320,7 +1550,9 @@ public class BoxRun {
             .unwrap_or_else(|| panic!("krusty {stem}: in-process compile failed"));
         for (internal, bytes) in &classes {
             let path = dir.join(format!("{internal}.class"));
-            if let Some(parent) = path.parent() { fs::create_dir_all(parent).unwrap(); }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
             fs::write(&path, bytes).unwrap();
         }
         cases.push((dir.to_str().unwrap().to_string(), format!("{stem}Kt")));
@@ -1336,12 +1568,20 @@ public class BoxRun {
         args.push(class.clone());
     }
     let run = Command::new(&java).args(&args).output().unwrap();
-    assert!(run.status.success(), "BoxRun: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "BoxRun: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
-    let results: std::collections::HashMap<&str, &str> = stdout.lines().filter_map(|l| l.split_once('\t')).collect();
+    let results: std::collections::HashMap<&str, &str> =
+        stdout.lines().filter_map(|l| l.split_once('\t')).collect();
     for (_, class) in &cases {
         let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
-        assert!(got == "OK", "{class}.box() returned {got:?} (all: {stdout})");
+        assert!(
+            got == "OK",
+            "{class}.box() returned {got:?} (all: {stdout})"
+        );
     }
     let _ = fs::remove_dir_all(&work);
 }

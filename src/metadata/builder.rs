@@ -130,7 +130,14 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let ret = type_pb(st, m.ty);
     p.field_message(3, &ret); // Property.return_type = 3
-    p.field_varint(11, if m.is_var { PKG_VAR_FLAGS } else { PKG_VAL_FLAGS }); // flags
+    p.field_varint(
+        11,
+        if m.is_var {
+            PKG_VAR_FLAGS
+        } else {
+            PKG_VAL_FLAGS
+        },
+    ); // flags
     let mut jvm = Pb::new();
     jvm.field_message(1, &Pb::new()); // field (empty → derived)
     let getter = jvm_method_sig(st, &m.getter.0, &m.getter.1);
@@ -184,11 +191,14 @@ mod tests {
 
     #[test]
     fn matches_kotlinc_reference_for_f_int_int() {
-        let (d1, d2) = build_package(&[FnMeta {
-            name: "f".into(),
-            params: vec![("a".into(), Ty::Int)],
-            ret: Ty::Int,
-        }], &[]);
+        let (d1, d2) = build_package(
+            &[FnMeta {
+                name: "f".into(),
+                params: vec![("a".into(), Ty::Int)],
+                ret: Ty::Int,
+            }],
+            &[],
+        );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
     }
@@ -196,11 +206,14 @@ mod tests {
     #[test]
     fn dedups_builtin_types() {
         // return Int + param Int must share one string-table entry (index 1).
-        let (_d1, d2) = build_package(&[FnMeta {
-            name: "g".into(),
-            params: vec![("x".into(), Ty::Int)],
-            ret: Ty::Int,
-        }], &[]);
+        let (_d1, d2) = build_package(
+            &[FnMeta {
+                name: "g".into(),
+                params: vec![("x".into(), Ty::Int)],
+                ret: Ty::Int,
+            }],
+            &[],
+        );
         assert_eq!(d2.iter().filter(|s| s.is_empty()).count(), 1);
     }
 }

@@ -47,36 +47,36 @@ pub enum TokenKind {
     Comma,
     Colon,
     Dot,
-    Eq,       // =
+    Eq, // =
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
-    EqEq,     // ==
-    NotEq,    // !=
-    RefEq,    // ===
-    RefNe,    // !==
+    EqEq,  // ==
+    NotEq, // !=
+    RefEq, // ===
+    RefNe, // !==
     Lt,
     LtEq,
     Gt,
     GtEq,
-    AndAnd,   // &&
-    OrOr,     // ||
-    Not,      // !
-    Arrow,    // ->  (when arms, lambdas)
-    DotDot,   // ..  (range)
-    DotDotLt, // ..< (rangeUntil)
+    AndAnd,     // &&
+    OrOr,       // ||
+    Not,        // !
+    Arrow,      // ->  (when arms, lambdas)
+    DotDot,     // ..  (range)
+    DotDotLt,   // ..< (rangeUntil)
     PlusPlus,   // ++
     MinusMinus, // --
-    PlusEq,   // +=
-    MinusEq,  // -=
-    StarEq,   // *=
-    SlashEq,  // /=
-    PercentEq,// %=
+    PlusEq,     // +=
+    MinusEq,    // -=
+    StarEq,     // *=
+    SlashEq,    // /=
+    PercentEq,  // %=
     ColonColon, // ::  (callable references, class literals)
-    Question, // ?   (nullable types, ?. , ?:)
-    At,       // @   (annotations)
+    Question,   // ?   (nullable types, ?. , ?:)
+    At,         // @   (annotations)
     // trivia / control
     Newline,
     Eof,

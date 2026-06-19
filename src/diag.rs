@@ -37,7 +37,11 @@ impl DiagSink {
     }
 
     pub fn error(&mut self, span: Span, msg: impl Into<String>) {
-        self.diags.push(Diagnostic { span, severity: Severity::Error, msg: msg.into() });
+        self.diags.push(Diagnostic {
+            span,
+            severity: Severity::Error,
+            msg: msg.into(),
+        });
     }
 
     pub fn has_errors(&self) -> bool {

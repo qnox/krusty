@@ -11,7 +11,12 @@ use krusty::jvm::classpath::Classpath;
 /// `cp_jars` are the `-classpath` jars; `jdk_modules` is the JDK `lib/modules` jimage (the bootclasspath).
 /// Returns `None` on any compile error (an unsupported feature), like the CLI's non-zero exit.
 #[allow(dead_code)]
-pub fn compile_in_process(src: &str, stem: &str, cp_jars: &[PathBuf], jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
+pub fn compile_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::jvm::names::file_class_name;
     use krusty::resolve::{check_file, collect_signatures_with_cp};
@@ -50,7 +55,11 @@ pub fn compile_in_process(src: &str, stem: &str, cp_jars: &[PathBuf], jdk_module
     let facade = file_class_name(stem, file.package.as_deref());
     let ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp)?;
-    if outputs.is_empty() { None } else { Some(outputs) }
+    if outputs.is_empty() {
+        None
+    } else {
+        Some(outputs)
+    }
 }
 
 /// Locate a complete kotlin-stdlib jar from standard local caches, mirroring how a drop-in
@@ -99,7 +108,12 @@ pub fn stdlib_classpath() -> Classpath {
 pub fn directive(src: &str, name: &str) -> bool {
     src.lines().any(|l| {
         let l = l.trim();
-        l.starts_with("//") && l.trim_start_matches('/').trim_start().split([' ', ':']).next() == Some(name)
+        l.starts_with("//")
+            && l.trim_start_matches('/')
+                .trim_start()
+                .split([' ', ':'])
+                .next()
+                == Some(name)
     })
 }
 
@@ -117,15 +131,28 @@ pub fn find_jar(prefix: &str, excludes: &[&str]) -> Option<PathBuf> {
         collect_named_jars(std::path::Path::new(r), prefix, excludes, &mut found, 0);
     }
     // Prefer the shortest name (the plain `<prefix><version>.jar`, not `-junit`/`-jvm`/…).
-    found.sort_by_key(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n.len()).unwrap_or(usize::MAX));
+    found.sort_by_key(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.len())
+            .unwrap_or(usize::MAX)
+    });
     found.into_iter().next()
 }
 
-fn collect_named_jars(dir: &std::path::Path, prefix: &str, excludes: &[&str], out: &mut Vec<PathBuf>, depth: usize) {
+fn collect_named_jars(
+    dir: &std::path::Path,
+    prefix: &str,
+    excludes: &[&str],
+    out: &mut Vec<PathBuf>,
+    depth: usize,
+) {
     if depth > 9 || out.len() > 8 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -167,13 +194,19 @@ pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {
         if let Ok(s) = std::fs::read_to_string(lib.parent().unwrap().join("build.txt")) {
             if let Some(v) = s.trim().split('-').next() {
-                if !v.is_empty() { return v.to_string(); }
+                if !v.is_empty() {
+                    return v.to_string();
+                }
             }
         }
     }
     stdlib_jar()
         .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
-        .and_then(|n| n.strip_prefix("kotlin-stdlib-").and_then(|s| s.strip_suffix(".jar")).map(String::from))
+        .and_then(|n| {
+            n.strip_prefix("kotlin-stdlib-")
+                .and_then(|s| s.strip_suffix(".jar"))
+                .map(String::from)
+        })
         .unwrap_or_else(|| "2.0.21".to_string())
 }
 
@@ -182,7 +215,9 @@ pub fn kotlin_version() -> String {
 /// download fails (offline). Cached under `~/.cache/krusty-deps`.
 #[allow(dead_code)]
 pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
-    let cache = std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache/krusty-deps"))?;
+    let cache = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".cache/krusty-deps"))?;
     let _ = std::fs::create_dir_all(&cache);
     let file = cache.join(format!("{artifact}-{version}.jar"));
     if file.is_file() {
@@ -220,7 +255,9 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
         | (directive(src, "WITH_COROUTINES") as u8) << 4;
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u8, Vec<PathBuf>>>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u8, Vec<PathBuf>>>,
+    > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(v) = cache.lock().unwrap().get(&sig) {
         return v.clone();
@@ -236,25 +273,47 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
     // `kotlinc` always puts kotlin-stdlib on the compile classpath (only `-no-stdlib` removes it), so a
     // faithful drop-in must too — supply it unconditionally, not just for `// WITH_STDLIB` tests. The
     // explicit directives still select the *extra* jars (reflect, jdk8, coroutines) below.
-    let _ = (directive(src, "WITH_STDLIB"), directive(src, "WITH_RUNTIME"));
+    let _ = (
+        directive(src, "WITH_STDLIB"),
+        directive(src, "WITH_RUNTIME"),
+    );
     let with_stdlib = true;
     if with_stdlib {
-        if let Some(j) = stdlib_jar() { jars.push(j); }
-        if let Some(j) = kotlin_test_jar() { jars.push(j); }
+        if let Some(j) = stdlib_jar() {
+            jars.push(j);
+        }
+        if let Some(j) = kotlin_test_jar() {
+            jars.push(j);
+        }
         if let Some(j) = dist_jar("annotations-13.0.jar")
-            .or_else(|| ensure_maven("org.jetbrains", "annotations", "23.0.0")) { jars.push(j); }
+            .or_else(|| ensure_maven("org.jetbrains", "annotations", "23.0.0"))
+        {
+            jars.push(j);
+        }
     }
     if directive(src, "WITH_REFLECT") {
         if let Some(j) = dist_jar("kotlin-reflect.jar")
-            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-reflect", &v)) { jars.push(j); }
+            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-reflect", &v))
+        {
+            jars.push(j);
+        }
     }
     if directive(src, "STDLIB_JDK8") {
         if let Some(j) = dist_jar("kotlin-stdlib-jdk8.jar")
-            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib-jdk8", &v)) { jars.push(j); }
+            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib-jdk8", &v))
+        {
+            jars.push(j);
+        }
     }
     if directive(src, "WITH_COROUTINES") {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
-        if let Some(j) = ensure_maven("org.jetbrains.kotlinx", "kotlinx-coroutines-core-jvm", "1.9.0") { jars.push(j); }
+        if let Some(j) = ensure_maven(
+            "org.jetbrains.kotlinx",
+            "kotlinx-coroutines-core-jvm",
+            "1.9.0",
+        ) {
+            jars.push(j);
+        }
     }
     jars
 }
@@ -272,7 +331,9 @@ fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usi
     if depth > 8 || out.len() > 4 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {

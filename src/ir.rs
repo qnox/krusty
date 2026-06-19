@@ -20,12 +20,19 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrType {
     /// A class/interface by Kotlin FqName, with type arguments (erased or reified per backend).
-    Class { fq_name: String, type_args: Vec<IrType>, nullable: bool },
+    Class {
+        fq_name: String,
+        type_args: Vec<IrType>,
+        nullable: bool,
+    },
     /// A type-parameter reference (`T`), resolved to its declaration index.
     TypeParameter(u32),
     /// `(P..) -> R` function type — kept structural so backends choose the representation
     /// (JVM `FunctionN`, a JS closure, …).
-    Function { params: Vec<IrType>, ret: Box<IrType> },
+    Function {
+        params: Vec<IrType>,
+        ret: Box<IrType>,
+    },
     /// `kotlin.Unit` / `kotlin.Nothing` — special-cased so control flow needn't synthesize them.
     Unit,
     Nothing,
@@ -53,14 +60,28 @@ pub enum Callee {
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
     /// `inline` => the callee is a Kotlin `inline` function (set from the resolved signature's metadata);
     /// the JVM backend may splice its compiled body here instead of emitting the `invokestatic`.
-    Static { owner: String, name: String, descriptor: String, inline: bool },
+    Static {
+        owner: String,
+        name: String,
+        descriptor: String,
+        inline: bool,
+    },
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
-    Virtual { owner: String, name: String, descriptor: String, interface: bool },
+    Virtual {
+        owner: String,
+        name: String,
+        descriptor: String,
+        interface: bool,
+    },
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
     /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
     /// receiver's override). `owner` is the base class declaring the method.
-    Special { owner: String, name: String, descriptor: String },
+    Special {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
 }
 
 /// A compile-time constant (`IrConst` in Kotlin IR).
@@ -86,65 +107,132 @@ pub enum IrExpr {
     /// Read a value parameter / variable by its declaration index.
     GetValue(u32),
     /// Assign to a variable (`IrSetValue`).
-    SetValue { var: u32, value: ExprId },
+    SetValue {
+        var: u32,
+        value: ExprId,
+    },
     /// A call to a function/constructor/operator/stdlib intrinsic (`IrCall`). The `callee` is a
     /// resolved [`Callee`]: a local function, or an intrinsic identified by Kotlin FqName that each
     /// backend maps to its platform (`kotlin/String.plus`, `kotlin/io/println`, …). This single node
     /// expresses every call — there is no dedicated node per stdlib operation.
-    Call { callee: Callee, dispatch_receiver: Option<ExprId>, args: Vec<ExprId> },
+    Call {
+        callee: Callee,
+        dispatch_receiver: Option<ExprId>,
+        args: Vec<ExprId>,
+    },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),
     /// `IrBlock` — a sequence of statements; value is the last expression (or Unit).
-    Block { stmts: Vec<ExprId>, value: Option<ExprId> },
+    Block {
+        stmts: Vec<ExprId>,
+        value: Option<ExprId>,
+    },
     /// `IrWhen` — branches of (condition → result); the AST `if`/`when` lower here. `else` is the
     /// branch with a `None` condition.
-    When { branches: Vec<(Option<ExprId>, ExprId)> },
+    When {
+        branches: Vec<(Option<ExprId>, ExprId)>,
+    },
     /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions.
-    TypeOp { op: IrTypeOp, arg: ExprId, type_operand: IrType },
+    TypeOp {
+        op: IrTypeOp,
+        arg: ExprId,
+        type_operand: IrType,
+    },
     /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than
     /// skipping it. A plain `while` has `update: None` (then `continue` re-tests `cond`). `post_test`
     /// ⇒ a `do…while` (the body runs once before `cond` is first tested).
-    While { cond: ExprId, body: ExprId, update: Option<ExprId>, post_test: bool, label: Option<String> },
+    While {
+        cond: ExprId,
+        body: ExprId,
+        update: Option<ExprId>,
+        post_test: bool,
+        label: Option<String>,
+    },
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
-    Break { label: Option<String> },
+    Break {
+        label: Option<String>,
+    },
     /// `continue` — jump to the innermost enclosing loop's `update`/condition (or the labeled loop's).
-    Continue { label: Option<String> },
+    Continue {
+        label: Option<String>,
+    },
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
-    Variable { index: u32, ty: IrType, init: Option<ExprId> },
+    Variable {
+        index: u32,
+        ty: IrType,
+        init: Option<ExprId>,
+    },
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
     /// parameterized node (not one-per-intrinsic): Kotlin IR models these as `IrCall` to the
     /// operator function, but the built-in numeric/boolean ops are universal across backends, so a
     /// single node lets each emit the native instruction (JVM `iadd`, JS `+`). Every *other*
     /// operator/stdlib operation — `String.plus`, `toString`, `println`, collections — is an
     /// ordinary `Call` to a `Callee::External` symbol the backend resolves; there is no per-op node.
-    PrimitiveBinOp { op: IrBinOp, lhs: ExprId, rhs: ExprId },
+    PrimitiveBinOp {
+        op: IrBinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
-    GetField { receiver: ExprId, class: ClassId, index: u32 },
+    GetField {
+        receiver: ExprId,
+        class: ClassId,
+        index: u32,
+    },
     /// Write an instance field (`IrSetField`): `receiver.<fields[index]> = value` (statement).
-    SetField { receiver: ExprId, class: ClassId, index: u32, value: ExprId },
+    SetField {
+        receiver: ExprId,
+        class: ClassId,
+        index: u32,
+        value: ExprId,
+    },
     /// Read a top-level (module) property — `statics[index]`, a static field on the file facade.
     GetStatic(u32),
     /// Write a top-level (module) property — `statics[index] = value` (statement).
-    SetStatic { index: u32, value: ExprId },
+    SetStatic {
+        index: u32,
+        value: ExprId,
+    },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
     /// `ctor_params` is `None` for the primary constructor (the descriptor covers the leading
     /// parameter fields); `Some(types)` selects a secondary constructor with that parameter list.
-    New { class: ClassId, args: Vec<ExprId>, ctor_params: Option<Vec<IrType>> },
+    New {
+        class: ClassId,
+        args: Vec<ExprId>,
+        ctor_params: Option<Vec<IrType>>,
+    },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
     /// the meaning is backend-agnostic — the JVM realizes omitted args via the `$default` stub + mask,
     /// another backend may fill them inline. All-`Some` is an ordinary full call.
-    MethodCall { class: ClassId, index: u32, receiver: ExprId, args: Vec<Option<ExprId>> },
+    MethodCall {
+        class: ClassId,
+        index: u32,
+        receiver: ExprId,
+        args: Vec<Option<ExprId>>,
+    },
     /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
-    EnumEntry { class: ClassId, index: u32 },
+    EnumEntry {
+        class: ClassId,
+        index: u32,
+    },
     /// Read a static field holding a singleton instance (Kotlin IR's `IrGetObjectValue`):
     /// `getstatic <owner>.<field>:L<ty>;`. An `object`'s `INSTANCE` (`owner == ty`), or a
     /// `companion`'s `Companion` field on the outer class (`owner` = outer, `ty` = companion).
-    StaticInstance { owner: ClassId, ty: ClassId, field: &'static str },
+    StaticInstance {
+        owner: ClassId,
+        ty: ClassId,
+        field: &'static str,
+    },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
-    EnumValues { class: ClassId },
-    EnumValueOf { class: ClassId, arg: ExprId },
+    EnumValues {
+        class: ClassId,
+    },
+    EnumValueOf {
+        class: ClassId,
+        arg: ExprId,
+    },
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
@@ -154,43 +242,82 @@ pub enum IrExpr {
     /// directly when the lambda is inlined into a stdlib `inline fun` splice — so a user `return` in the
     /// lambda becomes a real return from the *enclosing* method (correct non-local return). `None` for a
     /// callable reference (`::foo`), which has no inlinable body.
-    Lambda { impl_fn: u32, arity: u8, captures: Vec<ExprId>, sam: Option<(String, String)>, inline_body: Option<ExprId> },
+    Lambda {
+        impl_fn: u32,
+        arity: u8,
+        captures: Vec<ExprId>,
+        sam: Option<(String, String)>,
+        inline_body: Option<ExprId>,
+    },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic
     /// kotlin/Unit.INSTANCE:Lkotlin/Unit;` — what a `Unit`-returning lambda body yields so its
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
     UnitInstance,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
-    InvokeFunction { func: ExprId, args: Vec<ExprId>, ret: IrType },
+    InvokeFunction {
+        func: ExprId,
+        args: Vec<ExprId>,
+        ret: IrType,
+    },
     /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
     /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
-    NotNullAssert { operand: ExprId },
+    NotNullAssert {
+        operand: ExprId,
+    },
     /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
     /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
-    NewExternal { internal: String, ctor_desc: String, args: Vec<ExprId> },
+    NewExternal {
+        internal: String,
+        ctor_desc: String,
+        args: Vec<ExprId>,
+    },
     /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a
     /// new `Ref$IntRef`/`Ref$ObjectRef`/… whose `element` field is initialized to `init`. `elem` is
     /// the boxed value's type (selects the `Ref` subclass + the `element` field descriptor). Evaluates
     /// to the holder, so it's the initializer of the local that holds the box.
-    RefNew { elem: IrType, init: ExprId },
+    RefNew {
+        elem: IrType,
+        init: ExprId,
+    },
     /// Read a boxed mutable local: `holder.element` (`getfield Ref$XxxRef.element`).
-    RefGet { holder: ExprId, elem: IrType },
+    RefGet {
+        holder: ExprId,
+        elem: IrType,
+    },
     /// Write a boxed mutable local: `holder.element = value` (`putfield`), evaluating to `value`.
-    RefSet { holder: ExprId, elem: IrType, value: ExprId },
+    RefSet {
+        holder: ExprId,
+        elem: IrType,
+        value: ExprId,
+    },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
-    Throw { operand: ExprId },
+    Throw {
+        operand: ExprId,
+    },
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
-    Vararg { element_type: IrType, elements: Vec<ExprId> },
+    Vararg {
+        element_type: IrType,
+        elements: Vec<ExprId>,
+    },
     /// Allocate an uninitialized array of `size` elements (`anewarray` for a reference element,
     /// `newarray` for a primitive) — the sized constructor `Array<T>(n) { … }` / `arrayOfNulls<T>(n)`
     /// fills it afterwards. (`Vararg` is the *literal* form with a statically-known element list.)
-    NewArray { element_type: IrType, size: ExprId },
+    NewArray {
+        element_type: IrType,
+        size: ExprId,
+    },
     /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when
     /// used as a statement). Each catch binds the exception to a value index and runs its body. A
     /// `finally` block runs on every exit (normal, each catch, and an uncaught exception via a
     /// catch-all that re-throws); it is emitted (inlined) at each.
-    Try { body: ExprId, catches: Vec<IrCatch>, finally: Option<ExprId>, result: IrType },
+    Try {
+        body: ExprId,
+        catches: Vec<IrCatch>,
+        finally: Option<ExprId>,
+        result: IrType,
+    },
 }
 
 /// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
@@ -206,14 +333,30 @@ pub struct IrCatch {
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrBinOp {
-    Add, Sub, Mul, Div, Rem,
-    Lt, Le, Gt, Ge, Eq, Ne,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
     /// Referential identity (`===`/`!==`): a JVM `if_acmp*` on two reference operands, never the
     /// structural `Intrinsics.areEqual` that `==`/`!=` (`Eq`/`Ne`) uses for references.
-    RefEq, RefNe,
-    And, Or,
+    RefEq,
+    RefNe,
+    And,
+    Or,
     /// Bitwise/shift on `Int`/`Long` (Kotlin's `and`/`or`/`xor`/`shl`/`shr`/`ushr` infix functions).
-    BitAnd, BitOr, BitXor, Shl, Shr, Ushr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Ushr,
 }
 
 /// The `IrTypeOperatorCall` operators (Kotlin IR's `IrTypeOperator`).
@@ -225,7 +368,7 @@ pub enum IrTypeOp {
     /// `as T` to a non-null reference type: null-check (`Intrinsics.checkNotNull`) then `checkcast`,
     /// so casting `null` throws — matching kotlinc.
     CastNonNull,
-    SafeCast,      // `as? T`
+    SafeCast, // `as? T`
     /// Representation coercion the backend inserts (e.g. JVM box/unbox) — explicit in the IR so it
     /// is visible and testable, not hidden in codegen.
     ImplicitCoercion,
@@ -421,11 +564,18 @@ mod tests {
         let mut f = IrFile::default();
         let lit = f.add_expr(IrExpr::Const(IrConst::Int(42)));
         let ret = f.add_expr(IrExpr::Return(Some(lit)));
-        let body = f.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+        let body = f.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
         let fun = f.add_fun(IrFunction {
             name: "answer".to_string(),
             params: vec![],
-            ret: IrType::Class { fq_name: "kotlin/Int".to_string(), type_args: vec![], nullable: false },
+            ret: IrType::Class {
+                fq_name: "kotlin/Int".to_string(),
+                type_args: vec![],
+                nullable: false,
+            },
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,

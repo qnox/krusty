@@ -31,23 +31,60 @@ fn constructs_and_calls_java_instance_methods() {
     // A plain Java class with a constructor + instance methods.
     fs::write(cp.join("util/Calc.java"),
         "package util;\npublic class Calc {\n  private final int base;\n  public Calc(int base) { this.base = base; }\n  public int add(int n) { return base + n; }\n  public String tag() { return \"calc\"; }\n}\n").unwrap();
-    assert!(Command::new(&javac).args(["-d", cp.to_str().unwrap()]).arg(cp.join("util/Calc.java")).output().unwrap().status.success());
+    assert!(Command::new(&javac)
+        .args(["-d", cp.to_str().unwrap()])
+        .arg(cp.join("util/Calc.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
 
     // krusty constructs it and calls instance methods.
     fs::write(root.join("Use.kt"),
         "import util.Calc\nfun box(): String {\n  val c = Calc(10)\n  if (c.add(5) != 15) return \"f1\"\n  if (c.tag() != \"calc\") return \"f2\"\n  return \"OK\"\n}\n").unwrap();
     let kr = root.join("kr");
-    let out = Command::new(krusty).args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()]).arg(root.join("Use.kt")).output().unwrap();
-    if !out.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&out.stderr)); return; }
+    let out = Command::new(krusty)
+        .args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()])
+        .arg(root.join("Use.kt"))
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "skip (IR unsupported): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
 
     let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
     fs::write(kr.join("M.java"), main).unwrap();
     // The compiled output may reference `kotlin/jvm/internal/Intrinsics` (parameter null-checks, like
     // kotlinc) — put the stdlib on the run classpath.
-    let stdlib = common::stdlib_jar().map(|p| format!(":{}", p.display())).unwrap_or_default();
-    let kcp = format!("{}:{}{}", kr.to_str().unwrap(), cp.to_str().unwrap(), stdlib);
-    assert!(Command::new(&javac).args(["-cp", &kcp, "-d", kr.to_str().unwrap()]).arg(kr.join("M.java")).output().unwrap().status.success());
-    let run = Command::new(&java).args(["-Xverify:all", "-cp", &kcp, "M"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK", "stderr={}", String::from_utf8_lossy(&run.stderr));
+    let stdlib = common::stdlib_jar()
+        .map(|p| format!(":{}", p.display()))
+        .unwrap_or_default();
+    let kcp = format!(
+        "{}:{}{}",
+        kr.to_str().unwrap(),
+        cp.to_str().unwrap(),
+        stdlib
+    );
+    assert!(Command::new(&javac)
+        .args(["-cp", &kcp, "-d", kr.to_str().unwrap()])
+        .arg(kr.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &kcp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let _ = fs::remove_dir_all(&root);
 }
