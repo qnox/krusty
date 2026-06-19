@@ -2709,8 +2709,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                // The safe-call result is nullable; krusty needs it to be a reference type (no boxing).
+                // The safe-call result is nullable: a primitive member result becomes its boxed wrapper
+                // (`s?.length` → `Int?` = `java/lang/Integer`); the member value is boxed (or `null`) in
+                // lowering. A non-wrappable primitive (unsigned/value) stays unsupported.
                 if !result.is_reference() && result != Ty::Error {
+                    if let Some(w) = nullable_prim_wrapper(result) {
+                        return self.set(e, Ty::obj(w));
+                    }
                     self.diags.error(self.span(e), "krusty: safe call (?.) with a non-reference result is not supported".to_string());
                     return Ty::Error;
                 }

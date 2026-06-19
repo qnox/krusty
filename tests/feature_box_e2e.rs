@@ -287,6 +287,21 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A nullable-primitive `==`/`!=` a primitive short-circuits like kotlinc: when the wrapper is null
+    // the primitive side is NOT evaluated (so `sideEffecting()` runs once, not twice). A `?.` on a null
+    // receiver yields null → the comparison resolves without touching the RHS.
+    ("NullableEqShortCircuit", r#"
+var result = ""
+fun se(): Int { result += "X"; return 123 }
+class C(val x: Int)
+val a: C? = C(123)
+val b: C? = null
+fun box(): String {
+    if (a?.x != se()) return "f1"
+    if (b?.x == se()) return "f2"
+    return if (result == "X") "OK" else "f3:$result"
+}
+"#),
     // Bound property reference `obj::x` — a `PropertyReference0Impl` carrying the captured receiver;
     // `.get()` (no args) reads `this.receiver`'s property.
     ("BoundPropertyRef", r#"

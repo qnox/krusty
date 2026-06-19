@@ -2733,7 +2733,7 @@ impl<'a> Lower<'a> {
                 if !rty.is_reference() || !result_ty.is_reference() {
                     return None;
                 }
-                let internal = rty.obj_internal()?.to_string();
+                let internal = if rty == Ty::String { "java/lang/String".to_string() } else { rty.obj_internal()?.to_string() };
                 let rv = self.expr(receiver)?;
                 let v = self.fresh_value();
                 let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(rty), init: Some(rv) });
@@ -2741,31 +2741,58 @@ impl<'a> Lower<'a> {
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
                 let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
+                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
                 let member = match args {
                     Some(args) => {
-                        let (class, index, fid, _) = self.resolve_method(&internal, &name)?;
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if args.len() != params.len() { return None; }
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&params) {
-                            a.push(self.lower_arg(*arg, pt)?);
+                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name) {
+                            let params = self.ir.functions[fid as usize].params.clone();
+                            if args.len() != params.len() { return None; }
+                            let mut a = Vec::new();
+                            for (arg, pt) in args.iter().zip(&params) {
+                                a.push(self.lower_arg(*arg, pt)?);
+                            }
+                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a.into_iter().map(Some).collect() })
+                        } else {
+                            // A classpath instance method (`s?.substring(1)`).
+                            let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                            let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys)?;
+                            let mut a = Vec::new();
+                            for (arg, pt) in args.iter().zip(&m.params) {
+                                a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                            }
+                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv2), args: a })
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a.into_iter().map(Some).collect() })
                     }
                     None => {
-                        let (fclass, idx, _) = self.resolve_field(&internal, &name)?;
-                        let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
-                        // External read → `getX()` (the backing field is private); internal → field.
-                        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                            if let Some((mclass, mindex, _, _)) = self.resolve_method(&internal, &getter_name(&name)) {
-                                self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv2, args: vec![] })
+                        if let Some((fclass, idx, _)) = self.resolve_field(&internal, &name) {
+                            let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
+                            // External read → `getX()` (the backing field is private); internal → field.
+                            if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                                if let Some((mclass, mindex, _, _)) = self.resolve_method(&internal, &getter_name(&name)) {
+                                    self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv2, args: vec![] })
+                                } else {
+                                    self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                                }
                             } else {
                                 self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
                             }
+                        } else if internal == "java/lang/String" && name == "length" {
+                            self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv2), args: vec![] })
                         } else {
-                            self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                            // A classpath property (`list?.size`) — a zero-arg accessor.
+                            let mapped = crate::resolve::collection_mapped_accessor(&name).map(|s| s.to_string());
+                            let m = [Some(name.clone()), Some(getter_name(&name)), mapped].into_iter().flatten()
+                                .find_map(|c| crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)))?;
+                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv2), args: vec![] })
                         }
                     }
+                };
+                // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
+                // both `when` branches are the wrapper reference (the other branch is `null`).
+                let member = if result_ty.obj_internal().and_then(crate::resolve::prim_of_wrapper).is_some() {
+                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: member, type_operand: ty_to_ir(result_ty) })
+                } else {
+                    member
                 };
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), member), (None, nullb)] });
@@ -3209,8 +3236,29 @@ impl<'a> Lower<'a> {
                         if lt != p { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: pir.clone() }); }
                         if rt != p { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: pir }); }
                     } else if matches!(op, BinOp::Eq | BinOp::Ne) && lt.is_reference() != rt.is_reference() {
-                        // Mixed reference/primitive equality (`Any == 5`): box the primitive operand so
-                        // both sides are references → structural equality (`Intrinsics.areEqual`).
+                        // A nullable-primitive wrapper (`Int?`) compared with a primitive: match kotlinc's
+                        // short-circuit — when the wrapper is null the result is fixed (`!=`→true,
+                        // `==`→false) WITHOUT evaluating the primitive side (which may have side effects).
+                        // `{ val t = wrapper; if (t == null) <fixed> else t.unbox <op> prim }`.
+                        let l_wp = lt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
+                        let r_wp = rt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
+                        if let Some(wp) = l_wp.or(r_wp) {
+                            let (w_e, w_ty, p_e) = if l_wp.is_some() { (lhs, lt, rhs) } else { (rhs, rt, lhs) };
+                            let wv = self.expr(w_e)?;
+                            let v = self.fresh_value();
+                            let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(w_ty), init: Some(wv) });
+                            let getn = self.ir.add_expr(IrExpr::GetValue(v));
+                            let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                            let isnull = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: getn, rhs: nullc });
+                            let getw = self.ir.add_expr(IrExpr::GetValue(v));
+                            let unboxed = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: getw, type_operand: ty_to_ir(wp) });
+                            let pv = self.lower_arg(p_e, &ty_to_ir(wp))?;
+                            let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: unboxed, rhs: pv });
+                            let fixed = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
+                            let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(isnull), fixed), (None, cmp)] });
+                            return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) }));
+                        }
+                        // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
                         let obj = ty_to_ir(Ty::obj("kotlin/Any"));
                         if lt.is_primitive() { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: obj }); }
                         else { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: obj }); }
