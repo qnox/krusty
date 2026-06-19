@@ -359,6 +359,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
+  before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
+  `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
+  `{ val tmp = <value>; <finally>…; return tmp }` — the return value is captured into a temp first so a
+  `finally` that mutates state cannot change what is returned (Kotlin evaluates the value, then runs the
+  finallys). `emit_try` still inlines the finally on the normal-completion and exception paths. A `break`/
+  `continue` escaping the `try`, or a `finally` that declares locals (its duplicated slots would clash
+  across the inlined copies), is still skipped. `ReturnInTryFinally` in `tests/feature_box_e2e.rs`.
 - **`when (subject)` with `in`/`!in` range branches** (`when (x) { in 4..6 -> … }`): the parser builds
   the structural `Is`/`InRange` node for an `is`/`in`-range condition (same as the infix `is`/`in`
   operator); the checker and lowering treat that node as a complete boolean test of the subject, not a

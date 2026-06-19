@@ -44,6 +44,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
         cur_ret_ty: IrType::Unit,
+        try_finally_stack: Vec::new(),
         companions: HashMap::new(),
         computed_props: HashMap::new(),
         expr_depth: 0,
@@ -1083,6 +1084,11 @@ struct Lower<'a> {
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: IrType,
+    /// `finally` blocks of the enclosing `try`s (outermost first) whose protected region covers the
+    /// statement being lowered. A `return` inside them must run each `finally` (innermost first) before
+    /// transferring control — so the lowerer inlines them at the `return`. Pushed while a try-body/catch
+    /// with a `finally` is lowered.
+    try_finally_stack: Vec<AstExprId>,
     /// Outer-class internal name → its `C$Companion` internal name, for routing `C.foo()` calls.
     companions: HashMap<String, String>,
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
@@ -2242,6 +2248,30 @@ impl<'a> Lower<'a> {
                     Some(e) => Some(self.expr(e)?),
                     None => None,
                 };
+                // Inside one or more `try { … } finally { … }`, a `return` must run each enclosing
+                // `finally` (innermost first) before transferring control — `{ val tmp = <value>;
+                // <finally>…; return tmp }`. The value is captured into a temp first so a `finally` that
+                // mutates state can't change what is returned (Kotlin evaluates the value, then runs the
+                // finallys).
+                if !self.try_finally_stack.is_empty() {
+                    let finallys = self.try_finally_stack.clone();
+                    let mut stmts = Vec::new();
+                    let ret_val = match v {
+                        Some(val) => {
+                            let tmp = self.fresh_value();
+                            let vty = self.cur_ret_ty.clone();
+                            stmts.push(self.ir.add_expr(IrExpr::Variable { index: tmp, ty: vty, init: Some(val) }));
+                            Some(tmp)
+                        }
+                        None => None,
+                    };
+                    for f in finallys.iter().rev() {
+                        stmts.push(self.expr(*f)?);
+                    }
+                    let rv = ret_val.map(|tmp| self.ir.add_expr(IrExpr::GetValue(tmp)));
+                    stmts.push(self.ir.add_expr(IrExpr::Return(rv)));
+                    return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                }
                 Some(self.ir.add_expr(IrExpr::Return(v)))
             }
             Stmt::Local { name, init, ty, .. } => {
@@ -2819,30 +2849,48 @@ impl<'a> Lower<'a> {
             }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
             Expr::Try { body, catches, finally } => {
-                // A `finally` is inlined at each exit; a `return`/`break`/`continue` out of the body or
-                // a catch would need the `finally` run before it (not modeled) — bail in that case.
+                // A `finally` is inlined at each exit. A `break`/`continue` that escapes the `try` would
+                // need the `finally` run before it (not modeled) — bail. A `return` IS modeled: the
+                // `finally` is pushed onto `try_finally_stack` and inlined at each `return` inside the
+                // body/catch (`Stmt::Return`); the normal/exception exits are inlined by `emit_try`.
                 if finally.is_some()
-                    && (body_has_nonlocal_exit(self.afile, body)
-                        || catches.iter().any(|c| body_has_nonlocal_exit(self.afile, c.body)))
+                    && (body_has_break_continue(self.afile, body)
+                        || catches.iter().any(|c| body_has_break_continue(self.afile, c.body)))
                 {
                     return None;
                 }
+                // A `finally` that declares locals is inlined on several exit paths (normal, each `return`,
+                // the exception catch-all); the duplicated locals' slots clash across copies (a verify
+                // error) — skip rather than miscompile.
+                if let Some(f) = finally {
+                    if body_declares_local(self.afile, f) {
+                        return None;
+                    }
+                }
                 let result = ty_to_ir(self.info.ty(e));
-                let body_ir = self.expr(body)?;
+                if let Some(f) = finally {
+                    self.try_finally_stack.push(f);
+                }
+                let body_ir = self.expr(body);
                 let mut ir_catches = Vec::new();
+                let mut ok = body_ir.is_some();
                 for c in &catches {
-                    let exc_internal = self.catch_internal(&c.ty.name)?;
+                    let exc_internal = match self.catch_internal(&c.ty.name) { Some(x) => x, None => { ok = false; break; } };
                     let v = self.fresh_value();
                     self.scope.push((c.name.clone(), v, Ty::obj(&exc_internal)));
-                    let cbody = self.expr(c.body)?;
+                    let cbody = self.expr(c.body);
                     self.scope.pop();
-                    ir_catches.push(crate::ir::IrCatch { var: v, exc_internal, body: cbody });
+                    match cbody { Some(cb) => ir_catches.push(crate::ir::IrCatch { var: v, exc_internal, body: cb }), None => { ok = false; break; } }
                 }
+                if finally.is_some() {
+                    self.try_finally_stack.pop();
+                }
+                if !ok { return None; }
                 let fin = match finally {
                     Some(f) => Some(self.expr(f)?),
                     None => None,
                 };
-                self.ir.add_expr(IrExpr::Try { body: body_ir, catches: ir_catches, finally: fin, result })
+                self.ir.add_expr(IrExpr::Try { body: body_ir?, catches: ir_catches, finally: fin, result })
             }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
@@ -4920,26 +4968,58 @@ fn ir_type_is_object(t: &IrType) -> bool {
 /// loop *outside* `e` (i.e. at loop-depth 0 here) — control transfers that would skip an enclosing
 /// `finally`. Does not descend into lambdas (their control flow is separate).
 fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
-    fn ex(file: &ast::File, e: AstExprId, ld: u32) -> bool {
+    body_has_exit(file, e, true)
+}
+
+/// Whether `e` declares a local `val`/`var` (a `Stmt::Local`/`Destructure`), not descending into a
+/// nested lambda. A `finally` that declares locals can't be inlined on the several exit paths krusty's
+/// `emit_try` needs without the duplicated locals' slots clashing across copies — so such a `try` skips.
+fn body_declares_local(file: &ast::File, e: AstExprId) -> bool {
+    fn ex(file: &ast::File, e: AstExprId) -> bool {
         match file.expr(e) {
-            // A lambda's control flow is separate; a callable-ref receiver carries no return/break.
             Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
-            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld), &mut |s| st(file, s, ld)),
+            _ => file.any_child_expr(e, &mut |c| ex(file, c), &mut |s| st(file, s)),
         }
     }
-    fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32) -> bool {
+    fn st(file: &ast::File, s: crate::ast::StmtId) -> bool {
         match file.stmt(s) {
-            Stmt::Return(_) => true,
-            Stmt::Break(_) | Stmt::Continue(_) => ld == 0,
-            Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld),
-            // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
-            Stmt::While { cond, body, .. } => ex(file, *cond, ld) || ex(file, *body, ld + 1),
-            Stmt::DoWhile { body, cond, .. } => ex(file, *body, ld + 1) || ex(file, *cond, ld),
-            Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1),
+            Stmt::Local { .. } | Stmt::Destructure { .. } => true,
+            Stmt::Expr(e) | Stmt::Assign { value: e, .. } | Stmt::While { body: e, .. }
+            | Stmt::DoWhile { body: e, .. } | Stmt::For { body: e, .. } | Stmt::ForEach { body: e, .. } => ex(file, *e),
             _ => false,
         }
     }
-    ex(file, e, 0)
+    ex(file, e)
+}
+
+/// Whether `e` contains a `break`/`continue` that escapes past this region (a loop-local one is fine).
+/// `with_return` also flags a `return` — used where a `return` can't be modeled; `false` where the
+/// lowerer handles `return` itself (inlining enclosing `finally`s) and only `break`/`continue` must bail.
+fn body_has_break_continue(file: &ast::File, e: AstExprId) -> bool {
+    body_has_exit(file, e, false)
+}
+
+fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
+    fn ex(file: &ast::File, e: AstExprId, ld: u32, wr: bool) -> bool {
+        match file.expr(e) {
+            // A lambda's control flow is separate; a callable-ref receiver carries no return/break.
+            Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
+            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld, wr), &mut |s| st(file, s, ld, wr)),
+        }
+    }
+    fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32, wr: bool) -> bool {
+        match file.stmt(s) {
+            Stmt::Return(_) => wr,
+            Stmt::Break(_) | Stmt::Continue(_) => ld == 0,
+            Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld, wr),
+            // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
+            Stmt::While { cond, body, .. } => ex(file, *cond, ld, wr) || ex(file, *body, ld + 1, wr),
+            Stmt::DoWhile { body, cond, .. } => ex(file, *body, ld + 1, wr) || ex(file, *cond, ld, wr),
+            Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1, wr),
+            _ => false,
+        }
+    }
+    ex(file, e, 0, with_return)
 }
 
 /// The element type of a primitive-array constructor name (`IntArray` → `Int`).
