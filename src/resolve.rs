@@ -1283,6 +1283,8 @@ fn range_primitive_elem(internal: &str) -> Option<Ty> {
         "kotlin/ranges/IntRange" | "kotlin/ranges/IntProgression" => Some(Ty::Int),
         "kotlin/ranges/LongRange" | "kotlin/ranges/LongProgression" => Some(Ty::Long),
         "kotlin/ranges/CharRange" | "kotlin/ranges/CharProgression" => Some(Ty::Char),
+        "kotlin/ranges/UIntRange" | "kotlin/ranges/UIntProgression" => Some(Ty::UInt),
+        "kotlin/ranges/ULongRange" | "kotlin/ranges/ULongProgression" => Some(Ty::ULong),
         _ => None,
     }
 }
@@ -2702,6 +2704,10 @@ impl<'a> Checker<'a> {
                 let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
                 match (lt, rt) {
                     (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
+                    // Unsigned ranges are their own stdlib classes (`UIntRange`/`ULongRange`), iterated
+                    // with unsigned comparison and mangled inline-class getters.
+                    (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
+                    (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
                     _ if small_int(&lt) && small_int(&rt) => Ty::obj("kotlin/ranges/IntRange"),
                     _ if (small_int(&lt) || lt == Ty::Long) && (small_int(&rt) || rt == Ty::Long) => Ty::obj("kotlin/ranges/LongRange"),
                     _ => {

@@ -1166,6 +1166,26 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Iterating an unsigned range *value* (`val r = 0u..5u; for (i in r)`): builds a `UIntRange`/
+    // `ULongRange` (the ctor takes a synthetic marker) and iterates via the MANGLED inline-class getters
+    // (`getFirst-pVg5ArA`, resolved from the classpath by prefix) with unsigned comparison.
+    ("UnsignedRangeIterate", r#"
+fun box(): String {
+    val r = 0u..5u
+    var s = 0
+    for (i in r) s += i.toInt()
+    if (s != 15) return "f1: $s"
+    var t = 0uL
+    val lr = 10uL..13uL
+    for (j in lr) t += j
+    if (t != 46uL) return "f2: $t"
+    // a UInt range reaching past the signed-int sign bit must iterate in unsigned order
+    var c = 0
+    for (k in 4294967293u..4294967295u) c++
+    if (c != 3) return "f3: $c"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
