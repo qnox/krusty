@@ -458,3 +458,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a primitive (`String?.length` → `Int`) types as the boxed wrapper (`Int?`) and boxes the primitive result
   before the `null` join, so the `when` arms agree; the checker maps such a result back through
   `nullable_prim_wrapper` so the expression's type is the wrapper, not `Error`.
+
+- **Extension-function body referencing receiver members implicitly** (`fun A.twice() = n + n`, where
+  `n` means `this.n`): the bare name lowers as a read on the receiver — which is bound as the `this`
+  local with `cur_class == None` (an extension is a top-level static, not a class member). Because the
+  body executes *outside* class `A`, a user property is read through its getter (the backing field is
+  private), falling back to a direct field then a classpath accessor; this mirrors any external member
+  read. **Nullable reference receivers** (`fun A?.foo()`) are now supported for *ordinary* names: under
+  `Ty`'s nullability erasure a lone `A?.foo` is unambiguous (there is no member `foo` to compete with).
+  An *operator*-named extension on a nullable receiver (`fun String?.plus(…)`) stays rejected: it would
+  shadow the builtin/member operator for *every* `String + …` (even non-null), recursing infinitely in a
+  body that uses the same operator — kotlinc disambiguates by static nullability, which krusty cannot.
+  A duplicate or nullable/non-null pair with the same erased `(receiver, name)` is also rejected.
