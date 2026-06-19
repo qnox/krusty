@@ -208,6 +208,14 @@ pub trait LibrarySet {
         None
     }
 
+    /// Resolve a method on `internal` whose JVM name starts with `prefix`, returning `(name, descriptor)`.
+    /// Inline-class members carry a mangled name suffix (`getFirst-pVg5ArA` on `UIntRange`, where the
+    /// `-…` hash encodes the inline-class signature), so a call site can't name them directly — it looks
+    /// the real name up from the classpath instead of recomputing kotlinc's mangling. `None` if absent.
+    fn mangled_member(&self, _internal: &str, _prefix: &str) -> Option<(String, String)> {
+        None
+    }
+
     /// For a generic extension `recv.name(args…)` taking function arguments, the *element-typed*
     /// parameter types of each call argument that is a lambda — `List<Int>.map { … }` → `[[Int]]` (the
     /// single lambda's parameter is the element `Int`). The type variables bind from the receiver and

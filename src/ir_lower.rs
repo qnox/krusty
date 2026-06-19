@@ -1905,36 +1905,56 @@ impl<'a> Lower<'a> {
         let internal = it_ty.obj_internal()?.to_string();
         let depth = self.scope.len();
         let elem_ir = ty_to_ir(elem);
+        // The `first`/`last` getters: a signed range names them `getFirst`/`getLast`; an unsigned range's
+        // are mangled inline-class members (`getFirst-pVg5ArA`), looked up from the classpath by prefix.
+        let (gf_name, gf_desc, gl_name, gl_desc) = if elem.is_unsigned() {
+            let (gf, gfd) = self.syms.libraries.mangled_member(&internal, "getFirst-")?;
+            let (gl, gld) = self.syms.libraries.mangled_member(&internal, "getLast-")?;
+            (gf, gfd, gl, gld)
+        } else {
+            ("getFirst".to_string(), format!("(){prim_desc}"), "getLast".to_string(), format!("(){prim_desc}"))
+        };
         // Evaluate the range once into a temp (the getters must share one receiver).
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
         let var_r = self.ir.add_expr(IrExpr::Variable { index: r_v, ty: ty_to_ir(it_ty), init: Some(rng) });
-        let getter = |this: &mut Self, name: &str| {
+        let getter = |this: &mut Self, name: &str, desc: &str| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
             this.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual { owner: internal.clone(), name: name.to_string(), descriptor: format!("(){prim_desc}"), interface: false },
+                callee: Callee::Virtual { owner: internal.clone(), name: name.to_string(), descriptor: desc.to_string(), interface: false },
                 dispatch_receiver: Some(recv), args: vec![],
             })
         };
         // i = range.getFirst()
-        let first = getter(self, "getFirst");
+        let first = getter(self, &gf_name, &gf_desc);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
         let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: elem_ir.clone(), init: Some(first) });
         // last = range.getLast()  (hoisted)
-        let last = getter(self, "getLast");
+        let last = getter(self, &gl_name, &gl_desc);
         let n_v = self.fresh_value();
         let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: elem_ir.clone(), init: Some(last) });
-        // condition: i <= last
+        // condition: i <= last (unsigned: compareUnsigned(i, last) <= 0, so values past the sign bit
+        // order correctly — a signed `<=` would end the loop early).
         let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: gi, rhs: gn });
+        let cond = if elem.is_unsigned() {
+            let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+            let call = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
+                dispatch_receiver: None, args: vec![gi, gn],
+            });
+            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: call, rhs: zero })
+        } else {
+            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: gi, rhs: gn })
+        };
         // body (the loop variable `x` is the counter `i` itself)
         let mut out = Vec::new();
         if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
         // i += 1  (the loop update, at the `continue` target)
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let one = self.ir.add_expr(IrExpr::Const(if elem == Ty::Long { IrConst::Long(1) } else { IrConst::Int(1) }));
+        let one = self.ir.add_expr(IrExpr::Const(if matches!(elem, Ty::Long | Ty::ULong) { IrConst::Long(1) } else { IrConst::Int(1) }));
         let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
         let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
         // Break when the counter reaches the inclusive last *before* incrementing, so a range ending at
@@ -3653,6 +3673,8 @@ impl<'a> Lower<'a> {
                 let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
                 let (range_internal, prim_desc, elem) = match (lt, rt) {
                     (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", "C", Ty::Char),
+                    (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", "I", Ty::UInt),
+                    (Ty::ULong, Ty::ULong) => ("kotlin/ranges/ULongRange", "J", Ty::ULong),
                     (l, r) if small_int(&l) && small_int(&r) => ("kotlin/ranges/IntRange", "I", Ty::Int),
                     (l, r) if (small_int(&l) || l == Ty::Long) && (small_int(&r) || r == Ty::Long) => ("kotlin/ranges/LongRange", "J", Ty::Long),
                     _ => return None,
@@ -3660,12 +3682,20 @@ impl<'a> Lower<'a> {
                 let lo_v = self.lower_arg(lo, &ty_to_ir(elem))?;
                 let hi_v = self.lower_arg(hi, &ty_to_ir(elem))?;
                 match kind {
-                    // `a..b` → `new IntRange(a, b)` (kotlinc's intrinsic constructor).
+                    // `a..b` → `new IntRange(a, b)` (kotlinc's intrinsic constructor). The unsigned range
+                    // classes' public ctor takes a trailing synthetic `DefaultConstructorMarker` (null).
+                    RangeKind::Through if elem.is_unsigned() => {
+                        let marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let ctor_desc = format!("({prim_desc}{prim_desc}Lkotlin/jvm/internal/DefaultConstructorMarker;)V");
+                        self.ir.add_expr(IrExpr::NewExternal { internal: range_internal.to_string(), ctor_desc, args: vec![lo_v, hi_v, marker] })
+                    }
                     RangeKind::Through => {
                         let ctor_desc = format!("({prim_desc}{prim_desc})V");
                         self.ir.add_expr(IrExpr::NewExternal { internal: range_internal.to_string(), ctor_desc, args: vec![lo_v, hi_v] })
                     }
                     // `a..<b` → `RangesKt.until(a, b)` (the `rangeUntil` operator), returning the range.
+                    // (Unsigned `..<` uses a different intrinsic krusty doesn't model yet — skip.)
+                    RangeKind::Until if elem.is_unsigned() => return None,
                     RangeKind::Until => {
                         let descriptor = format!("({prim_desc}{prim_desc})L{range_internal};");
                         self.ir.add_expr(IrExpr::Call {
@@ -5137,6 +5167,9 @@ fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     match internal {
         "kotlin/ranges/IntRange" => Some((Ty::Int, "I")),
         "kotlin/ranges/LongRange" => Some((Ty::Long, "J")),
+        // Unsigned ranges erase to the signed primitive; the counted loop uses unsigned comparison.
+        "kotlin/ranges/UIntRange" => Some((Ty::UInt, "I")),
+        "kotlin/ranges/ULongRange" => Some((Ty::ULong, "J")),
         _ => None,
     }
 }

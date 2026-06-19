@@ -557,6 +557,26 @@ impl LibrarySet for JvmLibraries {
         sam
     }
 
+    fn mangled_member(&self, internal: &str, prefix: &str) -> Option<(String, String)> {
+        // The first public instance method whose name starts with `prefix` (`getFirst-…`), searching the
+        // class and its superclass chain — an inline-range getter is declared on the `…Progression`
+        // superclass and inherited by the `…Range`. A mangled member has one such name per logical member,
+        // so the prefix is unambiguous.
+        let mut cur = Some(internal.to_string());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(name) = cur {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let ci = self.cp.find(&name)?;
+            if let Some(m) = ci.methods.iter().find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix)) {
+                return Some((m.name.clone(), m.descriptor.clone()));
+            }
+            cur = ci.super_class.clone();
+        }
+        None
+    }
+
     fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
         let Ty::Obj(start, start_args) = recv else { return None };
         if start_args.is_empty() {

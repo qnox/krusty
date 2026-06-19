@@ -2188,6 +2188,12 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 374 — unsigned range values + inline-class mangled-member resolution** (843, +0 capability).
+  `0u..5u`→`UIntRange` (ctor with `DefaultConstructorMarker`), iterated via kotlinc's mangled getters
+  (`getFirst-pVg5ArA`) — new `LibrarySet::mangled_member` looks the real name up from the classpath
+  (superclass-chain walk), the first real inline-class infra. Unsigned counted loop uses `compareUnsigned`.
+  `UByte`/`UShort`/open-ranges/`step` still unmodeled so corpus files stay skipped. `tests/feature_box_e2e.rs::UnsignedRangeIterate`.
+
 - ✅ **Phase 373 — unsigned `in`-range membership + fast-iteration test profile** (843, +0 capability).
   `x in a..b` for `UInt`/`ULong` lowers to the bounds-check intrinsic with `compareUnsigned` (correct past
   the sign bit). Infra: added an unoptimized `[profile.gate]` (overflow-checks off) used by run-tests.sh

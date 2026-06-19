@@ -658,3 +658,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   still pending; direct `for (i in 0u until n)` already worked. (Infra: the in-loop test round now builds
   with an unoptimized `gate` cargo profile — overflow-checks off so krusty's wrapping arithmetic doesn't
   abort — for seconds-long rebuilds; the conformance worker stack is 64 MB so unoptimized recursion fits.)
+
+- **Unsigned range *values* + inline-class mangled-member resolution.** `0u..5u` / `0uL..nuL` builds a
+  `UIntRange`/`ULongRange` (the public ctor takes a trailing synthetic `DefaultConstructorMarker`, passed
+  `null`), and iterating one (`val r = 0u..5u; for (i in r)`) reads its bounds through kotlinc's MANGLED
+  inline-class getters (`getFirst-pVg5ArA`/`getLast-…`, inherited from the `…Progression` superclass). The
+  mangle suffix is a hash of the inline-class signature; rather than recompute it, krusty looks the real
+  JVM name up from the classpath by prefix (new `LibrarySet::mangled_member`, walking the superclass
+  chain). The counted loop compares with `Integer/Long.compareUnsigned` so values past the signed sign bit
+  iterate in unsigned order, and breaks at `i == last` before incrementing (overflow-safe). This is the
+  first piece of real inline-class infrastructure (the mangled-name lookup); `UByte`/`UShort` and unsigned
+  open-ranges/`step` are still unmodeled, so most unsigned-range corpus files (which mix all of these) stay
+  skipped — but the range-value iteration itself is correct (verified past the sign bit).
