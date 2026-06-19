@@ -2570,8 +2570,13 @@ impl<'a> Lower<'a> {
             Stmt::For { name, range, body, label } => {
                 use crate::ast::RangeKind;
                 let depth = self.scope.len();
-                // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`).
-                let elem = self.info.ty(range.start);
+                // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`). A
+                // `Byte`/`Short` range widens to an `IntRange`, so the counter is `Int` and the bounds
+                // coerce up (matching the checker and `Short.rangeTo(Short): IntRange`).
+                let elem = match self.info.ty(range.start) {
+                    Ty::Byte | Ty::Short => Ty::Int,
+                    t => t,
+                };
                 let elem_ir = ty_to_ir(elem);
                 let one = if matches!(elem, Ty::Long | Ty::ULong) { IrConst::Long(1) } else { IrConst::Int(1) };
                 // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
@@ -2607,7 +2612,9 @@ impl<'a> Lower<'a> {
                 // side-effecting `step` (`a step logged(2)`) must run a single time. Hoist it to a temp.
                 let var_step = match range.step {
                     Some(e) => {
-                        let sv = self.expr(e)?;
+                        // Coerce the step to the counter's type — `0L..n step 3` adapts the `Int` step `3`
+                        // to `Long`, else an `int` would be stored into a `long` slot (a verify error).
+                        let sv = self.lower_arg(e, &elem_ir)?;
                         let step_v = self.fresh_value();
                         Some((self.ir.add_expr(IrExpr::Variable { index: step_v, ty: elem_ir.clone(), init: Some(sv) }), step_v))
                     }

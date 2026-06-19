@@ -632,3 +632,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bound element type is carried on `LibraryCallable.vararg_elem`, recovered from the callee's generic
   signature with the call's explicit type arguments bound first. (Direct `for (x in b1..b5)` over `Byte`/
   `Short` via the `Stmt::For` path is still pending — only range *values* widen so far.)
+
+- **Direct `for` over a `Byte`/`Short` range + step type coercion.** A direct `for (x in b1..b5)` over
+  `Byte`/`Short` operands (the `Stmt::For` path, distinct from a range *value*) widens to an `IntRange`:
+  the counter is `Int` and the bounds coerce up (`Short.rangeTo(Short): IntRange`). The loop `step` is
+  coerced to the counter's type — `for (i in 0L..n step 3)` adapts the `Int` step `3` to `Long`, else an
+  `int` would be stored into a `long` slot (a verify error). Both mirror the range-value path (phase 369).
