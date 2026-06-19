@@ -3247,6 +3247,22 @@ impl<'a> Lower<'a> {
                     let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
                     let mut l = self.expr(lhs)?;
                     let mut r = self.expr(rhs)?;
+                    // `Char` arithmetic (`'a' + 1`, `c - 1`, `c1 - c2`): `Char`/`Int` share the int stack
+                    // representation, but there is no numeric *promotion* between them. Do the op on ints
+                    // (coerce the `Char` operands to `Int` — a no-op on the stack, but it types the result
+                    // as `Int`); a `Char` result then truncates with `i2c` (Kotlin wraps mod 2^16), a
+                    // `Char - Char` difference is a plain `Int`. The checker already typed `e` accordingly.
+                    if lt == Ty::Char && matches!(op, BinOp::Add | BinOp::Sub) && (rt == Ty::Int || rt == Ty::Char) {
+                        let int_ir = ty_to_ir(Ty::Int);
+                        let li = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: int_ir.clone() });
+                        let ri = if rt == Ty::Char {
+                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: int_ir })
+                        } else { r };
+                        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: li, rhs: ri });
+                        return Some(if self.info.ty(e) == Ty::Char {
+                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: raw, type_operand: ty_to_ir(Ty::Char) })
+                        } else { raw });
+                    }
                     if lt.is_primitive() && rt.is_primitive() && lt != rt {
                         let p = Ty::promote(lt, rt)?;
                         let pir = ty_to_ir(p);
