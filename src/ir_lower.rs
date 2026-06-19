@@ -4466,6 +4466,34 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0) to the base
+                    // class's method (the receiver's own override is skipped). The base is the current
+                    // class's superclass; the method's signature comes from the super (a user class via
+                    // `method_of`, else a classpath class via `resolve_instance`).
+                    if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn == "super") {
+                        let cur = self.cur_class.clone()?;
+                        let sup = self.classes.get(&cur).and_then(|ci| ci.super_internal.clone())?;
+                        let this = self.ir.add_expr(IrExpr::GetValue(0));
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let (params, descriptor) = if let Some(sig) = self.syms.method_of(&sup, &name) {
+                            (sig.params.clone(), crate::jvm::names::method_descriptor(&sig.params, sig.ret))
+                        } else if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, &sup, &name, &arg_tys) {
+                            (m.params.clone(), m.descriptor.clone())
+                        } else {
+                            return None;
+                        };
+                        if params.len() != args.len() {
+                            return None;
+                        }
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&params) {
+                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                        }
+                        return Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Special { owner: sup, name: name.clone(), descriptor },
+                            dispatch_receiver: Some(this), args: a,
+                        }));
+                    }
                     // Array `isEmpty()`/`isNotEmpty()`/`count()` (stdlib extensions) → the `arraylength`
                     // intrinsic: `size == 0` / `size != 0` / `size`.
                     if self.info.ty(receiver).array_elem().is_some() && args.is_empty() {

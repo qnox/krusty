@@ -3717,11 +3717,16 @@ impl<'a> Checker<'a> {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sup = self.syms.class_by_internal(internal).and_then(|c| c.super_internal.clone());
                         if let Some(sup) = sup {
+                            // A user base-class method.
                             if let Some(sig) = self.syms.method_of(&sup, &name) {
                                 for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
                                     self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                                 }
                                 return sig.ret;
+                            }
+                            // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
+                            if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, &sup, &name, &arg_tys) {
+                                return m.ret;
                             }
                         }
                     }

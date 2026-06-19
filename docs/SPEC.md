@@ -679,3 +679,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   broader "two unrelated references → `Any`" join was tried and reverted: it unblocked files whose merge
   frame krusty's emitter couldn't reconcile — a VerifyError — so reference↔reference joins beyond `null`
   stay unsupported pending correct common-supertype frame merging.)
+
+- **`super.method(args)` — non-virtual base dispatch.** A `super` method call compiles to `invokespecial`
+  on `this` (value 0) targeting the named base method, skipping the receiver's own override. The base is
+  the current class's direct superclass; the signature is resolved from a user base (via `method_of`) or a
+  classpath base (`resolve_instance`, so `class C : ArrayList<…>() { … super.add(x) }` and
+  `super.toString()` reaching `Object`/an open stdlib method work). Modeled by a new `Callee::Special`
+  (the first non-virtual instance-call node). `owner` is the direct superclass — the JVM resolves
+  `invokespecial` up the chain to the actual declaring class.

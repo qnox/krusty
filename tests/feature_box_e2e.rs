@@ -1200,6 +1200,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // `super.method(args)` → a non-virtual `invokespecial` to the base method, for a user base class
+    // and for a classpath base (`super.toString()` reaching `Object`/an open stdlib method).
+    ("SuperMethodCall", r#"
+open class Base { open fun tag(s: String): String = "base:$s" }
+class Derived : Base() { override fun tag(s: String): String = super.tag(s) + "+derived" }
+open class Animal { override fun toString(): String = "animal" }
+class Dog : Animal() { override fun toString(): String = super.toString() + "+dog" }
+fun box(): String {
+    if (Derived().tag("x") != "base:x+derived") return "f1: ${Derived().tag("x")}"
+    if (Dog().toString() != "animal+dog") return "f2: ${Dog()}"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
