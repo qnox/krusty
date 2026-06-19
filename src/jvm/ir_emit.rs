@@ -1600,6 +1600,16 @@ impl<'a> Emitter<'a> {
                     code.array_store(op, w);
                 }
             }
+            IrExpr::NewArray { element_type, size } => {
+                let et = ir_ty_to_jvm(element_type);
+                self.emit_value(*size, code);
+                if et.is_primitive() {
+                    code.newarray(prim_newarray_atype(et));
+                } else {
+                    let ci = self.cw.class_ref(&ref_internal(et));
+                    code.anewarray(ci);
+                }
+            }
             IrExpr::Try { body, catches, finally, result } => {
                 let catches = catches.clone();
                 let result = result.clone();
@@ -1885,6 +1895,10 @@ impl<'a> Emitter<'a> {
                     // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
                     // and the value-compare path it remaps to for primitives both do.
                     || matches!(op, RefEq | RefNe)
+                    // `x == null`/`x != null` emits an `ifnull`/`ifnonnull` branch+merge frame.
+                    || (matches!(op, Eq | Ne)
+                        && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
+                            || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
                     || self.records_frame(*lhs) || self.records_frame(*rhs)
             }
             IrExpr::Call { dispatch_receiver, args, .. } =>
@@ -1903,6 +1917,7 @@ impl<'a> Emitter<'a> {
             IrExpr::RefNew { init, .. } => self.records_frame(*init),
             IrExpr::Throw { operand } => self.records_frame(*operand),
             IrExpr::Vararg { elements, .. } => elements.iter().any(|&a| self.records_frame(a)),
+            IrExpr::NewArray { size, .. } => self.records_frame(*size),
             IrExpr::Return(v) => v.map_or(false, |x| self.records_frame(x)),
             IrExpr::Variable { init, .. } => init.map_or(false, |i| self.records_frame(i)),
             IrExpr::Block { stmts, value } =>
@@ -2014,6 +2029,28 @@ impl<'a> Emitter<'a> {
             return;
         }
         let op = match op { IrBinOp::RefEq => IrBinOp::Eq, IrBinOp::RefNe => IrBinOp::Ne, o => o };
+        // `x == null` / `x != null`: compare against null directly with `ifnull`/`ifnonnull` (kotlinc's
+        // bytecode), regardless of the operand's static value type. `Intrinsics.areEqual` below is only
+        // for two reference operands neither of which is the `null` literal — and a plain `if_icmp*` on
+        // a reference (what the numeric path would emit) is only accepted by the verifier when no
+        // stackmap frame pins the operand types, so it must not be relied on.
+        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
+        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && (lhs_null || rhs_null) {
+            let operand = if lhs_null { rhs } else { lhs };
+            self.emit_value(operand, code);
+            let t = code.new_label();
+            let end = code.new_label();
+            self.frame(t, vec![], code);
+            if op == IrBinOp::Eq { code.ifnull(t) } else { code.ifnonnull(t) }
+            code.push_int(0, self.cw);
+            self.frame(end, vec![VerifType::Integer], code);
+            code.goto(end);
+            code.bind(t);
+            code.push_int(1, self.cw);
+            code.bind(end);
+            return;
+        }
         // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
         // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
         // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
@@ -2411,6 +2448,7 @@ impl<'a> Emitter<'a> {
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
+            IrExpr::NewArray { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }

@@ -340,7 +340,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body yields the element. The element value is spilled to a temp before the store, since a branchy body
   (`{ it % 2 == 0 }`) records a stackmap frame and `Array.set` pushes the array+index before the value —
   without the spill those would be stranded across the frame (VerifyError). Reference `Array<T>(n) { … }`
-  still needs a sized `anewarray` node (not yet modeled) and is unsupported. `PrimArrayInit` in `tests/feature_box_e2e.rs`.
+  allocates via the `NewArray` IR node (`anewarray`); a *primitive* `Array<Int>` (boxed `Integer[]`) is
+  skipped. `PrimArrayInit`/`RefArrayInit` in `tests/feature_box_e2e.rs`.
+- **`x == null` / `x != null` compile to `ifnull` / `ifnonnull`** (kotlinc's bytecode), regardless of the
+  operand's static value type. A reference `==`/`!=` against the `null` literal must NOT go through the
+  primitive `if_icmp*` path — `if_icmpeq` on a reference operand is only accepted by the verifier when no
+  stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
+  `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
+  neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
