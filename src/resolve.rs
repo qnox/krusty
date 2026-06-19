@@ -2634,8 +2634,10 @@ impl<'a> Checker<'a> {
                 // `instanceof` yields false, so it would miscompile.
                 // A floating-point `is` target (`is Double`/`is Float`) would let the file reach
                 // boxed `==` whose IEEE-754 semantics (`-0.0`/`NaN`) krusty doesn't model — restrict to
-                // integral/boolean/char primitives.
-                let tt_known = tt.is_reference() || (tt.is_primitive() && !matches!(tt, Ty::Double | Ty::Float));
+                // integral/boolean/char primitives. `is UInt`/`is ULong` is rejected too: the value is a
+                // `kotlin.UInt`/`ULong` value-type box, but krusty erases unsigned to `int`/`long` and a
+                // smart-cast *use* of it would unbox as `Integer`/`Long` (ClassCastException), so skip.
+                let tt_known = tt.is_reference() || (tt.is_primitive() && !matches!(tt, Ty::Double | Ty::Float | Ty::UInt | Ty::ULong));
                 if !tt_known || ty.nullable || (!ot.is_reference() && ot != Ty::Error) {
                     self.diags.error(self.span(e), "krusty: 'is' on this type is not supported".to_string());
                     return Ty::Error;

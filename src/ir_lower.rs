@@ -2057,6 +2057,12 @@ impl<'a> Lower<'a> {
         if at.is_unsigned() && target_ref {
             return Some(self.box_unsigned(e, at));
         }
+        // A reference (`Any`, a smart-cast `is UInt`) flowing into an unsigned target unboxes the
+        // `kotlin.UInt`/`ULong` value type — but krusty erases unsigned to `int` and would emit an
+        // `Integer` unbox (ClassCastException). Skip rather than miscompile.
+        if at.is_reference() && matches!(target, IrType::Class { fq_name, .. } if fq_name == "kotlin/UInt" || fq_name == "kotlin/ULong") {
+            return None;
+        }
         if at.is_primitive() && target_ref {
             Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
         } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
@@ -2133,6 +2139,15 @@ impl<'a> Lower<'a> {
         }
         let t = if let Some(p) = Ty::from_name(&r.name) {
             p
+        } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
+            // `IntArray`/`CharArray`/… → the primitive array type (`int[]`/…), NOT a same-named classpath
+            // class — resolve it here, before the `class_names` fallback, exactly as `resolve_ty` does
+            // (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`).
+            Ty::array(elem)
+        } else if r.name == "Array" {
+            let e = r.arg.as_ref().and_then(|a| self.ty_ref(a))?;
+            if !e.is_reference() { return None; }
+            Ty::array(e)
         } else if self.classes.contains_key(&r.name) {
             Ty::obj(&r.name)
         } else if self.classes.contains_key(&class_internal(self.afile, &r.name)) {
@@ -3067,6 +3082,12 @@ impl<'a> Lower<'a> {
                     // the variable's declared slot type. Insert the `checkcast` (a more specific
                     // reference) or unbox (a nullable primitive narrowed to the primitive) kotlinc emits.
                     let narrowed = self.info.ty(e);
+                    // A reference (`Any`) smart-cast to `UInt`/`ULong` (`if (x is UInt) … x …`) would
+                    // unbox the `kotlin.UInt` value type, but krusty erases unsigned to `int` and would
+                    // emit an `Integer` unbox (ClassCastException) — skip rather than miscompile.
+                    if matches!(narrowed, Ty::UInt | Ty::ULong) && slot_ty.is_reference() {
+                        return None;
+                    }
                     if narrowed != slot_ty && narrowed != Ty::Error {
                         if narrowed.is_primitive() && slot_ty.is_reference() {
                             self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(narrowed) })
@@ -3091,7 +3112,7 @@ impl<'a> Lower<'a> {
                     // computed property (`this.getX()`).
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    if let Some(cur) = self.cur_class.clone() {
+                    let read = if let Some(cur) = self.cur_class.clone() {
                         let field = self.classes.get(&cur).and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == n).map(|i| (ci.id, i as u32)));
                         if let Some((class, idx)) = field {
                             self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
@@ -3125,6 +3146,18 @@ impl<'a> Lower<'a> {
                                 .find_map(|c| crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)))?;
                             self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] })
                         }
+                    };
+                    // Smart-cast narrowing: a nullable-primitive *field* read narrowed to its primitive
+                    // (after `field != null`) must unbox the wrapper, exactly as the local-variable read
+                    // path does — else the `Integer` value reaches an `int` context (a verify error).
+                    let narrowed = self.info.ty(e);
+                    let field_is_ref = this_ty.obj_internal()
+                        .and_then(|i| self.syms.prop_of(i, &n))
+                        .map_or(false, |(t, _)| t.is_reference());
+                    if narrowed.is_primitive() && field_is_ref {
+                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(narrowed) })
+                    } else {
+                        read
                     }
                 }
             }
@@ -4107,6 +4140,32 @@ impl<'a> Lower<'a> {
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
                             a.push(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                        } else if c.default_call {
+                            // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
+                            // lower the provided prefix, then append a placeholder per omitted trailing
+                            // parameter, an `int` bit-mask (a bit per omitted param), and a `null` marker.
+                            // A generic function whose provided parameters share one type variable
+                            // (`assertEquals(expected: T, actual: T)`) boxes each argument as its OWN
+                            // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
+                            // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
+                            // literal, which krusty doesn't model) — skip rather than miscompile.
+                            let prim_args: Vec<Ty> = args.iter().map(|&a| self.info.ty(a))
+                                .filter(|t| t.is_primitive()).collect();
+                            let generic_provided = c.params.iter().take(args.len())
+                                .all(|p| matches!(p.obj_internal(), Some("kotlin/Any") | Some("java/lang/Object")));
+                            if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
+                                return None;
+                            }
+                            for (i, &arg) in args.iter().enumerate() {
+                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                            }
+                            for j in args.len()..c.params.len() {
+                                let ph = self.zero_placeholder(c.params[j]);
+                                a.push(ph);
+                            }
+                            let mask: i32 = (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
+                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         } else {
                             if c.params.len() != args.len() {
                                 return None;

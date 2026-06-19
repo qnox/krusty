@@ -2224,8 +2224,13 @@ impl<'a> Emitter<'a> {
             self.next_slot += 1;
             store(thr_ty, tslot, code);
             self.emit(f, code);
-            load(thr_ty, tslot, code);
-            code.athrow();
+            // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
+            // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
+            // unreachable and emitting it would leave a dead instruction without a stackmap frame.
+            if !fin_diverges {
+                load(thr_ty, tslot, code);
+                code.athrow();
+            }
             // `catch_type` 0 = catch-all (any throwable), matching kotlinc's `finally` table entry.
             code.add_exception(start, protected_end, fin_handler, 0);
         }

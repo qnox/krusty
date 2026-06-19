@@ -359,6 +359,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **`kotlin.test` (and other default-argument) top-level calls.** A receiver-less library function call
+  that omits trailing defaults (`assertEquals(a, b)` — the `message` is defaulted) resolves to the
+  `name$default` synthetic (`resolve_callable` falls back to `find_top_level("name$default")` when no
+  exact/vararg overload matches); the call lowers the provided prefix then appends a placeholder per
+  omitted parameter, the `int` default-bit-mask, and the `null` marker — kotlinc's defaulted-call shape.
+  A generic function whose provided parameters are mismatched primitives (`assertEquals(0, longVal)`)
+  is skipped (kotlinc unifies the type variable and coerces the literal; krusty would box `Integer` vs
+  `Long`). This is what compiles the large `kotlin.test`-based slice of the box corpus.
+- **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
+  wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
+- **A `finally { return … }` / `finally { throw … }`** that itself transfers control suppresses the
+  catch-all's exception re-raise (emitting the dead `athrow` left an unframed instruction → verify error).
+- **`is`/`as`/`as?` to `IntArray`/`CharArray`/…** resolves to the primitive array type before the
+  classpath-class fallback (the JDK ships an unrelated `sun.jvm.hotspot.utilities.IntArray`). `is UInt`/
+  `is ULong` and smart-casting a reference to an unsigned value type are rejected (value-type boxing).
 - **A branchy arithmetic operand spills.** When one operand of a primitive `+`/`-`/`*`/`/`/`%`/bitwise/
   shift is branchy (records a stackmap frame — `5 + if (c) 1 else 2`, `r += if (…) … else …`), the
   emitter routes both operands through `emit_operands`, which stores the already-pushed operand to a temp

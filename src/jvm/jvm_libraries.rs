@@ -674,6 +674,45 @@ impl LibrarySet for JvmLibraries {
                     && params[..fixed].iter().zip(args).all(|(p, a)| arg_fits(p, a))
                     && args[fixed..].iter().all(|a| arg_fits(&elem, a))
             }));
+            // No exact/vararg match — try the `name$default` synthetic for a top-level function with
+            // default parameters (`assertEquals(a, b)` → `assertEquals$default(a, b, null, mask, null)`).
+            // Its descriptor is `(real…, int mask, Object marker)ret`; the call fills a prefix of the real
+            // parameters and the backend defaults the rest. A trailing lambda interacts with defaulted
+            // middle parameters in a way the prefix-fill doesn't model — leave those unresolved.
+            if pick.is_none() {
+                if args.last().map_or(false, |a| matches!(a, Ty::Fun(_))) {
+                    return None;
+                }
+                let default_name = format!("{name}$default");
+                for c in self.cp.find_top_level(&default_name) {
+                    if !c.public {
+                        continue;
+                    }
+                    let (params, ret) = parse_method_desc(&c.descriptor);
+                    if params.len() < 2 {
+                        continue; // need at least int mask + Object marker
+                    }
+                    let real_count = params.len() - 2;
+                    if args.len() > real_count {
+                        continue;
+                    }
+                    if !params[..args.len()].iter().zip(args).all(|(p, a)| arg_fits(p, a)) {
+                        continue;
+                    }
+                    let kept: Vec<Ty> = params[..real_count].to_vec();
+                    let ret_ty = c.signature.as_ref().and_then(|sig| parse_method_gsig(sig)).map(|(formals, psigs, rsig)| {
+                        let mut binds = std::collections::HashMap::new();
+                        for (f, t) in formals.iter().zip(type_args) {
+                            binds.insert(f.clone(), *t);
+                        }
+                        for (ps, a) in psigs.iter().zip(args) {
+                            unify_gsig(ps, *a, &mut binds);
+                        }
+                        gsig_to_ty(&rsig, &binds)
+                    }).unwrap_or(ret);
+                    return Some(LibraryCallable { owner: c.owner.clone(), name: c.name.clone(), params: kept, ret: ret_ty, physical_ret: ret, descriptor: c.descriptor.clone(), is_inline: self.cp.is_inline_method(&c.owner, &c.name), default_call: true });
+                }
+            }
             let (c, params, ret) = pick?;
             // A reified reflection intrinsic (`typeOf` → `KType`) is implemented by inlining + reified
             // substitution; called as a plain static it throws at runtime. krusty doesn't inline it —
