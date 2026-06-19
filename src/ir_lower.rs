@@ -4721,6 +4721,8 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
         BinOp::Ge => IrBinOp::Ge,
         BinOp::Eq => IrBinOp::Eq,
         BinOp::Ne => IrBinOp::Ne,
+        BinOp::RefEq => IrBinOp::RefEq,
+        BinOp::RefNe => IrBinOp::RefNe,
         BinOp::And => IrBinOp::And,
         BinOp::Or => IrBinOp::Or,
         _ => return None,
