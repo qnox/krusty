@@ -3748,7 +3748,7 @@ impl<'a> Lower<'a> {
                         for &c in &arm.conditions {
                             // `is`/`in` conditions are complete boolean tests, not `==` comparands —
                             // their type (`Boolean`) needn't match the subject's primitiveness.
-                            if matches!(self.afile.expr(c), Expr::Is { .. } | Expr::InRange { .. }) {
+                            if is_when_test(self.afile, c) {
                                 continue;
                             }
                             if st.is_primitive() != self.info.ty(c).is_primitive() {
@@ -3784,7 +3784,7 @@ impl<'a> Lower<'a> {
                             // An `is`/`!is` or `in`/`!in` condition is already a complete boolean test
                             // involving the subject (the parser embeds it) — use it directly rather than
                             // comparing the subject against it with `==`.
-                            let test = if matches!(self.afile.expr(c), Expr::Is { .. } | Expr::InRange { .. }) {
+                            let test = if is_when_test(self.afile, c) {
                                 self.expr(c)?
                             } else {
                                 match (subj_tmp, subject) {
@@ -4819,7 +4819,13 @@ fn descriptor_has_byte_or_short_param(desc: &str) -> bool {
     false
 }
 
-/// Is `e` a compile-time constant literal (an argument-default krusty can inline at the call site)?
+/// A `when (subject) { … }` condition that is a complete boolean test of the subject (`is`/`!is`,
+/// `in`/`!in` range) — built by the parser as a structural `Is`/`InRange` node, so it is used directly,
+/// not compared with `subject == cond`.
+fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
+    matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
+}
+
 fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e),
         Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)

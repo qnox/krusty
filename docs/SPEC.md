@@ -359,6 +359,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **`when (subject)` with `in`/`!in` range branches** (`when (x) { in 4..6 -> … }`): the parser builds
+  the structural `Is`/`InRange` node for an `is`/`in`-range condition (same as the infix `is`/`in`
+  operator); the checker and lowering treat that node as a complete boolean test of the subject, not a
+  value to compare with `==`. `in <range>` is the bounds-check intrinsic (`InRange` → `a <= x && x <= b`,
+  no range allocation — matching kotlinc); `in <collection>` (a `contains` call) in a `when` is not
+  modeled and skips — krusty recognizes the test forms *structurally*, never by matching a method name.
+  `WhenInRange` in `tests/feature_box_e2e.rs`.
 - **Mixed-primitive `a.compareTo(b)`** (`1.compareTo(1.1)`, `0.toByte().compareTo(5.0)`) → promote both
   operands to their common numeric type, then `{Integer,Long,Float,Double}.compare(a, b)` (returns -1/0/1);
   `Byte`/`Short`/`Char` compare in the `int` category. (A user `operator compareTo` has a reference
