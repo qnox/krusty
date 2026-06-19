@@ -335,6 +335,21 @@ fn arg_fits(p: &Ty, a: &Ty) -> bool {
     if let (Ty::Obj(pi, _), Ty::Fun(_)) = (p, a) {
         return pi.starts_with("kotlin/jvm/functions/Function");
     }
+    // A property reference (`C::n` → `KProperty1`, `obj::n` → `KProperty0`) is itself a function:
+    // `PropertyReference{1,0}Impl` implements the matching `FunctionN` (`invoke = get`). Accept it for
+    // a `FunctionN` parameter of the matching arity (`Function1` ← `KProperty1`, `Function0` ← `KProperty0`).
+    if let (Ty::Obj(pi, _), Ty::Obj(ai, _)) = (p, a) {
+        if let Some(arity) = pi.strip_prefix("kotlin/jvm/functions/Function").and_then(|n| n.parse::<usize>().ok()) {
+            let prop_arity = match *ai {
+                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
+                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
+                _ => None,
+            };
+            if prop_arity == Some(arity) {
+                return true;
+            }
+        }
+    }
     matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 

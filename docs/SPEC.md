@@ -606,3 +606,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `type mismatch: inferred type is Int but String was expected`. Verified by the differential
   `diagnostics_match_kotlinc` test, which compiles each snippet with both compilers and asserts the first
   `error:` text matches exactly.
+
+- **A property reference is a function value** (`C::n` as a `(C)->Int`). An unbound `Type::prop` has type
+  `KProperty1<C, R>` and a bound `obj::prop` has `KProperty0<R>`; both are accepted where a `(C)->R` /
+  `()->R` (`kotlin/jvm/functions/Function1`/`Function0`) of the matching arity is expected, because
+  kotlinc's `PropertyReference{1,0}Impl` implements the corresponding `FunctionN` (`invoke = get`). This
+  assignability holds in three places: the checker's `expect_assignable` (a declared function-typed
+  local/parameter), the JVM library overload resolution (`arg_fits` — so `Iterable.map(C::n)` selects the
+  `Function1` overload), and the IR lowering of a function-typed local (`val f: (C)->Int = C::n` records
+  the slot's type from the *annotation*'s `Ty::Fun`, not the initializer's `KProperty1`, so a later
+  `f(arg)` lowers through the `Function1.invoke` path). The reference lowers to the existing
+  `PropertyReference{1,0}Impl` singleton/instance — no new IR. (Arity is read structurally from the
+  `FunctionN`/`KPropertyN` class name, never by member-name matching.)
