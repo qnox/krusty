@@ -2413,7 +2413,7 @@ impl<'a> Checker<'a> {
             // Match kotlinc 2.4.0's phrasing. A return position (an expression body or a getter body)
             // reads as "return type mismatch: expected 'T', actual 'U'."; every other context keeps the
             // general inferred-vs-expected wording.
-            let msg = if matches!(ctx, "function body" | "getter body") {
+            let msg = if matches!(ctx, "function body" | "getter body" | "local function body") {
                 format!("return type mismatch: expected '{}', actual '{}'.", expected.name(), actual.name())
             } else {
                 format!("type mismatch: inferred type is {} but {} was expected", actual.name(), expected.name())
