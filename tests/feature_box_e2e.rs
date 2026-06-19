@@ -1226,6 +1226,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Two `if`/`when` branches of UNRELATED classes join to their common supertype, which krusty
+    // approximates as `Any` (`Object`): the merge stack frame is `Object`, which every branch satisfies.
+    ("UnrelatedRefJoin", r#"
+open class P
+class Foo : P() { fun who() = "foo" }
+class Bar : P() { fun who() = "bar" }
+fun box(): String {
+    val x: Any = if (true) Foo() else Bar()
+    if (x !is Foo) return "f1"
+    val y: Any = if (false) "str" else Foo()
+    if (y !is Foo) return "f2"
+    val z: P = if (true) Foo() else Bar()
+    if ((z as Foo).who() != "foo") return "f3"
+    return "OK"
+}
+"#),
 ];
 
 #[test]

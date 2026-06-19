@@ -694,3 +694,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
   can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
   read on the result resolves against the raw class (element type `Any`).
+
+- **`if`/`when` branch join: unrelated reference classes → common supertype (`Object`).** Two branches of
+  different reference classes (`if (c) Foo() else Bar()`) join to their common supertype, which krusty
+  approximates as `Any`/`Object` (the universal upper bound). The emitter writes `Object` for the
+  merge-point stack frame, so each branch's more-specific value verifies against it; an assignment/return
+  to a more specific declared type inserts the `checkcast` kotlinc emits (the value really is that type at
+  runtime). Branch types are compared by their JVM internal name when deciding whether a merge is needed —
+  `Ty::String` and `Ty::Obj("java/lang/String")` are the same type but distinct `Ty` values, so a
+  same-class merge keeps its precise frame and only a genuinely different class falls back to `Object`.
