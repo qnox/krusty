@@ -34,14 +34,15 @@ jobs:
         with:
           distribution: zulu
           java-version: '25' # krusty's reference toolchain is Java 25; JVM-run e2e tests need it
-      # Reference kotlinc dist (differential harness + box-suite stdlib). Cached by manifest hash so
-      # it's downloaded once per version, then restored. KRUSTY_KOTLINC enables the gated tests.
-      - name: cache reference kotlinc
+      # Cache the reference kotlinc dist + the codegen/box corpus, keyed by manifest hash. `just ci`
+      # (-> test-all) provisions both per supported version on a miss, so the differential + the
+      # conformance gates actually run (they FAIL, not skip, without these).
+      - name: cache kotlin toolchain + box corpus
         uses: actions/cache@v4
         with:
-          path: .kotlinc
-          key: kotlinc-${{ hashFiles('kotlin-versions') }}
-      - name: provision reference kotlinc
-        run: echo "KRUSTY_KOTLINC=$(just kotlinc)" >> "$GITHUB_ENV"
+          path: |
+            .kotlinc
+            .kotlin-box
+          key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: just ci
         run: just ci

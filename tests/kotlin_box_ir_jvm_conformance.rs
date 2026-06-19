@@ -434,10 +434,13 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
 
 #[test]
 fn kotlin_codegen_box_conformance() {
-    let Some(box_dir) = env("KRUSTY_KOTLIN_BOX_DIR") else {
-        eprintln!("skipping box conformance: set KRUSTY_KOTLIN_BOX_DIR");
-        return;
-    };
+    let box_dir = env("KRUSTY_KOTLIN_BOX_DIR").unwrap_or_else(|| {
+        panic!(
+            "KRUSTY_KOTLIN_BOX_DIR not set — the Kotlin codegen/box corpus is required for the \
+             conformance gate, not optional. Run via `just test`/`just conformance` (provisions + \
+             caches it per supported version) or set it manually. Refusing to skip.",
+        )
+    });
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping box conformance: set JAVA_HOME");
         return;
