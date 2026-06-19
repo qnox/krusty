@@ -439,3 +439,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type-parameter field's literal to the type-argument primitive before boxing (so `-1` becomes `Long`,
   not `Integer`). An assignment to a typed `var` coerces a generic-erased `Object` value to the slot
   type (the `checkcast` kotlinc inserts) so the slot's stackmap frame stays consistent.
+
+- **Nullable-primitive equality short-circuits the primitive side** (matches kotlinc): `wrapper == prim`
+  (and `!=`) lowers to `{ val t = wrapper; if (t == null) <fixed> else t.unbox <op> prim }`, where the
+  fixed null-result is `false` for `==` / `true` for `!=`. The primitive operand is evaluated **only** in
+  the non-null branch, so a side-effecting RHS (`a?.x != sideEffecting()`) runs exactly when kotlinc runs
+  it — once when the wrapper is non-null, never when it is null. (A general `Any == prim`, where the
+  reference side is *not* a nullable-primitive wrapper, still boxes the primitive for `Intrinsics.areEqual`.)
+
+- **Safe calls on classpath receivers** (`s?.length`, `list?.size`, `s?.substring(1)`): the `?.` member
+  is resolved against the classpath — a user method/field, else a library member via `resolve_instance`
+  (args lowered to their parameter types) — not just same-module targets. A safe call whose member returns
+  a primitive (`String?.length` → `Int`) types as the boxed wrapper (`Int?`) and boxes the primitive result
+  before the `null` join, so the `when` arms agree; the checker maps such a result back through
+  `nullable_prim_wrapper` so the expression's type is the wrapper, not `Error`.
