@@ -2997,7 +2997,10 @@ impl<'a> Checker<'a> {
                         has_else = true;
                     }
                     for &cnd in &arm.conditions {
-                        let is_type_test = matches!(self.file.expr(cnd), Expr::Is { .. });
+                        // An `is T` / `in range` (or `!`-forms) condition is a *boolean test* on the
+                        // subject — built by the parser as a structural `Is`/`InRange` node — not a value
+                        // to compare with `==`, so it carries no comparability constraint with the subject.
+                        let is_type_test = matches!(self.file.expr(cnd), Expr::Is { .. } | Expr::InRange { .. });
                         let ct = self.expr(cnd);
                         match subj_ty {
                             // A type-test arm (`is T`) compares by `instanceof`, not `==` — no

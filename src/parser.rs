@@ -2666,6 +2666,56 @@ impl<'a> Parser<'a> {
             let end = self.t[self.i.saturating_sub(1)].span;
             return self.file.add_expr(Expr::Is { operand: subj, ty, negated }, Span::new(start.lo, end.hi));
         }
+        // `when (x) { in range -> … }` / `!in` — a membership condition on the subject (`x in range`),
+        // mirroring the infix `in`/`!in` operator: a range RHS → `InRange`, any other RHS → `contains`.
+        let in_negated = if self.at(TokenKind::KwIn) {
+            Some(false)
+        } else if self.at(TokenKind::Not)
+            && self.t.get(self.i + 1).map_or(false, |t| t.kind == TokenKind::KwIn)
+        {
+            Some(true)
+        } else {
+            None
+        };
+        if let (Some(negated), Some(subj)) = (in_negated, subject) {
+            let start = self.tok().span;
+            if negated {
+                self.bump(); // '!'
+            }
+            self.bump(); // 'in'
+            self.skip_newlines();
+            let rstart = self.parse_bp(9);
+            let kind = if self.eat(TokenKind::DotDot) {
+                Some(RangeKind::Through)
+            } else if self.eat(TokenKind::DotDotLt) {
+                Some(RangeKind::Until)
+            } else if self.at(TokenKind::Ident) && self.text() == "until" {
+                self.bump();
+                Some(RangeKind::Until)
+            } else if self.at(TokenKind::Ident) && self.text() == "downTo" {
+                self.bump();
+                Some(RangeKind::DownTo)
+            } else {
+                None
+            };
+            return match kind {
+                Some(kind) => {
+                    let rend = self.parse_bp(9);
+                    let end = self.file.expr_spans[rend.0 as usize];
+                    self.file.add_expr(Expr::InRange { value: subj, start: rstart, end: rend, kind, negated }, Span::new(start.lo, end.hi))
+                }
+                None => {
+                    let cspan = self.file.expr_spans[rstart.0 as usize];
+                    let callee = self.file.add_expr(Expr::Member { receiver: rstart, name: "contains".to_string() }, Span::new(start.lo, cspan.hi));
+                    let call = self.file.add_expr(Expr::Call { callee, args: vec![subj] }, Span::new(start.lo, cspan.hi));
+                    if negated {
+                        self.file.add_expr(Expr::Unary { op: UnOp::Not, operand: call }, Span::new(start.lo, cspan.hi))
+                    } else {
+                        call
+                    }
+                }
+            };
+        }
         self.parse_expr()
     }
 

@@ -297,6 +297,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // `when (subject)` with `in`/`!in` *range* condition branches (`in 4..6 -> …`), mixed with
+    // comma-list and `is` branches. (`in <range>` is the bounds-check intrinsic — `InRange` — same as
+    // kotlinc; `in <collection>` is unsupported and skips, not string-matched.)
+    ("WhenInRange", r#"
+fun cls(x: Int): String = when (x) {
+    0 -> "zero"
+    in 1..9 -> "low"
+    !in -100..100 -> "far"
+    else -> "other"
+}
+fun box(): String {
+    if (cls(0) != "zero") return "f1"
+    if (cls(5) != "low") return "f2"
+    if (cls(500) != "far") return "f3:${cls(500)}"
+    if (cls(50) != "other") return "f4"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
