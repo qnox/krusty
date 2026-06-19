@@ -15,10 +15,30 @@
 
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
 pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
-    "Any", "String", "CharSequence", "Throwable", "Cloneable", "Number", "Comparable", "Enum",
-    "Annotation", "Iterable", "MutableIterable", "Iterator", "MutableIterator", "Collection",
-    "MutableCollection", "List", "MutableList", "Set", "MutableSet", "ListIterator",
-    "MutableListIterator", "Map", "MutableMap", "Nothing",
+    "Any",
+    "String",
+    "CharSequence",
+    "Throwable",
+    "Cloneable",
+    "Number",
+    "Comparable",
+    "Enum",
+    "Annotation",
+    "Iterable",
+    "MutableIterable",
+    "Iterator",
+    "MutableIterator",
+    "Collection",
+    "MutableCollection",
+    "List",
+    "MutableList",
+    "Set",
+    "MutableSet",
+    "ListIterator",
+    "MutableListIterator",
+    "Map",
+    "MutableMap",
+    "Nothing",
 ];
 
 /// Map a Kotlin built-in type's **simple name** to its JVM internal name, mirroring
@@ -88,14 +108,22 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if internal == "kotlin/Throwable" {
         return "java/lang/Throwable";
     }
-    TYPE_MAP.iter().find(|(k, _)| *k == internal).map(|(_, j)| *j).unwrap_or(internal)
+    TYPE_MAP
+        .iter()
+        .find(|(k, _)| *k == internal)
+        .map(|(_, j)| *j)
+        .unwrap_or(internal)
 }
 
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
 pub fn to_kotlin_internal(internal: &str) -> &str {
-    TYPE_MAP.iter().find(|(_, j)| *j == internal).map(|(k, _)| *k).unwrap_or(internal)
+    TYPE_MAP
+        .iter()
+        .find(|(_, j)| *j == internal)
+        .map(|(k, _)| *k)
+        .unwrap_or(internal)
 }
 
 /// The JVM wrapper (box) class for a primitive `Ty` (`Int` → `java/lang/Integer`), or `None` for a

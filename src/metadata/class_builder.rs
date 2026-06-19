@@ -39,7 +39,13 @@ pub struct FnMeta {
 impl FnMeta {
     /// A plain member function (no special flags) — the common case.
     pub fn plain(name: String, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
-        FnMeta { name, params, ret, flags: 0, params_have_defaults: false }
+        FnMeta {
+            name,
+            params,
+            ret,
+            flags: 0,
+            params_have_defaults: false,
+        }
     }
 }
 
@@ -242,7 +248,13 @@ mod tests {
             &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
             "(ILjava/lang/String;)V",
             &[
-                PropMeta { name: "x".into(), ty: Ty::Int, is_var: false, getter: ("getX".into(), "()I".into()), setter: None },
+                PropMeta {
+                    name: "x".into(),
+                    ty: Ty::Int,
+                    is_var: false,
+                    getter: ("getX".into(), "()I".into()),
+                    setter: None,
+                },
                 PropMeta {
                     name: "y".into(),
                     ty: Ty::String,

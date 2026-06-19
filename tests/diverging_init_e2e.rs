@@ -30,7 +30,9 @@ fun box(): String {
 
 #[test]
 fn diverging_property_initializer_runs() {
-    let Ok(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+    let Ok(java_home) =
+        std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME"))
+    else {
         eprintln!("skipping diverging_init_e2e: set JAVA_HOME");
         return;
     };
@@ -55,9 +57,19 @@ fn diverging_property_initializer_runs() {
     let mut d = DiagSink::new();
     let toks = lex(SRC, &mut d);
     let files = vec![parse(SRC, &toks, &mut d)];
-    let syms = collect_signatures_with_cp(&files, Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![stdlib.clone()])))), &mut d);
+    let syms = collect_signatures_with_cp(
+        &files,
+        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![stdlib.clone()])),
+        )),
+        &mut d,
+    );
     let _ = check_file(&files[0], &syms, &mut d);
-    assert!(!d.has_errors(), "krusty errors: {:?}", d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(
+        !d.has_errors(),
+        "krusty errors: {:?}",
+        d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
+    );
 
     let bin = env!("CARGO_BIN_EXE_krusty");
     let out = Command::new(bin)
@@ -65,14 +77,35 @@ fn diverging_property_initializer_runs() {
         .arg(&src_path)
         .output()
         .unwrap();
-    if !out.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&out.stderr)); return; }
+    if !out.status.success() {
+        eprintln!(
+            "skip (IR unsupported): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
     let main = "public class M { public static void main(String[] a) { System.out.println(DivKt.box()); } }";
     fs::write(dir.join("M.java"), main).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib.to_str().unwrap());
-    let jc = Command::new(&javac).args(["-cp", &cp, "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap();
-    assert!(jc.status.success(), "javac: {}", String::from_utf8_lossy(&jc.stderr));
-    let run = Command::new(&java).args(["-Xverify:all", "-cp", &cp, "M"]).output().unwrap();
-    assert!(run.status.success(), "java: {}", String::from_utf8_lossy(&run.stderr));
+    let jc = Command::new(&javac)
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac: {}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "java: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }

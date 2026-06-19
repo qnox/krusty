@@ -39,7 +39,9 @@ fun box(): String {
 
 #[test]
 fn destructuring_runs_correctly() {
-    let Ok(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+    let Ok(java_home) =
+        std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME"))
+    else {
         eprintln!("skipping destructure_e2e: set JAVA_HOME");
         return;
     };
@@ -60,15 +62,40 @@ fn destructuring_runs_correctly() {
     let src_path = dir.join("Destr.kt");
     fs::write(&src_path, SRC).unwrap();
     let bin = env!("CARGO_BIN_EXE_krusty");
-    let out = Command::new(bin).args(["-d", dir.to_str().unwrap()]).arg(&src_path).output().unwrap();
-    if !out.status.success() { eprintln!("skip (IR unsupported): {}", String::from_utf8_lossy(&out.stderr)); return; }
+    let out = Command::new(bin)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(&src_path)
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "skip (IR unsupported): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
     let main = "public class M { public static void main(String[] a) { System.out.println(DestrKt.box()); } }";
     fs::write(dir.join("M.java"), main).unwrap();
-    let jc = Command::new(&javac).args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()]).arg(dir.join("M.java")).output().unwrap();
-    assert!(jc.status.success(), "javac: {}", String::from_utf8_lossy(&jc.stderr));
+    let jc = Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac: {}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let run = Command::new(&java).args(["-Xverify:all", "-cp", &cp, "M"]).output().unwrap();
-    assert!(run.status.success(), "java: {}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "java: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -76,6 +103,11 @@ fn destructuring_runs_correctly() {
 #[test]
 fn destructuring_non_component_type_is_rejected() {
     // `String` has no `component1`/`component2` operators → must be rejected, never miscompiled.
-    let msgs = check("fun box(): String {\n    val s = \"ab\"\n    val (a, b) = s\n    return \"OK\"\n}\n");
-    assert!(msgs.iter().any(|m| m.contains("cannot destructure")), "msgs: {msgs:?}");
+    let msgs = check(
+        "fun box(): String {\n    val s = \"ab\"\n    val (a, b) = s\n    return \"OK\"\n}\n",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("cannot destructure")),
+        "msgs: {msgs:?}"
+    );
 }

@@ -16,8 +16,14 @@ fn main() {
         } else {
             for diag in &d.diags {
                 let lo = diag.span.lo as usize;
-                let line_start = src[..lo.min(src.len())].rfind('\n').map(|i| i + 1).unwrap_or(0);
-                let line_end = src[lo.min(src.len())..].find('\n').map(|i| lo + i).unwrap_or(src.len());
+                let line_start = src[..lo.min(src.len())]
+                    .rfind('\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let line_end = src[lo.min(src.len())..]
+                    .find('\n')
+                    .map(|i| lo + i)
+                    .unwrap_or(src.len());
                 let line_no = src[..lo.min(src.len())].matches('\n').count() + 1;
                 let line = src.get(line_start..line_end).unwrap_or("").trim_end();
                 println!("{path}:{line_no}: {} | {}", diag.msg, line.trim());

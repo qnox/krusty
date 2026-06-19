@@ -16,11 +16,20 @@ fn with_stdlib_resolves_kotlin_test() {
         .iter()
         .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
         .collect();
-    assert!(names.iter().any(|n| n.starts_with("kotlin-stdlib")), "no stdlib jar: {names:?}");
-    assert!(names.iter().any(|n| n.contains("kotlin-test")), "no kotlin-test jar: {names:?}");
+    assert!(
+        names.iter().any(|n| n.starts_with("kotlin-stdlib")),
+        "no stdlib jar: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("kotlin-test")),
+        "no kotlin-test jar: {names:?}"
+    );
     // the resolved kotlin-test jar must really carry the assertion API
     let test_jar = common::kotlin_test_jar().expect("kotlin-test jar");
-    assert!(test_jar.is_file(), "kotlin-test path not a file: {test_jar:?}");
+    assert!(
+        test_jar.is_file(),
+        "kotlin-test path not a file: {test_jar:?}"
+    );
 }
 
 #[test]
@@ -31,7 +40,13 @@ fn coroutines_directive_fetches_runtime() {
     let src = "// WITH_COROUTINES\nfun box() = \"OK\"";
     let jars = common::classpath_jars_for(src);
     let has = jars.iter().any(|p| {
-        p.file_name().and_then(|n| n.to_str()).map(|n| n.contains("coroutines")).unwrap_or(false)
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.contains("coroutines"))
+            .unwrap_or(false)
     });
-    assert!(has, "WITH_COROUTINES did not resolve a coroutines jar: {jars:?}");
+    assert!(
+        has,
+        "WITH_COROUTINES did not resolve a coroutines jar: {jars:?}"
+    );
 }

@@ -44,6 +44,10 @@ mod tests {
             0x12, 0x06, 0x4c, 0x69, 0x62, 0x31, 0x4b, 0x74, 0x22, 0x00, 0x2a, 0x00,
         ];
         let got = build_kotlin_module(&[("demo".into(), vec!["Lib1Kt".into()])]);
-        assert_eq!(got, reference, "\n got: {:02x?}\n ref: {:02x?}", got, reference);
+        assert_eq!(
+            got, reference,
+            "\n got: {:02x?}\n ref: {:02x?}",
+            got, reference
+        );
     }
 }

@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
-use crate::ir::{Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp};
+use crate::ir::{
+    Callee, ClassId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp,
+};
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
 
@@ -31,7 +33,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         afile: file,
         info,
         syms,
-        ir: IrFile { package: file.package.clone(), ..Default::default() },
+        ir: IrFile {
+            package: file.package.clone(),
+            ..Default::default()
+        },
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
         classes: HashMap::new(),
@@ -73,8 +78,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
-            let mut ctor_fields: Vec<(String, Ty)> = c.props.iter().filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), ty_of(file, &p.ty))).collect();
+            let mut ctor_fields: Vec<(String, Ty)> = c
+                .props
+                .iter()
+                .filter(|p| p.is_property)
+                .map(|p| (p.name.clone(), ty_of(file, &p.ty)))
+                .collect();
             if let Some(outer) = &inner_outer {
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
             }
@@ -83,29 +92,51 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // (kotlinc does); primitives, nullable params, and class type-parameters are skipped.
             // Parallel to ALL ctor params (declaration order, `ctor_args`) — a non-null reference plain
             // parameter is guarded too (it's still a constructor argument kotlinc null-checks).
-            let mut ctor_param_checks: Vec<Option<String>> = c.props.iter().map(|p| {
-                let ty = ty_of(file, &p.ty);
-                let is_type_param = c.type_params.contains(&p.ty.name);
-                if !p.ty.nullable && !is_type_param && ty.is_reference() { Some(p.name.clone()) } else { None }
-            }).collect();
+            let mut ctor_param_checks: Vec<Option<String>> = c
+                .props
+                .iter()
+                .map(|p| {
+                    let ty = ty_of(file, &p.ty);
+                    let is_type_param = c.type_params.contains(&p.ty.name);
+                    if !p.ty.nullable && !is_type_param && ty.is_reference() {
+                        Some(p.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // The synthetic `this$0` is not null-checked (kotlinc doesn't guard it).
-            if inner_outer.is_some() { ctor_param_checks.insert(0, None); }
+            if inner_outer.is_some() {
+                ctor_param_checks.insert(0, None);
+            }
             // Computed body properties (custom getter, no backing field) become `getX()` methods, not
             // fields — exclude them here.
-            let body_fields: Vec<(String, Ty)> = c.body_props.iter().filter(|p| is_backing_field_prop(p))
+            let body_fields: Vec<(String, Ty)> = c
+                .body_props
+                .iter()
+                .filter(|p| is_backing_field_prop(p))
                 .map(|p| {
-                    let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
+                    let ty =
+                        p.ty.as_ref()
+                            .map(|r| ty_of(file, r))
+                            .unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
                 })
                 .collect();
             let fields: Vec<(String, Ty)> = ctor_fields.into_iter().chain(body_fields).collect();
-            let class_ty = IrType::Class { fq_name: internal.clone(), type_args: vec![], nullable: false };
+            let class_ty = IrType::Class {
+                fq_name: internal.clone(),
+                type_args: vec![],
+                nullable: false,
+            };
             // Resolve a base class (`: A(args)`): only a non-interface class declared in this file is
             // supported; extending a classpath/Java type isn't modeled yet → bail.
             let super_internal: Option<String> = match &c.base_class {
                 Some(base) => {
                     let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface));
-                    if !is_file_class { return None; }
+                    if !is_file_class {
+                        return None;
+                    }
                     Some(class_internal(file, base))
                 }
                 None => None,
@@ -113,7 +144,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let superclass = if c.is_enum {
                 "java/lang/Enum".to_string()
             } else {
-                super_internal.clone().unwrap_or_else(|| "kotlin/Any".to_string())
+                super_internal
+                    .clone()
+                    .unwrap_or_else(|| "kotlin/Any".to_string())
             };
             // Implemented interfaces (`: I, J`): a file interface, or a classpath interface
             // (`Runnable`, `Comparator`) resolved through the library set; else bail.
@@ -124,8 +157,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     iface_internals.push(class_internal(file, st));
                     continue;
                 }
-                let resolved = lo.syms.class_names.get(st).cloned().unwrap_or_else(|| st.clone());
-                if lo.syms.libraries.resolve_type(&resolved).map_or(false, |t| t.is_interface) {
+                let resolved = lo
+                    .syms
+                    .class_names
+                    .get(st)
+                    .cloned()
+                    .unwrap_or_else(|| st.clone());
+                if lo
+                    .syms
+                    .libraries
+                    .resolve_type(&resolved)
+                    .map_or(false, |t| t.is_interface)
+                {
                     iface_internals.push(resolved);
                 } else {
                     return None;
@@ -134,30 +177,52 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 supertypes: vec![],
-                fields: fields.iter().map(|(n, t)| (n.clone(), ty_to_ir(*t))).collect(),
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), ty_to_ir(*t)))
+                    .collect(),
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
                 // An inner class's synthetic `this$0` (the outer instance) is the first field param.
-                ctor_args: inner_outer.iter().map(|o| (ty_to_ir(Ty::obj(o)), true))
-                    .chain(c.props.iter().map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property))).collect(),
+                ctor_args: inner_outer
+                    .iter()
+                    .map(|o| (ty_to_ir(Ty::obj(o)), true))
+                    .chain(
+                        c.props
+                            .iter()
+                            .map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property)),
+                    )
+                    .collect(),
                 init_body: None,
                 methods: vec![],
                 is_interface: c.is_interface,
                 superclass,
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
-                enum_entries: c.enum_entries.iter().map(|n| (n.clone(), Vec::new())).collect(),
+                enum_entries: c
+                    .enum_entries
+                    .iter()
+                    .map(|n| (n.clone(), Vec::new()))
+                    .collect(),
                 enum_entry_subclass: vec![None; c.enum_entries.len()],
-                enum_entry_of: None, prop_ref: None,
+                enum_entry_of: None,
+                prop_ref: None,
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object,
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
-                field_final: inner_outer.iter().map(|_| true) // `this$0` is final
+                field_final: inner_outer
+                    .iter()
+                    .map(|_| true) // `this$0` is final
                     .chain(c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var))
-                    .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| !p.is_var))
+                    .chain(
+                        c.body_props
+                            .iter()
+                            .filter(|p| is_backing_field_prop(p))
+                            .map(|p| !p.is_var),
+                    )
                     .collect(),
                 secondary_ctors: vec![],
             });
@@ -182,9 +247,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // pass 2 and overwrite this marker. Interface defaults (kotlinc routes those through a
                 // `$DefaultImpls` class) and >31 parameters (kotlinc's multi-`int` mask) aren't modeled —
                 // leaving them unmarked makes an omitted-arg call bail, so the file is skipped, not wrong.
-                if m.params.iter().any(|p| p.default.is_some()) && !c.is_interface && m.params.len() <= 31 {
+                if m.params.iter().any(|p| p.default.is_some())
+                    && !c.is_interface
+                    && m.params.len() <= 31
+                {
                     lo.ir.fn_param_defaults.insert(fid, Vec::new());
-                    lo.ir.fn_param_names.insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                    lo.ir
+                        .fn_param_names
+                        .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
                 }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
@@ -195,8 +265,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let gname = getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
-                    name: gname.clone(), params: vec![], ret: ty_to_ir(ty),
-                    body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![],
+                    name: gname.clone(),
+                    params: vec![],
+                    ret: ty_to_ir(ty),
+                    body: None,
+                    is_static: false,
+                    dispatch_receiver: Some(internal.clone()),
+                    param_checks: vec![],
                 });
                 methods.insert(gname, (mi, fid, ty));
                 method_fids.push(fid);
@@ -205,12 +280,27 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // `getX()` (and `setX()` for a `var`) the implementing class overrides with its field
             // accessor.
             {
-                for p in c.body_props.iter().filter(|p| p.is_abstract || (c.is_interface && !is_computed_prop(p))) {
-                    let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                for p in c
+                    .body_props
+                    .iter()
+                    .filter(|p| p.is_abstract || (c.is_interface && !is_computed_prop(p)))
+                {
+                    let ty =
+                        p.ty.as_ref()
+                            .map(|r| ty_of(file, r))
+                            .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     let gname = getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
-                        let fid = lo.ir.add_fun(IrFunction { name: gname.clone(), params: vec![], ret: ty_to_ir(ty), body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                        let fid = lo.ir.add_fun(IrFunction {
+                            name: gname.clone(),
+                            params: vec![],
+                            ret: ty_to_ir(ty),
+                            body: None,
+                            is_static: false,
+                            dispatch_receiver: Some(internal.clone()),
+                            param_checks: vec![],
+                        });
                         methods.insert(gname, (mi, fid, ty));
                         method_fids.push(fid);
                     }
@@ -218,7 +308,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sname = setter_name(&p.name);
                         if !methods.contains_key(&sname) {
                             let mi = method_fids.len() as u32;
-                            let fid = lo.ir.add_fun(IrFunction { name: sname.clone(), params: vec![ty_to_ir(ty)], ret: IrType::Unit, body: None, is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                            let fid = lo.ir.add_fun(IrFunction {
+                                name: sname.clone(),
+                                params: vec![ty_to_ir(ty)],
+                                ret: IrType::Unit,
+                                body: None,
+                                is_static: false,
+                                dispatch_receiver: Some(internal.clone()),
+                                param_checks: vec![],
+                            });
                             methods.insert(sname, (mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
@@ -229,8 +327,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
             // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
             if !c.is_interface && !c.is_enum {
-                let field_props: Vec<(String, bool)> = c.props.iter().filter(|p| p.is_property).map(|p| (p.name.clone(), p.is_var))
-                    .chain(c.body_props.iter().filter(|p| is_backing_field_prop(p)).map(|p| (p.name.clone(), p.is_var)))
+                let field_props: Vec<(String, bool)> = c
+                    .props
+                    .iter()
+                    .filter(|p| p.is_property)
+                    .map(|p| (p.name.clone(), p.is_var))
+                    .chain(
+                        c.body_props
+                            .iter()
+                            .filter(|p| is_backing_field_prop(p))
+                            .map(|p| (p.name.clone(), p.is_var)),
+                    )
                     .collect();
                 // An inner class's `this$0` occupies field index 0, so the declared properties' fields
                 // are shifted by one — map each property's `field_props` index to its real field index.
@@ -242,11 +349,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let gname = getter_name(pname);
                     if !methods.contains_key(&gname) {
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
-                        let gf = lo.ir.add_expr(IrExpr::GetField { receiver: this_e, class: id, index: fidx as u32 });
+                        let gf = lo.ir.add_expr(IrExpr::GetField {
+                            receiver: this_e,
+                            class: id,
+                            index: fidx as u32,
+                        });
                         let ret = lo.ir.add_expr(IrExpr::Return(Some(gf)));
-                        let body = lo.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+                        let body = lo.ir.add_expr(IrExpr::Block {
+                            stmts: vec![ret],
+                            value: None,
+                        });
                         let mi = method_fids.len() as u32;
-                        let fid = lo.ir.add_fun(IrFunction { name: gname.clone(), params: vec![], ret: fty_ir.clone(), body: Some(body), is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                        let fid = lo.ir.add_fun(IrFunction {
+                            name: gname.clone(),
+                            params: vec![],
+                            ret: fty_ir.clone(),
+                            body: Some(body),
+                            is_static: false,
+                            dispatch_receiver: Some(internal.clone()),
+                            param_checks: vec![],
+                        });
                         methods.insert(gname, (mi, fid, fty));
                         method_fids.push(fid);
                     }
@@ -255,10 +377,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if !methods.contains_key(&sname) {
                             let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                             let v = lo.ir.add_expr(IrExpr::GetValue(1));
-                            let sf = lo.ir.add_expr(IrExpr::SetField { receiver: this_e, class: id, index: fidx as u32, value: v });
-                            let body = lo.ir.add_expr(IrExpr::Block { stmts: vec![sf], value: None });
+                            let sf = lo.ir.add_expr(IrExpr::SetField {
+                                receiver: this_e,
+                                class: id,
+                                index: fidx as u32,
+                                value: v,
+                            });
+                            let body = lo.ir.add_expr(IrExpr::Block {
+                                stmts: vec![sf],
+                                value: None,
+                            });
                             let mi = method_fids.len() as u32;
-                            let fid = lo.ir.add_fun(IrFunction { name: sname.clone(), params: vec![fty_ir.clone()], ret: IrType::Unit, body: Some(body), is_static: false, dispatch_receiver: Some(internal.clone()), param_checks: vec![] });
+                            let fid = lo.ir.add_fun(IrFunction {
+                                name: sname.clone(),
+                                params: vec![fty_ir.clone()],
+                                ret: IrType::Unit,
+                                body: Some(body),
+                                is_static: false,
+                                dispatch_receiver: Some(internal.clone()),
+                                param_checks: vec![],
+                            });
                             methods.insert(sname, (mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
@@ -267,20 +405,44 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             lo.ir.classes[id as usize].methods = method_fids;
             let _ = class_ty;
-            lo.classes.insert(internal.clone(), ClassInfo { id, internal: internal.clone(), fields, methods, super_internal });
+            lo.classes.insert(
+                internal.clone(),
+                ClassInfo {
+                    id,
+                    internal: internal.clone(),
+                    fields,
+                    methods,
+                    super_internal,
+                },
+            );
             // `companion object` with methods → a synthesized `C$Companion` class (private ctor, the
             // companion methods as instance methods) + a `Companion` field on the outer class.
             // Companion properties aren't modeled yet (their backing fields live on the outer class).
             if !c.companion_methods.is_empty() && c.companion_props.is_empty() {
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
-                    fq_name: comp_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
+                    fq_name: comp_fq.clone(),
+                    supertypes: vec![],
+                    fields: vec![],
+                    ctor_param_count: 0,
                     ctor_args: vec![],
-                    init_body: None, methods: vec![], is_interface: false,
-                    superclass: "kotlin/Any".to_string(), super_args: vec![],
-                    enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None, prop_ref: None, bridges: vec![], interfaces: vec![],
-                    is_object: false, ctor_param_checks: vec![], is_companion: true, companion_class: None,
-                    field_final: vec![], secondary_ctors: vec![],
+                    init_body: None,
+                    methods: vec![],
+                    is_interface: false,
+                    superclass: "kotlin/Any".to_string(),
+                    super_args: vec![],
+                    enum_entries: vec![],
+                    enum_entry_subclass: vec![],
+                    enum_entry_of: None,
+                    prop_ref: None,
+                    bridges: vec![],
+                    interfaces: vec![],
+                    is_object: false,
+                    ctor_param_checks: vec![],
+                    is_companion: true,
+                    companion_class: None,
+                    field_final: vec![],
+                    secondary_ctors: vec![],
                 });
                 let csig = syms.classes.get(&c.name)?;
                 let mut cmethods = HashMap::new();
@@ -291,15 +453,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                     let param_checks = param_checks_for(m, &sig.params);
                     let fid = lo.ir.add_fun(IrFunction {
-                        name: m.name.clone(), params, ret: ty_to_ir(ret), body: None,
-                        is_static: false, dispatch_receiver: Some(comp_fq.clone()), param_checks,
+                        name: m.name.clone(),
+                        params,
+                        ret: ty_to_ir(ret),
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(comp_fq.clone()),
+                        param_checks,
                     });
                     cmethods.insert(m.name.clone(), (mi as u32, fid, ret));
                     cmethod_fids.push(fid);
                 }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
                 lo.ir.classes[id as usize].companion_class = Some(comp_fq.clone());
-                lo.classes.insert(comp_fq.clone(), ClassInfo { id: comp_id, internal: comp_fq.clone(), fields: vec![], methods: cmethods, super_internal: None });
+                lo.classes.insert(
+                    comp_fq.clone(),
+                    ClassInfo {
+                        id: comp_id,
+                        internal: comp_fq.clone(),
+                        fields: vec![],
+                        methods: cmethods,
+                        super_internal: None,
+                    },
+                );
                 lo.companions.insert(internal.clone(), comp_fq);
             }
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
@@ -342,14 +518,35 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let mut params = vec![ty_to_ir(recv_ty)];
                 params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
                 let ret = ty_to_ir(sig.ret);
-                let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks: vec![] });
+                let id = lo.ir.add_fun(IrFunction {
+                    name: f.name.clone(),
+                    params,
+                    ret,
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: vec![],
+                });
                 lo.ext_fun_ids.insert((recv_desc, f.name.clone()), id);
             } else {
                 let sig = syms.funs.get(&f.name)?;
                 let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
-                let ret = ty_to_ir(info.fun_ret_overrides.get(&f.name).copied().unwrap_or(sig.ret));
+                let ret = ty_to_ir(
+                    info.fun_ret_overrides
+                        .get(&f.name)
+                        .copied()
+                        .unwrap_or(sig.ret),
+                );
                 let param_checks = param_checks_for(f, &sig.params);
-                let id = lo.ir.add_fun(IrFunction { name: f.name.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks });
+                let id = lo.ir.add_fun(IrFunction {
+                    name: f.name.clone(),
+                    params,
+                    ret,
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks,
+                });
                 lo.fun_ids.insert(f.name.clone(), id);
             }
         }
@@ -371,7 +568,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
                 let ret = ty_to_ir(sig.ret);
-                let id = lo.ir.add_fun(IrFunction { name: mangled.clone(), params, ret, body: None, is_static: true, dispatch_receiver: None, param_checks: vec![] });
+                let id = lo.ir.add_fun(IrFunction {
+                    name: mangled.clone(),
+                    params,
+                    ret,
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: vec![],
+                });
                 lo.local_fun_ids.insert(stmt_id, id);
             }
         }
@@ -380,12 +585,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // any body so a function may read a top-level property as `GetStatic`.
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
-            let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap_or_else(|| info.ty(p.init.unwrap()));
+            let ty =
+                p.ty.as_ref()
+                    .map(|r| ty_of(file, r))
+                    .unwrap_or_else(|| info.ty(p.init.unwrap()));
             if is_computed_prop(p) {
                 // A computed property: a `getX()` accessor (static on the facade), no backing field.
                 let fid = lo.ir.add_fun(IrFunction {
-                    name: getter_name(&p.name), params: vec![], ret: ty_to_ir(ty),
-                    body: None, is_static: true, dispatch_receiver: None, param_checks: vec![],
+                    name: getter_name(&p.name),
+                    params: vec![],
+                    ret: ty_to_ir(ty),
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: vec![],
                 });
                 lo.computed_props.insert(p.name.clone(), (fid, ty));
             } else {
@@ -442,8 +655,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let cid = lo.classes[&internal].id;
                                 lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
                                     name: m.name.clone(),
-                                    erased_params: bp, erased_ret: br,
-                                    concrete_params: op, concrete_ret: or,
+                                    erased_params: bp,
+                                    erased_ret: br,
+                                    concrete_params: op,
+                                    concrete_ret: or,
                                 });
                             }
                         }
@@ -452,23 +667,38 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // `getX()`, so external access dispatches virtually to the subclass field — correct.
                     // But a *base-class member that reads the property internally* reads the field
                     // directly (not via `getX`), bypassing the override. Bail only then.
-                    let own_fields: Vec<&String> = c.props.iter().filter(|p| p.is_property).map(|p| &p.name)
-                        .chain(c.body_props.iter().map(|p| &p.name)).collect();
+                    let own_fields: Vec<&String> = c
+                        .props
+                        .iter()
+                        .filter(|p| p.is_property)
+                        .map(|p| &p.name)
+                        .chain(c.body_props.iter().map(|p| &p.name))
+                        .collect();
                     let base_name = c.base_class.clone();
-                    let base_decl = base_name.as_ref().and_then(|bn| file.decls.iter().find_map(|&d| match file.decl(d) {
-                        Decl::Class(bc) if bc.name == *bn => Some(bc),
-                        _ => None,
-                    }));
+                    let base_decl = base_name.as_ref().and_then(|bn| {
+                        file.decls.iter().find_map(|&d| match file.decl(d) {
+                            Decl::Class(bc) if bc.name == *bn => Some(bc),
+                            _ => None,
+                        })
+                    });
                     for fname in own_fields {
                         if lo.resolve_field(&super_int, fname).is_some() {
                             // A base with its own base, or a base member reading `fname`, risks the
                             // internal-read bypass — bail conservatively; else the override is safe.
-                            let unsafe_base = base_decl.map_or(true, |bd| bd.base_class.is_some()
-                                || bd.methods.iter().any(|m| match &m.body {
-                                    FunBody::Expr(e) | FunBody::Block(e) => crate::resolve::expr_uses_name_pub(file, *e, fname),
-                                    FunBody::None => false,
-                                })
-                                || bd.body_props.iter().any(|p| p.init.map_or(false, |e| crate::resolve::expr_uses_name_pub(file, e, fname))));
+                            let unsafe_base = base_decl.map_or(true, |bd| {
+                                bd.base_class.is_some()
+                                    || bd.methods.iter().any(|m| match &m.body {
+                                        FunBody::Expr(e) | FunBody::Block(e) => {
+                                            crate::resolve::expr_uses_name_pub(file, *e, fname)
+                                        }
+                                        FunBody::None => false,
+                                    })
+                                    || bd.body_props.iter().any(|p| {
+                                        p.init.map_or(false, |e| {
+                                            crate::resolve::expr_uses_name_pub(file, e, fname)
+                                        })
+                                    })
+                            });
                             if unsafe_base {
                                 return None;
                             }
@@ -483,18 +713,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !c.is_interface {
                     let cid = lo.classes[&internal].id;
                     for sup in lo.syms.supertype_internals(&internal) {
-                        let Some(sc) = lo.syms.class_by_internal(&sup) else { continue };
+                        let Some(sc) = lo.syms.class_by_internal(&sup) else {
+                            continue;
+                        };
                         for (pname, sty, _) in sc.props.clone() {
                             if let Some((own_ty, _)) = lo.syms.prop_of(&internal, &pname) {
-                                if sty.descriptor() != own_ty.descriptor() && !own_ty.is_primitive() {
+                                if sty.descriptor() != own_ty.descriptor() && !own_ty.is_primitive()
+                                {
                                     let gname = getter_name(&pname);
-                                    let already = lo.ir.classes[cid as usize].bridges.iter().any(|b| b.name == gname && b.erased_params.is_empty());
+                                    let already = lo.ir.classes[cid as usize]
+                                        .bridges
+                                        .iter()
+                                        .any(|b| b.name == gname && b.erased_params.is_empty());
                                     if !already {
-                                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
-                                            name: gname,
-                                            erased_params: vec![], erased_ret: ty_to_ir(sty),
-                                            concrete_params: vec![], concrete_ret: ty_to_ir(own_ty),
-                                        });
+                                        lo.ir.classes[cid as usize].bridges.push(
+                                            crate::ir::Bridge {
+                                                name: gname,
+                                                erased_params: vec![],
+                                                erased_ret: ty_to_ir(sty),
+                                                concrete_params: vec![],
+                                                concrete_ret: ty_to_ir(own_ty),
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -507,20 +747,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !c.is_interface {
                     let cid = lo.classes[&internal].id;
                     let ifaces = lo.ir.classes[cid as usize].interfaces.clone();
-                    let mut seen: std::collections::HashSet<String> =
-                        lo.ir.classes[cid as usize].bridges.iter()
-                            .map(|b| format!("{}{:?}{:?}", b.name, b.erased_params, b.erased_ret)).collect();
+                    let mut seen: std::collections::HashSet<String> = lo.ir.classes[cid as usize]
+                        .bridges
+                        .iter()
+                        .map(|b| format!("{}{:?}{:?}", b.name, b.erased_params, b.erased_ret))
+                        .collect();
                     for itf in &ifaces {
                         for (mname, ifid) in lo.collect_iface_methods(itf) {
-                            if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &mname) {
+                            if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &mname)
+                            {
                                 let ip = lo.ir.functions[ifid as usize].params.clone();
                                 let ir_ = lo.ir.functions[ifid as usize].ret.clone();
                                 let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                 let cr = lo.ir.functions[impl_fid as usize].ret.clone();
-                                if (ip != cp || ir_ != cr) && seen.insert(format!("{}{:?}{:?}", mname, ip, ir_)) {
+                                if (ip != cp || ir_ != cr)
+                                    && seen.insert(format!("{}{:?}{:?}", mname, ip, ir_))
+                                {
                                     lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
-                                        name: mname, erased_params: ip, erased_ret: ir_,
-                                        concrete_params: cp, concrete_ret: cr,
+                                        name: mname,
+                                        erased_params: ip,
+                                        erased_ret: ir_,
+                                        concrete_params: cp,
+                                        concrete_ret: cr,
                                     });
                                 }
                             }
@@ -533,16 +781,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // hits `AbstractMethodError` instead of running the override (or throwing CCE).
                         if !lo.classes.contains_key(itf) {
                             if let Some(m) = lo.syms.libraries.sam_method(itf) {
-                                if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &m.name) {
-                                    let ip: Vec<IrType> = m.params.iter().map(|t| ty_to_ir(*t)).collect();
+                                if let Some((_, _, impl_fid, _)) =
+                                    lo.resolve_method(&internal, &m.name)
+                                {
+                                    let ip: Vec<IrType> =
+                                        m.params.iter().map(|t| ty_to_ir(*t)).collect();
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                     let cr = lo.ir.functions[impl_fid as usize].ret.clone();
-                                    if (ip != cp || ir_ != cr) && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_)) {
-                                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
-                                            name: m.name.clone(), erased_params: ip, erased_ret: ir_,
-                                            concrete_params: cp, concrete_ret: cr,
-                                        });
+                                    if (ip != cp || ir_ != cr)
+                                        && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
+                                    {
+                                        lo.ir.classes[cid as usize].bridges.push(
+                                            crate::ir::Bridge {
+                                                name: m.name.clone(),
+                                                erased_params: ip,
+                                                erased_ret: ir_,
+                                                concrete_params: cp,
+                                                concrete_ret: cr,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -566,7 +824,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.lambda_seq = 0;
                     // `this` is value 0.
                     let this_v = lo.fresh_value();
-                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
                     let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?.clone();
                     for (p, t) in m.params.iter().zip(&sig.params) {
                         let v = lo.fresh_value();
@@ -576,7 +835,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // stub). Lowered with `this` = value 0 and the params = values 1..=n — the stub's
                     // value layout. `None` for a required parameter. Gated identically to the pass-1
                     // marker (no interface defaults, ≤31 parameters).
-                    if m.params.iter().any(|p| p.default.is_some()) && !c.is_interface && m.params.len() <= 31 {
+                    if m.params.iter().any(|p| p.default.is_some())
+                        && !c.is_interface
+                        && m.params.len() <= 31
+                    {
                         let mut defaults = Vec::new();
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             match p.default {
@@ -599,7 +861,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.cur_fn_name = gname;
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
-                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
@@ -617,7 +880,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.cur_fn_name = m.name.clone();
                         lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
-                        lo.scope.push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
                         let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             let v = lo.fresh_value();
@@ -630,7 +894,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // A superclass whose constructor needs more arguments than are supplied (`object : A()`
                 // where `A(val x = …)` has defaulted parameters) — krusty doesn't fill super default
                 // arguments, so the `super(…)` call shape wouldn't match. Bail rather than miscompile.
-                if let Some(sup) = lo.classes[&internal].super_internal.clone().and_then(|s| lo.classes.get(&s)) {
+                if let Some(sup) = lo.classes[&internal]
+                    .super_internal
+                    .clone()
+                    .and_then(|s| lo.classes.get(&s))
+                {
                     let sup_params = lo.ir.classes[sup.id as usize].ctor_param_count as usize;
                     if sup_params > c.base_args.len() {
                         return None;
@@ -653,14 +921,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
-                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
                     // ALL ctor params (property and plain) are in scope as values `1..=M` in declaration
                     // order — a plain parameter is an argument the initializer / `super(…)` can read.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
-                    let super_field_tys: Vec<IrType> = lo.classes[&internal].super_internal.clone()
+                    let super_field_tys: Vec<IrType> = lo.classes[&internal]
+                        .super_internal
+                        .clone()
                         .and_then(|s| lo.classes.get(&s).map(|sup| sup.id))
                         .map(|sid| {
                             let sup = &lo.ir.classes[sid as usize];
@@ -685,7 +956,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             // Exact IR-type match is fine; a reference arg into a reference param (erased
                             // generic / `Any`) is fine; anything else (e.g. an `Int` arg into a `String`
                             // param — the call really targets a secondary ctor) is a mis-target → bail.
-                            &ty_to_ir(at) != ft && !(at.is_reference() && ir_type_is_reference(ft)) && at != Ty::Error
+                            &ty_to_ir(at) != ft
+                                && !(at.is_reference() && ir_type_is_reference(ft))
+                                && at != Ty::Error
                         })
                     {
                         return None;
@@ -705,11 +978,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     let this_v = lo.fresh_value();
-                    lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
                     // An inner class's synthetic `this$0` is the first constructor parameter (value 1).
                     if let Some(outer) = &c.inner_of {
                         let v = lo.fresh_value();
-                        lo.scope.push(("this$0".to_string(), v, Ty::obj(&class_internal(file, outer))));
+                        lo.scope.push((
+                            "this$0".to_string(),
+                            v,
+                            Ty::obj(&class_internal(file, outer)),
+                        ));
                     }
                     // ALL ctor params (property and plain) in scope as values, declaration order.
                     for p in c.props.iter() {
@@ -731,31 +1009,60 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 }
                                 // Computed body properties are not fields, so the field index counts
                                 // only the non-computed body properties before this one.
-                                let body_offset = c.body_props[..*i as usize].iter().filter(|p| is_backing_field_prop(p)).count();
+                                let body_offset = c.body_props[..*i as usize]
+                                    .iter()
+                                    .filter(|p| is_backing_field_prop(p))
+                                    .count();
                                 let field_idx = ctor_count + body_offset as u32;
-                                let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize].1.clone();
+                                let field_ty = lo.ir.classes[class_id as usize].fields
+                                    [field_idx as usize]
+                                    .1
+                                    .clone();
                                 let init_e = c.body_props[*i].init.unwrap();
                                 // A branchy body-property initializer (`val k = when { … }`) emits
                                 // merge-point frames in the constructor's init context that the flat
                                 // emitter doesn't reconcile yet — bail rather than miscompile.
-                                if matches!(lo.afile.expr(init_e), Expr::When { .. } | Expr::If { .. } | Expr::Elvis { .. } | Expr::Block { .. } | Expr::Try { .. }) {
+                                if matches!(
+                                    lo.afile.expr(init_e),
+                                    Expr::When { .. }
+                                        | Expr::If { .. }
+                                        | Expr::Elvis { .. }
+                                        | Expr::Block { .. }
+                                        | Expr::Try { .. }
+                                ) {
                                     return None;
                                 }
                                 let val = lo.lower_arg(init_e, &field_ty)?;
                                 let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
-                                stmts.push(lo.ir.add_expr(IrExpr::SetField { receiver: recv, class: class_id, index: field_idx, value: val }));
+                                stmts.push(lo.ir.add_expr(IrExpr::SetField {
+                                    receiver: recv,
+                                    class: class_id,
+                                    index: field_idx,
+                                    value: val,
+                                }));
                             }
                             ast::ClassInit::Block(e) => {
                                 // An `init { … }` block: lower its statements for effect.
-                                let Expr::Block { stmts: bs, trailing } = lo.afile.expr(*e).clone() else { return None };
+                                let Expr::Block {
+                                    stmts: bs,
+                                    trailing,
+                                } = lo.afile.expr(*e).clone()
+                                else {
+                                    return None;
+                                };
                                 // A branchy VALUE assignment in `init` (`a = if(…) … else …`) emits merge
                                 // frames in the constructor the flat emitter doesn't reconcile (a
                                 // verify/runtime error) — bail. A branchy *statement* (`if (c) { … }`) is
                                 // fine. (Pre-existing limitation, surfaced by deferred-`val` init.)
                                 for &s in &bs {
                                     let branchy = match lo.afile.stmt(s) {
-                                        Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } => body_contains_branch(lo.afile, *value),
-                                        Stmt::Local { init, .. } => body_contains_branch(lo.afile, *init),
+                                        Stmt::Assign { value, .. }
+                                        | Stmt::AssignMember { value, .. } => {
+                                            body_contains_branch(lo.afile, *value)
+                                        }
+                                        Stmt::Local { init, .. } => {
+                                            body_contains_branch(lo.afile, *init)
+                                        }
                                         _ => false,
                                     };
                                     if branchy {
@@ -780,7 +1087,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let class_id = lo.classes[&internal].id;
                     let primary_param_tys: Vec<IrType> = {
                         let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                        lo.ir.classes[class_id as usize].fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                        lo.ir.classes[class_id as usize].fields[..n]
+                            .iter()
+                            .map(|(_, t)| t.clone())
+                            .collect()
                     };
                     let mut secs = Vec::new();
                     for sc in &c.secondary_ctors {
@@ -792,7 +1102,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
                         let this_v = lo.fresh_value();
-                        lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&internal)));
                         let mut param_irs = Vec::new();
                         for p in &sc.params {
                             let pty = ty_of(file, &p.ty);
@@ -811,11 +1122,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             Some(b) => {
                                 let mut out = Vec::new();
                                 lo.append_body_stmts(b, &mut out)?;
-                                Some(lo.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
+                                Some(lo.ir.add_expr(IrExpr::Block {
+                                    stmts: out,
+                                    value: None,
+                                }))
                             }
                             None => None,
                         };
-                        secs.push(crate::ir::IrSecondaryCtor { params: param_irs, delegate_args: dargs, body });
+                        secs.push(crate::ir::IrSecondaryCtor {
+                            params: param_irs,
+                            delegate_args: dargs,
+                            body,
+                        });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;
                 }
@@ -824,8 +1142,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if c.is_enum {
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                    let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields[..ctor_count]
-                        .iter().map(|(_, t)| t.clone()).collect();
+                    let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields
+                        [..ctor_count]
+                        .iter()
+                        .map(|(_, t)| t.clone())
+                        .collect();
                     for (ei, args) in c.enum_entry_args.iter().enumerate() {
                         lo.scope.clear();
                         lo.next_value = 0;
@@ -852,22 +1173,44 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let entry_name = &c.enum_entries[ei];
                         let sub_fq = format!("{internal}${entry_name}");
                         let sub_id = lo.ir.add_class(IrClass {
-                            fq_name: sub_fq.clone(), supertypes: vec![], fields: vec![], ctor_param_count: 0,
-                            ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
-                            superclass: internal.clone(), super_args: vec![],
-                            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: Some(field_tys.clone()), prop_ref: None,
-                            bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
-                            is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
+                            fq_name: sub_fq.clone(),
+                            supertypes: vec![],
+                            fields: vec![],
+                            ctor_param_count: 0,
+                            ctor_args: vec![],
+                            init_body: None,
+                            methods: vec![],
+                            is_interface: false,
+                            superclass: internal.clone(),
+                            super_args: vec![],
+                            enum_entries: vec![],
+                            enum_entry_subclass: vec![],
+                            enum_entry_of: Some(field_tys.clone()),
+                            prop_ref: None,
+                            bridges: vec![],
+                            interfaces: vec![],
+                            is_object: false,
+                            ctor_param_checks: vec![],
+                            is_companion: false,
+                            companion_class: None,
+                            field_final: vec![],
+                            secondary_ctors: vec![],
                         });
                         let mut mfids = Vec::new();
                         for bm in body {
                             // The override conforms to the abstract member it overrides — use that
                             // signature for the emitted descriptor (kotlinc's erased override shape).
                             let sig = syms.classes.get(&c.name)?.methods.get(&bm.name)?.clone();
-                            let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                            let params: Vec<IrType> =
+                                sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                             let fid = lo.ir.add_fun(IrFunction {
-                                name: bm.name.clone(), params, ret: ty_to_ir(sig.ret), body: None,
-                                is_static: false, dispatch_receiver: Some(sub_fq.clone()), param_checks: vec![],
+                                name: bm.name.clone(),
+                                params,
+                                ret: ty_to_ir(sig.ret),
+                                body: None,
+                                is_static: false,
+                                dispatch_receiver: Some(sub_fq.clone()),
+                                param_checks: vec![],
                             });
                             lo.scope.clear();
                             lo.next_value = 0;
@@ -875,7 +1218,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             lo.cur_fn_name = bm.name.clone();
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
-                            lo.scope.push(("this".to_string(), this_v, Ty::obj(&internal)));
+                            lo.scope
+                                .push(("this".to_string(), this_v, Ty::obj(&internal)));
                             for (p, t) in bm.params.iter().zip(&sig.params) {
                                 let v = lo.fresh_value();
                                 lo.scope.push((p.name.clone(), v, *t));
@@ -904,19 +1248,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let (_, ty) = lo.statics[&p.name].clone();
                     let ir_ty = ty_to_ir(ty);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
-                    lo.ir.statics.push(crate::ir::IrStatic { name: p.name.clone(), ty: ir_ty, init });
+                    lo.ir.statics.push(crate::ir::IrStatic {
+                        name: p.name.clone(),
+                        ty: ir_ty,
+                        init,
+                    });
                 }
             }
-            _ => {}
         }
     }
     // Pass 2': lower the lifted local-function bodies. A non-capturing local function lowers like a
     // top-level static method: its parameters are values `0..n`, no captured outer scope.
-    let local_funs: Vec<(crate::ast::StmtId, ast::FunDecl)> = file.stmt_arena.iter().enumerate()
-        .filter_map(|(i, s)| match s { Stmt::LocalFun(f) => Some((crate::ast::StmtId(i as u32), f.clone())), _ => None })
+    let local_funs: Vec<(crate::ast::StmtId, ast::FunDecl)> = file
+        .stmt_arena
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Stmt::LocalFun(f) => Some((crate::ast::StmtId(i as u32), f.clone())),
+            _ => None,
+        })
         .collect();
     for (stmt_id, f) in &local_funs {
-        let Some(&fid) = lo.local_fun_ids.get(stmt_id) else { continue };
+        let Some(&fid) = lo.local_fun_ids.get(stmt_id) else {
+            continue;
+        };
         lo.scope.clear();
         lo.next_value = 0;
         lo.cur_class = None;
@@ -929,7 +1284,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             for (name, ty) in caps {
                 let v = lo.fresh_value();
                 if info.boxed_vars.contains(name) {
-                    lo.scope.push((name.clone(), v, Ty::obj(ref_holder_internal(*ty))));
+                    lo.scope
+                        .push((name.clone(), v, Ty::obj(ref_holder_internal(*ty))));
                     lo.boxed_elem.insert(name.clone(), *ty);
                 } else {
                     lo.scope.push((name.clone(), v, *ty));
@@ -983,8 +1339,12 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
 /// Per-entry bodies (`ENTRY { override fun m() = … }`) are emitted as anonymous subclasses; only
 /// method overrides are supported (a property override would need backing-field plumbing — deferred).
 fn is_simple_enum(c: &ast::ClassDecl) -> bool {
-    let abstract_names: std::collections::HashSet<&str> = c.methods.iter()
-        .filter(|m| matches!(m.body, FunBody::None)).map(|m| m.name.as_str()).collect();
+    let abstract_names: std::collections::HashSet<&str> = c
+        .methods
+        .iter()
+        .filter(|m| matches!(m.body, FunBody::None))
+        .map(|m| m.name.as_str())
+        .collect();
     c.is_enum
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
@@ -1038,22 +1398,37 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
 /// A class-body property that is a plain backing field: a normal (non-extension) `val`/`var` with an
 /// initializer and no custom getter/setter and not `lateinit`.
 fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
-    p.receiver.is_none() && !p.is_lateinit && p.getter.is_none() && p.setter.is_none() && p.init.is_some()
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && p.getter.is_none()
+        && p.setter.is_none()
+        && p.init.is_some()
 }
 
 /// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
 /// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
 /// in the constructor body rather than at the declaration.
 fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
-    !p.is_var && p.receiver.is_none() && !p.is_lateinit && p.init.is_none()
-        && p.getter.is_none() && p.setter.is_none() && !p.is_abstract && p.ty.is_some()
+    !p.is_var
+        && p.receiver.is_none()
+        && !p.is_lateinit
+        && p.init.is_none()
+        && p.getter.is_none()
+        && p.setter.is_none()
+        && !p.is_abstract
+        && p.ty.is_some()
 }
 
 /// A computed property `val x: T get() = expr` — a custom getter, no backing field (no initializer),
 /// immutable (no setter). Compiled to a `getX()` accessor; reads call it.
 fn is_computed_prop(p: &ast::PropDecl) -> bool {
-    p.receiver.is_none() && !p.is_lateinit && !p.is_var
-        && p.init.is_none() && p.getter.is_some() && p.setter.is_none() && p.ty.is_some()
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && !p.is_var
+        && p.init.is_none()
+        && p.getter.is_some()
+        && p.setter.is_none()
+        && p.ty.is_some()
 }
 
 /// A body property with a real backing field — neither a computed property (custom getter, no field)
@@ -1076,7 +1451,11 @@ fn getter_name(prop: &str) -> String {
 /// The JVM setter name for a property: `x` → `setX`; `isOpen` → `setOpen` (the `is` prefix is dropped).
 fn setter_name(prop: &str) -> String {
     let b = prop.as_bytes();
-    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() { &prop[2..] } else { prop };
+    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
+        &prop[2..]
+    } else {
+        prop
+    };
     let mut c = base.chars();
     format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
 }
@@ -1143,7 +1522,10 @@ impl<'a> Lower<'a> {
     /// Resolve a `catch` exception type name to its JVM internal name (mirrors the checker): a file
     /// class, a known class-name, or a classpath/stdlib throwable alias.
     fn catch_internal(&self, name: &str) -> Option<String> {
-        self.syms.class_names.get(name).cloned()
+        self.syms
+            .class_names
+            .get(name)
+            .cloned()
             .or_else(|| self.syms.classes.get(name).map(|c| c.internal.clone()))
     }
 
@@ -1152,7 +1534,8 @@ impl<'a> Lower<'a> {
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
-        let ctor = crate::libraries::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
+        let ctor =
+            crate::libraries::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
         if ctor.params.len() != args.len() {
             return None;
         }
@@ -1161,7 +1544,11 @@ impl<'a> Lower<'a> {
             let pty = ty_to_ir(*pty);
             a.push(self.lower_arg(*arg, &pty)?);
         }
-        Some(self.ir.add_expr(IrExpr::NewExternal { internal: internal.to_string(), ctor_desc: ctor.descriptor, args: a }))
+        Some(self.ir.add_expr(IrExpr::NewExternal {
+            internal: internal.to_string(),
+            ctor_desc: ctor.descriptor,
+            args: a,
+        }))
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -1190,7 +1577,10 @@ impl<'a> Lower<'a> {
                 let mut diverged = false;
                 for s in stmts {
                     self.append_stmt(s, out)?;
-                    if self.stmt_diverges(s) { diverged = true; break; }
+                    if self.stmt_diverges(s) {
+                        diverged = true;
+                        break;
+                    }
                 }
                 if !diverged {
                     if let Some(t) = trailing {
@@ -1216,42 +1606,122 @@ impl<'a> Lower<'a> {
     /// Lower `val (a, b, …) = init` into `out`: a temp bound to `init`, then one local per component
     /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
     /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
-    fn lower_destructure(&mut self, entries: &[(String, bool)], init: AstExprId, out: &mut Vec<u32>) -> Option<()> {
+    fn lower_destructure(
+        &mut self,
+        entries: &[(String, bool)],
+        init: AstExprId,
+        out: &mut Vec<u32>,
+    ) -> Option<()> {
         let it_ty = self.info.ty(init);
         let internal = it_ty.obj_internal()?.to_string();
         let init_v = self.expr(init)?;
         let tmp = self.fresh_value();
-        out.push(self.ir.add_expr(IrExpr::Variable { index: tmp, ty: ty_to_ir(it_ty), init: Some(init_v) }));
+        out.push(self.ir.add_expr(IrExpr::Variable {
+            index: tmp,
+            ty: ty_to_ir(it_ty),
+            init: Some(init_v),
+        }));
         for (idx, (name, _)) in entries.iter().enumerate() {
             if name == "_" {
                 continue;
             }
             let comp = format!("component{}", idx + 1);
             let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
-            let (call, log_ty) = if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
-                let ret = self.syms.method_of(&internal, &comp).map(|s| s.ret).unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] }), ret)
-            } else if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[]) {
-                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
-                let log = self.syms.libraries.member_return(it_ty, &comp, &[]).unwrap_or(m.ret);
-                let c = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: comp.clone(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] });
-                (self.coerce_erased(c, log, m.ret), log)
-            } else if let Some(c) = self.syms.libraries.resolve_callable(&comp, Some(it_ty), &[], &[]) {
-                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: vec![recv] });
-                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
-            } else {
-                // An indexable type: `componentN` is the inline `get(N-1)`.
-                let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, "get", &[Ty::Int])?;
-                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
-                let log = self.syms.libraries.member_return(it_ty, "get", &[Ty::Int]).unwrap_or(m.ret);
-                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
-                let c = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: "get".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(recv), args: vec![i] });
-                (self.coerce_erased(c, log, m.ret), log)
-            };
+            let (call, log_ty) =
+                if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
+                    let ret = self
+                        .syms
+                        .method_of(&internal, &comp)
+                        .map(|s| s.ret)
+                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                    (
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: recv,
+                            args: vec![],
+                        }),
+                        ret,
+                    )
+                } else if let Some(m) =
+                    crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])
+                {
+                    let is_iface = self
+                        .syms
+                        .libraries
+                        .resolve_type(&internal)
+                        .map_or(false, |t| t.is_interface);
+                    let log = self
+                        .syms
+                        .libraries
+                        .member_return(it_ty, &comp, &[])
+                        .unwrap_or(m.ret);
+                    let c = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.clone(),
+                            name: comp.clone(),
+                            descriptor: m.descriptor.clone(),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    });
+                    (self.coerce_erased(c, log, m.ret), log)
+                } else if let Some(c) =
+                    self.syms
+                        .libraries
+                        .resolve_callable(&comp, Some(it_ty), &[], &[])
+                {
+                    // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
+                    let call = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Static {
+                            owner: c.owner,
+                            name: c.name,
+                            descriptor: c.descriptor,
+                            inline: c.is_inline,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![recv],
+                    });
+                    (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+                } else {
+                    // An indexable type: `componentN` is the inline `get(N-1)`.
+                    let m = crate::libraries::resolve_instance(
+                        &*self.syms.libraries,
+                        &internal,
+                        "get",
+                        &[Ty::Int],
+                    )?;
+                    let is_iface = self
+                        .syms
+                        .libraries
+                        .resolve_type(&internal)
+                        .map_or(false, |t| t.is_interface);
+                    let log = self
+                        .syms
+                        .libraries
+                        .member_return(it_ty, "get", &[Ty::Int])
+                        .unwrap_or(m.ret);
+                    let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                    let c = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.clone(),
+                            name: "get".to_string(),
+                            descriptor: m.descriptor.clone(),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![i],
+                    });
+                    (self.coerce_erased(c, log, m.ret), log)
+                };
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, log_ty));
-            out.push(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(log_ty), init: Some(call) }));
+            out.push(self.ir.add_expr(IrExpr::Variable {
+                index: v,
+                ty: ty_to_ir(log_ty),
+                init: Some(call),
+            }));
         }
         Some(())
     }
@@ -1263,8 +1733,16 @@ impl<'a> Lower<'a> {
     /// `sam`: `(interface internal name, abstract-method name, method returns void)`. The void flag
     /// distinguishes a SAM whose method is `()V` (`Runnable.run`) — the impl runs the body for effect
     /// and returns void — from a `Unit`-typed-but-`Object`-returning target (`FunctionN.invoke`).
-    fn lower_lambda_sam(&mut self, e: AstExprId, params: &[String], body: AstExprId, sam: Option<(String, String, bool)>) -> Option<u32> {
-        let Ty::Fun(sig) = self.info.ty(e) else { return None };
+    fn lower_lambda_sam(
+        &mut self,
+        e: AstExprId,
+        params: &[String],
+        body: AstExprId,
+        sam: Option<(String, String, bool)>,
+    ) -> Option<u32> {
+        let Ty::Fun(sig) = self.info.ty(e) else {
+            return None;
+        };
         let arity = sig.params.len();
         // A lambda inside a class method could capture `this`/fields — not modeled yet.
         if self.cur_class.is_some() {
@@ -1302,7 +1780,10 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         // The capture values are read in the *enclosing* scope before it's swapped out.
-        let capture_vals: Vec<u32> = captures.iter().map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v))).collect();
+        let capture_vals: Vec<u32> = captures
+            .iter()
+            .map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v)))
+            .collect();
         // Lower the body in a fresh value-numbering scope: captured params first (values `0..n_cap`),
         // then the lambda's own parameters.
         let saved_scope = std::mem::take(&mut self.scope);
@@ -1330,21 +1811,36 @@ impl<'a> Lower<'a> {
         // user `return` in the lambda becomes a real return from the *enclosing* method (a correct
         // non-local return), not the lambda.
         let (ret_ty, block, inline_body) = if diverges {
-            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None });
+            let b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ve],
+                value: None,
+            });
             (ty_to_ir(sig.ret), b, ve)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
-            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: None });
+            let b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ve],
+                value: None,
+            });
             (ty_to_ir(Ty::Unit), b, ve)
         } else if sig.ret == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             let ret = self.ir.add_expr(IrExpr::Return(Some(unit)));
-            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve, ret], value: None });
-            let inline_b = self.ir.add_expr(IrExpr::Block { stmts: vec![ve], value: Some(unit) });
+            let b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ve, ret],
+                value: None,
+            });
+            let inline_b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ve],
+                value: Some(unit),
+            });
             (ty_to_ir(Ty::obj("kotlin/Unit")), b, inline_b)
         } else {
             let ret = self.ir.add_expr(IrExpr::Return(Some(ve)));
-            let b = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            let b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
             (ty_to_ir(sig.ret), b, ve)
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
@@ -1361,22 +1857,47 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: capture_vals, sam: sam.map(|(i, m, _)| (i, m)), inline_body: Some(inline_body) }))
+        Some(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: fid,
+            arity: arity as u8,
+            captures: capture_vals,
+            sam: sam.map(|(i, m, _)| (i, m)),
+            inline_body: Some(inline_body),
+        }))
     }
 
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
     /// it resolves like any other method and the generic emitter handles it — no backend special-case.
-    fn add_synth_method(&mut self, internal: &str, class_id: ClassId, name: &str, params: Vec<IrType>, ret: Ty, body: u32, force_override: bool) -> Option<u32> {
-        if self.classes.get(internal).map_or(false, |ci| ci.methods.contains_key(name)) {
+    fn add_synth_method(
+        &mut self,
+        internal: &str,
+        class_id: ClassId,
+        name: &str,
+        params: Vec<IrType>,
+        ret: Ty,
+        body: u32,
+        force_override: bool,
+    ) -> Option<u32> {
+        if self
+            .classes
+            .get(internal)
+            .map_or(false, |ci| ci.methods.contains_key(name))
+        {
             return None; // a user-defined override exists — don't synthesize over it
         }
         // Don't synthesize over a member a superclass provides. For a `data class` member
         // (`force_override`), only a *final* base member blocks generation — an `open` override IS
         // overridden by the synthesized member (KT-6206); a final one is inherited (can't override).
         // Other synthesis (an interface-delegation forwarder) inherits any base member.
-        if let Some(s) = self.classes.get(internal).and_then(|ci| ci.super_internal.clone()) {
+        if let Some(s) = self
+            .classes
+            .get(internal)
+            .and_then(|ci| ci.super_internal.clone())
+        {
             let blocks = if force_override {
-                self.syms.method_of(&s, name).map_or(false, |sig| sig.is_final)
+                self.syms
+                    .method_of(&s, name)
+                    .map_or(false, |sig| sig.is_final)
             } else {
                 self.resolve_method(&s, name).is_some()
             };
@@ -1385,8 +1906,12 @@ impl<'a> Lower<'a> {
             }
         }
         let fid = self.ir.add_fun(IrFunction {
-            name: name.to_string(), params, ret: ty_to_ir(ret), body: Some(body),
-            is_static: false, dispatch_receiver: Some(internal.to_string()),
+            name: name.to_string(),
+            params,
+            ret: ty_to_ir(ret),
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(internal.to_string()),
             param_checks: Vec::new(),
         });
         let idx = self.ir.classes[class_id as usize].methods.len() as u32;
@@ -1401,27 +1926,61 @@ impl<'a> Lower<'a> {
     /// `fun m(args) = this.delegate.m(args)` (an `invokeinterface` on the delegate field). Only
     /// user-interface delegation with a simple `val`-parameter delegate is modeled; anything else
     /// (classpath interface, missing field) returns `None` so the file is skipped, never miscompiled.
-    fn synth_delegation_forwarders(&mut self, file: &ast::File, c: &ast::ClassDecl, internal: &str, class_id: ClassId) -> Option<()> {
+    fn synth_delegation_forwarders(
+        &mut self,
+        file: &ast::File,
+        c: &ast::ClassDecl,
+        internal: &str,
+        class_id: ClassId,
+    ) -> Option<()> {
         for (iface_name, delegate) in &c.delegations {
-            let delegate_idx = self.classes.get(internal)?.fields.iter().position(|(n, _)| n == delegate)? as u32;
+            let delegate_idx = self
+                .classes
+                .get(internal)?
+                .fields
+                .iter()
+                .position(|(n, _)| n == delegate)? as u32;
             let iface_internal = class_internal(file, iface_name);
-            let methods: Vec<(String, Vec<Ty>, Ty)> = self.syms.classes.get(iface_name)?
-                .methods.iter().map(|(n, s)| (n.clone(), s.params.clone(), s.ret)).collect();
+            let methods: Vec<(String, Vec<Ty>, Ty)> = self
+                .syms
+                .classes
+                .get(iface_name)?
+                .methods
+                .iter()
+                .map(|(n, s)| (n.clone(), s.params.clone(), s.ret))
+                .collect();
             for (mname, params, ret) in methods {
                 let params_ir: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
-                let descriptor = format!("({}){}", params.iter().map(|t| t.descriptor()).collect::<String>(), ret.descriptor());
+                let descriptor = format!(
+                    "({}){}",
+                    params.iter().map(|t| t.descriptor()).collect::<String>(),
+                    ret.descriptor()
+                );
                 let field = self.this_field(class_id, delegate_idx);
-                let args: Vec<u32> = (0..params.len()).map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1))).collect();
+                let args: Vec<u32> = (0..params.len())
+                    .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                    .collect();
                 let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual { owner: iface_internal.clone(), name: mname.clone(), descriptor, interface: true },
+                    callee: Callee::Virtual {
+                        owner: iface_internal.clone(),
+                        name: mname.clone(),
+                        descriptor,
+                        interface: true,
+                    },
                     dispatch_receiver: Some(field),
                     args,
                 });
                 let body = if ret == Ty::Unit {
-                    self.ir.add_expr(IrExpr::Block { stmts: vec![call], value: None })
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![call],
+                        value: None,
+                    })
                 } else {
                     let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
-                    self.ir.add_expr(IrExpr::Block { stmts: vec![ret_stmt], value: None })
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![ret_stmt],
+                        value: None,
+                    })
                 };
                 self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
             }
@@ -1436,42 +1995,90 @@ impl<'a> Lower<'a> {
     /// via `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (kotlinc's synthetic factory) — NOT
     /// `Integer.valueOf`, which would lose the unsigned identity (`is UInt`, the unsigned `toString`).
     fn box_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt { ("kotlin/UInt", "I") } else { ("kotlin/ULong", "J") };
+        let (owner, prim) = if ty == Ty::UInt {
+            ("kotlin/UInt", "I")
+        } else {
+            ("kotlin/ULong", "J")
+        };
         self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static { owner: owner.to_string(), name: "box-impl".to_string(), descriptor: format!("({prim})L{owner};"), inline: false },
-            dispatch_receiver: None, args: vec![val],
+            callee: Callee::Static {
+                owner: owner.to_string(),
+                name: "box-impl".to_string(),
+                descriptor: format!("({prim})L{owner};"),
+                inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![val],
         })
     }
 
     /// Unbox a (possibly `Object`-typed) `kotlin/UInt`/`ULong` object back to its int/long: checkcast
     /// to the inline-class type, then `unbox-impl`.
     fn unbox_unsigned(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt { ("kotlin/UInt", "I") } else { ("kotlin/ULong", "J") };
-        let cast = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: val, type_operand: ty_to_ir(Ty::obj(owner)) });
+        let (owner, prim) = if ty == Ty::UInt {
+            ("kotlin/UInt", "I")
+        } else {
+            ("kotlin/ULong", "J")
+        };
+        let cast = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: val,
+            type_operand: ty_to_ir(Ty::obj(owner)),
+        });
         self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual { owner: owner.to_string(), name: "unbox-impl".to_string(), descriptor: format!("(){prim}"), interface: false },
-            dispatch_receiver: Some(cast), args: vec![],
+            callee: Callee::Virtual {
+                owner: owner.to_string(),
+                name: "unbox-impl".to_string(),
+                descriptor: format!("(){prim}"),
+                interface: false,
+            },
+            dispatch_receiver: Some(cast),
+            args: vec![],
         })
     }
 
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> u32 {
-        let (owner, prim) = if ty == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+        let (owner, prim) = if ty == Ty::UInt {
+            ("java/lang/Integer", "I")
+        } else {
+            ("java/lang/Long", "J")
+        };
         self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static { owner: owner.to_string(), name: "toUnsignedString".to_string(), descriptor: format!("({prim})Ljava/lang/String;"), inline: false },
-            dispatch_receiver: None, args: vec![val],
+            callee: Callee::Static {
+                owner: owner.to_string(),
+                name: "toUnsignedString".to_string(),
+                descriptor: format!("({prim})Ljava/lang/String;"),
+                inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![val],
         })
     }
 
-    fn ir_const_str(&mut self, s: String) -> u32 { self.ir.add_expr(IrExpr::Const(IrConst::String(s))) }
+    fn ir_const_str(&mut self, s: String) -> u32 {
+        self.ir.add_expr(IrExpr::Const(IrConst::String(s)))
+    }
     fn str_plus(&mut self, acc: u32, arg: u32) -> u32 {
-        self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![arg] })
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/String.plus".to_string()),
+            dispatch_receiver: Some(acc),
+            args: vec![arg],
+        })
     }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
         let this = self.ir.add_expr(IrExpr::GetValue(0));
-        self.ir.add_expr(IrExpr::GetField { receiver: this, class: class_id, index: i })
+        self.ir.add_expr(IrExpr::GetField {
+            receiver: this,
+            class: class_id,
+            index: i,
+        })
     }
     fn static_call(&mut self, fq: &str, args: Vec<u32>) -> u32 {
-        self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: None, args })
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External(fq.to_string()),
+            dispatch_receiver: None,
+            args,
+        })
     }
     /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`).
     fn field_hash(&mut self, v: u32, t: Ty) -> u32 {
@@ -1489,21 +2096,38 @@ impl<'a> Lower<'a> {
     fn field_ne(&mut self, a: u32, b: u32, t: Ty) -> u32 {
         match t {
             Ty::Double | Ty::Float => {
-                let fq = if t == Ty::Double { "java/lang/Double.compare" } else { "java/lang/Float.compare" };
+                let fq = if t == Ty::Double {
+                    "java/lang/Double.compare"
+                } else {
+                    "java/lang/Float.compare"
+                };
                 let cmp = self.static_call(fq, vec![a, b]);
                 let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: cmp, rhs: z })
+                self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Ne,
+                    lhs: cmp,
+                    rhs: z,
+                })
             }
             // Int/Long/… → native compare; reference → `!Intrinsics.areEqual` via the reference Ne path.
-            _ => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: a, rhs: b }),
+            _ => self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Ne,
+                lhs: a,
+                rhs: b,
+            }),
         }
     }
     /// `if (cond) return false` — a no-`else` statement-`when` whose only branch diverges.
     fn guard_return_false(&mut self, cond: u32) -> u32 {
         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
         let ret = self.ir.add_expr(IrExpr::Return(Some(f)));
-        let blk = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-        self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), blk)] })
+        let blk = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(cond), blk)],
+        })
     }
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
@@ -1515,16 +2139,35 @@ impl<'a> Lower<'a> {
         for (i, (_, t)) in fields.iter().enumerate() {
             let get = self.this_field(class_id, i as u32);
             let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
-            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, &format!("component{}", i + 1), vec![], *t, body, true);
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            self.add_synth_method(
+                internal,
+                class_id,
+                &format!("component{}", i + 1),
+                vec![],
+                *t,
+                body,
+                true,
+            );
         }
 
         // toString(): `"Simple(f1=" + f1 + ", f2=" + f2 + ")"`.
         {
-            let simple = internal.rsplit('/').next().unwrap_or(internal).replace('$', ".");
+            let simple = internal
+                .rsplit('/')
+                .next()
+                .unwrap_or(internal)
+                .replace('$', ".");
             let mut acc = self.ir_const_str(format!("{simple}("));
             for (i, (name, _)) in fields.iter().enumerate() {
-                let sep = if i == 0 { format!("{name}=") } else { format!(", {name}=") };
+                let sep = if i == 0 {
+                    format!("{name}=")
+                } else {
+                    format!(", {name}=")
+                };
                 let s = self.ir_const_str(sep);
                 acc = self.str_plus(acc, s);
                 let fv = self.this_field(class_id, i as u32);
@@ -1533,8 +2176,19 @@ impl<'a> Lower<'a> {
             let close = self.ir_const_str(")".to_string());
             acc = self.str_plus(acc, close);
             let ret = self.ir.add_expr(IrExpr::Return(Some(acc)));
-            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body, true);
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            self.add_synth_method(
+                internal,
+                class_id,
+                "toString",
+                vec![],
+                Ty::String,
+                body,
+                true,
+            );
         }
 
         // hashCode(): `h(f1)`, then `result*31 + h(fN)` (0 for an empty data class).
@@ -1550,15 +2204,26 @@ impl<'a> Lower<'a> {
                         None => h,
                         Some(prev) => {
                             let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
-                            let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Mul, lhs: prev, rhs: c31 });
-                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: mul, rhs: h })
+                            let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::Mul,
+                                lhs: prev,
+                                rhs: c31,
+                            });
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::Add,
+                                lhs: mul,
+                                rhs: h,
+                            })
                         }
                     });
                 }
                 acc.unwrap()
             };
             let ret = self.ir.add_expr(IrExpr::Return(Some(result)));
-            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
             self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true);
         }
 
@@ -1567,14 +2232,26 @@ impl<'a> Lower<'a> {
             let class_ty = ty_to_ir(Ty::obj(internal));
             let mut stmts = Vec::new();
             let other = self.ir.add_expr(IrExpr::GetValue(1));
-            let not_inst = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::NotInstanceOf, arg: other, type_operand: class_ty.clone() });
+            let not_inst = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::NotInstanceOf,
+                arg: other,
+                type_operand: class_ty.clone(),
+            });
             let g = self.guard_return_false(not_inst);
             stmts.push(g);
             for (i, (_, t)) in fields.iter().enumerate() {
                 let af = self.this_field(class_id, i as u32);
                 let other_v = self.ir.add_expr(IrExpr::GetValue(1));
-                let ocast = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: other_v, type_operand: class_ty.clone() });
-                let bf = self.ir.add_expr(IrExpr::GetField { receiver: ocast, class: class_id, index: i as u32 });
+                let ocast = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: other_v,
+                    type_operand: class_ty.clone(),
+                });
+                let bf = self.ir.add_expr(IrExpr::GetField {
+                    receiver: ocast,
+                    class: class_id,
+                    index: i as u32,
+                });
                 let ne = self.field_ne(af, bf, *t);
                 let g = self.guard_return_false(ne);
                 stmts.push(g);
@@ -1583,37 +2260,74 @@ impl<'a> Lower<'a> {
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
             let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-            self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body, true);
+            self.add_synth_method(
+                internal,
+                class_id,
+                "equals",
+                vec![obj],
+                Ty::Boolean,
+                body,
+                true,
+            );
         }
 
         // copy(f1, f2, …): `return P(f1, f2, …)`. (A `copy` call with named/omitted arguments — the
         // common form — still needs the `$default` mechanism; this enables the full-positional call.)
         {
             let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
-            let args: Vec<u32> = (0..fields.len()).map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1))).collect();
-            let new = self.ir.add_expr(IrExpr::New { class: class_id, args, ctor_params: None });
+            let args: Vec<u32> = (0..fields.len())
+                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                .collect();
+            let new = self.ir.add_expr(IrExpr::New {
+                class: class_id,
+                args,
+                ctor_params: None,
+            });
             let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
-            let body = self.ir.add_expr(IrExpr::Block { stmts: vec![ret], value: None });
-            if let Some(copy_fid) = self.add_synth_method(internal, class_id, "copy", params, Ty::obj(internal), body, true) {
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            if let Some(copy_fid) = self.add_synth_method(
+                internal,
+                class_id,
+                "copy",
+                params,
+                Ty::obj(internal),
+                body,
+                true,
+            ) {
                 // Each `copy` parameter defaults to the corresponding property of the receiver — the
                 // backend-agnostic meaning. (The JVM backend realizes this as `copy$default`.) The
                 // `$default` mask is one `int`, so it covers ≤31 parameters; a wider data class uses
                 // copy() positionally only (the multi-mask form isn't modeled).
                 if fields.len() <= 31 {
-                    let defaults: Vec<Option<u32>> = (0..fields.len()).map(|i| {
-                        let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        Some(self.ir.add_expr(IrExpr::GetField { receiver: this, class: class_id, index: i as u32 }))
-                    }).collect();
+                    let defaults: Vec<Option<u32>> = (0..fields.len())
+                        .map(|i| {
+                            let this = self.ir.add_expr(IrExpr::GetValue(0));
+                            Some(self.ir.add_expr(IrExpr::GetField {
+                                receiver: this,
+                                class: class_id,
+                                index: i as u32,
+                            }))
+                        })
+                        .collect();
                     self.ir.fn_param_defaults.insert(copy_fid, defaults);
                     // `copy`'s parameters are named after the properties — used to map named args.
-                    self.ir.fn_param_names.insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
+                    self.ir
+                        .fn_param_names
+                        .insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
                 }
             }
         }
     }
 
     fn lookup(&self, name: &str) -> Option<(u32, Ty)> {
-        self.scope.iter().rev().find(|(n, _, _)| n == name).map(|(_, v, t)| (*v, *t))
+        self.scope
+            .iter()
+            .rev()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, v, t)| (*v, *t))
     }
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
@@ -1625,24 +2339,40 @@ impl<'a> Lower<'a> {
     /// is spliced rather than desugared per-function. Metadata-driven: gated on the resolved callable's
     /// `is_inline` flag, not the name. Only routes a non-capturing, single-value-return lambda (which the
     /// emitter is guaranteed to splice); `None` ⇒ the call falls through to its desugar / normal lowering.
-    fn try_route_lambda_inline(&mut self, name: &str, receiver: AstExprId, lam_arg: AstExprId, rty: Ty) -> Option<u32> {
+    fn try_route_lambda_inline(
+        &mut self,
+        name: &str,
+        receiver: AstExprId,
+        lam_arg: AstExprId,
+        rty: Ty,
+    ) -> Option<u32> {
         // The bytecode splicer substitutes the receiver inline; it can relocate a simple value but not
         // an `invokedynamic` (a lambda literal or callable reference `::A` as the receiver), so the
         // splice would fail at emit and fall back to a real call to the private `@InlineOnly` callee
         // (IllegalAccessError). Bail so the `let`/`also` desugar — which binds the receiver to a local
         // first — handles it instead.
-        if matches!(self.afile.expr(receiver), Expr::CallableRef { .. } | Expr::Lambda { .. }) {
+        if matches!(
+            self.afile.expr(receiver),
+            Expr::CallableRef { .. } | Expr::Lambda { .. }
+        ) {
             return None;
         }
         // Resolve via the inline-only path, which (unlike `resolve_callable`) matches `@InlineOnly`
         // package-private scope fns (`let`/`also`) — safe because we *inline* it (no call is emitted).
-        let c = self.syms.libraries.resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
+        let c = self
+            .syms
+            .libraries
+            .resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
         if !c.is_inline {
             return None;
         }
         // The platform must be able to splice this body (branchless, single lambda-invoke, single exit) —
         // else the emitter would fall back to a real call, which is broken for an `@InlineOnly` callee.
-        if !self.syms.libraries.can_inline_lambda(&c.owner, &c.name, &c.descriptor) {
+        if !self
+            .syms
+            .libraries
+            .can_inline_lambda(&c.owner, &c.name, &c.descriptor)
+        {
             return None;
         }
         // The emitter's lambda-splice is branchless-only: a branch in the lambda body produces a
@@ -1656,13 +2386,24 @@ impl<'a> Lower<'a> {
         let lam = self.expr(lam_arg)?;
         // The argument must be a real lambda (with an `inline_body` to splice) — a callable reference
         // (`::foo`) has none. The emitter handles any lambda body, incl. captures and non-local return.
-        if !matches!(self.ir.expr(lam), IrExpr::Lambda { inline_body: Some(_), .. }) {
+        if !matches!(
+            self.ir.expr(lam),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        ) {
             return None;
         }
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
         let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: true },
+            callee: Callee::Static {
+                owner: c.owner,
+                name: c.name,
+                descriptor: c.descriptor,
+                inline: true,
+            },
             dispatch_receiver: None,
             args: vec![recv, lam],
         });
@@ -1672,23 +2413,35 @@ impl<'a> Lower<'a> {
     }
 
     fn top_fun_decl(&self, name: &str) -> Option<&ast::FunDecl> {
-        self.afile.decls.iter().find_map(|&d| match self.afile.decl(d) {
-            Decl::Fun(f) if f.name == name => Some(f),
-            _ => None,
-        })
+        self.afile
+            .decls
+            .iter()
+            .find_map(|&d| match self.afile.decl(d) {
+                Decl::Fun(f) if f.name == name => Some(f),
+                _ => None,
+            })
     }
 
     fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
-        self.afile.decls.iter().find_map(|&d| match self.afile.decl(d) {
-            Decl::Class(c) if c.name == name => Some(c),
-            _ => None,
-        })
+        self.afile
+            .decls
+            .iter()
+            .find_map(|&d| match self.afile.decl(d) {
+                Decl::Class(c) if c.name == name => Some(c),
+                _ => None,
+            })
     }
 
     /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
     /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
     /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
-    fn lower_args_defaulted(&mut self, call: AstExprId, param_meta: &[(String, Option<AstExprId>)], args: &[AstExprId], ir_params: &[IrType]) -> Option<Vec<u32>> {
+    fn lower_args_defaulted(
+        &mut self,
+        call: AstExprId,
+        param_meta: &[(String, Option<AstExprId>)],
+        args: &[AstExprId],
+        ir_params: &[IrType],
+    ) -> Option<Vec<u32>> {
         let n = ir_params.len();
         if args.len() > n {
             return None;
@@ -1696,19 +2449,28 @@ impl<'a> Lower<'a> {
         // Place each argument into its parameter slot: a positional arg fills the next free position;
         // a named arg (`x = …`) fills its named parameter. Unfilled slots take constant-literal
         // defaults. (Arguments are evaluated in slot order — fine for the side-effect-free common case.)
-        let names = self.afile.call_arg_names.get(&call.0).cloned().unwrap_or_default();
+        let names = self
+            .afile
+            .call_arg_names
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
         let mut pos = 0;
         for (i, &arg) in args.iter().enumerate() {
             match names.get(i).and_then(|o| o.as_ref()) {
                 None => {
-                    if pos >= n { return None; }
+                    if pos >= n {
+                        return None;
+                    }
                     slot[pos] = Some(arg);
                     pos += 1;
                 }
                 Some(nm) => {
                     let idx = param_meta.iter().position(|(name, _)| name == nm)?;
-                    if idx >= n || slot[idx].is_some() { return None; }
+                    if idx >= n || slot[idx].is_some() {
+                        return None;
+                    }
                     slot[idx] = Some(arg);
                 }
             }
@@ -1735,7 +2497,11 @@ impl<'a> Lower<'a> {
     fn recv_ty(&self, receiver: AstExprId) -> Ty {
         if let Expr::Name(rn) = self.afile.expr(receiver) {
             let internal = class_internal(self.afile, rn);
-            if self.classes.get(&internal).map_or(false, |ci| self.ir.classes[ci.id as usize].is_object) {
+            if self
+                .classes
+                .get(&internal)
+                .map_or(false, |ci| self.ir.classes[ci.id as usize].is_object)
+            {
                 return Ty::obj(&internal);
             }
         }
@@ -1762,7 +2528,9 @@ impl<'a> Lower<'a> {
         let mut stack = vec![itf.to_string()];
         let mut seen = std::collections::HashSet::new();
         while let Some(i) = stack.pop() {
-            if !seen.insert(i.clone()) { continue; }
+            if !seen.insert(i.clone()) {
+                continue;
+            }
             if let Some(ci) = self.classes.get(&i) {
                 for (name, &(_, fid, _)) in &ci.methods {
                     out.push((name.clone(), fid));
@@ -1788,7 +2556,9 @@ impl<'a> Lower<'a> {
             "kotlin/reflect/KProperty0" => true,
             _ => return None,
         };
-        let Expr::Name(rn) = self.afile.expr(recv).clone() else { return None };
+        let Expr::Name(rn) = self.afile.expr(recv).clone() else {
+            return None;
+        };
         // Bound: the receiver is an in-scope value; its type gives the owner. Unbound: `rn` is the class.
         let (owner, recv_val) = if bound {
             let (v, ty) = self.lookup(&rn)?;
@@ -1802,26 +2572,60 @@ impl<'a> Lower<'a> {
             let idx = cls.fields.iter().position(|(n, _)| n == name)?;
             cls.fields[idx].1.clone()
         };
-        let synth_fq = class_internal(self.afile, &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq));
+        let synth_fq = class_internal(
+            self.afile,
+            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+        );
         self.lambda_seq += 1;
-        let superclass = if bound { "kotlin/jvm/internal/PropertyReference0Impl" } else { "kotlin/jvm/internal/PropertyReference1Impl" };
+        let superclass = if bound {
+            "kotlin/jvm/internal/PropertyReference0Impl"
+        } else {
+            "kotlin/jvm/internal/PropertyReference1Impl"
+        };
         let synth_id = self.ir.add_class(IrClass {
-            fq_name: synth_fq, supertypes: vec![], fields: vec![], ctor_param_count: 0,
-            ctor_args: vec![], init_body: None, methods: vec![], is_interface: false,
-            superclass: superclass.to_string(), super_args: vec![],
-            enum_entries: vec![], enum_entry_subclass: vec![], enum_entry_of: None,
+            fq_name: synth_fq,
+            supertypes: vec![],
+            fields: vec![],
+            ctor_param_count: 0,
+            ctor_args: vec![],
+            init_body: None,
+            methods: vec![],
+            is_interface: false,
+            superclass: superclass.to_string(),
+            super_args: vec![],
+            enum_entries: vec![],
+            enum_entry_subclass: vec![],
+            enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: owner, prop_name: name.to_string(), getter_name: getter_name(name), prop_ty, bound,
+                owner_internal: owner,
+                prop_name: name.to_string(),
+                getter_name: getter_name(name),
+                prop_ty,
+                bound,
             }),
-            bridges: vec![], interfaces: vec![], is_object: false, ctor_param_checks: vec![],
-            is_companion: false, companion_class: None, field_final: vec![], secondary_ctors: vec![],
+            bridges: vec![],
+            interfaces: vec![],
+            is_object: false,
+            ctor_param_checks: vec![],
+            is_companion: false,
+            companion_class: None,
+            field_final: vec![],
+            secondary_ctors: vec![],
         });
         if let Some(v) = recv_val {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.
             let recv_e = self.ir.add_expr(IrExpr::GetValue(v));
-            Some(self.ir.add_expr(IrExpr::New { class: synth_id, args: vec![recv_e], ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]) }))
+            Some(self.ir.add_expr(IrExpr::New {
+                class: synth_id,
+                args: vec![recv_e],
+                ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+            }))
         } else {
-            Some(self.ir.add_expr(IrExpr::StaticInstance { owner: synth_id, ty: synth_id, field: "INSTANCE" }))
+            Some(self.ir.add_expr(IrExpr::StaticInstance {
+                owner: synth_id,
+                ty: synth_id,
+                field: "INSTANCE",
+            }))
         }
     }
 
@@ -1831,11 +2635,19 @@ impl<'a> Lower<'a> {
     /// as a lambda `{ a -> obj.m(a) }` / `{ r, a -> r.m(a) }` would lower. `params`/`ret` are the
     /// reference's function type. Only user-class methods are modeled (the receiver/method must
     /// resolve in the IR class table); a `Unit`/`Nothing` return is skipped.
-    fn lower_method_ref(&mut self, recv: AstExprId, name: &str, params: &[Ty], ret: Ty) -> Option<u32> {
+    fn lower_method_ref(
+        &mut self,
+        recv: AstExprId,
+        name: &str,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<u32> {
         if ret == Ty::Unit || ret == Ty::Nothing {
             return None;
         }
-        let Expr::Name(rn) = self.afile.expr(recv).clone() else { return None };
+        let Expr::Name(rn) = self.afile.expr(recv).clone() else {
+            return None;
+        };
         // Bound `obj::m`: `rn` is an in-scope value, captured into the closure. Unbound `Type::m`:
         // `rn` is a class; the receiver is the reference's first parameter.
         let (bound_capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
@@ -1852,27 +2664,51 @@ impl<'a> Lower<'a> {
         let (class_id, index, _fid, _mret) = self.resolve_method(&internal, name)?;
         // The method's own parameter types: all of `params` for a bound ref (the receiver is captured),
         // `params[1..]` for an unbound ref (the receiver is the first parameter).
-        let method_params: Vec<Ty> = if bound_capture.is_some() { params.to_vec() } else { params[1..].to_vec() };
+        let method_params: Vec<Ty> = if bound_capture.is_some() {
+            params.to_vec()
+        } else {
+            params[1..].to_vec()
+        };
         // Impl value layout: value 0 = receiver, values 1.. = the method arguments.
         let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
         let arg_vs: Vec<Option<u32>> = (0..method_params.len() as u32)
-            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1)))).collect();
-        let mc = self.ir.add_expr(IrExpr::MethodCall { class: class_id, index, receiver: recv_v, args: arg_vs });
+            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1))))
+            .collect();
+        let mc = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv_v,
+            args: arg_vs,
+        });
         let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
-        let block = self.ir.add_expr(IrExpr::Block { stmts: vec![ret_e], value: None });
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret_e],
+            value: None,
+        });
         let impl_name = format!("{}$methodref${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
         let mut impl_params: Vec<IrType> = vec![ty_to_ir(recv_ty)];
         impl_params.extend(method_params.iter().map(|t| ty_to_ir(*t)));
         let fid = self.ir.add_fun(IrFunction {
-            name: impl_name, params: impl_params, ret: ty_to_ir(ret), body: Some(block),
-            is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+            name: impl_name,
+            params: impl_params,
+            ret: ty_to_ir(ret),
+            body: Some(block),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
         });
         let captures = match bound_capture {
             Some(v) => vec![self.ir.add_expr(IrExpr::GetValue(v))],
             None => vec![],
         };
-        Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: params.len() as u8, captures, sam: None, inline_body: None }))
+        Some(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: fid,
+            arity: params.len() as u8,
+            captures,
+            sam: None,
+            inline_body: None,
+        }))
     }
 
     /// For an unqualified call inside an inner class, resolve `name` as an ENCLOSING method (reached
@@ -1912,7 +2748,9 @@ impl<'a> Lower<'a> {
                 if let Expr::Name(n) = self.afile.expr(*callee) {
                     // `emptyArray` is a compiler intrinsic (no stdlib body) recognized by resolved symbol;
                     // a user-defined function or local of that name shadows it, exactly as in kotlinc.
-                    return n == "emptyArray" && self.lookup(n).is_none() && !self.fun_ids.contains_key(n);
+                    return n == "emptyArray"
+                        && self.lookup(n).is_none()
+                        && !self.fun_ids.contains_key(n);
                 }
             }
         }
@@ -1927,7 +2765,16 @@ impl<'a> Lower<'a> {
     /// `for (x in range)` over an `IntRange`/`LongRange`/`CharRange` value → a counted loop:
     /// `last = range.getLast(); i = range.getFirst(); while (i <= last) { x = i; …; i++ }` (step +1).
     /// The bounds are read once via the virtual getters; element/counter are the unboxed primitive.
-    fn lower_foreach_range(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, elem: Ty, prim_desc: &str, label: Option<String>) -> Option<u32> {
+    fn lower_foreach_range(
+        &mut self,
+        name: &str,
+        iterable: AstExprId,
+        body: AstExprId,
+        it_ty: Ty,
+        elem: Ty,
+        prim_desc: &str,
+        label: Option<String>,
+    ) -> Option<u32> {
         let internal = it_ty.obj_internal()?.to_string();
         let depth = self.scope.len();
         let elem_ir = ty_to_ir(elem);
@@ -1938,92 +2785,200 @@ impl<'a> Lower<'a> {
             let (gl, gld) = self.syms.libraries.mangled_member(&internal, "getLast-")?;
             (gf, gfd, gl, gld)
         } else {
-            ("getFirst".to_string(), format!("(){prim_desc}"), "getLast".to_string(), format!("(){prim_desc}"))
+            (
+                "getFirst".to_string(),
+                format!("(){prim_desc}"),
+                "getLast".to_string(),
+                format!("(){prim_desc}"),
+            )
         };
         // Evaluate the range once into a temp (the getters must share one receiver).
         let rng = self.expr(iterable)?;
         let r_v = self.fresh_value();
-        let var_r = self.ir.add_expr(IrExpr::Variable { index: r_v, ty: ty_to_ir(it_ty), init: Some(rng) });
+        let var_r = self.ir.add_expr(IrExpr::Variable {
+            index: r_v,
+            ty: ty_to_ir(it_ty),
+            init: Some(rng),
+        });
         let getter = |this: &mut Self, name: &str, desc: &str| {
             let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
             this.ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual { owner: internal.clone(), name: name.to_string(), descriptor: desc.to_string(), interface: false },
-                dispatch_receiver: Some(recv), args: vec![],
+                callee: Callee::Virtual {
+                    owner: internal.clone(),
+                    name: name.to_string(),
+                    descriptor: desc.to_string(),
+                    interface: false,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![],
             })
         };
         // i = range.getFirst()
         let first = getter(self, &gf_name, &gf_desc);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: elem_ir.clone(), init: Some(first) });
+        let var_i = self.ir.add_expr(IrExpr::Variable {
+            index: i_v,
+            ty: elem_ir.clone(),
+            init: Some(first),
+        });
         // last = range.getLast()  (hoisted)
         let last = getter(self, &gl_name, &gl_desc);
         let n_v = self.fresh_value();
-        let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: elem_ir.clone(), init: Some(last) });
+        let var_n = self.ir.add_expr(IrExpr::Variable {
+            index: n_v,
+            ty: elem_ir.clone(),
+            init: Some(last),
+        });
         // condition: i <= last (unsigned: compareUnsigned(i, last) <= 0, so values past the sign bit
         // order correctly — a signed `<=` would end the loop early).
         let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
         let cond = if elem.is_unsigned() {
-            let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+            let (owner, prim) = if elem == Ty::UInt {
+                ("java/lang/Integer", "I")
+            } else {
+                ("java/lang/Long", "J")
+            };
             let call = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
-                dispatch_receiver: None, args: vec![gi, gn],
+                callee: Callee::Static {
+                    owner: owner.to_string(),
+                    name: "compareUnsigned".to_string(),
+                    descriptor: format!("({prim}{prim})I"),
+                    inline: false,
+                },
+                dispatch_receiver: None,
+                args: vec![gi, gn],
             });
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: call, rhs: zero })
+            self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Le,
+                lhs: call,
+                rhs: zero,
+            })
         } else {
-            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: gi, rhs: gn })
+            self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Le,
+                lhs: gi,
+                rhs: gn,
+            })
         };
         // body (the loop variable `x` is the counter `i` itself)
         let mut out = Vec::new();
-        if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
+        if self.append_body_stmts(body, &mut out).is_none() {
+            self.scope.truncate(depth);
+            return None;
+        }
         // i += 1  (the loop update, at the `continue` target)
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let one = self.ir.add_expr(IrExpr::Const(if matches!(elem, Ty::Long | Ty::ULong) { IrConst::Long(1) } else { IrConst::Int(1) }));
-        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
-        let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
+        let one = self
+            .ir
+            .add_expr(IrExpr::Const(if matches!(elem, Ty::Long | Ty::ULong) {
+                IrConst::Long(1)
+            } else {
+                IrConst::Int(1)
+            }));
+        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            lhs: gi2,
+            rhs: one,
+        });
+        let incs = self.ir.add_expr(IrExpr::SetValue {
+            var: i_v,
+            value: inc,
+        });
         // Break when the counter reaches the inclusive last *before* incrementing, so a range ending at
         // `Int.MAX_VALUE`/`Long.MAX_VALUE` doesn't wrap past it and loop forever (same overflow-safe
         // counted-loop shape as `Stmt::For`). The break + increment are the `update` (the `continue`
         // target), so a `continue` also hits the bound check rather than skipping to the wrapping `i++`.
         let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
         let ec = self.ir.add_expr(IrExpr::GetValue(n_v));
-        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: ic, rhs: ec });
+        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: ic,
+            rhs: ec,
+        });
         let brk = self.ir.add_expr(IrExpr::Break { label: None });
-        let if_break = self.ir.add_expr(IrExpr::When { branches: vec![(Some(at_end), brk)] });
-        let update = self.ir.add_expr(IrExpr::Block { stmts: vec![if_break, incs], value: None });
-        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false, label });
+        let if_break = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(at_end), brk)],
+        });
+        let update = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![if_break, incs],
+            value: None,
+        });
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: Some(update),
+            post_test: false,
+            label,
+        });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_r, var_i, var_n, wh], value: None }))
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_r, var_i, var_n, wh],
+            value: None,
+        }))
     }
 
-    fn lower_foreach_iterator(&mut self, name: &str, iterable: AstExprId, body: AstExprId, it_ty: Ty, index: Option<&str>, label: Option<String>) -> Option<u32> {
+    fn lower_foreach_iterator(
+        &mut self,
+        name: &str,
+        iterable: AstExprId,
+        body: AstExprId,
+        it_ty: Ty,
+        index: Option<&str>,
+        label: Option<String>,
+    ) -> Option<u32> {
         let internal = it_ty.obj_internal()?;
         // The iterator comes from a member `iterator()` (`List`), or — when there is none — the stdlib
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
         // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
-        let (iter_ret, iter_desc, iter_owner, iter_ext) =
-            if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[]) {
-                (m.ret, m.descriptor, internal.to_string(), false)
-            } else if let Some(c) = self.syms.libraries.resolve_callable("iterator", Some(it_ty), &[], &[]) {
-                (c.ret, c.descriptor, c.owner, true)
-            } else {
-                return None;
-            };
+        let (iter_ret, iter_desc, iter_owner, iter_ext) = if let Some(m) =
+            crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
+        {
+            (m.ret, m.descriptor, internal.to_string(), false)
+        } else if let Some(c) =
+            self.syms
+                .libraries
+                .resolve_callable("iterator", Some(it_ty), &[], &[])
+        {
+            (c.ret, c.descriptor, c.owner, true)
+        } else {
+            return None;
+        };
         let iter_ty = iter_ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
-        let hasnext_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "hasNext", &[])?;
-        let next_m = crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "next", &[])?;
+        let hasnext_m = crate::libraries::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "hasNext",
+            &[],
+        )?;
+        let next_m =
+            crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "next", &[])?;
         // The element is the iterator's type argument (`Iterator<Map.Entry<K,V>>`), else the iterable's
         // own (`List<Int>` → `Int`), else the type parameter's upper bound (`Any`). The JVM `Object`
         // realization + checkcast are the backend's concern, applied at the Ty→bytecode boundary.
-        let elem = iter_ty.type_args().first().copied()
+        let elem = iter_ty
+            .type_args()
+            .first()
+            .copied()
             .or_else(|| it_ty.type_args().first().copied())
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        let it_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
-        let iter_iface = self.syms.libraries.resolve_type(&iter_internal).map_or(false, |t| t.is_interface);
+        let it_iface = self
+            .syms
+            .libraries
+            .resolve_type(internal)
+            .map_or(false, |t| t.is_interface);
+        let iter_iface = self
+            .syms
+            .libraries
+            .resolve_type(&iter_internal)
+            .map_or(false, |t| t.is_interface);
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
         // first parameter, incremented at the end of each iteration.
@@ -2031,7 +2986,14 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((iname.to_string(), v, Ty::Int));
             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            (Some(v), Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(Ty::Int), init: Some(zero) })))
+            (
+                Some(v),
+                Some(self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(Ty::Int),
+                    init: Some(zero),
+                })),
+            )
         } else {
             (None, None)
         };
@@ -2039,9 +3001,19 @@ impl<'a> Lower<'a> {
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
         let iter_callee = if iter_ext {
-            Callee::Static { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc, inline: false }
+            Callee::Static {
+                owner: iter_owner,
+                name: "iterator".to_string(),
+                descriptor: iter_desc,
+                inline: false,
+            }
         } else {
-            Callee::Virtual { owner: iter_owner, name: "iterator".to_string(), descriptor: iter_desc, interface: it_iface }
+            Callee::Virtual {
+                owner: iter_owner,
+                name: "iterator".to_string(),
+                descriptor: iter_desc,
+                interface: it_iface,
+            }
         };
         let iter_call = self.ir.add_expr(IrExpr::Call {
             callee: iter_callee,
@@ -2049,35 +3021,63 @@ impl<'a> Lower<'a> {
             args: if iter_ext { vec![recv] } else { vec![] },
         });
         let it_v = self.fresh_value();
-        let var_it = self.ir.add_expr(IrExpr::Variable { index: it_v, ty: ty_to_ir(iter_ty), init: Some(iter_call) });
+        let var_it = self.ir.add_expr(IrExpr::Variable {
+            index: it_v,
+            ty: ty_to_ir(iter_ty),
+            init: Some(iter_call),
+        });
 
         // cond: it.hasNext()
         let it_g = self.ir.add_expr(IrExpr::GetValue(it_v));
         let cond = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual { owner: iter_internal.clone(), name: "hasNext".to_string(), descriptor: hasnext_m.descriptor, interface: iter_iface },
-            dispatch_receiver: Some(it_g), args: vec![],
+            callee: Callee::Virtual {
+                owner: iter_internal.clone(),
+                name: "hasNext".to_string(),
+                descriptor: hasnext_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g),
+            args: vec![],
         });
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.ir.add_expr(IrExpr::GetValue(it_v));
         let next_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual { owner: iter_internal.clone(), name: "next".to_string(), descriptor: next_m.descriptor, interface: iter_iface },
-            dispatch_receiver: Some(it_g2), args: vec![],
+            callee: Callee::Virtual {
+                owner: iter_internal.clone(),
+                name: "next".to_string(),
+                descriptor: next_m.descriptor,
+                interface: iter_iface,
+            },
+            dispatch_receiver: Some(it_g2),
+            args: vec![],
         });
         let x_init = if elem.is_unsigned() {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
             // `Integer` unbox a plain `is_primitive` coercion would emit.
             self.unbox_unsigned(next_call, elem)
         } else if elem.is_primitive() {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: next_call, type_operand: ty_to_ir(elem) })
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
         } else if elem != Ty::obj("kotlin/Any") {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: next_call, type_operand: ty_to_ir(elem) })
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: next_call,
+                type_operand: ty_to_ir(elem),
+            })
         } else {
             next_call
         };
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
-        let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(x_init) });
+        let var_x = self.ir.add_expr(IrExpr::Variable {
+            index: x_v,
+            ty: ty_to_ir(elem),
+            init: Some(x_init),
+        });
 
         let mut out = vec![var_x];
         if self.append_body_stmts(body, &mut out).is_none() {
@@ -2088,14 +3088,32 @@ impl<'a> Lower<'a> {
         let update = idx_v.map(|iv| {
             let g = self.ir.add_expr(IrExpr::GetValue(iv));
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: g, rhs: one });
-            self.ir.add_expr(IrExpr::SetValue { var: iv, value: inc })
+            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Add,
+                lhs: g,
+                rhs: one,
+            });
+            self.ir.add_expr(IrExpr::SetValue {
+                var: iv,
+                value: inc,
+            })
         });
-        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update, post_test: false, label });
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update,
+            post_test: false,
+            label,
+        });
         self.scope.truncate(depth);
         let mut stmts = Vec::new();
-        if let Some(vi) = var_idx { stmts.push(vi); }
+        if let Some(vi) = var_idx {
+            stmts.push(vi);
+        }
         stmts.push(var_it);
         stmts.push(wh);
         Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
@@ -2109,7 +3127,10 @@ impl<'a> Lower<'a> {
         // `Object[]` value also has); the target supplies the otherwise-erased element.
         if self.is_empty_array_intrinsic(arg) {
             if let Some(elem) = ir_array_element(target) {
-                return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem, elements: vec![] }));
+                return Some(self.ir.add_expr(IrExpr::Vararg {
+                    element_type: elem,
+                    elements: vec![],
+                }));
             }
         }
         let e = self.expr(arg)?;
@@ -2122,22 +3143,49 @@ impl<'a> Lower<'a> {
         // A reference (`Any`, a smart-cast `is UInt`) flowing into an unsigned target unboxes the
         // `kotlin.UInt`/`ULong` value type — but krusty erases unsigned to `int` and would emit an
         // `Integer` unbox (ClassCastException). Skip rather than miscompile.
-        if at.is_reference() && matches!(target, IrType::Class { fq_name, .. } if fq_name == "kotlin/UInt" || fq_name == "kotlin/ULong") {
+        if at.is_reference()
+            && matches!(target, IrType::Class { fq_name, .. } if fq_name == "kotlin/UInt" || fq_name == "kotlin/ULong")
+        {
             return None;
         }
         if at.is_primitive() && target_ref {
-            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
-        } else if at.is_reference() && !target_ref && *target != IrType::Unit && *target != IrType::Error {
-            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
-        } else if at.is_primitive() && !target_ref && *target != IrType::Error && *target != IrType::Unit && ty_to_ir(at) != *target {
+            Some(self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: e,
+                type_operand: target.clone(),
+            }))
+        } else if at.is_reference()
+            && !target_ref
+            && *target != IrType::Unit
+            && *target != IrType::Error
+        {
+            Some(self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: e,
+                type_operand: target.clone(),
+            }))
+        } else if at.is_primitive()
+            && !target_ref
+            && *target != IrType::Error
+            && *target != IrType::Unit
+            && ty_to_ir(at) != *target
+        {
             // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
             // coercion (the backend does the `i2l`/`d2i`/… conversion).
-            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: e, type_operand: target.clone() }))
+            Some(self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: e,
+                type_operand: target.clone(),
+            }))
         } else if at == Ty::obj("kotlin/Any") && target_ref && !ir_type_is_object(target) {
             // A generic type-parameter return is erased to `Object` in the JVM signature; flowing it
             // into a more specific reference target needs a `checkcast` (kotlinc inserts one — the
             // value really is the target type at runtime). `as`-style, but never null here.
-            Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: e, type_operand: target.clone() }))
+            Some(self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: e,
+                type_operand: target.clone(),
+            }))
         } else {
             Some(e)
         }
@@ -2177,9 +3225,20 @@ impl<'a> Lower<'a> {
         // A primitive flowing out of any erased reference (`Object`, or a type-parameter bound like
         // `Comparable`/`Number` — `maxOrNull(): T`) unboxes; a reference erased to `Object` checkcasts.
         if logical.is_primitive() && physical.is_reference() {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(logical) })
-        } else if logical.is_reference() && !matches!(logical, Ty::Null) && physical == Ty::obj("kotlin/Any") {
-            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(logical) })
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: read,
+                type_operand: ty_to_ir(logical),
+            })
+        } else if logical.is_reference()
+            && !matches!(logical, Ty::Null)
+            && physical == Ty::obj("kotlin/Any")
+        {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: read,
+                type_operand: ty_to_ir(logical),
+            })
         } else {
             read
         }
@@ -2208,11 +3267,16 @@ impl<'a> Lower<'a> {
             Ty::array(elem)
         } else if r.name == "Array" {
             let e = r.arg.as_ref().and_then(|a| self.ty_ref(a))?;
-            if !e.is_reference() { return None; }
+            if !e.is_reference() {
+                return None;
+            }
             Ty::array(e)
         } else if self.classes.contains_key(&r.name) {
             Ty::obj(&r.name)
-        } else if self.classes.contains_key(&class_internal(self.afile, &r.name)) {
+        } else if self
+            .classes
+            .contains_key(&class_internal(self.afile, &r.name))
+        {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
@@ -2221,7 +3285,9 @@ impl<'a> Lower<'a> {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
             // the same name→internal map the checker resolves `is`/`as` targets against. `"__ty/<prim>"`
             // is an alias to a primitive, which `is`/`as` here doesn't model (skip).
-            if internal.starts_with("__ty/") { return None; }
+            if internal.starts_with("__ty/") {
+                return None;
+            }
             Ty::obj(internal)
         } else {
             return None;
@@ -2259,19 +3325,27 @@ impl<'a> Lower<'a> {
     }
 
     fn block_as_body(&mut self, block: AstExprId, ret_ty: &IrType) -> Option<u32> {
-        let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else { return None };
+        let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else {
+            return None;
+        };
         let depth = self.scope.len();
         let mut out = Vec::new();
         let mut diverged = false;
         for s in stmts {
             self.append_stmt(s, &mut out)?;
-            if self.stmt_diverges(s) { diverged = true; break; }
+            if self.stmt_diverges(s) {
+                diverged = true;
+                break;
+            }
         }
         // A block that diverges before its trailing value (`{ …; throw X; <unreachable trailing> }`)
         // needs no `return` — the diverging statement already transfers control; the trailing is dead.
         if diverged {
             self.scope.truncate(depth);
-            return Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }));
+            return Some(self.ir.add_expr(IrExpr::Block {
+                stmts: out,
+                value: None,
+            }));
         }
         if let Some(t) = trailing {
             let tt = self.info.ty(t);
@@ -2291,7 +3365,10 @@ impl<'a> Lower<'a> {
             }
         }
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        }))
     }
 
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
@@ -2300,7 +3377,9 @@ impl<'a> Lower<'a> {
             Stmt::Return(e) => {
                 let v = match e {
                     // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
-                    Some(e) if self.cur_ret_ty != IrType::Unit && self.info.ty(e) != Ty::Nothing => {
+                    Some(e)
+                        if self.cur_ret_ty != IrType::Unit && self.info.ty(e) != Ty::Nothing =>
+                    {
                         let rt = self.cur_ret_ty.clone();
                         Some(self.lower_arg(e, &rt)?)
                     }
@@ -2319,7 +3398,11 @@ impl<'a> Lower<'a> {
                         Some(val) => {
                             let tmp = self.fresh_value();
                             let vty = self.cur_ret_ty.clone();
-                            stmts.push(self.ir.add_expr(IrExpr::Variable { index: tmp, ty: vty, init: Some(val) }));
+                            stmts.push(self.ir.add_expr(IrExpr::Variable {
+                                index: tmp,
+                                ty: vty,
+                                init: Some(val),
+                            }));
                             Some(tmp)
                         }
                         None => None,
@@ -2353,14 +3436,29 @@ impl<'a> Lower<'a> {
                     // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`, not
                     // the initializer's type — a property reference `C::n` is typed `KProperty1`, but the
                     // slot (and any `f(arg)` invoke) must see the function type it was declared as.
-                    Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => ty_of(self.afile, r),
+                    Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
+                        ty_of(self.afile, r)
+                    }
                     // A nullable primitive (`Char?`) is its boxed wrapper, not the primitive — keep the
                     // slot a reference (consistent with the checker), else a boxed value is stored raw.
-                    Some(r) if Ty::from_name(&r.name).map_or(false, |t| r.nullable && !t.is_reference() && crate::resolve::nullable_prim_wrapper(t).is_some()) => {
-                        Ty::obj(crate::resolve::nullable_prim_wrapper(Ty::from_name(&r.name).unwrap()).unwrap())
+                    Some(r)
+                        if Ty::from_name(&r.name).map_or(false, |t| {
+                            r.nullable
+                                && !t.is_reference()
+                                && crate::resolve::nullable_prim_wrapper(t).is_some()
+                        }) =>
+                    {
+                        Ty::obj(
+                            crate::resolve::nullable_prim_wrapper(Ty::from_name(&r.name).unwrap())
+                                .unwrap(),
+                        )
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
-                    Some(r) if self.classes.contains_key(&class_internal(self.afile, &r.name)) => {
+                    Some(r)
+                        if self
+                            .classes
+                            .contains_key(&class_internal(self.afile, &r.name)) =>
+                    {
                         Ty::obj(&class_internal(self.afile, &r.name))
                     }
                     // A library reference type (`Throwable?`, `List<Int>`): use the declared reference
@@ -2385,21 +3483,32 @@ impl<'a> Lower<'a> {
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
-                    return Some(self.ir.add_expr(IrExpr::Variable { index: holder, ty: ty_to_ir(holder_ty), init: Some(new_ref) }));
+                    return Some(self.ir.add_expr(IrExpr::Variable {
+                        index: holder,
+                        ty: ty_to_ir(holder_ty),
+                        init: Some(new_ref),
+                    }));
                 }
                 // Coerce the initializer to the declared type (a generic-erased `Object` flowing into a
                 // typed `val` gets the `checkcast` kotlinc inserts).
                 let it = self.lower_arg(init, &ty_to_ir(kty))?;
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
-                Some(self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(kty), init: Some(it) }))
+                Some(self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(kty),
+                    init: Some(it),
+                }))
             }
             Stmt::Destructure { entries, init } => {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
                 // `append_stmt` instead so the component locals live in the enclosing scope.
                 let mut out = Vec::new();
                 self.lower_destructure(&entries, init, &mut out)?;
-                Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }))
+                Some(self.ir.add_expr(IrExpr::Block {
+                    stmts: out,
+                    value: None,
+                }))
             }
             Stmt::Assign { name, value } => {
                 // A boxed mutable-capture local: write through its `Ref` holder's `element`.
@@ -2407,7 +3516,11 @@ impl<'a> Lower<'a> {
                     let (holder, _) = self.lookup(&name)?;
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
                     let val = self.lower_arg(value, &ty_to_ir(elem))?;
-                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv, elem: ty_to_ir(elem), value: val }));
+                    return Some(self.ir.add_expr(IrExpr::RefSet {
+                        holder: hv,
+                        elem: ty_to_ir(elem),
+                        value: val,
+                    }));
                 }
                 if let Some((v, sty)) = self.lookup(&name) {
                     // Coerce to the slot's declared type — a generic-erased `Object` value assigned to a
@@ -2417,7 +3530,10 @@ impl<'a> Lower<'a> {
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
-                    Some(self.ir.add_expr(IrExpr::SetStatic { index: idx, value: val }))
+                    Some(self.ir.add_expr(IrExpr::SetStatic {
+                        index: idx,
+                        value: val,
+                    }))
                 } else {
                     // Unqualified write to a `var` member of `this`. Inside the owning class it is the
                     // backing field (`this.<field> = …`, a direct `putfield`); when `this` is an external
@@ -2425,17 +3541,40 @@ impl<'a> Lower<'a> {
                     // through the property setter `setX(v)`.
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    let own_field = self.cur_class.as_ref().and_then(|c| self.classes.get(c))
-                        .and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == name).map(|i| (ci.id, i as u32, ty_to_ir(ci.fields[i].1))));
+                    let own_field = self
+                        .cur_class
+                        .as_ref()
+                        .and_then(|c| self.classes.get(c))
+                        .and_then(|ci| {
+                            ci.fields
+                                .iter()
+                                .position(|(fn_, _)| *fn_ == name)
+                                .map(|i| (ci.id, i as u32, ty_to_ir(ci.fields[i].1)))
+                        });
                     if let Some((class, idx, field_ty)) = own_field {
                         let val = self.lower_arg(value, &field_ty)?;
-                        Some(self.ir.add_expr(IrExpr::SetField { receiver: recv, class, index: idx, value: val }))
+                        Some(self.ir.add_expr(IrExpr::SetField {
+                            receiver: recv,
+                            class,
+                            index: idx,
+                            value: val,
+                        }))
                     } else {
                         let internal = this_ty.obj_internal()?.to_string();
-                        let (sclass, sindex, sfid, _) = self.resolve_method(&internal, &setter_name(&name))?;
-                        let pty = self.ir.functions[sfid as usize].params.first().cloned().unwrap_or_else(|| ty_to_ir(Ty::obj("kotlin/Any")));
+                        let (sclass, sindex, sfid, _) =
+                            self.resolve_method(&internal, &setter_name(&name))?;
+                        let pty = self.ir.functions[sfid as usize]
+                            .params
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| ty_to_ir(Ty::obj("kotlin/Any")));
                         let val = self.lower_arg(value, &pty)?;
-                        Some(self.ir.add_expr(IrExpr::MethodCall { class: sclass, index: sindex, receiver: recv, args: vec![Some(val)] }))
+                        Some(self.ir.add_expr(IrExpr::MethodCall {
+                            class: sclass,
+                            index: sindex,
+                            receiver: recv,
+                            args: vec![Some(val)],
+                        }))
                     }
                 }
             }
@@ -2455,14 +3594,31 @@ impl<'a> Lower<'a> {
                     };
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
-                    let cur = self.ir.add_expr(IrExpr::RefGet { holder: hv, elem: ty_to_ir(elem) });
+                    let cur = self.ir.add_expr(IrExpr::RefGet {
+                        holder: hv,
+                        elem: ty_to_ir(elem),
+                    });
                     let one = self.ir.add_expr(IrExpr::Const(one));
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one });
+                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op,
+                        lhs: cur,
+                        rhs: one,
+                    });
                     let nv = if matches!(elem, Ty::Byte | Ty::Short | Ty::Char) {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: sum, type_operand: ty_to_ir(elem) })
-                    } else { sum };
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: sum,
+                            type_operand: ty_to_ir(elem),
+                        })
+                    } else {
+                        sum
+                    };
                     let hv2 = self.ir.add_expr(IrExpr::GetValue(holder));
-                    return Some(self.ir.add_expr(IrExpr::RefSet { holder: hv2, elem: ty_to_ir(elem), value: nv }));
+                    return Some(self.ir.add_expr(IrExpr::RefSet {
+                        holder: hv2,
+                        elem: ty_to_ir(elem),
+                        value: nv,
+                    }));
                 }
                 // A `var` field of the enclosing class (`this.x++` written bare) inside its own method —
                 // `this.x = this.x ± 1` via a direct field read/write. (`obj.x++`/`arr[i]++` were already
@@ -2472,7 +3628,9 @@ impl<'a> Lower<'a> {
                     let (this_v, this_ty) = self.lookup("this")?;
                     let internal = this_ty.obj_internal()?.to_string();
                     let (fty, is_var) = self.syms.prop_of(&internal, &name)?;
-                    if !is_var { return None; }
+                    if !is_var {
+                        return None;
+                    }
                     let one_c = match fty {
                         Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
                         Ty::Long => IrConst::Long(1),
@@ -2483,29 +3641,74 @@ impl<'a> Lower<'a> {
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     // A field of *this* class is read/written directly; an inherited one (or an external
                     // `this`) goes through its getter/setter accessors.
-                    let own = self.cur_class.as_ref().and_then(|c| self.classes.get(c))
-                        .and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == name).map(|i| (ci.id, i as u32)));
+                    let own = self
+                        .cur_class
+                        .as_ref()
+                        .and_then(|c| self.classes.get(c))
+                        .and_then(|ci| {
+                            ci.fields
+                                .iter()
+                                .position(|(fn_, _)| *fn_ == name)
+                                .map(|i| (ci.id, i as u32))
+                        });
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let cur_val = if let Some((class, idx)) = own {
-                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                        self.ir.add_expr(IrExpr::GetField {
+                            receiver: recv,
+                            class,
+                            index: idx,
+                        })
                     } else {
-                        let (gclass, gindex, _, _) = self.resolve_method(&internal, &getter_name(&name))?;
-                        self.ir.add_expr(IrExpr::MethodCall { class: gclass, index: gindex, receiver: recv, args: vec![] })
+                        let (gclass, gindex, _, _) =
+                            self.resolve_method(&internal, &getter_name(&name))?;
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class: gclass,
+                            index: gindex,
+                            receiver: recv,
+                            args: vec![],
+                        })
                     };
                     let one = self.ir.add_expr(IrExpr::Const(one_c));
                     let nv = if matches!(fty, Ty::Byte | Ty::Short | Ty::Char) {
-                        let cur_i = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: cur_val, type_operand: ty_to_ir(Ty::Int) });
-                        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_i, rhs: one });
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: sum, type_operand: ty_to_ir(fty) })
+                        let cur_i = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: cur_val,
+                            type_operand: ty_to_ir(Ty::Int),
+                        });
+                        let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op,
+                            lhs: cur_i,
+                            rhs: one,
+                        });
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: sum,
+                            type_operand: ty_to_ir(fty),
+                        })
                     } else {
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_val, rhs: one })
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op,
+                            lhs: cur_val,
+                            rhs: one,
+                        })
                     };
                     let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
                     return Some(if let Some((class, idx)) = own {
-                        self.ir.add_expr(IrExpr::SetField { receiver: recv2, class, index: idx, value: nv })
+                        self.ir.add_expr(IrExpr::SetField {
+                            receiver: recv2,
+                            class,
+                            index: idx,
+                            value: nv,
+                        })
                     } else {
-                        let (sclass, sindex, _, _) = self.resolve_method(&internal, &setter_name(&name))?;
-                        self.ir.add_expr(IrExpr::MethodCall { class: sclass, index: sindex, receiver: recv2, args: vec![Some(nv)] })
+                        let (sclass, sindex, _, _) =
+                            self.resolve_method(&internal, &setter_name(&name))?;
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class: sclass,
+                            index: sindex,
+                            receiver: recv2,
+                            args: vec![Some(nv)],
+                        })
                     });
                 }
                 let (v, ty) = self.lookup(&name)?;
@@ -2523,27 +3726,54 @@ impl<'a> Lower<'a> {
                     // wraps in its own width (`Byte.MAX_VALUE++` = `Byte.MIN_VALUE`, not 128). The widen
                     // forces an `Int`-typed result so the final narrow actually emits `i2b`/`i2s`/`i2c`.
                     let cur = self.ir.add_expr(IrExpr::GetValue(v));
-                    let cur_i = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: cur, type_operand: ty_to_ir(Ty::Int) });
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_i, rhs: one });
-                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: sum, type_operand: ty_to_ir(ty) })
+                    let cur_i = self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: cur,
+                        type_operand: ty_to_ir(Ty::Int),
+                    });
+                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op,
+                        lhs: cur_i,
+                        rhs: one,
+                    });
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: sum,
+                        type_operand: ty_to_ir(ty),
+                    })
                 } else {
                     let cur = self.ir.add_expr(IrExpr::GetValue(v));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one })
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op,
+                        lhs: cur,
+                        rhs: one,
+                    })
                 };
                 Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: nv }))
             }
             // `receiver.field = value` → `IrSetField` (var property of a class in this IR).
-            Stmt::AssignMember { receiver, name, value } => {
+            Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+            } => {
                 let rt = self.info.ty(receiver);
                 let owner_internal = self.class_of(rt)?.internal.clone();
                 // The backing field is private; a write from outside the declaring class goes through
                 // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
                 if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                    if let Some((mclass, mindex, mfid, _)) = self.resolve_method(&owner_internal, &setter_name(&name)) {
+                    if let Some((mclass, mindex, mfid, _)) =
+                        self.resolve_method(&owner_internal, &setter_name(&name))
+                    {
                         let pty = self.ir.functions[mfid as usize].params[0].clone();
                         let r = self.expr(receiver)?;
                         let v = self.lower_arg(value, &pty)?;
-                        return Some(self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: r, args: vec![Some(v)] }));
+                        return Some(self.ir.add_expr(IrExpr::MethodCall {
+                            class: mclass,
+                            index: mindex,
+                            receiver: r,
+                            args: vec![Some(v)],
+                        }));
                     }
                 }
                 let (class, idx, field_ty) = {
@@ -2554,9 +3784,18 @@ impl<'a> Lower<'a> {
                 let r = self.expr(receiver)?;
                 // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
                 let v = self.lower_arg(value, &field_ty)?;
-                Some(self.ir.add_expr(IrExpr::SetField { receiver: r, class, index: idx, value: v }))
+                Some(self.ir.add_expr(IrExpr::SetField {
+                    receiver: r,
+                    class,
+                    index: idx,
+                    value: v,
+                }))
             }
-            Stmt::AssignIndex { array, index, value } => {
+            Stmt::AssignIndex {
+                array,
+                index,
+                value,
+            } => {
                 let at = self.info.ty(array);
                 // `coll[i] = v` on a library type → its `set(index, value)` operator member, discarding
                 // the returned previous element (an array set stays the `kotlin/Array.set` intrinsic).
@@ -2565,29 +3804,67 @@ impl<'a> Lower<'a> {
                         let (it, vt) = (self.info.ty(index), self.info.ty(value));
                         // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
                         // operator maps to `put` on a map.
-                        let resolved = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).map(|m| ("set", m))
-                            .or_else(|| crate::libraries::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).map(|m| ("put", m)));
+                        let resolved = crate::libraries::resolve_instance(
+                            &*self.syms.libraries,
+                            internal,
+                            "set",
+                            &[it, vt],
+                        )
+                        .map(|m| ("set", m))
+                        .or_else(|| {
+                            crate::libraries::resolve_instance(
+                                &*self.syms.libraries,
+                                internal,
+                                "put",
+                                &[it, vt],
+                            )
+                            .map(|m| ("put", m))
+                        });
                         if let Some((mname, m)) = resolved {
                             // A narrowing store into a primitive-element collection (`List<Byte>[i] = intVal`)
                             // needs `(value).toByte()` before boxing as `java/lang/Byte` — not yet modeled.
                             // Bail (skip the file) rather than box the wrong wrapper type.
-                            if let Some(elem) = self.syms.libraries.member_return(at, "get", &[it]) {
+                            if let Some(elem) = self.syms.libraries.member_return(at, "get", &[it])
+                            {
                                 if elem.is_primitive() && elem != vt {
                                     return None;
                                 }
                             }
-                            let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
+                            let is_iface = self
+                                .syms
+                                .libraries
+                                .resolve_type(internal)
+                                .map_or(false, |t| t.is_interface);
                             let a = self.expr(array)?;
-                            let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
-                            let v = self.lower_arg(value, &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)))?;
-                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: mname.to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i, v] }));
+                            let i = self.lower_arg(
+                                index,
+                                &ty_to_ir(m.params.first().copied().unwrap_or(it)),
+                            )?;
+                            let v = self.lower_arg(
+                                value,
+                                &ty_to_ir(m.params.get(1).copied().unwrap_or(vt)),
+                            )?;
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.to_string(),
+                                    name: mname.to_string(),
+                                    descriptor: m.descriptor.clone(),
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(a),
+                                args: vec![i, v],
+                            }));
                         }
                     }
                 }
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
                 let v = self.expr(value)?;
-                Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.set".to_string()), dispatch_receiver: Some(a), args: vec![i, v] }))
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::External("kotlin/Array.set".to_string()),
+                    dispatch_receiver: Some(a),
+                    args: vec![i, v],
+                }))
             }
             Stmt::While { cond, body, label } => {
                 let c = self.expr(cond)?;
@@ -2595,8 +3872,17 @@ impl<'a> Lower<'a> {
                 let mut out = Vec::new();
                 self.append_body_stmts(body, &mut out)?;
                 self.scope.truncate(depth);
-                let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: false, label }))
+                let b = self.ir.add_expr(IrExpr::Block {
+                    stmts: out,
+                    value: None,
+                });
+                Some(self.ir.add_expr(IrExpr::While {
+                    cond: c,
+                    body: b,
+                    update: None,
+                    post_test: false,
+                    label,
+                }))
             }
             Stmt::DoWhile { body, cond, label } => {
                 let depth = self.scope.len();
@@ -2606,14 +3892,28 @@ impl<'a> Lower<'a> {
                 // The condition is lowered after the body's scope is dropped — a `do…while` condition
                 // can't see body-local declarations (Kotlin scopes them to the body).
                 let c = self.expr(cond)?;
-                let b = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                Some(self.ir.add_expr(IrExpr::While { cond: c, body: b, update: None, post_test: true, label }))
+                let b = self.ir.add_expr(IrExpr::Block {
+                    stmts: out,
+                    value: None,
+                });
+                Some(self.ir.add_expr(IrExpr::While {
+                    cond: c,
+                    body: b,
+                    update: None,
+                    post_test: true,
+                    label,
+                }))
             }
             Stmt::Break(label) => Some(self.ir.add_expr(IrExpr::Break { label })),
             Stmt::Continue(label) => Some(self.ir.add_expr(IrExpr::Continue { label })),
             // `for (i in a..b [step s])` over an `Int` range → a counted `while`. The bound is
             // hoisted to a local (evaluated once, per Kotlin); the step defaults to 1.
-            Stmt::For { name, range, body, label } => {
+            Stmt::For {
+                name,
+                range,
+                body,
+                label,
+            } => {
                 use crate::ast::RangeKind;
                 let depth = self.scope.len();
                 // The counter type is the bound type (`Int`, `Long`, or unsigned `UInt`/`ULong`). A
@@ -2624,36 +3924,73 @@ impl<'a> Lower<'a> {
                     t => t,
                 };
                 let elem_ir = ty_to_ir(elem);
-                let one = if matches!(elem, Ty::Long | Ty::ULong) { IrConst::Long(1) } else { IrConst::Int(1) };
+                let one = if matches!(elem, Ty::Long | Ty::ULong) {
+                    IrConst::Long(1)
+                } else {
+                    IrConst::Int(1)
+                };
                 // loop var = start. The bounds may be erased (`l[0]` → `Object`); coerce them to the
                 // counter's primitive type so the value is unboxed before the slot store.
                 let start = self.lower_arg(range.start, &elem_ir)?;
                 let i_v = self.fresh_value();
                 self.scope.push((name.clone(), i_v, elem));
-                let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: elem_ir.clone(), init: Some(start) });
+                let var_i = self.ir.add_expr(IrExpr::Variable {
+                    index: i_v,
+                    ty: elem_ir.clone(),
+                    init: Some(start),
+                });
                 // hoisted bound
                 let end_e = self.lower_arg(range.end, &elem_ir)?;
                 let end_v = self.fresh_value();
-                let var_end = self.ir.add_expr(IrExpr::Variable { index: end_v, ty: elem_ir.clone(), init: Some(end_e) });
+                let var_end = self.ir.add_expr(IrExpr::Variable {
+                    index: end_v,
+                    ty: elem_ir.clone(),
+                    init: Some(end_e),
+                });
                 // condition. Signed/Long use the direct comparison opcode; unsigned compares via the JDK
                 // `compareUnsigned(i, end) <op> 0` (a signed `<=` would misorder values past the sign bit).
-                let cmp = match range.kind { RangeKind::Through => IrBinOp::Le, RangeKind::Until => IrBinOp::Lt, RangeKind::DownTo => IrBinOp::Ge };
+                let cmp = match range.kind {
+                    RangeKind::Through => IrBinOp::Le,
+                    RangeKind::Until => IrBinOp::Lt,
+                    RangeKind::DownTo => IrBinOp::Ge,
+                };
                 let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let ge = self.ir.add_expr(IrExpr::GetValue(end_v));
                 let cond = if elem.is_unsigned() {
-                    let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+                    let (owner, prim) = if elem == Ty::UInt {
+                        ("java/lang/Integer", "I")
+                    } else {
+                        ("java/lang/Long", "J")
+                    };
                     let cmp_call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
-                        dispatch_receiver: None, args: vec![gi, ge],
+                        callee: Callee::Static {
+                            owner: owner.to_string(),
+                            name: "compareUnsigned".to_string(),
+                            descriptor: format!("({prim}{prim})I"),
+                            inline: false,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![gi, ge],
                     });
                     let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: cmp_call, rhs: zero })
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: cmp,
+                        lhs: cmp_call,
+                        rhs: zero,
+                    })
                 } else {
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: cmp, lhs: gi, rhs: ge })
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: cmp,
+                        lhs: gi,
+                        rhs: ge,
+                    })
                 };
                 // body + increment
                 let mut out = Vec::new();
-                if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
+                if self.append_body_stmts(body, &mut out).is_none() {
+                    self.scope.truncate(depth);
+                    return None;
+                }
                 // The step is evaluated ONCE (after the bounds, before the loop), not per iteration — a
                 // side-effecting `step` (`a step logged(2)`) must run a single time. Hoist it to a temp.
                 let var_step = match range.step {
@@ -2662,7 +3999,14 @@ impl<'a> Lower<'a> {
                         // to `Long`, else an `int` would be stored into a `long` slot (a verify error).
                         let sv = self.lower_arg(e, &elem_ir)?;
                         let step_v = self.fresh_value();
-                        Some((self.ir.add_expr(IrExpr::Variable { index: step_v, ty: elem_ir.clone(), init: Some(sv) }), step_v))
+                        Some((
+                            self.ir.add_expr(IrExpr::Variable {
+                                index: step_v,
+                                ty: elem_ir.clone(),
+                                init: Some(sv),
+                            }),
+                            step_v,
+                        ))
                     }
                     None => None,
                 };
@@ -2670,12 +4014,23 @@ impl<'a> Lower<'a> {
                     Some((_, step_v)) => self.ir.add_expr(IrExpr::GetValue(step_v)),
                     None => self.ir.add_expr(IrExpr::Const(one)),
                 };
-                let inc_op = if matches!(range.kind, RangeKind::DownTo) { IrBinOp::Sub } else { IrBinOp::Add };
+                let inc_op = if matches!(range.kind, RangeKind::DownTo) {
+                    IrBinOp::Sub
+                } else {
+                    IrBinOp::Add
+                };
                 let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: inc_op, lhs: gi2, rhs: step });
+                let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: inc_op,
+                    lhs: gi2,
+                    rhs: step,
+                });
                 // The increment is the loop `update` (runs at the `continue` target), not a body stmt —
                 // so `continue` advances the counter instead of skipping it.
-                let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
+                let inc = self.ir.add_expr(IrExpr::SetValue {
+                    var: i_v,
+                    value: inc_val,
+                });
                 // Non-overflowing loop: break when the counter reaches the (inclusive) bound, *before*
                 // the increment — so `0..Int.MAX_VALUE` / `x downTo Int.MIN_VALUE` don't wrap past it and
                 // loop forever. The break + increment are the loop `update` (the `continue` target), so a
@@ -2684,30 +4039,66 @@ impl<'a> Lower<'a> {
                 // — harmless either way (the `cond` ends the loop).
                 let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
-                let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: ic, rhs: ec });
+                let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: ic,
+                    rhs: ec,
+                });
                 let brk = self.ir.add_expr(IrExpr::Break { label: None });
-                let if_break = self.ir.add_expr(IrExpr::When { branches: vec![(Some(at_end), brk)] });
-                let update = self.ir.add_expr(IrExpr::Block { stmts: vec![if_break, inc], value: None });
-                let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false, label });
+                let if_break = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(at_end), brk)],
+                });
+                let update = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![if_break, inc],
+                    value: None,
+                });
+                let wbody = self.ir.add_expr(IrExpr::Block {
+                    stmts: out,
+                    value: None,
+                });
+                let wh = self.ir.add_expr(IrExpr::While {
+                    cond,
+                    body: wbody,
+                    update: Some(update),
+                    post_test: false,
+                    label,
+                });
                 self.scope.truncate(depth);
                 let mut prologue = vec![var_i, var_end];
-                if let Some((vs, _)) = var_step { prologue.push(vs); }
+                if let Some((vs, _)) = var_step {
+                    prologue.push(vs);
+                }
                 prologue.push(wh);
-                Some(self.ir.add_expr(IrExpr::Block { stmts: prologue, value: None }))
+                Some(self.ir.add_expr(IrExpr::Block {
+                    stmts: prologue,
+                    value: None,
+                }))
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
-            Stmt::ForEach { name, iterable, body, label } => self.lower_for_each(&name, iterable, body, label),
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                label,
+            } => self.lower_for_each(&name, iterable, body, label),
             // A local-function declaration emits no code here — its body is lifted to a separate static
             // method (pass 2'); a call to it routes to that method.
-            Stmt::LocalFun(_) => Some(self.ir.add_expr(IrExpr::Block { stmts: vec![], value: None })),
-            _ => None,
+            Stmt::LocalFun(_) => Some(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![],
+                value: None,
+            })),
         }
     }
 
     /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
     /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
-    fn lower_for_each(&mut self, name: &str, iterable: AstExprId, body: AstExprId, label: Option<String>) -> Option<u32> {
+    fn lower_for_each(
+        &mut self,
+        name: &str,
+        iterable: AstExprId,
+        body: AstExprId,
+        label: Option<String>,
+    ) -> Option<u32> {
         let it_ty = self.info.ty(iterable);
         // A primitive range value (`IntRange`/`LongRange`/`CharRange`) iterates as a counted loop over
         // its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc and avoiding per-element boxing.
@@ -2716,7 +4107,11 @@ impl<'a> Lower<'a> {
         }
         // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other iterable
         // (`List`, `Set`, a progression value, …) uses the iterator protocol.
-        let elem = if it_ty == Ty::String { Some(Ty::Char) } else { it_ty.array_elem() };
+        let elem = if it_ty == Ty::String {
+            Some(Ty::Char)
+        } else {
+            it_ty.array_elem()
+        };
         let Some(elem) = elem else {
             return self.lower_foreach_iterator(name, iterable, body, it_ty, None, label);
         };
@@ -2724,39 +4119,97 @@ impl<'a> Lower<'a> {
         // Evaluate the array once into a temp.
         let arr_v = self.fresh_value();
         let arr_val = self.expr(iterable)?;
-        let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: ty_to_ir(it_ty), init: Some(arr_val) });
+        let var_arr = self.ir.add_expr(IrExpr::Variable {
+            index: arr_v,
+            ty: ty_to_ir(it_ty),
+            init: Some(arr_val),
+        });
         // i = 0
         let i_v = self.fresh_value();
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(zero) });
+        let var_i = self.ir.add_expr(IrExpr::Variable {
+            index: i_v,
+            ty: ty_to_ir(Ty::Int),
+            init: Some(zero),
+        });
         // n = arr.size (hoisted)
         let n_v = self.fresh_value();
         let arr_g = self.ir.add_expr(IrExpr::GetValue(arr_v));
-        let size_fq = if it_ty == Ty::String { "kotlin/String.length" } else { "kotlin/Array.size" };
-        let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External(size_fq.to_string()), dispatch_receiver: Some(arr_g), args: vec![] });
-        let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(size) });
+        let size_fq = if it_ty == Ty::String {
+            "kotlin/String.length"
+        } else {
+            "kotlin/Array.size"
+        };
+        let size = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External(size_fq.to_string()),
+            dispatch_receiver: Some(arr_g),
+            args: vec![],
+        });
+        let var_n = self.ir.add_expr(IrExpr::Variable {
+            index: n_v,
+            ty: ty_to_ir(Ty::Int),
+            init: Some(size),
+        });
         // condition: i < n
         let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
         let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Lt,
+            lhs: gi,
+            rhs: gn,
+        });
         // loop var `x = arr[i]`, bound for the body
         let x_v = self.fresh_value();
         self.scope.push((name.to_string(), x_v, elem));
         let arr_g2 = self.ir.add_expr(IrExpr::GetValue(arr_v));
         let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-        let getq = if it_ty == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
-        let elem_get = self.ir.add_expr(IrExpr::Call { callee: Callee::External(getq.to_string()), dispatch_receiver: Some(arr_g2), args: vec![gi2] });
-        let var_x = self.ir.add_expr(IrExpr::Variable { index: x_v, ty: ty_to_ir(elem), init: Some(elem_get) });
+        let getq = if it_ty == Ty::String {
+            "kotlin/String.get"
+        } else {
+            "kotlin/Array.get"
+        };
+        let elem_get = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External(getq.to_string()),
+            dispatch_receiver: Some(arr_g2),
+            args: vec![gi2],
+        });
+        let var_x = self.ir.add_expr(IrExpr::Variable {
+            index: x_v,
+            ty: ty_to_ir(elem),
+            init: Some(elem_get),
+        });
         let mut out = vec![var_x];
-        if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
+        if self.append_body_stmts(body, &mut out).is_none() {
+            self.scope.truncate(depth);
+            return None;
+        }
         let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
-        let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
-        let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-        let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label });
+        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            lhs: gi3,
+            rhs: one,
+        });
+        let incs = self.ir.add_expr(IrExpr::SetValue {
+            var: i_v,
+            value: inc,
+        });
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: Some(incs),
+            post_test: false,
+            label,
+        });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_arr, var_i, var_n, wh], value: None }))
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_arr, var_i, var_n, wh],
+            value: None,
+        }))
     }
 
     /// Expand a call to a user-defined `inline fun`: bind its value parameters to the (once-evaluated)
@@ -2797,7 +4250,11 @@ impl<'a> Lower<'a> {
         for (i, pty) in sig.params.iter().enumerate() {
             if let Ty::Fun(fnsig) = pty {
                 // A lambda parameter: require a literal lambda argument with no non-local return.
-                if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[i]).clone() {
+                if let Expr::Lambda {
+                    params,
+                    body: lbody,
+                } = self.afile.expr(args[i]).clone()
+                {
                     // A single-parameter lambda may name its parameter implicitly as `it`.
                     let params = if params.is_empty() && fnsig.params.len() == 1 {
                         vec!["it".to_string()]
@@ -2810,7 +4267,12 @@ impl<'a> Lower<'a> {
                         self.inline_active.truncate(active_depth);
                         return None;
                     }
-                    self.inline_lambdas.push((pnames[i].clone(), params, lbody, fnsig.params.clone()));
+                    self.inline_lambdas.push((
+                        pnames[i].clone(),
+                        params,
+                        lbody,
+                        fnsig.params.clone(),
+                    ));
                 } else {
                     self.scope.truncate(depth);
                     self.inline_lambdas.truncate(lam_depth);
@@ -2828,7 +4290,11 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                 };
-                let var = self.ir.add_expr(IrExpr::Variable { index: slot, ty: ty_to_ir(*pty), init: Some(val) });
+                let var = self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty: ty_to_ir(*pty),
+                    init: Some(val),
+                });
                 stmts.push(var);
                 self.scope.push((pnames[i].clone(), slot, *pty));
             }
@@ -2841,7 +4307,10 @@ impl<'a> Lower<'a> {
         if stmts.is_empty() {
             Some(body_val)
         } else {
-            Some(self.ir.add_expr(IrExpr::Block { stmts, value: Some(body_val) }))
+            Some(self.ir.add_expr(IrExpr::Block {
+                stmts,
+                value: Some(body_val),
+            }))
         }
     }
 
@@ -2863,7 +4332,11 @@ impl<'a> Lower<'a> {
                     return None;
                 }
             };
-            let var = self.ir.add_expr(IrExpr::Variable { index: slot, ty: ty_to_ir(*pty), init: Some(val) });
+            let var = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: ty_to_ir(*pty),
+                init: Some(val),
+            });
             stmts.push(var);
             self.scope.push((pname.clone(), slot, *pty));
         }
@@ -2873,7 +4346,10 @@ impl<'a> Lower<'a> {
         if stmts.is_empty() {
             Some(body_val)
         } else {
-            Some(self.ir.add_expr(IrExpr::Block { stmts, value: Some(body_val) }))
+            Some(self.ir.add_expr(IrExpr::Block {
+                stmts,
+                value: Some(body_val),
+            }))
         }
     }
 
@@ -2896,7 +4372,9 @@ impl<'a> Lower<'a> {
             Expr::LongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
             // Unsigned literals are the signed int/long bit pattern of their magnitude (`UInt.MAX` =
             // 0xFFFFFFFFu reinterprets to int -1, which is what kotlinc stores).
-            Expr::UIntLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Int(v as u32 as i32))),
+            Expr::UIntLit(v) => self
+                .ir
+                .add_expr(IrExpr::Const(IrConst::Int(v as u32 as i32))),
             Expr::ULongLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Long(v))),
             Expr::DoubleLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Double(v))),
             Expr::FloatLit(v) => self.ir.add_expr(IrExpr::Const(IrConst::Float(v))),
@@ -2911,21 +4389,31 @@ impl<'a> Lower<'a> {
                 // and is physically `Object`) needs the `checkcast Throwable` kotlinc inserts — the JVM
                 // `athrow` requires a `Throwable` on the stack.
                 let v = if self.info.ty(operand) == Ty::obj("kotlin/Any") {
-                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: v, type_operand: ty_to_ir(Ty::obj("kotlin/Throwable")) })
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::Cast,
+                        arg: v,
+                        type_operand: ty_to_ir(Ty::obj("kotlin/Throwable")),
+                    })
                 } else {
                     v
                 };
                 self.ir.add_expr(IrExpr::Throw { operand: v })
             }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
-            Expr::Try { body, catches, finally } => {
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
                 // A `finally` is inlined at each exit. A `break`/`continue` that escapes the `try` would
                 // need the `finally` run before it (not modeled) — bail. A `return` IS modeled: the
                 // `finally` is pushed onto `try_finally_stack` and inlined at each `return` inside the
                 // body/catch (`Stmt::Return`); the normal/exception exits are inlined by `emit_try`.
                 if finally.is_some()
                     && (body_has_break_continue(self.afile, body)
-                        || catches.iter().any(|c| body_has_break_continue(self.afile, c.body)))
+                        || catches
+                            .iter()
+                            .any(|c| body_has_break_continue(self.afile, c.body)))
                 {
                     return None;
                 }
@@ -2945,22 +4433,45 @@ impl<'a> Lower<'a> {
                 let mut ir_catches = Vec::new();
                 let mut ok = body_ir.is_some();
                 for c in &catches {
-                    let exc_internal = match self.catch_internal(&c.ty.name) { Some(x) => x, None => { ok = false; break; } };
+                    let exc_internal = match self.catch_internal(&c.ty.name) {
+                        Some(x) => x,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    };
                     let v = self.fresh_value();
                     self.scope.push((c.name.clone(), v, Ty::obj(&exc_internal)));
                     let cbody = self.expr(c.body);
                     self.scope.pop();
-                    match cbody { Some(cb) => ir_catches.push(crate::ir::IrCatch { var: v, exc_internal, body: cb }), None => { ok = false; break; } }
+                    match cbody {
+                        Some(cb) => ir_catches.push(crate::ir::IrCatch {
+                            var: v,
+                            exc_internal,
+                            body: cb,
+                        }),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
                 }
                 if finally.is_some() {
                     self.try_finally_stack.pop();
                 }
-                if !ok { return None; }
+                if !ok {
+                    return None;
+                }
                 let fin = match finally {
                     Some(f) => Some(self.expr(f)?),
                     None => None,
                 };
-                self.ir.add_expr(IrExpr::Try { body: body_ir?, catches: ir_catches, finally: fin, result })
+                self.ir.add_expr(IrExpr::Try {
+                    body: body_ir?,
+                    catches: ir_catches,
+                    finally: fin,
+                    result,
+                })
             }
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
@@ -2971,7 +4482,11 @@ impl<'a> Lower<'a> {
                     // `Int?!!` narrows to the unboxed primitive — unbox the wrapper after the null check.
                     let result = self.info.ty(e);
                     if result.is_primitive() {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: asserted, type_operand: ty_to_ir(result) })
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: asserted,
+                            type_operand: ty_to_ir(result),
+                        })
                     } else {
                         asserted
                     }
@@ -2980,7 +4495,11 @@ impl<'a> Lower<'a> {
                 }
             }
             // `r?.m(args)` / `r?.p` → `{ val t = r; if (t != null) t.m(args)/t.p else null }`.
-            Expr::SafeCall { receiver, name, args } => {
+            Expr::SafeCall {
+                receiver,
+                name,
+                args,
+            } => {
                 let rty = self.info.ty(receiver);
                 let result_ty = self.info.ty(e);
                 // Only reference receiver + reference result are modeled (a nullable-primitive result
@@ -2988,34 +4507,72 @@ impl<'a> Lower<'a> {
                 if !rty.is_reference() || !result_ty.is_reference() {
                     return None;
                 }
-                let internal = if rty == Ty::String { "java/lang/String".to_string() } else { rty.obj_internal()?.to_string() };
+                let internal = if rty == Ty::String {
+                    "java/lang/String".to_string()
+                } else {
+                    rty.obj_internal()?.to_string()
+                };
                 let rv = self.expr(receiver)?;
                 let v = self.fresh_value();
-                let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(rty), init: Some(rv) });
+                let var = self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(rty),
+                    init: Some(rv),
+                });
                 let get1 = self.ir.add_expr(IrExpr::GetValue(v));
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
+                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Ne,
+                    lhs: get1,
+                    rhs: nullc,
+                });
                 let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
-                let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                let is_iface = self
+                    .syms
+                    .libraries
+                    .resolve_type(&internal)
+                    .map_or(false, |t| t.is_interface);
                 let member = match args {
                     Some(args) => {
-                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name) {
+                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name)
+                        {
                             let params = self.ir.functions[fid as usize].params.clone();
-                            if args.len() != params.len() { return None; }
+                            if args.len() != params.len() {
+                                return None;
+                            }
                             let mut a = Vec::new();
                             for (arg, pt) in args.iter().zip(&params) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv2, args: a.into_iter().map(Some).collect() })
+                            self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: recv2,
+                                args: a.into_iter().map(Some).collect(),
+                            })
                         } else {
                             // A classpath instance method (`s?.substring(1)`).
                             let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                            let m = crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys)?;
+                            let m = crate::libraries::resolve_instance(
+                                &*self.syms.libraries,
+                                &internal,
+                                &name,
+                                &arg_tys,
+                            )?;
                             let mut a = Vec::new();
                             for (arg, pt) in args.iter().zip(&m.params) {
                                 a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                             }
-                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv2), args: a })
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.clone(),
+                                    name: m.name,
+                                    descriptor: m.descriptor,
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(recv2),
+                                args: a,
+                            })
                         }
                     }
                     None => {
@@ -3023,35 +4580,87 @@ impl<'a> Lower<'a> {
                             let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
                             // External read → `getX()` (the backing field is private); internal → field.
                             if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                                if let Some((mclass, mindex, _, _)) = self.resolve_method(&internal, &getter_name(&name)) {
-                                    self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv2, args: vec![] })
+                                if let Some((mclass, mindex, _, _)) =
+                                    self.resolve_method(&internal, &getter_name(&name))
+                                {
+                                    self.ir.add_expr(IrExpr::MethodCall {
+                                        class: mclass,
+                                        index: mindex,
+                                        receiver: recv2,
+                                        args: vec![],
+                                    })
                                 } else {
-                                    self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                                    self.ir.add_expr(IrExpr::GetField {
+                                        receiver: recv2,
+                                        class: fclass,
+                                        index: idx,
+                                    })
                                 }
                             } else {
-                                self.ir.add_expr(IrExpr::GetField { receiver: recv2, class: fclass, index: idx })
+                                self.ir.add_expr(IrExpr::GetField {
+                                    receiver: recv2,
+                                    class: fclass,
+                                    index: idx,
+                                })
                             }
                         } else if internal == "java/lang/String" && name == "length" {
-                            self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv2), args: vec![] })
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::External("kotlin/String.length".to_string()),
+                                dispatch_receiver: Some(recv2),
+                                args: vec![],
+                            })
                         } else {
                             // A classpath property (`list?.size`) — a zero-arg accessor.
-                            let mapped = crate::resolve::collection_mapped_accessor(&name).map(|s| s.to_string());
-                            let m = [Some(name.clone()), Some(getter_name(&name)), mapped].into_iter().flatten()
-                                .find_map(|c| crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)))?;
-                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv2), args: vec![] })
+                            let mapped = crate::resolve::collection_mapped_accessor(&name)
+                                .map(|s| s.to_string());
+                            let m = [Some(name.clone()), Some(getter_name(&name)), mapped]
+                                .into_iter()
+                                .flatten()
+                                .find_map(|c| {
+                                    crate::libraries::resolve_instance(
+                                        &*self.syms.libraries,
+                                        &internal,
+                                        &c,
+                                        &[],
+                                    )
+                                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                                })?;
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.clone(),
+                                    name: m.name,
+                                    descriptor: m.descriptor,
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(recv2),
+                                args: vec![],
+                            })
                         }
                     }
                 };
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
                 // both `when` branches are the wrapper reference (the other branch is `null`).
-                let member = if result_ty.obj_internal().and_then(crate::resolve::prim_of_wrapper).is_some() {
-                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: member, type_operand: ty_to_ir(result_ty) })
+                let member = if result_ty
+                    .obj_internal()
+                    .and_then(crate::resolve::prim_of_wrapper)
+                    .is_some()
+                {
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: member,
+                        type_operand: ty_to_ir(result_ty),
+                    })
                 } else {
                     member
                 };
                 let nullb = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), member), (None, nullb)] });
-                self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) })
+                let when = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(cond), member), (None, nullb)],
+                });
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![var],
+                    value: Some(when),
+                })
             }
             // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
             Expr::Elvis { lhs, rhs } => {
@@ -3063,10 +4672,18 @@ impl<'a> Lower<'a> {
                 }
                 let lv = self.expr(lhs)?;
                 let v = self.fresh_value();
-                let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(lty), init: Some(lv) });
+                let var = self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(lty),
+                    init: Some(lv),
+                });
                 let get1 = self.ir.add_expr(IrExpr::GetValue(v));
                 let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Ne, lhs: get1, rhs: nullc });
+                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Ne,
+                    lhs: get1,
+                    rhs: nullc,
+                });
                 // When the elvis result is a primitive (a nullable-primitive lhs, `Int? ?: 0`), the
                 // non-null lhs unboxes to the primitive and the rhs coerces to it too.
                 let result_ty = self.info.ty(e);
@@ -3076,15 +4693,28 @@ impl<'a> Lower<'a> {
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                     // unboxing `Integer` straight to `Double` would be an invalid checkcast.
                     if let Some(lp) = lty.obj_internal().and_then(crate::resolve::prim_of_wrapper) {
-                        get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(lp) });
+                        get2 = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: get2,
+                            type_operand: ty_to_ir(lp),
+                        });
                         if lp != result_ty {
-                            get2 = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: get2, type_operand: ty_to_ir(result_ty) });
+                            get2 = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: get2,
+                                type_operand: ty_to_ir(result_ty),
+                            });
                         }
                     }
                 }
                 let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
-                let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(cond), get2), (None, rv)] });
-                self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) })
+                let when = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(cond), get2), (None, rv)],
+                });
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![var],
+                    value: Some(when),
+                })
             }
             // A block in expression position: `{ stmt; …; trailing }`; value is the trailing expr.
             Expr::Block { stmts, trailing } => {
@@ -3096,12 +4726,18 @@ impl<'a> Lower<'a> {
                         self.scope.truncate(depth);
                         return None;
                     }
-                    if self.stmt_diverges(s) { diverged = true; break; }
+                    if self.stmt_diverges(s) {
+                        diverged = true;
+                        break;
+                    }
                 }
                 let value = match trailing {
                     Some(t) if !diverged => match self.expr(t) {
                         Some(v) => Some(v),
-                        None => { self.scope.truncate(depth); return None; }
+                        None => {
+                            self.scope.truncate(depth);
+                            return None;
+                        }
                     },
                     _ => None,
                 };
@@ -3120,7 +4756,9 @@ impl<'a> Lower<'a> {
                         return Some(pr);
                     }
                 }
-                let Ty::Fun(sig) = self.info.ty(e) else { return None };
+                let Ty::Fun(sig) = self.info.ty(e) else {
+                    return None;
+                };
                 let arity = sig.params.len();
                 if let Some(recv) = receiver {
                     return self.lower_method_ref(recv, &name, &sig.params, sig.ret);
@@ -3135,24 +4773,47 @@ impl<'a> Lower<'a> {
                     let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
                     let ctor_args = self.ir.classes[class_id as usize].ctor_args.clone();
                     let field_tys: Vec<IrType> = if ctor_args.is_empty() {
-                        self.ir.classes[class_id as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect()
+                        self.ir.classes[class_id as usize].fields[..ctor_count]
+                            .iter()
+                            .map(|(_, t)| t.clone())
+                            .collect()
                     } else {
                         ctor_args.iter().map(|(t, _)| t.clone()).collect()
                     };
                     if field_tys.len() != arity {
                         return None;
                     }
-                    let argvals: Vec<u32> = (0..arity as u32).map(|i| self.ir.add_expr(IrExpr::GetValue(i))).collect();
-                    let new_e = self.ir.add_expr(IrExpr::New { class: class_id, args: argvals, ctor_params: None });
+                    let argvals: Vec<u32> = (0..arity as u32)
+                        .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
+                        .collect();
+                    let new_e = self.ir.add_expr(IrExpr::New {
+                        class: class_id,
+                        args: argvals,
+                        ctor_params: None,
+                    });
                     let ret_e = self.ir.add_expr(IrExpr::Return(Some(new_e)));
-                    let block = self.ir.add_expr(IrExpr::Block { stmts: vec![ret_e], value: None });
+                    let block = self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![ret_e],
+                        value: None,
+                    });
                     let impl_name = format!("{}$ctorref${}", self.cur_fn_name, self.lambda_seq);
                     self.lambda_seq += 1;
                     let fid = self.ir.add_fun(IrFunction {
-                        name: impl_name, params: field_tys, ret: ty_to_ir(sig.ret), body: Some(block),
-                        is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+                        name: impl_name,
+                        params: field_tys,
+                        ret: ty_to_ir(sig.ret),
+                        body: Some(block),
+                        is_static: true,
+                        dispatch_receiver: None,
+                        param_checks: Vec::new(),
                     });
-                    return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
+                    return Some(self.ir.add_expr(IrExpr::Lambda {
+                        impl_fn: fid,
+                        arity: arity as u8,
+                        captures: vec![],
+                        sam: None,
+                        inline_body: None,
+                    }));
                 }
                 let fid = *self.fun_ids.get(&name)?;
                 let ret = self.ir.functions[fid as usize].ret.clone();
@@ -3160,7 +4821,10 @@ impl<'a> Lower<'a> {
                 if self.ir.functions[fid as usize].params.len() != arity {
                     return None;
                 }
-                if self.top_fun_decl(&name).map_or(false, |f| !f.type_params.is_empty()) {
+                if self
+                    .top_fun_decl(&name)
+                    .map_or(false, |f| !f.type_params.is_empty())
+                {
                     return None;
                 }
                 // A `Unit`-returning function's method handle returns `void`; the SAM's `invoke` must
@@ -3172,27 +4836,56 @@ impl<'a> Lower<'a> {
                 }
                 if ret == IrType::Unit {
                     let params = self.ir.functions[fid as usize].params.clone();
-                    let argvals: Vec<u32> = (0..arity as u32).map(|i| self.ir.add_expr(IrExpr::GetValue(i))).collect();
-                    let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: argvals });
+                    let argvals: Vec<u32> = (0..arity as u32)
+                        .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
+                        .collect();
+                    let call = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Local(fid),
+                        dispatch_receiver: None,
+                        args: argvals,
+                    });
                     let unit = self.ir.add_expr(IrExpr::UnitInstance);
                     let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-                    let block = self.ir.add_expr(IrExpr::Block { stmts: vec![call, ret_e], value: None });
+                    let block = self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![call, ret_e],
+                        value: None,
+                    });
                     let impl_name = format!("{}$funref${}", self.cur_fn_name, self.lambda_seq);
                     self.lambda_seq += 1;
                     let wfid = self.ir.add_fun(IrFunction {
-                        name: impl_name, params, ret: ty_to_ir(Ty::obj("kotlin/Unit")), body: Some(block),
-                        is_static: true, dispatch_receiver: None, param_checks: Vec::new(),
+                        name: impl_name,
+                        params,
+                        ret: ty_to_ir(Ty::obj("kotlin/Unit")),
+                        body: Some(block),
+                        is_static: true,
+                        dispatch_receiver: None,
+                        param_checks: Vec::new(),
                     });
-                    return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: wfid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
+                    return Some(self.ir.add_expr(IrExpr::Lambda {
+                        impl_fn: wfid,
+                        arity: arity as u8,
+                        captures: vec![],
+                        sam: None,
+                        inline_body: None,
+                    }));
                 }
-                return Some(self.ir.add_expr(IrExpr::Lambda { impl_fn: fid, arity: arity as u8, captures: vec![], sam: None, inline_body: None }));
+                return Some(self.ir.add_expr(IrExpr::Lambda {
+                    impl_fn: fid,
+                    arity: arity as u8,
+                    captures: vec![],
+                    sam: None,
+                    inline_body: None,
+                }));
             }
             Expr::Name(n) => {
                 // A boxed mutable-capture local: read through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&n).cloned() {
                     let (holder, _) = self.lookup(&n)?;
                     let hv = self.ir.add_expr(IrExpr::GetValue(holder));
-                    return Some(self.ir.add_expr(IrExpr::RefGet { holder: hv, elem: ty_to_ir(elem) }));
+                    return Some(self.ir.add_expr(IrExpr::RefGet {
+                        holder: hv,
+                        elem: ty_to_ir(elem),
+                    }));
                 }
                 if let Some((v, slot_ty)) = self.lookup(&n) {
                     let read = self.ir.add_expr(IrExpr::GetValue(v));
@@ -3208,9 +4901,20 @@ impl<'a> Lower<'a> {
                     }
                     if narrowed != slot_ty && narrowed != Ty::Error {
                         if narrowed.is_primitive() && slot_ty.is_reference() {
-                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(narrowed) })
-                        } else if narrowed.is_reference() && slot_ty.is_reference() && !matches!(narrowed, Ty::Null) {
-                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: read, type_operand: ty_to_ir(narrowed) })
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: read,
+                                type_operand: ty_to_ir(narrowed),
+                            })
+                        } else if narrowed.is_reference()
+                            && slot_ty.is_reference()
+                            && !matches!(narrowed, Ty::Null)
+                        {
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::Cast,
+                                arg: read,
+                                type_operand: ty_to_ir(narrowed),
+                            })
                         } else {
                             read
                         }
@@ -3219,61 +4923,142 @@ impl<'a> Lower<'a> {
                     }
                 } else if let Some(&(fid, _)) = self.computed_props.get(&n) {
                     // A computed top-level property → call its `getX()` accessor.
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![] })
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Local(fid),
+                        dispatch_receiver: None,
+                        args: vec![],
+                    })
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
-                } else if let Some(class) = self.classes.get(&class_internal(self.afile, &n)).filter(|ci| self.ir.classes[ci.id as usize].is_object).map(|ci| ci.id) {
+                } else if let Some(class) = self
+                    .classes
+                    .get(&class_internal(self.afile, &n))
+                    .filter(|ci| self.ir.classes[ci.id as usize].is_object)
+                    .map(|ci| ci.id)
+                {
                     // A bare `object` name → its singleton instance.
-                    self.ir.add_expr(IrExpr::StaticInstance { owner: class, ty: class, field: "INSTANCE" })
+                    self.ir.add_expr(IrExpr::StaticInstance {
+                        owner: class,
+                        ty: class,
+                        field: "INSTANCE",
+                    })
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let read = if let Some(cur) = self.cur_class.clone() {
-                        let field = self.classes.get(&cur).and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == n).map(|i| (ci.id, i as u32)));
+                        let field = self.classes.get(&cur).and_then(|ci| {
+                            ci.fields
+                                .iter()
+                                .position(|(fn_, _)| *fn_ == n)
+                                .map(|i| (ci.id, i as u32))
+                        });
                         if let Some((class, idx)) = field {
-                            self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
-                        } else if let Some((class, index, _, _)) = self.resolve_method(&cur, &getter_name(&n)) {
-                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                            self.ir.add_expr(IrExpr::GetField {
+                                receiver: recv,
+                                class,
+                                index: idx,
+                            })
+                        } else if let Some((class, index, _, _)) =
+                            self.resolve_method(&cur, &getter_name(&n))
+                        {
+                            self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: recv,
+                                args: vec![],
+                            })
                         } else {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
                             let cur_id = self.classes.get(&cur)?.id;
                             let outer = match self.ir.classes[cur_id as usize].fields.first() {
-                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
+                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => {
+                                    fq_name.clone()
+                                }
                                 _ => return None,
                             };
-                            let this0 = self.ir.add_expr(IrExpr::GetField { receiver: recv, class: cur_id, index: 0 });
+                            let this0 = self.ir.add_expr(IrExpr::GetField {
+                                receiver: recv,
+                                class: cur_id,
+                                index: 0,
+                            });
                             // The outer backing field is private — read it through its synthesized getter.
-                            let (class, index, _, _) = self.resolve_method(&outer, &getter_name(&n))?;
-                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: vec![] })
+                            let (class, index, _, _) =
+                                self.resolve_method(&outer, &getter_name(&n))?;
+                            self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: this0,
+                                args: vec![],
+                            })
                         }
                     } else {
                         // An extension-function receiver: `fun A.f() = n` reads `this.n` from OUTSIDE
                         // class A, so go through the property getter (the backing field is private) for a
                         // user class, the field directly when one resolves, else a classpath accessor.
                         let internal = this_ty.obj_internal()?.to_string();
-                        if let Some((class, index, _, _)) = self.resolve_method(&internal, &getter_name(&n)) {
-                            self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                        if let Some((class, index, _, _)) =
+                            self.resolve_method(&internal, &getter_name(&n))
+                        {
+                            self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: recv,
+                                args: vec![],
+                            })
                         } else if let Some((fclass, idx, _)) = self.resolve_field(&internal, &n) {
-                            self.ir.add_expr(IrExpr::GetField { receiver: recv, class: fclass, index: idx })
+                            self.ir.add_expr(IrExpr::GetField {
+                                receiver: recv,
+                                class: fclass,
+                                index: idx,
+                            })
                         } else {
-                            let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
-                            let mapped = crate::resolve::collection_mapped_accessor(&n).map(|s| s.to_string());
-                            let m = [Some(n.clone()), Some(getter_name(&n)), mapped].into_iter().flatten()
-                                .find_map(|c| crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)))?;
-                            self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.clone(), name: m.name, descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] })
+                            let is_iface = self
+                                .syms
+                                .libraries
+                                .resolve_type(&internal)
+                                .map_or(false, |t| t.is_interface);
+                            let mapped = crate::resolve::collection_mapped_accessor(&n)
+                                .map(|s| s.to_string());
+                            let m = [Some(n.clone()), Some(getter_name(&n)), mapped]
+                                .into_iter()
+                                .flatten()
+                                .find_map(|c| {
+                                    crate::libraries::resolve_instance(
+                                        &*self.syms.libraries,
+                                        &internal,
+                                        &c,
+                                        &[],
+                                    )
+                                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                                })?;
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.clone(),
+                                    name: m.name,
+                                    descriptor: m.descriptor,
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(recv),
+                                args: vec![],
+                            })
                         }
                     };
                     // Smart-cast narrowing: a nullable-primitive *field* read narrowed to its primitive
                     // (after `field != null`) must unbox the wrapper, exactly as the local-variable read
                     // path does — else the `Integer` value reaches an `int` context (a verify error).
                     let narrowed = self.info.ty(e);
-                    let field_is_ref = this_ty.obj_internal()
+                    let field_is_ref = this_ty
+                        .obj_internal()
                         .and_then(|i| self.syms.prop_of(i, &n))
                         .map_or(false, |(t, _)| t.is_reference());
                     if narrowed.is_primitive() && field_is_ref {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: read, type_operand: ty_to_ir(narrowed) })
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: read,
+                            type_operand: ty_to_ir(narrowed),
+                        })
                     } else {
                         read
                     }
@@ -3287,26 +5072,58 @@ impl<'a> Lower<'a> {
                 if let Ty::Obj(internal, _) = at {
                     if at.array_elem().is_none() {
                         let it = self.info.ty(index);
-                        if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, internal, "get", &[it]) {
-                            let is_iface = self.syms.libraries.resolve_type(internal).map_or(false, |t| t.is_interface);
+                        if let Some(m) = crate::libraries::resolve_instance(
+                            &*self.syms.libraries,
+                            internal,
+                            "get",
+                            &[it],
+                        ) {
+                            let is_iface = self
+                                .syms
+                                .libraries
+                                .resolve_type(internal)
+                                .map_or(false, |t| t.is_interface);
                             let a = self.expr(array)?;
-                            let i = self.lower_arg(index, &ty_to_ir(m.params.first().copied().unwrap_or(it)))?;
-                            let read = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal.to_string(), name: "get".to_string(), descriptor: m.descriptor.clone(), interface: is_iface }, dispatch_receiver: Some(a), args: vec![i] });
+                            let i = self.lower_arg(
+                                index,
+                                &ty_to_ir(m.params.first().copied().unwrap_or(it)),
+                            )?;
+                            let read = self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: internal.to_string(),
+                                    name: "get".to_string(),
+                                    descriptor: m.descriptor.clone(),
+                                    interface: is_iface,
+                                },
+                                dispatch_receiver: Some(a),
+                                args: vec![i],
+                            });
                             return Some(self.coerce_generic_read(read, e, m.ret));
                         }
                     }
                 }
-                let fq = if at == Ty::String { "kotlin/String.get" } else { "kotlin/Array.get" };
+                let fq = if at == Ty::String {
+                    "kotlin/String.get"
+                } else {
+                    "kotlin/Array.get"
+                };
                 let a = self.expr(array)?;
                 let i = self.expr(index)?;
-                self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq.to_string()), dispatch_receiver: Some(a), args: vec![i] })
+                self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::External(fq.to_string()),
+                    dispatch_receiver: Some(a),
+                    args: vec![i],
+                })
             }
             Expr::Member { receiver, name } => {
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the
                 // compile-time value read from the library (kotlinc emits the same `ldc`).
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
-                    if matches!(rn.as_str(), "Int" | "Long" | "Short" | "Byte" | "Char" | "Double" | "Float" | "Boolean")
-                        && self.lookup(&rn).is_none() {
+                    if matches!(
+                        rn.as_str(),
+                        "Int" | "Long" | "Short" | "Byte" | "Char" | "Double" | "Float" | "Boolean"
+                    ) && self.lookup(&rn).is_none()
+                    {
                         if let Some(lc) = self.syms.libraries.prim_companion_const(&rn, &name) {
                             let c = match lc {
                                 crate::libraries::LibConst::Int(v) => IrConst::Int(v),
@@ -3323,8 +5140,15 @@ impl<'a> Lower<'a> {
                     let internal = class_internal(self.afile, &rn);
                     if let Some(ci) = self.classes.get(&internal) {
                         let cls = ci.id;
-                        if let Some(idx) = self.ir.classes[cls as usize].enum_entries.iter().position(|(n, _)| *n == name) {
-                            return Some(self.ir.add_expr(IrExpr::EnumEntry { class: cls, index: idx as u32 }));
+                        if let Some(idx) = self.ir.classes[cls as usize]
+                            .enum_entries
+                            .iter()
+                            .position(|(n, _)| *n == name)
+                        {
+                            return Some(self.ir.add_expr(IrExpr::EnumEntry {
+                                class: cls,
+                                index: idx as u32,
+                            }));
                         }
                     }
                 }
@@ -3335,17 +5159,29 @@ impl<'a> Lower<'a> {
                         if !self.ir.classes[ci.id as usize].enum_entries.is_empty() {
                             let recv = self.expr(receiver)?;
                             let fq = format!("java/lang/Enum.{name}");
-                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(fq), dispatch_receiver: Some(recv), args: vec![] }));
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::External(fq),
+                                dispatch_receiver: Some(recv),
+                                args: vec![],
+                            }));
                         }
                     }
                 }
                 if rt == Ty::Char && name == "code" {
                     // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM stack).
                     let c = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: c, type_operand: ty_to_ir(Ty::Int) })
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: c,
+                        type_operand: ty_to_ir(Ty::Int),
+                    })
                 } else if rt.array_elem().is_some() && name == "size" {
                     let a = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] })
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::External("kotlin/Array.size".to_string()),
+                        dispatch_receiver: Some(a),
+                        args: vec![],
+                    })
                 } else if let Some(rci) = self.class_of(rt) {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
@@ -3356,9 +5192,16 @@ impl<'a> Lower<'a> {
                         // through the public `getX()` accessor (matching kotlinc). Inside the class,
                         // read the field directly.
                         if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                            if let Some((mclass, mindex, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
+                            if let Some((mclass, mindex, _, _)) =
+                                self.resolve_method(&recv_internal, &getter_name(&name))
+                            {
                                 let recv = self.expr(receiver)?;
-                                let read = self.ir.add_expr(IrExpr::MethodCall { class: mclass, index: mindex, receiver: recv, args: vec![] });
+                                let read = self.ir.add_expr(IrExpr::MethodCall {
+                                    class: mclass,
+                                    index: mindex,
+                                    receiver: recv,
+                                    args: vec![],
+                                });
                                 return Some(self.coerce_generic_read(read, e, pty));
                             }
                         }
@@ -3368,14 +5211,31 @@ impl<'a> Lower<'a> {
                         let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
                             if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&owner_internal)));
                         let recv = if needs_cast {
-                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::obj(&owner_internal)) })
-                        } else { recv };
-                        let read = self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx });
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::Cast,
+                                arg: recv,
+                                type_operand: ty_to_ir(Ty::obj(&owner_internal)),
+                            })
+                        } else {
+                            recv
+                        };
+                        let read = self.ir.add_expr(IrExpr::GetField {
+                            receiver: recv,
+                            class,
+                            index: idx,
+                        });
                         self.coerce_generic_read(read, e, pty)
-                    } else if let Some((class, index, _, _)) = self.resolve_method(&recv_internal, &getter_name(&name)) {
+                    } else if let Some((class, index, _, _)) =
+                        self.resolve_method(&recv_internal, &getter_name(&name))
+                    {
                         // A computed property → `recv.getX()`.
                         let recv = self.expr(receiver)?;
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: vec![] })
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: recv,
+                            args: vec![],
+                        })
                     } else {
                         return None;
                     }
@@ -3386,27 +5246,61 @@ impl<'a> Lower<'a> {
                     let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
                         if self.lookup(n).map_or(false, |(_, t)| t != Ty::String));
                     let recv = if needs_cast {
-                        self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: recv, type_operand: ty_to_ir(Ty::String) })
-                    } else { recv };
-                    self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.length".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: recv,
+                            type_operand: ty_to_ir(Ty::String),
+                        })
+                    } else {
+                        recv
+                    };
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::External("kotlin/String.length".to_string()),
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    })
                 } else if let Some((internal, m, is_iface)) = {
                     // A property read on a library type (`list.size`): a Kotlin property is realized as a
                     // zero-arg accessor on the JVM. Try the property's own name (`size()` — collections
                     // map `size` straight to the JVM method) and the `getX()` accessor form.
                     if let Ty::Obj(i, _) = rt {
-                        let mapped = crate::resolve::collection_mapped_accessor(&name).map(|s| s.to_string());
-                        [Some(name.clone()), Some(getter_name(&name)), mapped].into_iter().flatten().find_map(|cand| {
-                            crate::libraries::resolve_instance(&*self.syms.libraries, i, &cand, &[]).filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error)).map(|m| {
-                                let is_iface = self.syms.libraries.resolve_type(i).map_or(false, |t| t.is_interface);
-                                (i.to_string(), m, is_iface)
+                        let mapped = crate::resolve::collection_mapped_accessor(&name)
+                            .map(|s| s.to_string());
+                        [Some(name.clone()), Some(getter_name(&name)), mapped]
+                            .into_iter()
+                            .flatten()
+                            .find_map(|cand| {
+                                crate::libraries::resolve_instance(
+                                    &*self.syms.libraries,
+                                    i,
+                                    &cand,
+                                    &[],
+                                )
+                                .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                                .map(|m| {
+                                    let is_iface = self
+                                        .syms
+                                        .libraries
+                                        .resolve_type(i)
+                                        .map_or(false, |t| t.is_interface);
+                                    (i.to_string(), m, is_iface)
+                                })
                             })
-                        })
                     } else {
                         None
                     }
                 } {
                     let recv = self.expr(receiver)?;
-                    let read = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: m.name.clone(), descriptor: m.descriptor, interface: is_iface }, dispatch_receiver: Some(recv), args: vec![] });
+                    let read = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal,
+                            name: m.name.clone(),
+                            descriptor: m.descriptor,
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    });
                     self.coerce_generic_read(read, e, m.ret)
                 } else {
                     return None;
@@ -3419,33 +5313,69 @@ impl<'a> Lower<'a> {
                 // `compareUnsigned(l, r) <op> 0`.
                 let lty = self.info.ty(lhs);
                 if lty.is_unsigned()
-                    && matches!(op, BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && matches!(
+                        op,
+                        BinOp::Div | BinOp::Rem | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    )
                 {
                     let is_uint = lty == Ty::UInt;
-                    let owner = if is_uint { "java/lang/Integer" } else { "java/lang/Long" };
+                    let owner = if is_uint {
+                        "java/lang/Integer"
+                    } else {
+                        "java/lang/Long"
+                    };
                     let prim = if is_uint { "I" } else { "J" };
                     let l = self.expr(lhs)?;
                     let r = self.expr(rhs)?;
                     let call = |this: &mut Self, name: &str, desc: String, args: Vec<u32>| {
                         this.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static { owner: owner.to_string(), name: name.to_string(), descriptor: desc, inline: false },
-                            dispatch_receiver: None, args,
+                            callee: Callee::Static {
+                                owner: owner.to_string(),
+                                name: name.to_string(),
+                                descriptor: desc,
+                                inline: false,
+                            },
+                            dispatch_receiver: None,
+                            args,
                         })
                     };
                     return Some(match op {
-                        BinOp::Div => call(self, "divideUnsigned", format!("({prim}{prim}){prim}"), vec![l, r]),
-                        BinOp::Rem => call(self, "remainderUnsigned", format!("({prim}{prim}){prim}"), vec![l, r]),
+                        BinOp::Div => call(
+                            self,
+                            "divideUnsigned",
+                            format!("({prim}{prim}){prim}"),
+                            vec![l, r],
+                        ),
+                        BinOp::Rem => call(
+                            self,
+                            "remainderUnsigned",
+                            format!("({prim}{prim}){prim}"),
+                            vec![l, r],
+                        ),
                         _ => {
-                            let cmp = call(self, "compareUnsigned", format!("({prim}{prim})I"), vec![l, r]);
+                            let cmp = call(
+                                self,
+                                "compareUnsigned",
+                                format!("({prim}{prim})I"),
+                                vec![l, r],
+                            );
                             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op: bin_to_ir(op)?, lhs: cmp, rhs: zero })
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: bin_to_ir(op)?,
+                                lhs: cmp,
+                                rhs: zero,
+                            })
                         }
                     });
                 }
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = match op {
-                    BinOp::Add => Some("plus"), BinOp::Sub => Some("minus"), BinOp::Mul => Some("times"),
-                    BinOp::Div => Some("div"), BinOp::Rem => Some("rem"), _ => None,
+                    BinOp::Add => Some("plus"),
+                    BinOp::Sub => Some("minus"),
+                    BinOp::Mul => Some("times"),
+                    BinOp::Div => Some("div"),
+                    BinOp::Rem => Some("rem"),
+                    _ => None,
                 };
                 if let Some(opn) = op_name {
                     let recv_desc = self.recv_ty(lhs).descriptor();
@@ -3454,17 +5384,27 @@ impl<'a> Lower<'a> {
                         if params.len() == 2 {
                             let l = self.lower_arg(lhs, &params[0])?;
                             let r = self.lower_arg(rhs, &params[1])?;
-                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: vec![l, r] }));
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Local(fid),
+                                dispatch_receiver: None,
+                                args: vec![l, r],
+                            }));
                         }
                     }
                     // A class MEMBER operator (`operator fun plus(o: V)`): `a + b` → `a.plus(b)`.
-                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
+                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
+                    {
                         if let Some((class, index, mfid, _)) = self.resolve_method(&internal, opn) {
                             let params = self.ir.functions[mfid as usize].params.clone();
                             if params.len() == 1 {
                                 let l = self.expr(lhs)?;
                                 let r = self.lower_arg(rhs, &params[0])?;
-                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: l, args: vec![Some(r)] }));
+                                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: l,
+                                    args: vec![Some(r)],
+                                }));
                             }
                         }
                     }
@@ -3472,15 +5412,27 @@ impl<'a> Lower<'a> {
                 // A class `operator fun compareTo(o): Int` drives a comparison: `a < b` →
                 // `a.compareTo(b) < 0`.
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
-                        if let Some((class, index, mfid, _)) = self.resolve_method(&internal, "compareTo") {
+                    if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
+                    {
+                        if let Some((class, index, mfid, _)) =
+                            self.resolve_method(&internal, "compareTo")
+                        {
                             let params = self.ir.functions[mfid as usize].params.clone();
                             if params.len() == 1 {
                                 let l = self.expr(lhs)?;
                                 let r = self.lower_arg(rhs, &params[0])?;
-                                let cmp = self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: l, args: vec![Some(r)] });
+                                let cmp = self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: l,
+                                    args: vec![Some(r)],
+                                });
                                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op: bin_to_ir(op)?, lhs: cmp, rhs: zero }));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: bin_to_ir(op)?,
+                                    lhs: cmp,
+                                    rhs: zero,
+                                }));
                             }
                         }
                     }
@@ -3493,19 +5445,31 @@ impl<'a> Lower<'a> {
                     let lt = self.info.ty(lhs);
                     if lt.is_reference() && self.info.ty(rhs) != Ty::Error {
                         let rt = self.info.ty(rhs);
-                        if let Some(c) = self.syms.libraries.resolve_callable(opn, Some(lt), &[rt], &[]) {
+                        if let Some(c) =
+                            self.syms
+                                .libraries
+                                .resolve_callable(opn, Some(lt), &[rt], &[])
+                        {
                             if c.params.len() == 2 {
                                 let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                                 let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
                                 return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline },
-                                    dispatch_receiver: None, args: vec![l, r],
+                                    callee: Callee::Static {
+                                        owner: c.owner,
+                                        name: c.name,
+                                        descriptor: c.descriptor,
+                                        inline: c.is_inline,
+                                    },
+                                    dispatch_receiver: None,
+                                    args: vec![l, r],
                                 }));
                             }
                         }
                     }
                 }
-                if op == BinOp::Add && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String) {
+                if op == BinOp::Add
+                    && (self.info.ty(lhs) == Ty::String || self.info.ty(rhs) == Ty::String)
+                {
                     // Flatten the left-nested concat chain (`a + b + c + …`) iteratively, then fold —
                     // a deep chain (a stress test with hundreds of `+`) would otherwise recurse through
                     // `expr` once per operator and overflow the stack. The emitted `String.plus` chain
@@ -3517,7 +5481,11 @@ impl<'a> Lower<'a> {
                     let mut cur = lhs;
                     loop {
                         match self.afile.expr(cur).clone() {
-                            Expr::Binary { op: BinOp::Add, lhs: l2, rhs: r2 } if is_concat(self, l2, r2) => {
+                            Expr::Binary {
+                                op: BinOp::Add,
+                                lhs: l2,
+                                rhs: r2,
+                            } if is_concat(self, l2, r2) => {
                                 operands.push(r2);
                                 cur = l2;
                             }
@@ -3531,7 +5499,11 @@ impl<'a> Lower<'a> {
                     let mut acc = self.expr(operands[0])?;
                     for &op_e in &operands[1..] {
                         let r = self.expr(op_e)?;
-                        acc = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![r] });
+                        acc = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::External("kotlin/String.plus".to_string()),
+                            dispatch_receiver: Some(acc),
+                            args: vec![r],
+                        });
                     }
                     acc
                 } else {
@@ -3547,23 +5519,60 @@ impl<'a> Lower<'a> {
                     // (coerce the `Char` operands to `Int` — a no-op on the stack, but it types the result
                     // as `Int`); a `Char` result then truncates with `i2c` (Kotlin wraps mod 2^16), a
                     // `Char - Char` difference is a plain `Int`. The checker already typed `e` accordingly.
-                    if lt == Ty::Char && matches!(op, BinOp::Add | BinOp::Sub) && (rt == Ty::Int || rt == Ty::Char) {
+                    if lt == Ty::Char
+                        && matches!(op, BinOp::Add | BinOp::Sub)
+                        && (rt == Ty::Int || rt == Ty::Char)
+                    {
                         let int_ir = ty_to_ir(Ty::Int);
-                        let li = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: int_ir.clone() });
+                        let li = self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: l,
+                            type_operand: int_ir.clone(),
+                        });
                         let ri = if rt == Ty::Char {
-                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: int_ir })
-                        } else { r };
-                        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: li, rhs: ri });
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: r,
+                                type_operand: int_ir,
+                            })
+                        } else {
+                            r
+                        };
+                        let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: irop,
+                            lhs: li,
+                            rhs: ri,
+                        });
                         return Some(if self.info.ty(e) == Ty::Char {
-                            self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: raw, type_operand: ty_to_ir(Ty::Char) })
-                        } else { raw });
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: raw,
+                                type_operand: ty_to_ir(Ty::Char),
+                            })
+                        } else {
+                            raw
+                        });
                     }
                     if lt.is_primitive() && rt.is_primitive() && lt != rt {
                         let p = Ty::promote(lt, rt)?;
                         let pir = ty_to_ir(p);
-                        if lt != p { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: pir.clone() }); }
-                        if rt != p { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: pir }); }
-                    } else if matches!(op, BinOp::Eq | BinOp::Ne) && lt.is_reference() != rt.is_reference() {
+                        if lt != p {
+                            l = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: l,
+                                type_operand: pir.clone(),
+                            });
+                        }
+                        if rt != p {
+                            r = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: r,
+                                type_operand: pir,
+                            });
+                        }
+                    } else if matches!(op, BinOp::Eq | BinOp::Ne)
+                        && lt.is_reference() != rt.is_reference()
+                    {
                         // A nullable-primitive wrapper (`Int?`) compared with a primitive: match kotlinc's
                         // short-circuit — when the wrapper is null the result is fixed (`!=`→true,
                         // `==`→false) WITHOUT evaluating the primitive side (which may have side effects).
@@ -3571,30 +5580,76 @@ impl<'a> Lower<'a> {
                         let l_wp = lt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
                         let r_wp = rt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
                         if let Some(wp) = l_wp.or(r_wp) {
-                            let (w_e, w_ty, p_e) = if l_wp.is_some() { (lhs, lt, rhs) } else { (rhs, rt, lhs) };
+                            let (w_e, w_ty, p_e) = if l_wp.is_some() {
+                                (lhs, lt, rhs)
+                            } else {
+                                (rhs, rt, lhs)
+                            };
                             let wv = self.expr(w_e)?;
                             let v = self.fresh_value();
-                            let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(w_ty), init: Some(wv) });
+                            let var = self.ir.add_expr(IrExpr::Variable {
+                                index: v,
+                                ty: ty_to_ir(w_ty),
+                                init: Some(wv),
+                            });
                             let getn = self.ir.add_expr(IrExpr::GetValue(v));
                             let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                            let isnull = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: getn, rhs: nullc });
+                            let isnull = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::Eq,
+                                lhs: getn,
+                                rhs: nullc,
+                            });
                             let getw = self.ir.add_expr(IrExpr::GetValue(v));
-                            let unboxed = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: getw, type_operand: ty_to_ir(wp) });
+                            let unboxed = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: getw,
+                                type_operand: ty_to_ir(wp),
+                            });
                             let pv = self.lower_arg(p_e, &ty_to_ir(wp))?;
-                            let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: unboxed, rhs: pv });
-                            let fixed = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
-                            let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(isnull), fixed), (None, cmp)] });
-                            return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) }));
+                            let cmp = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: irop,
+                                lhs: unboxed,
+                                rhs: pv,
+                            });
+                            let fixed = self
+                                .ir
+                                .add_expr(IrExpr::Const(IrConst::Boolean(op == BinOp::Ne)));
+                            let when = self.ir.add_expr(IrExpr::When {
+                                branches: vec![(Some(isnull), fixed), (None, cmp)],
+                            });
+                            return Some(self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![var],
+                                value: Some(when),
+                            }));
                         }
                         // A general `Any == 5`: box the primitive operand → structural `Intrinsics.areEqual`.
                         let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-                        if lt.is_primitive() { l = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: l, type_operand: obj }); }
-                        else { r = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: obj }); }
+                        if lt.is_primitive() {
+                            l = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: l,
+                                type_operand: obj,
+                            });
+                        } else {
+                            r = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: r,
+                                type_operand: obj,
+                            });
+                        }
                     }
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: irop, lhs: l, rhs: r })
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: irop,
+                        lhs: l,
+                        rhs: r,
+                    })
                 }
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 // Constant-fold a literal-boolean condition (`if (false) { … }`) — emit only the taken
                 // branch, like kotlinc's dead-code elimination. (Emitting the dead branch can produce
                 // unverifiable frames, e.g. a `try` whose handler slot conflicts in unreachable code.)
@@ -3604,7 +5659,10 @@ impl<'a> Lower<'a> {
                         return match else_branch {
                             Some(els) => self.expr(els),
                             // `if (false) {}` with no else is a no-op `Unit` statement.
-                            None => Some(self.ir.add_expr(IrExpr::Block { stmts: vec![], value: None })),
+                            None => Some(self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![],
+                                value: None,
+                            })),
                         };
                     }
                     _ => {}
@@ -3614,10 +5672,18 @@ impl<'a> Lower<'a> {
                 // null` → `Boolean?`), the primitive branch must be boxed at the merge so both branches
                 // agree on the (reference) stack type — `lower_arg` to the result type inserts the box.
                 let res = self.info.ty(e);
-                let t = if res.is_reference() { self.lower_arg(then_branch, &ty_to_ir(res))? } else { self.expr(then_branch)? };
+                let t = if res.is_reference() {
+                    self.lower_arg(then_branch, &ty_to_ir(res))?
+                } else {
+                    self.expr(then_branch)?
+                };
                 let branches = match else_branch {
                     Some(els) => {
-                        let e2 = if res.is_reference() { self.lower_arg(els, &ty_to_ir(res))? } else { self.expr(els)? };
+                        let e2 = if res.is_reference() {
+                            self.lower_arg(els, &ty_to_ir(res))?
+                        } else {
+                            self.expr(els)?
+                        };
                         vec![(Some(c), t), (None, e2)]
                     }
                     None => vec![(Some(c), t)],
@@ -3625,37 +5691,76 @@ impl<'a> Lower<'a> {
                 self.ir.add_expr(IrExpr::When { branches })
             }
             // `x is T` / `x !is T` / `x as T` → the existing `IrTypeOp` node (no new node).
-            Expr::Is { operand, ty, negated } => {
+            Expr::Is {
+                operand,
+                ty,
+                negated,
+            } => {
                 let arg = self.expr(operand)?;
-                let op = if negated { IrTypeOp::NotInstanceOf } else { IrTypeOp::InstanceOf };
+                let op = if negated {
+                    IrTypeOp::NotInstanceOf
+                } else {
+                    IrTypeOp::InstanceOf
+                };
                 // A reference target, or a primitive (`x is Int` → `instanceof` the boxed wrapper, which
                 // the backend resolves from the primitive type_operand).
                 let target = self.ty_ref(&ty).or_else(|| {
-                    if ty.nullable { None } else { Ty::from_name(&ty.name).filter(|t| t.is_primitive() && !matches!(t, Ty::Double | Ty::Float)) }
+                    if ty.nullable {
+                        None
+                    } else {
+                        Ty::from_name(&ty.name)
+                            .filter(|t| t.is_primitive() && !matches!(t, Ty::Double | Ty::Float))
+                    }
                 })?;
                 // An unsigned target tests against its inline-class object (`kotlin/UInt`), not the
                 // representation's wrapper (`Integer`).
                 let type_operand = if target.is_unsigned() {
-                    ty_to_ir(Ty::obj(if target == Ty::UInt { "kotlin/UInt" } else { "kotlin/ULong" }))
+                    ty_to_ir(Ty::obj(if target == Ty::UInt {
+                        "kotlin/UInt"
+                    } else {
+                        "kotlin/ULong"
+                    }))
                 } else {
                     ty_to_ir(target)
                 };
-                self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op,
+                    arg,
+                    type_operand,
+                })
             }
-            Expr::InRange { value, start, end, kind, negated } => {
+            Expr::InRange {
+                value,
+                start,
+                end,
+                kind,
+                negated,
+            } => {
                 use crate::ast::RangeKind;
                 // Evaluate the bounds then the value once each (source order: start, end, value —
                 // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
                 // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
                 let s = self.expr(start)?;
                 let sv = self.fresh_value();
-                let var_s = self.ir.add_expr(IrExpr::Variable { index: sv, ty: ty_to_ir(self.info.ty(start)), init: Some(s) });
+                let var_s = self.ir.add_expr(IrExpr::Variable {
+                    index: sv,
+                    ty: ty_to_ir(self.info.ty(start)),
+                    init: Some(s),
+                });
                 let en = self.expr(end)?;
                 let ev = self.fresh_value();
-                let var_e = self.ir.add_expr(IrExpr::Variable { index: ev, ty: ty_to_ir(self.info.ty(end)), init: Some(en) });
+                let var_e = self.ir.add_expr(IrExpr::Variable {
+                    index: ev,
+                    ty: ty_to_ir(self.info.ty(end)),
+                    init: Some(en),
+                });
                 let v = self.expr(value)?;
                 let vv = self.fresh_value();
-                let var_v = self.ir.add_expr(IrExpr::Variable { index: vv, ty: ty_to_ir(self.info.ty(value)), init: Some(v) });
+                let var_v = self.ir.add_expr(IrExpr::Variable {
+                    index: vv,
+                    ty: ty_to_ir(self.info.ty(value)),
+                    init: Some(v),
+                });
                 // `lo`/`hi` are the inclusive low / (in/ex)clusive high bound. `downTo` runs high→low, so
                 // membership is `end <= value <= start` — swap the bounds.
                 let (lo, hi, hi_strict) = match kind {
@@ -3671,29 +5776,68 @@ impl<'a> Lower<'a> {
                     let la = this.ir.add_expr(IrExpr::GetValue(a));
                     let lb = this.ir.add_expr(IrExpr::GetValue(b));
                     if elem.is_unsigned() {
-                        let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+                        let (owner, prim) = if elem == Ty::UInt {
+                            ("java/lang/Integer", "I")
+                        } else {
+                            ("java/lang/Long", "J")
+                        };
                         let call = this.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
-                            dispatch_receiver: None, args: vec![la, lb],
+                            callee: Callee::Static {
+                                owner: owner.to_string(),
+                                name: "compareUnsigned".to_string(),
+                                descriptor: format!("({prim}{prim})I"),
+                                inline: false,
+                            },
+                            dispatch_receiver: None,
+                            args: vec![la, lb],
                         });
                         let zero = this.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                        this.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: call, rhs: zero })
+                        this.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op,
+                            lhs: call,
+                            rhs: zero,
+                        })
                     } else {
-                        this.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: la, rhs: lb })
+                        this.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op,
+                            lhs: la,
+                            rhs: lb,
+                        })
                     }
                 };
                 let cond = if negated {
                     // value < lo  ||  value (> | >=) hi
                     let c1 = cmp(self, IrBinOp::Lt, vv, lo);
-                    let c2 = cmp(self, if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt }, vv, hi);
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: c1, rhs: c2 })
+                    let c2 = cmp(
+                        self,
+                        if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt },
+                        vv,
+                        hi,
+                    );
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Or,
+                        lhs: c1,
+                        rhs: c2,
+                    })
                 } else {
                     // lo <= value  &&  value (< | <=) hi
                     let c1 = cmp(self, IrBinOp::Le, lo, vv);
-                    let c2 = cmp(self, if hi_strict { IrBinOp::Lt } else { IrBinOp::Le }, vv, hi);
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::And, lhs: c1, rhs: c2 })
+                    let c2 = cmp(
+                        self,
+                        if hi_strict { IrBinOp::Lt } else { IrBinOp::Le },
+                        vv,
+                        hi,
+                    );
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::And,
+                        lhs: c1,
+                        rhs: c2,
+                    })
                 };
-                self.ir.add_expr(IrExpr::Block { stmts: vec![var_s, var_e, var_v], value: Some(cond) })
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![var_s, var_e, var_v],
+                    value: Some(cond),
+                })
             }
             Expr::RangeTo { lo, hi, kind } => {
                 use crate::ast::RangeKind;
@@ -3708,8 +5852,14 @@ impl<'a> Lower<'a> {
                     (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", "C", Ty::Char),
                     (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", "I", Ty::UInt),
                     (Ty::ULong, Ty::ULong) => ("kotlin/ranges/ULongRange", "J", Ty::ULong),
-                    (l, r) if small_int(&l) && small_int(&r) => ("kotlin/ranges/IntRange", "I", Ty::Int),
-                    (l, r) if (small_int(&l) || l == Ty::Long) && (small_int(&r) || r == Ty::Long) => ("kotlin/ranges/LongRange", "J", Ty::Long),
+                    (l, r) if small_int(&l) && small_int(&r) => {
+                        ("kotlin/ranges/IntRange", "I", Ty::Int)
+                    }
+                    (l, r)
+                        if (small_int(&l) || l == Ty::Long) && (small_int(&r) || r == Ty::Long) =>
+                    {
+                        ("kotlin/ranges/LongRange", "J", Ty::Long)
+                    }
                     _ => return None,
                 };
                 let lo_v = self.lower_arg(lo, &ty_to_ir(elem))?;
@@ -3720,11 +5870,19 @@ impl<'a> Lower<'a> {
                     RangeKind::Through if elem.is_unsigned() => {
                         let marker = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                         let ctor_desc = format!("({prim_desc}{prim_desc}Lkotlin/jvm/internal/DefaultConstructorMarker;)V");
-                        self.ir.add_expr(IrExpr::NewExternal { internal: range_internal.to_string(), ctor_desc, args: vec![lo_v, hi_v, marker] })
+                        self.ir.add_expr(IrExpr::NewExternal {
+                            internal: range_internal.to_string(),
+                            ctor_desc,
+                            args: vec![lo_v, hi_v, marker],
+                        })
                     }
                     RangeKind::Through => {
                         let ctor_desc = format!("({prim_desc}{prim_desc})V");
-                        self.ir.add_expr(IrExpr::NewExternal { internal: range_internal.to_string(), ctor_desc, args: vec![lo_v, hi_v] })
+                        self.ir.add_expr(IrExpr::NewExternal {
+                            internal: range_internal.to_string(),
+                            ctor_desc,
+                            args: vec![lo_v, hi_v],
+                        })
                     }
                     // `a..<b` → `RangesKt.until(a, b)` (the `rangeUntil` operator), returning the range.
                     // (Unsigned `..<` uses a different intrinsic krusty doesn't model yet — skip.)
@@ -3732,7 +5890,12 @@ impl<'a> Lower<'a> {
                     RangeKind::Until => {
                         let descriptor = format!("({prim_desc}{prim_desc})L{range_internal};");
                         self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static { owner: "kotlin/ranges/RangesKt".to_string(), name: "until".to_string(), descriptor, inline: false },
+                            callee: Callee::Static {
+                                owner: "kotlin/ranges/RangesKt".to_string(),
+                                name: "until".to_string(),
+                                descriptor,
+                                inline: false,
+                            },
                             dispatch_receiver: None,
                             args: vec![lo_v, hi_v],
                         })
@@ -3741,11 +5904,17 @@ impl<'a> Lower<'a> {
                     RangeKind::DownTo => return None,
                 }
             }
-            Expr::IncDec { target, dec, prefix } => {
+            Expr::IncDec {
+                target,
+                dec,
+                prefix,
+            } => {
                 // `var++`/`++var` as a value. Only a simple local/captured variable; anything else bails.
                 // No temp slot: the update is `i = i ± 1`; the value is the new `i` (prefix) or, for a
                 // postfix, the new `i` minus the step (the old value) — valid for every numeric type.
-                let Expr::Name(name) = self.afile.expr(target).clone() else { return None };
+                let Expr::Name(name) = self.afile.expr(target).clone() else {
+                    return None;
+                };
                 // A boxed mutable-capture local: `var++`/`++var` as a value, through its `Ref` holder.
                 // (A `Byte`/`Short`/`Char` boxed inc-as-expression is rare — skip it rather than model
                 // the narrowing here.)
@@ -3762,20 +5931,41 @@ impl<'a> Lower<'a> {
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
                     let h1 = self.ir.add_expr(IrExpr::GetValue(holder));
-                    let cur = self.ir.add_expr(IrExpr::RefGet { holder: h1, elem: elem_ir.clone() });
+                    let cur = self.ir.add_expr(IrExpr::RefGet {
+                        holder: h1,
+                        elem: elem_ir.clone(),
+                    });
                     let one1 = self.ir.add_expr(IrExpr::Const(one_c.clone()));
-                    let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one1 });
+                    let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op,
+                        lhs: cur,
+                        rhs: one1,
+                    });
                     let h2 = self.ir.add_expr(IrExpr::GetValue(holder));
-                    let set = self.ir.add_expr(IrExpr::RefSet { holder: h2, elem: elem_ir.clone(), value: nv });
+                    let set = self.ir.add_expr(IrExpr::RefSet {
+                        holder: h2,
+                        elem: elem_ir.clone(),
+                        value: nv,
+                    });
                     let h3 = self.ir.add_expr(IrExpr::GetValue(holder));
-                    let read = self.ir.add_expr(IrExpr::RefGet { holder: h3, elem: elem_ir });
+                    let read = self.ir.add_expr(IrExpr::RefGet {
+                        holder: h3,
+                        elem: elem_ir,
+                    });
                     let value = if prefix {
                         read
                     } else {
                         let one2 = self.ir.add_expr(IrExpr::Const(one_c));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: undo, lhs: read, rhs: one2 })
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: undo,
+                            lhs: read,
+                            rhs: one2,
+                        })
                     };
-                    return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) }));
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![set],
+                        value: Some(value),
+                    }));
                 }
                 let (v, ty) = self.lookup(&name)?;
                 let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
@@ -3784,14 +5974,33 @@ impl<'a> Lower<'a> {
                     // `Variable` inside an operand `Block` trips the verifier in a template/argument
                     // position): the postfix value is `narrow(new ∓ 1)`, which wraps back to the old value
                     // even at the boundary (`Byte` 127++: new = narrow(128) = -128; narrow(-128 - 1) = 127).
-                    let narrow = |this: &mut Self, val: u32| this.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: val, type_operand: ty_to_ir(ty) });
-                    let widen = |this: &mut Self, val: u32| this.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: val, type_operand: ty_to_ir(Ty::Int) });
+                    let narrow = |this: &mut Self, val: u32| {
+                        this.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: val,
+                            type_operand: ty_to_ir(ty),
+                        })
+                    };
+                    let widen = |this: &mut Self, val: u32| {
+                        this.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: val,
+                            type_operand: ty_to_ir(Ty::Int),
+                        })
+                    };
                     let cur = self.ir.add_expr(IrExpr::GetValue(v));
                     let cur_i = widen(self, cur);
                     let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_i, rhs: one });
+                    let sum = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op,
+                        lhs: cur_i,
+                        rhs: one,
+                    });
                     let narrowed = narrow(self, sum);
-                    let set = self.ir.add_expr(IrExpr::SetValue { var: v, value: narrowed });
+                    let set = self.ir.add_expr(IrExpr::SetValue {
+                        var: v,
+                        value: narrowed,
+                    });
                     let value = if prefix {
                         self.ir.add_expr(IrExpr::GetValue(v))
                     } else {
@@ -3799,10 +6008,17 @@ impl<'a> Lower<'a> {
                         let read_i = widen(self, read);
                         let one2 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
                         let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
-                        let back = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: undo, lhs: read_i, rhs: one2 });
+                        let back = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: undo,
+                            lhs: read_i,
+                            rhs: one2,
+                        });
                         narrow(self, back)
                     };
-                    return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) }));
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![set],
+                        value: Some(value),
+                    }));
                 }
                 let one = match ty {
                     Ty::Int => IrConst::Int(1),
@@ -3814,7 +6030,11 @@ impl<'a> Lower<'a> {
                 // i = i ± 1 (no temp: wraparound is consistent for Int/Long/Float/Double)
                 let cur = self.ir.add_expr(IrExpr::GetValue(v));
                 let one1 = self.ir.add_expr(IrExpr::Const(one.clone()));
-                let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur, rhs: one1 });
+                let nv = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op,
+                    lhs: cur,
+                    rhs: one1,
+                });
                 let set = self.ir.add_expr(IrExpr::SetValue { var: v, value: nv });
                 // value: new `i` (prefix), or new `i` ∓ 1 = old `i` (postfix).
                 let read = self.ir.add_expr(IrExpr::GetValue(v));
@@ -3823,11 +6043,22 @@ impl<'a> Lower<'a> {
                 } else {
                     let one2 = self.ir.add_expr(IrExpr::Const(one));
                     let undo = if dec { IrBinOp::Add } else { IrBinOp::Sub };
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: undo, lhs: read, rhs: one2 })
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: undo,
+                        lhs: read,
+                        rhs: one2,
+                    })
                 };
-                self.ir.add_expr(IrExpr::Block { stmts: vec![set], value: Some(value) })
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![set],
+                    value: Some(value),
+                })
             }
-            Expr::As { operand, ty, nullable } => {
+            Expr::As {
+                operand,
+                ty,
+                nullable,
+            } => {
                 // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
                 // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
                 // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
@@ -3838,14 +6069,31 @@ impl<'a> Lower<'a> {
                     let v = self.expr(operand)?;
                     let ov = self.fresh_value();
                     let oty = ty_to_ir(self.info.ty(operand));
-                    let var_t = self.ir.add_expr(IrExpr::Variable { index: ov, ty: oty, init: Some(v) });
+                    let var_t = self.ir.add_expr(IrExpr::Variable {
+                        index: ov,
+                        ty: oty,
+                        init: Some(v),
+                    });
                     let g1 = self.ir.add_expr(IrExpr::GetValue(ov));
-                    let is_t = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::InstanceOf, arg: g1, type_operand: target_ir.clone() });
+                    let is_t = self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::InstanceOf,
+                        arg: g1,
+                        type_operand: target_ir.clone(),
+                    });
                     let g2 = self.ir.add_expr(IrExpr::GetValue(ov));
-                    let cast_t = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::Cast, arg: g2, type_operand: target_ir });
+                    let cast_t = self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::Cast,
+                        arg: g2,
+                        type_operand: target_ir,
+                    });
                     let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let when = self.ir.add_expr(IrExpr::When { branches: vec![(Some(is_t), cast_t), (None, nullc)] });
-                    return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_t], value: Some(when) }));
+                    let when = self.ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(is_t), cast_t), (None, nullc)],
+                    });
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![var_t],
+                        value: Some(when),
+                    }));
                 }
                 let arg = self.expr(operand)?;
                 let target = self.ty_ref(&ty)?;
@@ -3857,7 +6105,11 @@ impl<'a> Lower<'a> {
                 } else {
                     IrTypeOp::Cast
                 };
-                self.ir.add_expr(IrExpr::TypeOp { op, arg, type_operand })
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op,
+                    arg,
+                    type_operand,
+                })
             }
             Expr::Unary { op, operand } => {
                 use crate::ast::UnOp;
@@ -3869,8 +6121,12 @@ impl<'a> Lower<'a> {
                         // which yields `+0.0` for `-0.0` (losing the sign IEEE-754 comparisons distinguish,
                         // e.g. `Double.compare(0.0, -0.0) == 1`).
                         match self.afile.expr(operand) {
-                            Expr::DoubleLit(d) => return Some(self.ir.add_expr(IrExpr::Const(IrConst::Double(-d)))),
-                            Expr::FloatLit(f) => return Some(self.ir.add_expr(IrExpr::Const(IrConst::Float(-f)))),
+                            Expr::DoubleLit(d) => {
+                                return Some(self.ir.add_expr(IrExpr::Const(IrConst::Double(-d))))
+                            }
+                            Expr::FloatLit(f) => {
+                                return Some(self.ir.add_expr(IrExpr::Const(IrConst::Float(-f))))
+                            }
                             _ => {}
                         }
                         // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
@@ -3881,11 +6137,19 @@ impl<'a> Lower<'a> {
                             Ty::Float => self.ir.add_expr(IrExpr::Const(IrConst::Float(0.0))),
                             _ => self.ir.add_expr(IrExpr::Const(IrConst::Int(0))),
                         };
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Sub, lhs: zero, rhs: v })
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Sub,
+                            lhs: zero,
+                            rhs: v,
+                        })
                     }
                     UnOp::Not => {
                         let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: v, rhs: f })
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Eq,
+                            lhs: v,
+                            rhs: f,
+                        })
                     }
                 }
             }
@@ -3941,7 +6205,11 @@ impl<'a> Lower<'a> {
                     Some(subj) if !matches!(self.afile.expr(subj), Expr::Name(_)) => {
                         let sv = self.expr(subj)?;
                         let v = self.fresh_value();
-                        let var = self.ir.add_expr(IrExpr::Variable { index: v, ty: ty_to_ir(self.info.ty(subj)), init: Some(sv) });
+                        let var = self.ir.add_expr(IrExpr::Variable {
+                            index: v,
+                            ty: ty_to_ir(self.info.ty(subj)),
+                            init: Some(sv),
+                        });
                         Some((v, var))
                     }
                     _ => None,
@@ -3952,7 +6220,11 @@ impl<'a> Lower<'a> {
                 let res = self.info.ty(e);
                 let mut branches = Vec::new();
                 for (ai, arm) in arms.iter().enumerate() {
-                    let body = if res.is_reference() { self.lower_arg(arm.body, &ty_to_ir(res))? } else { self.expr(arm.body)? };
+                    let body = if res.is_reference() {
+                        self.lower_arg(arm.body, &ty_to_ir(res))?
+                    } else {
+                        self.expr(arm.body)?
+                    };
                     if arm.conditions.is_empty() || (make_last_else && ai == last) {
                         branches.push((None, body)); // else (real, or the exhaustive last arm)
                     } else {
@@ -3968,18 +6240,30 @@ impl<'a> Lower<'a> {
                                     (Some((v, _)), _) => {
                                         let s = self.ir.add_expr(IrExpr::GetValue(v));
                                         let cv = self.expr(c)?;
-                                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                            op: IrBinOp::Eq,
+                                            lhs: s,
+                                            rhs: cv,
+                                        })
                                     }
                                     (None, Some(subj)) => {
                                         let s = self.expr(subj)?;
                                         let cv = self.expr(c)?;
-                                        self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs: s, rhs: cv })
+                                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                            op: IrBinOp::Eq,
+                                            lhs: s,
+                                            rhs: cv,
+                                        })
                                     }
                                     (None, None) => self.expr(c)?,
                                 }
                             };
                             cond = Some(match cond {
-                                Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: prev, rhs: test }),
+                                Some(prev) => self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: IrBinOp::Or,
+                                    lhs: prev,
+                                    rhs: test,
+                                }),
                                 None => test,
                             });
                         }
@@ -3989,27 +6273,45 @@ impl<'a> Lower<'a> {
                 let when = self.ir.add_expr(IrExpr::When { branches });
                 // Prepend the subject-temp declaration (if any) so it's evaluated before the arms.
                 match subj_tmp {
-                    Some((_, var)) => self.ir.add_expr(IrExpr::Block { stmts: vec![var], value: Some(when) }),
+                    Some((_, var)) => self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![var],
+                        value: Some(when),
+                    }),
                     None => when,
                 }
             }
             Expr::Template(parts) => {
                 let mut iter = parts.iter();
                 let mut acc = match iter.clone().next() {
-                    Some(TemplatePart::Str(s)) => { iter.next(); self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))) }
-                    _ => self.ir.add_expr(IrExpr::Const(IrConst::String(String::new()))),
+                    Some(TemplatePart::Str(s)) => {
+                        iter.next();
+                        self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
+                    }
+                    _ => self
+                        .ir
+                        .add_expr(IrExpr::Const(IrConst::String(String::new()))),
                 };
                 for part in iter {
                     let rhs = match part {
-                        TemplatePart::Str(s) => self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone()))),
+                        TemplatePart::Str(s) => {
+                            self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
+                        }
                         TemplatePart::Expr(e) => {
                             let v = self.expr(*e)?;
                             // An unsigned interpolated value prints in unsigned decimal.
                             let ety = self.info.ty(*e);
-                            if ety.is_unsigned() { self.unsigned_to_string(v, ety) } else { v }
+                            if ety.is_unsigned() {
+                                self.unsigned_to_string(v, ety)
+                            } else {
+                                v
+                            }
                         }
                     };
-                    acc = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/String.plus".to_string()), dispatch_receiver: Some(acc), args: vec![rhs] });
+                    acc = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::External("kotlin/String.plus".to_string()),
+                        dispatch_receiver: Some(acc),
+                        args: vec![rhs],
+                    });
                 }
                 acc
             }
@@ -4022,7 +6324,12 @@ impl<'a> Lower<'a> {
                     if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
                         if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
                             let params = self.ir.functions[fid as usize].params.clone();
-                            let caps = self.info.local_fun_captures.get(&stmt_id).cloned().unwrap_or_default();
+                            let caps = self
+                                .info
+                                .local_fun_captures
+                                .get(&stmt_id)
+                                .cloned()
+                                .unwrap_or_default();
                             if args.len() + caps.len() == params.len() {
                                 let mut a = Vec::new();
                                 for (name, _) in &caps {
@@ -4032,70 +6339,141 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params[caps.len()..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                                return Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Local(fid),
+                                    dispatch_receiver: None,
+                                    args: a,
+                                }));
                             }
                         }
                     }
                     // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
                     // currently being expanded: inline the passed lambda's body in place.
                     if self.lookup(&fname).is_none() {
-                        if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
+                        if let Some(idx) =
+                            self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname)
+                        {
                             return self.lower_inline_lambda_invoke(idx, &args);
                         }
                     }
                     // A user-defined `inline fun foo(...)` — expand it here (kotlinc's inliner): bind its
                     // value parameters to the evaluated arguments, register its lambda arguments, and
                     // lower its body so a lambda capturing a mutable local works (no closure).
-                    if self.lookup(&fname).is_none() && self.syms.funs.get(&fname).map_or(false, |s| s.is_inline) {
+                    if self.lookup(&fname).is_none()
+                        && self.syms.funs.get(&fname).map_or(false, |s| s.is_inline)
+                    {
                         return self.lower_inline_fn_call(&fname, &args);
                     }
                     // `repeat(count) { i -> body }` — the stdlib inline `repeat`, body
                     // `for (i in 0 until times) action(i)`. Inline to a counted loop (the lambda's
                     // single parameter is the index) so a mutable capture works.
-                    if fname == "repeat" && args.len() == 2 && self.lookup(&fname).is_none() && self.fun_ids.get(&fname).is_none() {
-                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[1]).clone() {
+                    if fname == "repeat"
+                        && args.len() == 2
+                        && self.lookup(&fname).is_none()
+                        && self.fun_ids.get(&fname).is_none()
+                    {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[1]).clone()
+                        {
                             let count = self.lower_arg(args[0], &ty_to_ir(Ty::Int))?;
                             let depth = self.scope.len();
                             let i_v = self.fresh_value();
                             let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                            let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: ty_to_ir(Ty::Int), init: Some(zero) });
+                            let var_i = self.ir.add_expr(IrExpr::Variable {
+                                index: i_v,
+                                ty: ty_to_ir(Ty::Int),
+                                init: Some(zero),
+                            });
                             let n_v = self.fresh_value();
-                            let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: ty_to_ir(Ty::Int), init: Some(count) });
+                            let var_n = self.ir.add_expr(IrExpr::Variable {
+                                index: n_v,
+                                ty: ty_to_ir(Ty::Int),
+                                init: Some(count),
+                            });
                             let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
                             self.scope.push((pname, i_v, Ty::Int)); // the index parameter is the counter
                             let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
                             let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-                            let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
+                            let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::Lt,
+                                lhs: gi,
+                                rhs: gn,
+                            });
                             let mut out = Vec::new();
-                            if self.append_body_stmts(lbody, &mut out).is_none() { self.scope.truncate(depth); return None; }
+                            if self.append_body_stmts(lbody, &mut out).is_none() {
+                                self.scope.truncate(depth);
+                                return None;
+                            }
                             let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
                             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi2, rhs: one });
-                            let incs = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc });
-                            let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
-                            let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(incs), post_test: false, label: None });
+                            let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::Add,
+                                lhs: gi2,
+                                rhs: one,
+                            });
+                            let incs = self.ir.add_expr(IrExpr::SetValue {
+                                var: i_v,
+                                value: inc,
+                            });
+                            let wbody = self.ir.add_expr(IrExpr::Block {
+                                stmts: out,
+                                value: None,
+                            });
+                            let wh = self.ir.add_expr(IrExpr::While {
+                                cond,
+                                body: wbody,
+                                update: Some(incs),
+                                post_test: false,
+                                label: None,
+                            });
                             self.scope.truncate(depth);
-                            return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_n, wh], value: None }));
+                            return Some(self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![var_i, var_n, wh],
+                                value: None,
+                            }));
                         }
                     }
                     // SAM conversion `Pred { lambda }` — a functional interface built from a lambda;
                     // lower the lambda as a `LambdaMetafactory` instance targeting the interface's
                     // single abstract method (instead of `FunctionN.invoke`).
-                    if args.len() == 1 && self.lookup(&fname).is_none() && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
+                    if args.len() == 1
+                        && self.lookup(&fname).is_none()
+                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
+                    {
                         if let Some(internal) = self.info.ty(e).obj_internal() {
                             // A file interface (its single method), or a classpath functional interface
                             // (`Runnable`, …) — its single abstract method from the library set.
-                            let target = self.classes.get(internal)
-                                .filter(|ci| self.ir.classes[ci.id as usize].is_interface && self.ir.classes[ci.id as usize].methods.len() == 1)
+                            let target = self
+                                .classes
+                                .get(internal)
+                                .filter(|ci| {
+                                    self.ir.classes[ci.id as usize].is_interface
+                                        && self.ir.classes[ci.id as usize].methods.len() == 1
+                                })
                                 .map(|ci| {
-                                    let f = &self.ir.functions[self.ir.classes[ci.id as usize].methods[0] as usize];
+                                    let f = &self.ir.functions
+                                        [self.ir.classes[ci.id as usize].methods[0] as usize];
                                     (f.name.clone(), f.ret == ty_to_ir(Ty::Unit))
                                 })
-                                .or_else(|| self.syms.libraries.sam_method(internal).map(|m| (m.name, m.ret == Ty::Unit)));
+                                .or_else(|| {
+                                    self.syms
+                                        .libraries
+                                        .sam_method(internal)
+                                        .map(|m| (m.name, m.ret == Ty::Unit))
+                                });
                             if let Some((method, void)) = target {
                                 let iface = internal.to_string();
-                                if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
-                                    return self.lower_lambda_sam(args[0], &params, body, Some((iface, method, void)));
+                                if let Expr::Lambda { params, body } =
+                                    self.afile.expr(args[0]).clone()
+                                {
+                                    return self.lower_lambda_sam(
+                                        args[0],
+                                        &params,
+                                        body,
+                                        Some((iface, method, void)),
+                                    );
                                 }
                             }
                         }
@@ -4105,7 +6483,11 @@ impl<'a> Lower<'a> {
                     // bail rather than miscompile (it would emit a bogus constructor call).
                     if self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname) {
                         if let Some(cur) = self.cur_class.clone() {
-                            if self.classes.get(&cur).map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname)) {
+                            if self
+                                .classes
+                                .get(&cur)
+                                .map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname))
+                            {
                                 return None;
                             }
                         }
@@ -4123,19 +6505,28 @@ impl<'a> Lower<'a> {
                             a.push(self.expr(*arg)?);
                         }
                         let ret = ty_to_ir(sig.ret);
-                        return Some(self.ir.add_expr(IrExpr::InvokeFunction { func, args: a, ret }));
+                        return Some(self.ir.add_expr(IrExpr::InvokeFunction {
+                            func,
+                            args: a,
+                            ret,
+                        }));
                     }
                     // The array creators (`arrayOf`/`intArrayOf`/…/`IntArray(n)`) are compiler INTRINSICS
                     // in kotlinc (they have no callable body — the backend lowers them to array bytecode by
                     // resolved symbol). Honor that resolution: treat the name as the intrinsic ONLY when it
                     // is not shadowed by a user-defined function or local of the same name (a user `fun
                     // arrayOf` wins, exactly as in kotlinc) — never by bare source name alone.
-                    let array_intrinsic_ok = self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname);
+                    let array_intrinsic_ok =
+                        self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname);
                     // Primitive-array size constructor `IntArray(n)` → a per-element intrinsic that
                     // encodes the element type (so the backend picks the right allocation).
                     if array_intrinsic_ok && prim_array_elem(&fname).is_some() && args.len() == 1 {
                         let size = self.expr(args[0])?;
-                        return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::External(format!("kotlin/{fname}.<init>")), dispatch_receiver: None, args: vec![size] }));
+                        return Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::External(format!("kotlin/{fname}.<init>")),
+                            dispatch_receiver: None,
+                            args: vec![size],
+                        }));
                     }
                     // Array init constructor `IntArray(n) { i -> elem }` / `Array<T>(n) { i -> elem }`:
                     // kotlinc inlines the index lambda into a fill loop. Desugar to
@@ -4145,73 +6536,129 @@ impl<'a> Lower<'a> {
                     // it's skipped). `NewArray` allocates (`newarray`/`anewarray`); `kotlin/Array.set`
                     // stores (the backend picks `iastore`/`aastore`/… by the array's element type).
                     if array_intrinsic_ok && args.len() == 2 {
-                      let elem = prim_array_elem(&fname).or_else(||
-                          if fname == "Array" { self.info.ty(e).array_elem().filter(|t| t.is_reference()) } else { None });
-                      if let Some(elem) = elem {
-                        if let Expr::Lambda { params, body } = self.afile.expr(args[1]).clone() {
-                            let elem_ir = ty_to_ir(elem);
-                            let int_ir = ty_to_ir(Ty::Int);
-                            // val n = <size> (evaluated once — the bound is read again in the loop)
-                            let size = self.lower_arg(args[0], &int_ir)?;
-                            let n_v = self.fresh_value();
-                            let var_n = self.ir.add_expr(IrExpr::Variable { index: n_v, ty: int_ir.clone(), init: Some(size) });
-                            // val a = new T[n]
-                            let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
-                            let alloc = self.ir.add_expr(IrExpr::NewArray { element_type: elem_ir.clone(), size: gn0 });
-                            let arr_v = self.fresh_value();
-                            let arr_ir = ty_to_ir(Ty::array(elem));
-                            let var_arr = self.ir.add_expr(IrExpr::Variable { index: arr_v, ty: arr_ir, init: Some(alloc) });
-                            // var i = 0
-                            let i_v = self.fresh_value();
-                            let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                            let var_i = self.ir.add_expr(IrExpr::Variable { index: i_v, ty: int_ir, init: Some(zero) });
-                            // cond: i < n
-                            let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                            let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
-                            let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: gi, rhs: gn });
-                            // body: a[i] = <lambda body with the index param bound to i>
-                            let pname = params.first().cloned().unwrap_or_else(|| "it".to_string());
-                            let depth = self.scope.len();
-                            self.scope.push((pname, i_v, Ty::Int));
-                            let body_val = self.lower_arg(body, &elem_ir);
-                            self.scope.truncate(depth);
-                            let body_val = body_val?;
-                            // Spill the element value into a temp before the store: a branchy body
-                            // (`{ it % 2 == 0 }`) records a stackmap frame, and `kotlin/Array.set` pushes
-                            // the array + index *before* the value — without the spill those operands
-                            // would be stranded on the stack across that frame (VerifyError).
-                            let tmp_v = self.fresh_value();
-                            let var_tmp = self.ir.add_expr(IrExpr::Variable { index: tmp_v, ty: elem_ir, init: Some(body_val) });
-                            let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                            let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                            let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
-                            let set = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.set".to_string()), dispatch_receiver: Some(ga), args: vec![gi2, gtmp] });
-                            let wbody = self.ir.add_expr(IrExpr::Block { stmts: vec![var_tmp, set], value: None });
-                            // update: i = i + 1
-                            let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-                            let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Add, lhs: gi3, rhs: one });
-                            let inc = self.ir.add_expr(IrExpr::SetValue { var: i_v, value: inc_val });
-                            let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(inc), post_test: false, label: None });
-                            let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
-                            return Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_n, var_arr, var_i, wh], value: Some(result) }));
+                        let elem = prim_array_elem(&fname).or_else(|| {
+                            if fname == "Array" {
+                                self.info.ty(e).array_elem().filter(|t| t.is_reference())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(elem) = elem {
+                            if let Expr::Lambda { params, body } = self.afile.expr(args[1]).clone()
+                            {
+                                let elem_ir = ty_to_ir(elem);
+                                let int_ir = ty_to_ir(Ty::Int);
+                                // val n = <size> (evaluated once — the bound is read again in the loop)
+                                let size = self.lower_arg(args[0], &int_ir)?;
+                                let n_v = self.fresh_value();
+                                let var_n = self.ir.add_expr(IrExpr::Variable {
+                                    index: n_v,
+                                    ty: int_ir.clone(),
+                                    init: Some(size),
+                                });
+                                // val a = new T[n]
+                                let gn0 = self.ir.add_expr(IrExpr::GetValue(n_v));
+                                let alloc = self.ir.add_expr(IrExpr::NewArray {
+                                    element_type: elem_ir.clone(),
+                                    size: gn0,
+                                });
+                                let arr_v = self.fresh_value();
+                                let arr_ir = ty_to_ir(Ty::array(elem));
+                                let var_arr = self.ir.add_expr(IrExpr::Variable {
+                                    index: arr_v,
+                                    ty: arr_ir,
+                                    init: Some(alloc),
+                                });
+                                // var i = 0
+                                let i_v = self.fresh_value();
+                                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                                let var_i = self.ir.add_expr(IrExpr::Variable {
+                                    index: i_v,
+                                    ty: int_ir,
+                                    init: Some(zero),
+                                });
+                                // cond: i < n
+                                let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                                let gn = self.ir.add_expr(IrExpr::GetValue(n_v));
+                                let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: IrBinOp::Lt,
+                                    lhs: gi,
+                                    rhs: gn,
+                                });
+                                // body: a[i] = <lambda body with the index param bound to i>
+                                let pname =
+                                    params.first().cloned().unwrap_or_else(|| "it".to_string());
+                                let depth = self.scope.len();
+                                self.scope.push((pname, i_v, Ty::Int));
+                                let body_val = self.lower_arg(body, &elem_ir);
+                                self.scope.truncate(depth);
+                                let body_val = body_val?;
+                                // Spill the element value into a temp before the store: a branchy body
+                                // (`{ it % 2 == 0 }`) records a stackmap frame, and `kotlin/Array.set` pushes
+                                // the array + index *before* the value — without the spill those operands
+                                // would be stranded on the stack across that frame (VerifyError).
+                                let tmp_v = self.fresh_value();
+                                let var_tmp = self.ir.add_expr(IrExpr::Variable {
+                                    index: tmp_v,
+                                    ty: elem_ir,
+                                    init: Some(body_val),
+                                });
+                                let ga = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                                let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                                let gtmp = self.ir.add_expr(IrExpr::GetValue(tmp_v));
+                                let set = self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::External("kotlin/Array.set".to_string()),
+                                    dispatch_receiver: Some(ga),
+                                    args: vec![gi2, gtmp],
+                                });
+                                let wbody = self.ir.add_expr(IrExpr::Block {
+                                    stmts: vec![var_tmp, set],
+                                    value: None,
+                                });
+                                // update: i = i + 1
+                                let gi3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                                let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: IrBinOp::Add,
+                                    lhs: gi3,
+                                    rhs: one,
+                                });
+                                let inc = self.ir.add_expr(IrExpr::SetValue {
+                                    var: i_v,
+                                    value: inc_val,
+                                });
+                                let wh = self.ir.add_expr(IrExpr::While {
+                                    cond,
+                                    body: wbody,
+                                    update: Some(inc),
+                                    post_test: false,
+                                    label: None,
+                                });
+                                let result = self.ir.add_expr(IrExpr::GetValue(arr_v));
+                                return Some(self.ir.add_expr(IrExpr::Block {
+                                    stmts: vec![var_n, var_arr, var_i, wh],
+                                    value: Some(result),
+                                }));
+                            }
                         }
-                      }
                     }
                     // Primitive-array literal `intArrayOf(1, 2, 3)` → a `Vararg` of that primitive type
                     // (the backend allocates `int[]`/`char[]`/… and stores each element).
                     if array_intrinsic_ok {
-                      if let Some(elem) = prim_array_of_elem(&fname) {
-                        let elem_ir = ty_to_ir(elem);
-                        let mut elements = Vec::new();
-                        for &arg in &args {
-                            if is_branchy(self.afile, arg) {
-                                return None;
+                        if let Some(elem) = prim_array_of_elem(&fname) {
+                            let elem_ir = ty_to_ir(elem);
+                            let mut elements = Vec::new();
+                            for &arg in &args {
+                                if is_branchy(self.afile, arg) {
+                                    return None;
+                                }
+                                elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
-                            elements.push(self.lower_arg(arg, &elem_ir)?);
+                            return Some(self.ir.add_expr(IrExpr::Vararg {
+                                element_type: elem_ir,
+                                elements,
+                            }));
                         }
-                        return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
-                      }
                     }
                     // Reference array literal `arrayOf(a, b, c)` → a `Vararg` of the (reference) element
                     // type, which the backend allocates as `T[]` and fills — the same node `intArrayOf`
@@ -4230,12 +6677,16 @@ impl<'a> Lower<'a> {
                             }
                             elements.push(self.lower_arg(arg, &elem_ir)?);
                         }
-                        return Some(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                        return Some(self.ir.add_expr(IrExpr::Vararg {
+                            element_type: elem_ir,
+                            elements,
+                        }));
                     }
                     if let Some(&fid) = self.fun_ids.get(&fname) {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
-                        if let Some(sig) = self.syms.funs.get(&fname).filter(|s| s.vararg).cloned() {
+                        if let Some(sig) = self.syms.funs.get(&fname).filter(|s| s.vararg).cloned()
+                        {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let fixed = params.len() - 1;
                             if args.len() < fixed {
@@ -4252,9 +6703,15 @@ impl<'a> Lower<'a> {
                             // call supplies a primitive type argument (`mk<Long>(-1)`), coerce each element
                             // to that primitive first (`Int`→`Long`), then box — matching kotlinc.
                             let targ_prim = if elem_ty == Ty::obj("kotlin/Any") {
-                                self.afile.call_type_args.get(&e.0).and_then(|ts| ts.first())
-                                    .map(|r| ty_of(self.afile, r)).filter(|t| t.is_primitive())
-                            } else { None };
+                                self.afile
+                                    .call_type_args
+                                    .get(&e.0)
+                                    .and_then(|ts| ts.first())
+                                    .map(|r| ty_of(self.afile, r))
+                                    .filter(|t| t.is_primitive())
+                            } else {
+                                None
+                            };
                             let mut elements = Vec::new();
                             for &arg in &args[fixed..] {
                                 if is_branchy(self.afile, arg) {
@@ -4262,22 +6719,43 @@ impl<'a> Lower<'a> {
                                 }
                                 if let Some(p) = targ_prim {
                                     let v = self.lower_arg(arg, &ty_to_ir(p))?;
-                                    elements.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: v, type_operand: elem_ir.clone() }));
+                                    elements.push(self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: v,
+                                        type_operand: elem_ir.clone(),
+                                    }));
                                 } else {
                                     elements.push(self.lower_arg(arg, &elem_ir)?);
                                 }
                             }
-                            let arr = self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements });
+                            let arr = self.ir.add_expr(IrExpr::Vararg {
+                                element_type: elem_ir,
+                                elements,
+                            });
                             a.push(arr);
-                            return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Local(fid),
+                                dispatch_receiver: None,
+                                args: a,
+                            }));
                         }
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Omitted trailing args are filled from constant-literal defaults.
-                        let meta: Vec<(String, Option<AstExprId>)> = self.top_fun_decl(&fname)
-                            .map(|f| f.params.iter().map(|p| (p.name.clone(), p.default)).collect())
+                        let meta: Vec<(String, Option<AstExprId>)> = self
+                            .top_fun_decl(&fname)
+                            .map(|f| {
+                                f.params
+                                    .iter()
+                                    .map(|p| (p.name.clone(), p.default))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         let a = self.lower_args_defaulted(e, &meta, &args, &params)?;
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a })
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Local(fid),
+                            dispatch_receiver: None,
+                            args: a,
+                        })
                     } else if let Some(c) = {
                         // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
@@ -4285,19 +6763,39 @@ impl<'a> Lower<'a> {
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         // Forward the call's explicit type arguments (`listOf<Long>(…)`), as the checker
                         // does — they bind the generic vararg's element type for literal adaptation below.
-                        let call_targs: Vec<Ty> = self.afile.call_type_args.get(&e.0)
-                            .map(|ts| ts.iter().map(|r| crate::types::Ty::from_name(&r.name).filter(|_| !r.nullable).or_else(|| self.ty_ref(r)).unwrap_or(Ty::Error)).collect())
+                        let call_targs: Vec<Ty> = self
+                            .afile
+                            .call_type_args
+                            .get(&e.0)
+                            .map(|ts| {
+                                ts.iter()
+                                    .map(|r| {
+                                        crate::types::Ty::from_name(&r.name)
+                                            .filter(|_| !r.nullable)
+                                            .or_else(|| self.ty_ref(r))
+                                            .unwrap_or(Ty::Error)
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default();
-                        self.syms.libraries.resolve_callable(&fname, None, &arg_tys, &call_targs)
+                        self.syms
+                            .libraries
+                            .resolve_callable(&fname, None, &arg_tys, &call_targs)
                     } {
                         // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
                         // element to `Object`, so a wider literal would box as `Integer` and a later
                         // narrowing read (`map(::shortFoo)`) throws `ClassCastException`. kotlinc boxes
                         // the constant as the narrow type; krusty doesn't track that logical-vs-erased
                         // element type yet, so bail (skip) rather than miscompile.
-                        let narrow_targ = self.afile.call_type_args.get(&e.0)
-                            .map_or(false, |ts| ts.iter().any(|r| !r.nullable && matches!(r.name.as_str(), "Short" | "Byte")));
-                        if narrow_targ && args.iter().any(|&a| matches!(self.info.ty(a), Ty::Int | Ty::Long | Ty::Char)) {
+                        let narrow_targ = self.afile.call_type_args.get(&e.0).map_or(false, |ts| {
+                            ts.iter()
+                                .any(|r| !r.nullable && matches!(r.name.as_str(), "Short" | "Byte"))
+                        });
+                        if narrow_targ
+                            && args
+                                .iter()
+                                .any(|&a| matches!(self.info.ty(a), Ty::Int | Ty::Long | Ty::Char))
+                        {
                             return None;
                         }
                         // krusty's `Ty` erases `byte`/`short` to `Int`, but a resolved overload's
@@ -4309,9 +6807,12 @@ impl<'a> Lower<'a> {
                         if descriptor_has_byte_or_short_param(&c.descriptor) {
                             return None;
                         }
-                        let last_is_array = c.params.last().map_or(false, |p| p.array_elem().is_some());
-                        let vararg = !c.params.is_empty() && last_is_array
-                            && (c.params.len() != args.len() || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
+                        let last_is_array =
+                            c.params.last().map_or(false, |p| p.array_elem().is_some());
+                        let vararg = !c.params.is_empty()
+                            && last_is_array
+                            && (c.params.len() != args.len()
+                                || self.info.ty(args[args.len() - 1]) != *c.params.last().unwrap());
                         let mut a = Vec::new();
                         if vararg {
                             let fixed = c.params.len() - 1;
@@ -4335,13 +6836,20 @@ impl<'a> Lower<'a> {
                                 if bound == Some(Ty::Long) {
                                     if let Expr::IntLit(v) = *self.afile.expr(arg) {
                                         let lc = self.ir.add_expr(IrExpr::Const(IrConst::Long(v)));
-                                        elements.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: lc, type_operand: elem_ir.clone() }));
+                                        elements.push(self.ir.add_expr(IrExpr::TypeOp {
+                                            op: IrTypeOp::ImplicitCoercion,
+                                            arg: lc,
+                                            type_operand: elem_ir.clone(),
+                                        }));
                                         continue;
                                     }
                                 }
                                 elements.push(self.lower_arg(arg, &elem_ir)?);
                             }
-                            a.push(self.ir.add_expr(IrExpr::Vararg { element_type: elem_ir, elements }));
+                            a.push(self.ir.add_expr(IrExpr::Vararg {
+                                element_type: elem_ir,
+                                elements,
+                            }));
                         } else if c.default_call {
                             // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
                             // lower the provided prefix, then append a placeholder per omitted trailing
@@ -4351,10 +6859,17 @@ impl<'a> Lower<'a> {
                             // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
                             // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
                             // literal, which krusty doesn't model) — skip rather than miscompile.
-                            let prim_args: Vec<Ty> = args.iter().map(|&a| self.info.ty(a))
-                                .filter(|t| t.is_primitive()).collect();
-                            let generic_provided = c.params.iter().take(args.len())
-                                .all(|p| matches!(p.obj_internal(), Some("kotlin/Any") | Some("java/lang/Object")));
+                            let prim_args: Vec<Ty> = args
+                                .iter()
+                                .map(|&a| self.info.ty(a))
+                                .filter(|t| t.is_primitive())
+                                .collect();
+                            let generic_provided = c.params.iter().take(args.len()).all(|p| {
+                                matches!(
+                                    p.obj_internal(),
+                                    Some("kotlin/Any") | Some("java/lang/Object")
+                                )
+                            });
                             if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
                                 return None;
                             }
@@ -4376,8 +6891,21 @@ impl<'a> Lower<'a> {
                                 a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
                             }
                         }
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: a })
-                    } else if let Some((class, index, mfid, _)) = self.cur_class.clone().and_then(|cur| self.resolve_method(&cur, &fname)) {
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: c.owner,
+                                name: c.name,
+                                descriptor: c.descriptor,
+                                inline: c.is_inline,
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        })
+                    } else if let Some((class, index, mfid, _)) = self
+                        .cur_class
+                        .clone()
+                        .and_then(|cur| self.resolve_method(&cur, &fname))
+                    {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
                         if args.len() != params.len() {
@@ -4388,25 +6916,44 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this, args: a.into_iter().map(Some).collect() })
-                    } else if let Some((class, index, mfid, cur_id)) = self.inner_outer_method(&fname) {
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: this,
+                            args: a.into_iter().map(Some).collect(),
+                        })
+                    } else if let Some((class, index, mfid, cur_id)) =
+                        self.inner_outer_method(&fname)
+                    {
                         // Unqualified call to an enclosing method from an inner class: `this.this$0.foo()`.
                         let params = self.ir.functions[mfid as usize].params.clone();
                         if args.len() != params.len() {
                             return None;
                         }
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let this0 = self.ir.add_expr(IrExpr::GetField { receiver: this, class: cur_id, index: 0 });
+                        let this0 = self.ir.add_expr(IrExpr::GetField {
+                            receiver: this,
+                            class: cur_id,
+                            index: 0,
+                        });
                         let mut a = Vec::new();
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: this0, args: a.into_iter().map(Some).collect() })
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: this0,
+                            args: a.into_iter().map(Some).collect(),
+                        })
                     } else if let Some((class, index, mfid, _)) = {
                         // A bare instance-method call on an external `this` receiver (an inlined
                         // `apply`/`run`, where `cur_class` is cleared and `this` is the receiver slot,
                         // not value 0): `m(args)` → `this.m(args)`.
-                        let internal = self.lookup("this").map(|(_, t)| t).and_then(|t| t.obj_internal().map(|s| s.to_string()));
+                        let internal = self
+                            .lookup("this")
+                            .map(|(_, t)| t)
+                            .and_then(|t| t.obj_internal().map(|s| s.to_string()));
                         internal.and_then(|i| self.resolve_method(&i, &fname))
                     } {
                         let (this_v, _) = self.lookup("this")?;
@@ -4419,8 +6966,18 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() })
-                    } else if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| !self.classes.contains_key(*i)) {
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: recv,
+                            args: a.into_iter().map(Some).collect(),
+                        })
+                    } else if let Some(internal) = self
+                        .info
+                        .ty(e)
+                        .obj_internal()
+                        .filter(|i| !self.classes.contains_key(*i))
+                    {
                         // Constructing a classpath (non-IR) class — `RuntimeException("x")`,
                         // `StringBuilder()`. The constructor descriptor comes from the classpath.
                         return self.lower_external_new(internal, &args);
@@ -4439,7 +6996,10 @@ impl<'a> Lower<'a> {
                         // leading parameter fields (synthesized classes have empty `ctor_args`).
                         let ctor_args = self.ir.classes[class as usize].ctor_args.clone();
                         let field_tys: Vec<IrType> = if ctor_args.is_empty() {
-                            self.ir.classes[class as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect()
+                            self.ir.classes[class as usize].fields[..ctor_count]
+                                .iter()
+                                .map(|(_, t)| t.clone())
+                                .collect()
                         } else {
                             ctor_args.iter().map(|(t, _)| t.clone()).collect()
                         };
@@ -4449,42 +7009,101 @@ impl<'a> Lower<'a> {
                         // `Long`. Only the simple all-property positional case.
                         // A NULLABLE type-param field (`val z: T?`) stays boxed (`Int?`) — only coerce a
                         // non-nullable one (`val value: T`); use an empty (non-matching) name for nullable.
-                        let (tparams, prop_tys): (Vec<String>, Vec<String>) = self.class_decl(&fname)
-                            .map(|cd| (cd.type_params.clone(), cd.props.iter().filter(|p| p.is_property)
-                                .map(|p| if p.ty.nullable { String::new() } else { p.ty.name.clone() }).collect()))
+                        let (tparams, prop_tys): (Vec<String>, Vec<String>) = self
+                            .class_decl(&fname)
+                            .map(|cd| {
+                                (
+                                    cd.type_params.clone(),
+                                    cd.props
+                                        .iter()
+                                        .filter(|p| p.is_property)
+                                        .map(|p| {
+                                            if p.ty.nullable {
+                                                String::new()
+                                            } else {
+                                                p.ty.name.clone()
+                                            }
+                                        })
+                                        .collect(),
+                                )
+                            })
                             .unwrap_or_default();
-                        let targs: Vec<Ty> = self.afile.call_type_args.get(&e.0)
-                            .map(|ts| ts.iter().map(|r| ty_of(self.afile, r)).collect()).unwrap_or_default();
-                        let no_named = self.afile.call_arg_names.get(&e.0).map_or(true, |ns| ns.iter().all(|n| n.is_none()));
-                        let arg_prim = |i: usize| prop_tys.get(i).and_then(|pn| tparams.iter().position(|tp| tp == pn))
-                            .and_then(|ti| targs.get(ti)).copied().filter(|t| t.is_primitive());
-                        if !targs.is_empty() && no_named && args.len() == field_tys.len()
-                            && prop_tys.len() == field_tys.len() && (0..args.len()).any(|i| arg_prim(i).is_some())
+                        let targs: Vec<Ty> = self
+                            .afile
+                            .call_type_args
+                            .get(&e.0)
+                            .map(|ts| ts.iter().map(|r| ty_of(self.afile, r)).collect())
+                            .unwrap_or_default();
+                        let no_named = self
+                            .afile
+                            .call_arg_names
+                            .get(&e.0)
+                            .map_or(true, |ns| ns.iter().all(|n| n.is_none()));
+                        let arg_prim = |i: usize| {
+                            prop_tys
+                                .get(i)
+                                .and_then(|pn| tparams.iter().position(|tp| tp == pn))
+                                .and_then(|ti| targs.get(ti))
+                                .copied()
+                                .filter(|t| t.is_primitive())
+                        };
+                        if !targs.is_empty()
+                            && no_named
+                            && args.len() == field_tys.len()
+                            && prop_tys.len() == field_tys.len()
+                            && (0..args.len()).any(|i| arg_prim(i).is_some())
                         {
                             let mut a = Vec::new();
                             for (i, &arg) in args.iter().enumerate() {
                                 if let Some(p) = arg_prim(i) {
                                     let v = self.lower_arg(arg, &ty_to_ir(p))?;
-                                    a.push(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: v, type_operand: field_tys[i].clone() }));
+                                    a.push(self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: v,
+                                        type_operand: field_tys[i].clone(),
+                                    }));
                                 } else {
                                     a.push(self.lower_arg(arg, &field_tys[i])?);
                                 }
                             }
-                            return Some(self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None }));
+                            return Some(self.ir.add_expr(IrExpr::New {
+                                class,
+                                args: a,
+                                ctor_params: None,
+                            }));
                         }
-                        let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&fname)
-                            .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
+                        let meta: Vec<(String, Option<AstExprId>)> = self
+                            .class_decl(&fname)
+                            .map(|cd| {
+                                cd.props
+                                    .iter()
+                                    .map(|p| (p.name.clone(), p.default))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         // The primary constructor (exact/defaulted positional match), else a secondary
                         // constructor selected by argument count.
                         if let Some(a) = self.lower_args_defaulted(e, &meta, &args, &field_tys) {
-                            self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None })
-                        } else if let Some(sc) = self.ir.classes[class as usize].secondary_ctors.clone().into_iter().find(|sc| sc.params.len() == args.len()) {
+                            self.ir.add_expr(IrExpr::New {
+                                class,
+                                args: a,
+                                ctor_params: None,
+                            })
+                        } else if let Some(sc) = self.ir.classes[class as usize]
+                            .secondary_ctors
+                            .clone()
+                            .into_iter()
+                            .find(|sc| sc.params.len() == args.len())
+                        {
                             let mut a = Vec::new();
                             for (arg, pt) in args.iter().zip(&sc.params) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: Some(sc.params) })
+                            self.ir.add_expr(IrExpr::New {
+                                class,
+                                args: a,
+                                ctor_params: Some(sc.params),
+                            })
                         } else {
                             return None;
                         }
@@ -4498,16 +7117,28 @@ impl<'a> Lower<'a> {
                     // `method_of`, else a classpath class via `resolve_instance`).
                     if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn == "super") {
                         let cur = self.cur_class.clone()?;
-                        let sup = self.classes.get(&cur).and_then(|ci| ci.super_internal.clone())?;
+                        let sup = self
+                            .classes
+                            .get(&cur)
+                            .and_then(|ci| ci.super_internal.clone())?;
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        let (params, descriptor) = if let Some(sig) = self.syms.method_of(&sup, &name) {
-                            (sig.params.clone(), crate::jvm::names::method_descriptor(&sig.params, sig.ret))
-                        } else if let Some(m) = crate::libraries::resolve_instance(&*self.syms.libraries, &sup, &name, &arg_tys) {
-                            (m.params.clone(), m.descriptor.clone())
-                        } else {
-                            return None;
-                        };
+                        let (params, descriptor) =
+                            if let Some(sig) = self.syms.method_of(&sup, &name) {
+                                (
+                                    sig.params.clone(),
+                                    crate::jvm::names::method_descriptor(&sig.params, sig.ret),
+                                )
+                            } else if let Some(m) = crate::libraries::resolve_instance(
+                                &*self.syms.libraries,
+                                &sup,
+                                &name,
+                                &arg_tys,
+                            ) {
+                                (m.params.clone(), m.descriptor.clone())
+                            } else {
+                                return None;
+                            };
                         if params.len() != args.len() {
                             return None;
                         }
@@ -4516,8 +7147,13 @@ impl<'a> Lower<'a> {
                             a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                         }
                         return Some(self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Special { owner: sup, name: name.clone(), descriptor },
-                            dispatch_receiver: Some(this), args: a,
+                            callee: Callee::Special {
+                                owner: sup,
+                                name: name.clone(),
+                                descriptor,
+                            },
+                            dispatch_receiver: Some(this),
+                            args: a,
                         }));
                     }
                     // Array `isEmpty()`/`isNotEmpty()`/`count()` (stdlib extensions) → the `arraylength`
@@ -4531,11 +7167,19 @@ impl<'a> Lower<'a> {
                         };
                         if let Some(op) = cmp {
                             let a = self.expr(receiver)?;
-                            let size = self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Array.size".to_string()), dispatch_receiver: Some(a), args: vec![] });
+                            let size = self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::External("kotlin/Array.size".to_string()),
+                                dispatch_receiver: Some(a),
+                                args: vec![],
+                            });
                             return Some(match op {
                                 Some(c) => {
                                     let z = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                                    self.ir.add_expr(IrExpr::PrimitiveBinOp { op: c, lhs: size, rhs: z })
+                                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                        op: c,
+                                        lhs: size,
+                                        rhs: z,
+                                    })
                                 }
                                 None => size,
                             });
@@ -4544,28 +7188,42 @@ impl<'a> Lower<'a> {
                     // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer,
                     // args)`: the checker typed the call as the inner class (whose first field is the
                     // synthetic `this$0`), so pass the receiver as the leading constructor argument.
-                    if let Some(class_id) = self.info.ty(e).obj_internal()
-                        .and_then(|i| self.classes.get(i)).map(|ci| ci.id)
+                    if let Some(class_id) = self
+                        .info
+                        .ty(e)
+                        .obj_internal()
+                        .and_then(|i| self.classes.get(i))
+                        .map(|ci| ci.id)
                         .filter(|&id| {
                             let c = &self.ir.classes[id as usize];
                             // The inner's `this$0` field type must match the receiver's type (the outer
                             // instance) — guards against a same-named method returning an inner-typed value.
                             let this0_outer = match c.fields.first() {
-                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => Some(fq_name.as_str()),
+                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => {
+                                    Some(fq_name.as_str())
+                                }
                                 _ => None,
                             };
                             c.fq_name.ends_with(&format!("${name}"))
                                 && this0_outer == self.info.ty(receiver).obj_internal()
                         })
                     {
-                        let field_tys: Vec<IrType> = self.ir.classes[class_id as usize].ctor_args.iter().map(|(t, _)| t.clone()).collect();
+                        let field_tys: Vec<IrType> = self.ir.classes[class_id as usize]
+                            .ctor_args
+                            .iter()
+                            .map(|(t, _)| t.clone())
+                            .collect();
                         if field_tys.len() == args.len() + 1 {
                             let recv = self.expr(receiver)?;
                             let mut a = vec![recv];
                             for (arg, pt) in args.iter().zip(&field_tys[1..]) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
-                            return Some(self.ir.add_expr(IrExpr::New { class: class_id, args: a, ctor_params: None }));
+                            return Some(self.ir.add_expr(IrExpr::New {
+                                class: class_id,
+                                args: a,
+                                ctor_params: None,
+                            }));
                         }
                     }
                     // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
@@ -4573,16 +7231,34 @@ impl<'a> Lower<'a> {
                     // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
                     // receiver being iterable (so a user `forEach` on a non-iterable falls through).
                     if name == "forEach" && args.len() == 1 {
-                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[0]).clone()
+                        {
                             let rty = self.info.ty(receiver);
                             // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
                             // by `lower_for_each` (and the checker element-types the lambda parameter).
-                            let iterable = rty.array_elem().is_some() || rty == Ty::String
-                                || rty.obj_internal().map_or(false, |i| range_counted_elem(i).is_some()
-                                    || crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
-                                    || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
+                            let iterable = rty.array_elem().is_some()
+                                || rty == Ty::String
+                                || rty.obj_internal().map_or(false, |i| {
+                                    range_counted_elem(i).is_some()
+                                        || crate::libraries::resolve_instance(
+                                            &*self.syms.libraries,
+                                            i,
+                                            "iterator",
+                                            &[],
+                                        )
+                                        .is_some()
+                                        || self
+                                            .syms
+                                            .libraries
+                                            .resolve_callable("iterator", Some(rty), &[], &[])
+                                            .is_some()
+                                });
                             if iterable {
-                                let param = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                                let param =
+                                    params.first().cloned().unwrap_or_else(|| "it".to_string());
                                 return self.lower_for_each(&param, receiver, lbody, None);
                             }
                         }
@@ -4591,15 +7267,37 @@ impl<'a> Lower<'a> {
                     // body is `var i = 0; for (x in this) { action(i, x); i++ }`. Inline it via the
                     // iterator path with an index counter (Obj iterables only, same as `forEach`).
                     if name == "forEachIndexed" && args.len() == 1 {
-                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[0]).clone()
+                        {
                             let rty = self.info.ty(receiver);
-                            let iterable = rty.obj_internal().map_or(false, |i|
-                                crate::libraries::resolve_instance(&*self.syms.libraries, i, "iterator", &[]).is_some()
-                                || self.syms.libraries.resolve_callable("iterator", Some(rty), &[], &[]).is_some());
+                            let iterable = rty.obj_internal().map_or(false, |i| {
+                                crate::libraries::resolve_instance(
+                                    &*self.syms.libraries,
+                                    i,
+                                    "iterator",
+                                    &[],
+                                )
+                                .is_some()
+                                    || self
+                                        .syms
+                                        .libraries
+                                        .resolve_callable("iterator", Some(rty), &[], &[])
+                                        .is_some()
+                            });
                             if iterable && params.len() == 2 {
                                 let idx = params[0].clone();
                                 let elem = params[1].clone();
-                                return self.lower_foreach_iterator(&elem, receiver, lbody, rty, Some(&idx), None);
+                                return self.lower_foreach_iterator(
+                                    &elem,
+                                    receiver,
+                                    lbody,
+                                    rty,
+                                    Some(&idx),
+                                    None,
+                                );
                             }
                         }
                     }
@@ -4611,9 +7309,16 @@ impl<'a> Lower<'a> {
                     // `run`/`apply` are receiver lambdas (the lambda's `this` is the receiver); the
                     // bytecode splice routes them as ordinary value-lambdas, mishandling that receiver, so
                     // they go to the receiver-aware fallback below instead.
-                    if args.len() == 1 && !matches!(name.as_str(), "run" | "apply")
-                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. }) {
-                        if let Some(call) = self.try_route_lambda_inline(&name, receiver, args[0], self.info.ty(receiver)) {
+                    if args.len() == 1
+                        && !matches!(name.as_str(), "run" | "apply")
+                        && matches!(self.afile.expr(args[0]), Expr::Lambda { .. })
+                    {
+                        if let Some(call) = self.try_route_lambda_inline(
+                            &name,
+                            receiver,
+                            args[0],
+                            self.info.ty(receiver),
+                        ) {
                             return Some(call);
                         }
                     }
@@ -4629,7 +7334,11 @@ impl<'a> Lower<'a> {
                     let is_recv_lambda = matches!(name.as_str(), "run" | "apply");
                     let scope_fn = matches!(name.as_str(), "let" | "also") || is_recv_lambda;
                     if scope_fn && args.len() == 1 {
-                        if let Expr::Lambda { params, body: lbody } = self.afile.expr(args[0]).clone() {
+                        if let Expr::Lambda {
+                            params,
+                            body: lbody,
+                        } = self.afile.expr(args[0]).clone()
+                        {
                             let rty = self.info.ty(receiver);
                             // A receiver lambda needs the receiver's user class for `this`-member access.
                             let recv_class = if is_recv_lambda {
@@ -4637,31 +7346,48 @@ impl<'a> Lower<'a> {
                                     Some(i) => Some(i.to_string()),
                                     None => return None,
                                 }
-                            } else { None };
+                            } else {
+                                None
+                            };
                             let recv = self.expr(receiver)?;
                             let depth = self.scope.len();
                             let p_slot = self.fresh_value();
-                            let pname = if is_recv_lambda { "this".to_string() }
-                                        else { params.first().cloned().unwrap_or_else(|| "it".to_string()) };
+                            let pname = if is_recv_lambda {
+                                "this".to_string()
+                            } else {
+                                params.first().cloned().unwrap_or_else(|| "it".to_string())
+                            };
                             // An inlined receiver lambda runs in the *caller's* method, so the receiver's
                             // members are accessed externally (getter/setter), never as the enclosing
                             // class's own private fields — clear `cur_class` for the body. (`recv_class`
                             // having resolved confirms the receiver is a reachable user class.)
                             let _ = &recv_class;
                             let saved_cur = self.cur_class.clone();
-                            if is_recv_lambda { self.cur_class = None; }
+                            if is_recv_lambda {
+                                self.cur_class = None;
+                            }
                             self.scope.push((pname, p_slot, rty));
-                            let var_p = self.ir.add_expr(IrExpr::Variable { index: p_slot, ty: ty_to_ir(rty), init: Some(recv) });
+                            let var_p = self.ir.add_expr(IrExpr::Variable {
+                                index: p_slot,
+                                ty: ty_to_ir(rty),
+                                init: Some(recv),
+                            });
                             let body_val = self.expr(lbody);
                             self.scope.truncate(depth);
                             self.cur_class = saved_cur;
                             let body_val = body_val?;
                             let returns_receiver = matches!(name.as_str(), "also" | "apply");
                             let result = if !returns_receiver {
-                                self.ir.add_expr(IrExpr::Block { stmts: vec![var_p], value: Some(body_val) })
+                                self.ir.add_expr(IrExpr::Block {
+                                    stmts: vec![var_p],
+                                    value: Some(body_val),
+                                })
                             } else {
                                 let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
-                                self.ir.add_expr(IrExpr::Block { stmts: vec![var_p, body_val], value: Some(recv_read) })
+                                self.ir.add_expr(IrExpr::Block {
+                                    stmts: vec![var_p, body_val],
+                                    value: Some(recv_read),
+                                })
                             };
                             return Some(result);
                         }
@@ -4671,15 +7397,33 @@ impl<'a> Lower<'a> {
                     if let Expr::Name(root) = self.afile.expr(receiver).clone() {
                         if self.lookup(&root).is_none() {
                             let qname = format!("{root}.{name}");
-                            if let Some(ci) = self.classes.get(&class_internal(self.afile, &qname)) {
+                            if let Some(ci) = self.classes.get(&class_internal(self.afile, &qname))
+                            {
                                 let class = ci.id;
-                                let ctor_count = self.ir.classes[class as usize].ctor_param_count as usize;
-                                let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields[..ctor_count].iter().map(|(_, t)| t.clone()).collect();
-                                let meta: Vec<(String, Option<AstExprId>)> = self.class_decl(&qname)
-                                    .map(|cd| cd.props.iter().map(|p| (p.name.clone(), p.default)).collect())
+                                let ctor_count =
+                                    self.ir.classes[class as usize].ctor_param_count as usize;
+                                let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields
+                                    [..ctor_count]
+                                    .iter()
+                                    .map(|(_, t)| t.clone())
+                                    .collect();
+                                let meta: Vec<(String, Option<AstExprId>)> = self
+                                    .class_decl(&qname)
+                                    .map(|cd| {
+                                        cd.props
+                                            .iter()
+                                            .map(|p| (p.name.clone(), p.default))
+                                            .collect()
+                                    })
                                     .unwrap_or_default();
-                                if let Some(a) = self.lower_args_defaulted(e, &meta, &args, &field_tys) {
-                                    return Some(self.ir.add_expr(IrExpr::New { class, args: a, ctor_params: None }));
+                                if let Some(a) =
+                                    self.lower_args_defaulted(e, &meta, &args, &field_tys)
+                                {
+                                    return Some(self.ir.add_expr(IrExpr::New {
+                                        class,
+                                        args: a,
+                                        ctor_params: None,
+                                    }));
                                 }
                                 return None;
                             }
@@ -4697,7 +7441,11 @@ impl<'a> Lower<'a> {
                                 for (arg, pt) in args.iter().zip(&params[1..]) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::Call { callee: Callee::Local(fid), dispatch_receiver: None, args: a }));
+                                return Some(self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Local(fid),
+                                    dispatch_receiver: None,
+                                    args: a,
+                                }));
                             }
                         }
                     }
@@ -4707,33 +7455,57 @@ impl<'a> Lower<'a> {
                     // sign-extending `i2l`); `ULong.toInt()` truncates (`l2i`); `inc`/`dec` are ±1.
                     {
                         let rty = self.info.ty(receiver);
-                        if args.is_empty() && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong")) {
+                        if args.is_empty()
+                            && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong"))
+                        {
                             let repr = |t: Ty| t.unsigned_repr().unwrap_or(t);
                             if rty.is_unsigned() && name == "toString" {
                                 let r = self.expr(receiver)?;
                                 return Some(self.unsigned_to_string(r, rty));
                             }
                             if rty.is_unsigned() && matches!(name.as_str(), "inc" | "dec") {
-                                let one = if rty == Ty::ULong { IrConst::Long(1) } else { IrConst::Int(1) };
+                                let one = if rty == Ty::ULong {
+                                    IrConst::Long(1)
+                                } else {
+                                    IrConst::Int(1)
+                                };
                                 let r = self.expr(receiver)?;
                                 let o = self.ir.add_expr(IrExpr::Const(one));
-                                let op = if name == "dec" { IrBinOp::Sub } else { IrBinOp::Add };
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: r, rhs: o }));
+                                let op = if name == "dec" {
+                                    IrBinOp::Sub
+                                } else {
+                                    IrBinOp::Add
+                                };
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op,
+                                    lhs: r,
+                                    rhs: o,
+                                }));
                             }
                             if let Some(target) = crate::resolve::conversion_target(&name) {
                                 let r = self.expr(receiver)?;
                                 if rty == Ty::UInt && matches!(target, Ty::Long | Ty::ULong) {
                                     // zero-extend the 32-bit unsigned value into a long
                                     return Some(self.ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Static { owner: "java/lang/Integer".to_string(), name: "toUnsignedLong".to_string(), descriptor: "(I)J".to_string(), inline: false },
-                                        dispatch_receiver: None, args: vec![r],
+                                        callee: Callee::Static {
+                                            owner: "java/lang/Integer".to_string(),
+                                            name: "toUnsignedLong".to_string(),
+                                            descriptor: "(I)J".to_string(),
+                                            inline: false,
+                                        },
+                                        dispatch_receiver: None,
+                                        args: vec![r],
                                     }));
                                 }
                                 if repr(rty) == repr(target) {
                                     return Some(r); // identity reinterpret (UInt↔Int, ULong↔Long, UInt→UInt)
                                 }
                                 if repr(rty).is_primitive() && repr(target).is_primitive() {
-                                    return Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: ty_to_ir(repr(target)) }));
+                                    return Some(self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: r,
+                                        type_operand: ty_to_ir(repr(target)),
+                                    }));
                                 }
                             }
                             // Any other unsigned conversion (e.g. unsigned→float) isn't modeled — bail.
@@ -4744,11 +7516,24 @@ impl<'a> Lower<'a> {
                     // are coercions — the backend emits the `i2l`/`l2i`/`i2c`/… opcode.
                     {
                         let rty = self.info.ty(receiver);
-                        if matches!(rty, Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Double | Ty::Float) {
+                        if matches!(
+                            rty,
+                            Ty::Int
+                                | Ty::Long
+                                | Ty::Byte
+                                | Ty::Short
+                                | Ty::Char
+                                | Ty::Double
+                                | Ty::Float
+                        ) {
                             if let Some(target) = crate::resolve::conversion_target(&name) {
                                 if args.is_empty() {
                                     let r = self.expr(receiver)?;
-                                    return Some(self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: r, type_operand: ty_to_ir(target) }));
+                                    return Some(self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: r,
+                                        type_operand: ty_to_ir(target),
+                                    }));
                                 }
                             }
                         }
@@ -4762,7 +7547,9 @@ impl<'a> Lower<'a> {
                         let rty = self.info.ty(receiver);
                         if name == "compareTo" && args.len() == 1 && rty.is_primitive() {
                             let at = self.info.ty(args[0]);
-                            if let Some(p) = Ty::promote(rty, at).filter(|p| p.is_primitive() && *p != Ty::Boolean) {
+                            if let Some(p) = Ty::promote(rty, at)
+                                .filter(|p| p.is_primitive() && *p != Ty::Boolean)
+                            {
                                 let pir = ty_to_ir(p);
                                 let l = self.lower_arg(receiver, &pir)?;
                                 let r = self.lower_arg(args[0], &pir)?;
@@ -4773,8 +7560,14 @@ impl<'a> Lower<'a> {
                                     _ => ("java/lang/Integer", "I"), // Int/Byte/Short/Char compare as int
                                 };
                                 return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Static { owner: owner.to_string(), name: "compare".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
-                                    dispatch_receiver: None, args: vec![l, r],
+                                    callee: Callee::Static {
+                                        owner: owner.to_string(),
+                                        name: "compare".to_string(),
+                                        descriptor: format!("({prim}{prim})I"),
+                                        inline: false,
+                                    },
+                                    dispatch_receiver: None,
+                                    args: vec![l, r],
                                 }));
                             }
                         }
@@ -4788,20 +7581,36 @@ impl<'a> Lower<'a> {
                         if matches!(rty, Ty::Int | Ty::Long) {
                             let shift = matches!(name.as_str(), "shl" | "shr" | "ushr");
                             let bop = match name.as_str() {
-                                "and" => Some(IrBinOp::BitAnd), "or" => Some(IrBinOp::BitOr), "xor" => Some(IrBinOp::BitXor),
-                                "shl" => Some(IrBinOp::Shl), "shr" => Some(IrBinOp::Shr), "ushr" => Some(IrBinOp::Ushr),
+                                "and" => Some(IrBinOp::BitAnd),
+                                "or" => Some(IrBinOp::BitOr),
+                                "xor" => Some(IrBinOp::BitXor),
+                                "shl" => Some(IrBinOp::Shl),
+                                "shr" => Some(IrBinOp::Shr),
+                                "ushr" => Some(IrBinOp::Ushr),
                                 _ => None,
                             };
                             if let (Some(op), 1) = (bop, args.len()) {
                                 let l = self.expr(receiver)?;
                                 let rt = if shift { Ty::Int } else { rty };
                                 let r = self.lower_arg(args[0], &ty_to_ir(rt))?;
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op,
+                                    lhs: l,
+                                    rhs: r,
+                                }));
                             }
                             if name == "inv" && args.is_empty() {
                                 let l = self.expr(receiver)?;
-                                let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long { IrConst::Long(-1) } else { IrConst::Int(-1) }));
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::BitXor, lhs: l, rhs: neg1 }));
+                                let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long {
+                                    IrConst::Long(-1)
+                                } else {
+                                    IrConst::Int(-1)
+                                }));
+                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                    op: IrBinOp::BitXor,
+                                    lhs: l,
+                                    rhs: neg1,
+                                }));
                             }
                         }
                     }
@@ -4812,11 +7621,16 @@ impl<'a> Lower<'a> {
                             let cls = ci.id;
                             if !self.ir.classes[cls as usize].enum_entries.is_empty() {
                                 if name == "values" && args.is_empty() {
-                                    return Some(self.ir.add_expr(IrExpr::EnumValues { class: cls }));
+                                    return Some(
+                                        self.ir.add_expr(IrExpr::EnumValues { class: cls }),
+                                    );
                                 }
                                 if name == "valueOf" && args.len() == 1 {
                                     let a = self.expr(args[0])?;
-                                    return Some(self.ir.add_expr(IrExpr::EnumValueOf { class: cls, arg: a }));
+                                    return Some(
+                                        self.ir
+                                            .add_expr(IrExpr::EnumValueOf { class: cls, arg: a }),
+                                    );
                                 }
                             }
                         }
@@ -4825,55 +7639,95 @@ impl<'a> Lower<'a> {
                     if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                         let internal = class_internal(self.afile, &rn);
                         if let Some(comp_fq) = self.companions.get(&internal).cloned() {
-                            if let Some((class, index, fid, _)) = self.resolve_method(&comp_fq, &name) {
+                            if let Some((class, index, fid, _)) =
+                                self.resolve_method(&comp_fq, &name)
+                            {
                                 let params = self.ir.functions[fid as usize].params.clone();
                                 if args.len() != params.len() {
                                     return None;
                                 }
                                 let outer_id = self.classes[&internal].id;
                                 let comp_id = self.classes[&comp_fq].id;
-                                let recv = self.ir.add_expr(IrExpr::StaticInstance { owner: outer_id, ty: comp_id, field: "Companion" });
+                                let recv = self.ir.add_expr(IrExpr::StaticInstance {
+                                    owner: outer_id,
+                                    ty: comp_id,
+                                    field: "Companion",
+                                });
                                 let mut a = Vec::new();
                                 for (arg, pt) in args.iter().zip(&params) {
                                     a.push(self.lower_arg(*arg, pt)?);
                                 }
-                                return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() }));
+                                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: recv,
+                                    args: a.into_iter().map(Some).collect(),
+                                }));
                             }
                         }
                     }
                     // A call to a method with parameter defaults, possibly with named/omitted args. Map
                     // each provided argument to its parameter position; omitted positions stay `None` (a
                     // call with holes). The backend fills the holes (JVM: `$default` stub + mask).
-                    if let Some(internal) = self.class_of(self.recv_ty(receiver)).map(|ci| ci.internal.clone()) {
-                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name) {
+                    if let Some(internal) = self
+                        .class_of(self.recv_ty(receiver))
+                        .map(|ci| ci.internal.clone())
+                    {
+                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name)
+                        {
                             if self.ir.fn_param_defaults.contains_key(&fid) {
                                 let params = self.ir.functions[fid as usize].params.clone();
                                 let n = params.len();
-                                let param_names = self.ir.fn_param_names.get(&fid).cloned().unwrap_or_default();
+                                let param_names = self
+                                    .ir
+                                    .fn_param_names
+                                    .get(&fid)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 let names = self.afile.call_arg_names.get(&e.0).cloned();
                                 let mut provided: Vec<Option<u32>> = vec![None; n];
                                 let mut next_pos = 0usize;
                                 let mut ok = param_names.len() == n;
                                 for (ai, arg) in args.iter().enumerate() {
-                                    let nm = names.as_ref().and_then(|v| v.get(ai).cloned().flatten());
+                                    let nm =
+                                        names.as_ref().and_then(|v| v.get(ai).cloned().flatten());
                                     let pos = match nm {
                                         Some(s) => param_names.iter().position(|f| *f == s),
-                                        None => { let p = next_pos; next_pos += 1; Some(p) }
+                                        None => {
+                                            let p = next_pos;
+                                            next_pos += 1;
+                                            Some(p)
+                                        }
                                     };
                                     match pos {
-                                        Some(p) if p < n => { let l = self.lower_arg(*arg, &params[p])?; provided[p] = Some(l); }
-                                        _ => { ok = false; break; }
+                                        Some(p) if p < n => {
+                                            let l = self.lower_arg(*arg, &params[p])?;
+                                            provided[p] = Some(l);
+                                        }
+                                        _ => {
+                                            ok = false;
+                                            break;
+                                        }
                                     }
                                 }
                                 if ok {
                                     let recv = self.expr(receiver)?;
-                                    return Some(self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: provided }));
+                                    return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                        class,
+                                        index,
+                                        receiver: recv,
+                                        args: provided,
+                                    }));
                                 }
                             }
                         }
                     }
                     let rt = self.recv_ty(receiver);
-                    if let Some((class, index, fid, _)) = self.class_of(rt).map(|ci| ci.internal.clone()).and_then(|i| self.resolve_method(&i, &name)) {
+                    if let Some((class, index, fid, _)) = self
+                        .class_of(rt)
+                        .map(|ci| ci.internal.clone())
+                        .and_then(|i| self.resolve_method(&i, &name))
+                    {
                         // The method may be inherited — `class` is the *owning* class. Virtual dispatch
                         // (`invokevirtual`) still reaches an override on the receiver's actual class.
                         let params = self.ir.functions[fid as usize].params.clone();
@@ -4887,25 +7741,57 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall { class, index, receiver: recv, args: a.into_iter().map(Some).collect() })
+                        self.ir.add_expr(IrExpr::MethodCall {
+                            class,
+                            index,
+                            receiver: recv,
+                            args: a.into_iter().map(Some).collect(),
+                        })
                     } else if name == "toString" && args.is_empty() {
                         // `x.toString()` → stdlib intrinsic, `String`.
                         let recv = self.expr(receiver)?;
-                        self.ir.add_expr(IrExpr::Call { callee: Callee::External("kotlin/Any.toString".to_string()), dispatch_receiver: Some(recv), args: vec![] })
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::External("kotlin/Any.toString".to_string()),
+                            dispatch_receiver: Some(recv),
+                            args: vec![],
+                        })
                     } else if let Some((internal, desc, is_iface, mparams, mret)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
                         // hardcoded names). Enables stdlib member calls (iterators, collections, …).
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.class_of(rt).map(|ci| ci.internal.clone())
-                            .or_else(|| if let Ty::Obj(i, _) = rt { Some(i.to_string()) } else { None })
+                        self.class_of(rt)
+                            .map(|ci| ci.internal.clone())
+                            .or_else(|| {
+                                if let Ty::Obj(i, _) = rt {
+                                    Some(i.to_string())
+                                } else {
+                                    None
+                                }
+                            })
                             // A `String` receiver resolves its `java.lang.String` members (`isEmpty()`,
                             // `isBlank()`, …) — a member wins over a same-named extension, as in kotlinc
                             // (and a private `@InlineOnly` extension like `StringsKt.isEmpty` can't be called).
-                            .or_else(|| if rt == Ty::String { Some("java/lang/String".to_string()) } else { None })
+                            .or_else(|| {
+                                if rt == Ty::String {
+                                    Some("java/lang/String".to_string())
+                                } else {
+                                    None
+                                }
+                            })
                             .and_then(|internal| {
-                                crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &name, &arg_tys).map(|m| {
-                                    let is_iface = self.syms.libraries.resolve_type(&internal).map_or(false, |t| t.is_interface);
+                                crate::libraries::resolve_instance(
+                                    &*self.syms.libraries,
+                                    &internal,
+                                    &name,
+                                    &arg_tys,
+                                )
+                                .map(|m| {
+                                    let is_iface = self
+                                        .syms
+                                        .libraries
+                                        .resolve_type(&internal)
+                                        .map_or(false, |t| t.is_interface);
                                     (internal, m.descriptor, is_iface, m.params, m.ret)
                                 })
                             })
@@ -4920,7 +7806,16 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Virtual { owner: internal, name: name.clone(), descriptor: desc, interface: is_iface }, dispatch_receiver: Some(recv), args: a });
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner: internal,
+                                name: name.clone(),
+                                descriptor: desc,
+                                interface: is_iface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: a,
+                        });
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
@@ -4929,11 +7824,14 @@ impl<'a> Lower<'a> {
                         // facade.name(recv, args)`. Owner + descriptor come from the library
                         // (`resolve_callable` with the receiver), so no stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_callable(&name, Some(rt), &arg_tys, &[])
+                        self.syms
+                            .libraries
+                            .resolve_callable(&name, Some(rt), &arg_tys, &[])
                     } {
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
-                        let recv = self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let recv =
+                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
                         let mut a = vec![recv];
                         for (i, &arg) in args.iter().enumerate() {
                             match c.params.get(i + 1) {
@@ -4953,7 +7851,16 @@ impl<'a> Lower<'a> {
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         }
-                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: c.is_inline }, dispatch_receiver: None, args: a });
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: c.owner,
+                                name: c.name,
+                                descriptor: c.descriptor,
+                                inline: c.is_inline,
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        });
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else if let Some(c) = {
                         // A private `@InlineOnly` extension (`String.uppercase()` → inlines
@@ -4963,10 +7870,20 @@ impl<'a> Lower<'a> {
                         // actual splice — so a body the emitter couldn't splice (and would fall back to an
                         // `invokestatic` on the private method) is never routed; the call simply skips.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms.libraries.resolve_scope_inline(&name, rt, &arg_tys)
-                            .filter(|c| c.is_inline && self.syms.libraries.can_inline_call(&c.owner, &c.name, &c.descriptor))
+                        self.syms
+                            .libraries
+                            .resolve_scope_inline(&name, rt, &arg_tys)
+                            .filter(|c| {
+                                c.is_inline
+                                    && self.syms.libraries.can_inline_call(
+                                        &c.owner,
+                                        &c.name,
+                                        &c.descriptor,
+                                    )
+                            })
                     } {
-                        let recv = self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let recv =
+                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
                         let mut a = vec![recv];
                         for (i, &arg) in args.iter().enumerate() {
                             match c.params.get(i + 1) {
@@ -4974,7 +7891,16 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let call = self.ir.add_expr(IrExpr::Call { callee: Callee::Static { owner: c.owner, name: c.name, descriptor: c.descriptor, inline: true }, dispatch_receiver: None, args: a });
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: c.owner,
+                                name: c.name,
+                                descriptor: c.descriptor,
+                                inline: true,
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        });
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else {
                         return None;
@@ -4982,7 +7908,6 @@ impl<'a> Lower<'a> {
                 }
                 _ => return None,
             },
-            _ => return None,
         })
     }
 }
@@ -4994,15 +7919,14 @@ impl<'a> Lower<'a> {
 /// Does the expression (or any nested statement/expression) contain a `return`? Inlining a body or
 /// lambda that returns non-locally isn't modeled, so such an `inline fun` is bailed (file skipped).
 fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
-    file.any_child_expr(
-        e,
-        &mut |x| body_has_return(file, x),
-        &mut |s| stmt_has_return(file, s),
-    )
+    file.any_child_expr(e, &mut |x| body_has_return(file, x), &mut |s| {
+        stmt_has_return(file, s)
+    })
 }
 
 fn stmt_has_return(file: &ast::File, s: ast::StmtId) -> bool {
-    matches!(file.stmt(s), Stmt::Return(_)) || file.any_child_stmt(s, &mut |x| body_has_return(file, x))
+    matches!(file.stmt(s), Stmt::Return(_))
+        || file.any_child_stmt(s, &mut |x| body_has_return(file, x))
 }
 
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
@@ -5019,7 +7943,9 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
             matches!(op, Lt | Le | Gt | Ge | And | Or)
                 || (matches!(op, Eq | Ne) && file_expr_is_primitive(file, *lhs))
         }
-        Expr::Unary { op: ast::UnOp::Not, .. } => true,
+        Expr::Unary {
+            op: ast::UnOp::Not, ..
+        } => true,
         _ => false,
     }
 }
@@ -5030,10 +7956,19 @@ fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
 /// per-function desugar (which inlines the body through normal branchy lowering).
 fn body_contains_branch(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
-        Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::SafeCall { .. } | Expr::Try { .. } => true,
-        Expr::Binary { op: ast::BinOp::And | ast::BinOp::Or, .. } => true,
+        Expr::If { .. }
+        | Expr::When { .. }
+        | Expr::Elvis { .. }
+        | Expr::SafeCall { .. }
+        | Expr::Try { .. } => true,
+        Expr::Binary {
+            op: ast::BinOp::And | ast::BinOp::Or,
+            ..
+        } => true,
         Expr::Lambda { .. } => false, // a nested lambda is its own method body
-        _ => file.any_child_expr(e, &mut |c| body_contains_branch(file, c), &mut |s| stmt_contains_branch(file, s)),
+        _ => file.any_child_expr(e, &mut |c| body_contains_branch(file, c), &mut |s| {
+            stmt_contains_branch(file, s)
+        }),
     }
 }
 
@@ -5048,15 +7983,26 @@ fn stmt_contains_branch(file: &ast::File, s: ast::StmtId) -> bool {
 /// (including a `byte[]`/`short[]` array). krusty's `Ty` erases these to `Int`, so it can't build a
 /// matching argument/array — a call to such an overload would fail the verifier; the caller bails.
 fn descriptor_has_byte_or_short_param(desc: &str) -> bool {
-    let Some(end) = desc.find(')') else { return false };
+    let Some(end) = desc.find(')') else {
+        return false;
+    };
     let bytes = desc[1..end].as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'[' => { i += 1; } // array prefix — fall through to the element type
-            b'L' => { while i < bytes.len() && bytes[i] != b';' { i += 1; } i += 1; } // skip `Lname;`
+            b'[' => {
+                i += 1;
+            } // array prefix — fall through to the element type
+            b'L' => {
+                while i < bytes.len() && bytes[i] != b';' {
+                    i += 1;
+                }
+                i += 1;
+            } // skip `Lname;`
             b'B' | b'S' => return true,
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     false
@@ -5070,19 +8016,35 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
 }
 
 fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {
-    matches!(file.expr(e),
-        Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
-        | Expr::DoubleLit(_) | Expr::FloatLit(_)
-        | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::StringLit(_) | Expr::NullLit)
+    matches!(
+        file.expr(e),
+        Expr::IntLit(_)
+            | Expr::LongLit(_)
+            | Expr::UIntLit(_)
+            | Expr::ULongLit(_)
+            | Expr::DoubleLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::CharLit(_)
+            | Expr::StringLit(_)
+            | Expr::NullLit
+    )
 }
 
 /// Best-effort: is the literal/operand a primitive (so `==` would use a numeric branch, not
 /// `Intrinsics.areEqual`)? Conservative — only obvious primitive literals count.
 fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
-    matches!(file.expr(e),
-        Expr::IntLit(_) | Expr::LongLit(_) | Expr::UIntLit(_) | Expr::ULongLit(_)
-        | Expr::DoubleLit(_) | Expr::FloatLit(_)
-        | Expr::BoolLit(_) | Expr::CharLit(_))
+    matches!(
+        file.expr(e),
+        Expr::IntLit(_)
+            | Expr::LongLit(_)
+            | Expr::UIntLit(_)
+            | Expr::ULongLit(_)
+            | Expr::DoubleLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::CharLit(_)
+    )
 }
 
 /// The IR parameter type for a captured local lifted into a local function: a boxed (closure-written)
@@ -5140,7 +8102,10 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         }
         return t;
     }
-    let is_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
+    let is_class = file
+        .decls
+        .iter()
+        .any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
     if is_class {
         Ty::obj(&class_internal(file, &r.name))
     } else {
@@ -5153,7 +8118,14 @@ fn ir_type_is_reference(t: &IrType) -> bool {
     match t {
         IrType::Class { fq_name, .. } => !matches!(
             fq_name.as_str(),
-            "kotlin/Int" | "kotlin/Long" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Boolean" | "kotlin/Char" | "kotlin/Double" | "kotlin/Float"
+            "kotlin/Int"
+                | "kotlin/Long"
+                | "kotlin/Short"
+                | "kotlin/Byte"
+                | "kotlin/Boolean"
+                | "kotlin/Char"
+                | "kotlin/Double"
+                | "kotlin/Float"
         ),
         IrType::Function { .. } => true,
         _ => false,
@@ -5185,8 +8157,12 @@ fn body_declares_local(file: &ast::File, e: AstExprId) -> bool {
     fn st(file: &ast::File, s: crate::ast::StmtId) -> bool {
         match file.stmt(s) {
             Stmt::Local { .. } | Stmt::Destructure { .. } => true,
-            Stmt::Expr(e) | Stmt::Assign { value: e, .. } | Stmt::While { body: e, .. }
-            | Stmt::DoWhile { body: e, .. } | Stmt::For { body: e, .. } | Stmt::ForEach { body: e, .. } => ex(file, *e),
+            Stmt::Expr(e)
+            | Stmt::Assign { value: e, .. }
+            | Stmt::While { body: e, .. }
+            | Stmt::DoWhile { body: e, .. }
+            | Stmt::For { body: e, .. }
+            | Stmt::ForEach { body: e, .. } => ex(file, *e),
             _ => false,
         }
     }
@@ -5205,17 +8181,26 @@ fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
         match file.expr(e) {
             // A lambda's control flow is separate; a callable-ref receiver carries no return/break.
             Expr::Lambda { .. } | Expr::CallableRef { .. } => false,
-            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld, wr), &mut |s| st(file, s, ld, wr)),
+            _ => file.any_child_expr(e, &mut |c| ex(file, c, ld, wr), &mut |s| {
+                st(file, s, ld, wr)
+            }),
         }
     }
     fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32, wr: bool) -> bool {
         match file.stmt(s) {
             Stmt::Return(_) => wr,
             Stmt::Break(_) | Stmt::Continue(_) => ld == 0,
-            Stmt::Expr(e) | Stmt::Local { init: e, .. } | Stmt::Assign { value: e, .. } | Stmt::Destructure { init: e, .. } => ex(file, *e, ld, wr),
+            Stmt::Expr(e)
+            | Stmt::Local { init: e, .. }
+            | Stmt::Assign { value: e, .. }
+            | Stmt::Destructure { init: e, .. } => ex(file, *e, ld, wr),
             // A loop's body raises the loop depth, so its `break`/`continue` are loop-local.
-            Stmt::While { cond, body, .. } => ex(file, *cond, ld, wr) || ex(file, *body, ld + 1, wr),
-            Stmt::DoWhile { body, cond, .. } => ex(file, *body, ld + 1, wr) || ex(file, *cond, ld, wr),
+            Stmt::While { cond, body, .. } => {
+                ex(file, *cond, ld, wr) || ex(file, *body, ld + 1, wr)
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                ex(file, *body, ld + 1, wr) || ex(file, *cond, ld, wr)
+            }
             Stmt::For { body, .. } | Stmt::ForEach { body, .. } => ex(file, *body, ld + 1, wr),
             _ => false,
         }
@@ -5288,50 +8273,92 @@ fn ty_to_ir(t: Ty) -> IrType {
         // (see `ir_array_element` below for the inverse — extracting an array IrType's element.)
         // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
         // primitive `T` when it lays out the array; the front end keeps the logical element).
-        Ty::Obj("kotlin/Array", args) => return IrType::Class {
-            fq_name: "kotlin/Array".to_string(),
-            type_args: args.iter().map(|t| ty_to_ir(*t)).collect(),
-            nullable: false,
-        },
-        Ty::Obj(n, _) => return IrType::Class { fq_name: n.to_string(), type_args: vec![], nullable: false },
+        Ty::Obj("kotlin/Array", args) => {
+            return IrType::Class {
+                fq_name: "kotlin/Array".to_string(),
+                type_args: args.iter().map(|t| ty_to_ir(*t)).collect(),
+                nullable: false,
+            }
+        }
+        Ty::Obj(n, _) => {
+            return IrType::Class {
+                fq_name: n.to_string(),
+                type_args: vec![],
+                nullable: false,
+            }
+        }
         // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
         // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
-        Ty::Fun(s) => return IrType::Function {
-            params: s.params.iter().map(|t| ty_to_ir(*t)).collect(),
-            ret: Box::new(ty_to_ir(s.ret)),
-        },
+        Ty::Fun(s) => {
+            return IrType::Function {
+                params: s.params.iter().map(|t| ty_to_ir(*t)).collect(),
+                ret: Box::new(ty_to_ir(s.ret)),
+            }
+        }
         // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
         // its representation. Primitive arrays encode the element in the class name.
         Ty::Array(e) => {
             let fq = match *e {
-                Ty::Int => "kotlin/IntArray", Ty::Long => "kotlin/LongArray", Ty::Double => "kotlin/DoubleArray",
-                Ty::Float => "kotlin/FloatArray", Ty::Boolean => "kotlin/BooleanArray", Ty::Char => "kotlin/CharArray",
-                Ty::Byte => "kotlin/ByteArray", Ty::Short => "kotlin/ShortArray",
-                _ => return IrType::Class { fq_name: "kotlin/Array".to_string(), type_args: vec![ty_to_ir(*e)], nullable: false },
+                Ty::Int => "kotlin/IntArray",
+                Ty::Long => "kotlin/LongArray",
+                Ty::Double => "kotlin/DoubleArray",
+                Ty::Float => "kotlin/FloatArray",
+                Ty::Boolean => "kotlin/BooleanArray",
+                Ty::Char => "kotlin/CharArray",
+                Ty::Byte => "kotlin/ByteArray",
+                Ty::Short => "kotlin/ShortArray",
+                _ => {
+                    return IrType::Class {
+                        fq_name: "kotlin/Array".to_string(),
+                        type_args: vec![ty_to_ir(*e)],
+                        nullable: false,
+                    }
+                }
             };
-            return IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false };
+            return IrType::Class {
+                fq_name: fq.to_string(),
+                type_args: vec![],
+                nullable: false,
+            };
         }
         _ => return IrType::Error,
     };
-    IrType::Class { fq_name: fq.to_string(), type_args: vec![], nullable: false }
+    IrType::Class {
+        fq_name: fq.to_string(),
+        type_args: vec![],
+        nullable: false,
+    }
 }
 
 /// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a
 /// primitive specialized array (`kotlin/IntArray` → `kotlin/Int`). `None` for a non-array type. Used
 /// to materialize an empty array (`emptyArray<T>()`) of the target's element type.
 fn ir_array_element(t: &IrType) -> Option<IrType> {
-    let IrType::Class { fq_name, type_args, .. } = t else { return None };
+    let IrType::Class {
+        fq_name, type_args, ..
+    } = t
+    else {
+        return None;
+    };
     if fq_name == "kotlin/Array" {
         return type_args.first().cloned();
     }
     let prim = match fq_name.as_str() {
-        "kotlin/IntArray" => "kotlin/Int", "kotlin/LongArray" => "kotlin/Long",
-        "kotlin/DoubleArray" => "kotlin/Double", "kotlin/FloatArray" => "kotlin/Float",
-        "kotlin/BooleanArray" => "kotlin/Boolean", "kotlin/CharArray" => "kotlin/Char",
-        "kotlin/ByteArray" => "kotlin/Byte", "kotlin/ShortArray" => "kotlin/Short",
+        "kotlin/IntArray" => "kotlin/Int",
+        "kotlin/LongArray" => "kotlin/Long",
+        "kotlin/DoubleArray" => "kotlin/Double",
+        "kotlin/FloatArray" => "kotlin/Float",
+        "kotlin/BooleanArray" => "kotlin/Boolean",
+        "kotlin/CharArray" => "kotlin/Char",
+        "kotlin/ByteArray" => "kotlin/Byte",
+        "kotlin/ShortArray" => "kotlin/Short",
         _ => return None,
     };
-    Some(IrType::Class { fq_name: prim.to_string(), type_args: vec![], nullable: false })
+    Some(IrType::Class {
+        fq_name: prim.to_string(),
+        type_args: vec![],
+        nullable: false,
+    })
 }
 
 /// Per-parameter `Some(name)` when a non-null assertion (`Intrinsics.checkNotNullParameter`) should
@@ -5343,14 +8370,18 @@ fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
     if f.is_private || f.receiver.is_some() || f.params.len() != param_tys.len() {
         return vec![None; param_tys.len()];
     }
-    f.params.iter().zip(param_tys).map(|(p, ty)| {
-        let is_type_param = f.type_params.contains(&p.ty.name);
-        if !p.ty.nullable && !is_type_param && ty.is_reference() {
-            Some(p.name.clone())
-        } else {
-            None
-        }
-    }).collect()
+    f.params
+        .iter()
+        .zip(param_tys)
+        .map(|(p, ty)| {
+            let is_type_param = f.type_params.contains(&p.ty.name);
+            if !p.ty.nullable && !is_type_param && ty.is_reference() {
+                Some(p.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
@@ -5370,6 +8401,5 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
         BinOp::RefNe => IrBinOp::RefNe,
         BinOp::And => IrBinOp::And,
         BinOp::Or => IrBinOp::Or,
-        _ => return None,
     })
 }

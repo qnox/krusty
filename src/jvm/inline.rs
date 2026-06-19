@@ -97,13 +97,25 @@ pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
             let base = pc + 1;
             let pad = (4 - (base % 4)) % 4;
             let p = base + pad;
-            let npairs = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
+            let npairs =
+                i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
             (p + 8 + npairs * 8) - pc
         }
         // 1 operand byte.
         0x10 | 0x12 | 0x15..=0x19 | 0x36..=0x3a | 0xa9 | 0xbc => 2,
         // 2 operand bytes.
-        0x11 | 0x13 | 0x14 | 0x84 | 0x99..=0xa8 | 0xb2..=0xb8 | 0xbb | 0xbd | 0xc0 | 0xc1 | 0xc6 | 0xc7 => 3,
+        0x11
+        | 0x13
+        | 0x14
+        | 0x84
+        | 0x99..=0xa8
+        | 0xb2..=0xb8
+        | 0xbb
+        | 0xbd
+        | 0xc0
+        | 0xc1
+        | 0xc6
+        | 0xc7 => 3,
         // multianewarray: 2-byte index + 1 dim byte.
         0xc5 => 4,
         // invokeinterface / invokedynamic: 2-byte index + 2 trailing bytes.
@@ -124,12 +136,12 @@ pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
 /// one. `ldc` carries a 1-byte index; the rest carry 2 bytes.
 fn pool_operand(op: u8) -> Option<(usize, usize)> {
     match op {
-        0x12 => Some((1, 1)), // ldc
-        0x13 | 0x14 => Some((1, 2)), // ldc_w / ldc2_w
+        0x12 => Some((1, 1)),                      // ldc
+        0x13 | 0x14 => Some((1, 2)),               // ldc_w / ldc2_w
         0xb2..=0xb8 => Some((1, 2)), // get/put static/field, invoke virtual/special/static
         0xb9 | 0xba => Some((1, 2)), // invokeinterface / invokedynamic (index in first 2 operand bytes)
         0xbb | 0xbd | 0xc0 | 0xc1 => Some((1, 2)), // new / anewarray / checkcast / instanceof
-        0xc5 => Some((1, 2)), // multianewarray
+        0xc5 => Some((1, 2)),        // multianewarray
         _ => None,
     }
 }
@@ -180,8 +192,15 @@ pub enum Insn {
     Branch { op: u8, target: usize },
     /// A 4-byte-offset `goto_w`/`jsr_w`.
     BranchW { op: u8, target: usize },
-    TableSwitch { default: usize, low: i32, targets: Vec<usize> },
-    LookupSwitch { default: usize, pairs: Vec<(i32, usize)> },
+    TableSwitch {
+        default: usize,
+        low: i32,
+        targets: Vec<usize>,
+    },
+    LookupSwitch {
+        default: usize,
+        pairs: Vec<(i32, usize)>,
+    },
 }
 
 /// Decode a method body into [`Insn`]s with branch targets as instruction indices. `None` on
@@ -197,39 +216,66 @@ pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
         let insn = match op {
             0x99..=0xa8 | 0xc6 | 0xc7 => {
                 let off = i16::from_be_bytes([code[pc + 1], code[pc + 2]]) as isize;
-                Insn::Branch { op, target: (pc as isize + off) as usize }
+                Insn::Branch {
+                    op,
+                    target: (pc as isize + off) as usize,
+                }
             }
             0xc8 | 0xc9 => {
                 let off = i32::from_be_bytes(code.get(pc + 1..pc + 5)?.try_into().ok()?) as isize;
-                Insn::BranchW { op, target: (pc as isize + off) as usize }
+                Insn::BranchW {
+                    op,
+                    target: (pc as isize + off) as usize,
+                }
             }
             0xaa => {
                 let p = pc + 1 + (4 - ((pc + 1) % 4)) % 4;
-                let def = (pc as isize + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize) as usize;
+                let def = (pc as isize
+                    + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize)
+                    as usize;
                 let low = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?);
                 let high = i32::from_be_bytes(code.get(p + 8..p + 12)?.try_into().ok()?);
                 let n = (high - low + 1).max(0) as usize;
                 let mut targets = Vec::with_capacity(n);
                 for k in 0..n {
                     let o = p + 12 + k * 4;
-                    targets.push((pc as isize + i32::from_be_bytes(code.get(o..o + 4)?.try_into().ok()?) as isize) as usize);
+                    targets.push(
+                        (pc as isize
+                            + i32::from_be_bytes(code.get(o..o + 4)?.try_into().ok()?) as isize)
+                            as usize,
+                    );
                 }
-                Insn::TableSwitch { default: def, low, targets }
+                Insn::TableSwitch {
+                    default: def,
+                    low,
+                    targets,
+                }
             }
             0xab => {
                 let p = pc + 1 + (4 - ((pc + 1) % 4)) % 4;
-                let def = (pc as isize + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize) as usize;
-                let npairs = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
+                let def = (pc as isize
+                    + i32::from_be_bytes(code.get(p..p + 4)?.try_into().ok()?) as isize)
+                    as usize;
+                let npairs =
+                    i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
                 let mut pairs = Vec::with_capacity(npairs);
                 for k in 0..npairs {
                     let o = p + 8 + k * 8;
                     let m = i32::from_be_bytes(code.get(o..o + 4)?.try_into().ok()?);
-                    let t = (pc as isize + i32::from_be_bytes(code.get(o + 4..o + 8)?.try_into().ok()?) as isize) as usize;
+                    let t = (pc as isize
+                        + i32::from_be_bytes(code.get(o + 4..o + 8)?.try_into().ok()?) as isize)
+                        as usize;
                     pairs.push((m, t));
                 }
-                Insn::LookupSwitch { default: def, pairs }
+                Insn::LookupSwitch {
+                    default: def,
+                    pairs,
+                }
             }
-            _ => Insn::Plain { op, operands: code[pc + 1..pc + len].to_vec() },
+            _ => Insn::Plain {
+                op,
+                operands: code[pc + 1..pc + len].to_vec(),
+            },
         };
         offsets.push(pc);
         insns.push(insn);
@@ -239,8 +285,12 @@ pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
     let idx_of = |byte: usize| offsets.binary_search(&byte).ok();
     for insn in &mut insns {
         match insn {
-            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target = idx_of(*target)?,
-            Insn::TableSwitch { default, targets, .. } => {
+            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
+                *target = idx_of(*target)?
+            }
+            Insn::TableSwitch {
+                default, targets, ..
+            } => {
                 *default = idx_of(*default)?;
                 for t in targets {
                     *t = idx_of(*t)?;
@@ -316,22 +366,34 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
             }
             Insn::Branch { op, target } => {
                 out.push(*op);
-                out.extend_from_slice(&((offs[*target] as isize - here as isize) as i16).to_be_bytes());
+                out.extend_from_slice(
+                    &((offs[*target] as isize - here as isize) as i16).to_be_bytes(),
+                );
             }
             Insn::BranchW { op, target } => {
                 out.push(*op);
-                out.extend_from_slice(&((offs[*target] as isize - here as isize) as i32).to_be_bytes());
+                out.extend_from_slice(
+                    &((offs[*target] as isize - here as isize) as i32).to_be_bytes(),
+                );
             }
-            Insn::TableSwitch { default, low, targets } => {
+            Insn::TableSwitch {
+                default,
+                low,
+                targets,
+            } => {
                 out.push(0xaa);
                 while (out.len()) % 4 != 0 {
                     out.push(0);
                 }
-                out.extend_from_slice(&((offs[*default] as isize - here as isize) as i32).to_be_bytes());
+                out.extend_from_slice(
+                    &((offs[*default] as isize - here as isize) as i32).to_be_bytes(),
+                );
                 out.extend_from_slice(&low.to_be_bytes());
                 out.extend_from_slice(&(*low + targets.len() as i32 - 1).to_be_bytes());
                 for t in targets {
-                    out.extend_from_slice(&((offs[*t] as isize - here as isize) as i32).to_be_bytes());
+                    out.extend_from_slice(
+                        &((offs[*t] as isize - here as isize) as i32).to_be_bytes(),
+                    );
                 }
             }
             Insn::LookupSwitch { default, pairs } => {
@@ -339,11 +401,15 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
                 while (out.len()) % 4 != 0 {
                     out.push(0);
                 }
-                out.extend_from_slice(&((offs[*default] as isize - here as isize) as i32).to_be_bytes());
+                out.extend_from_slice(
+                    &((offs[*default] as isize - here as isize) as i32).to_be_bytes(),
+                );
                 out.extend_from_slice(&(pairs.len() as i32).to_be_bytes());
                 for (m, t) in pairs {
                     out.extend_from_slice(&m.to_be_bytes());
-                    out.extend_from_slice(&((offs[*t] as isize - here as isize) as i32).to_be_bytes());
+                    out.extend_from_slice(
+                        &((offs[*t] as isize - here as isize) as i32).to_be_bytes(),
+                    );
                 }
             }
         }
@@ -393,13 +459,22 @@ fn decode_n_form(op: u8) -> Option<(u8, u16)> {
 fn local_load_store(base_op: u8, idx: u16) -> Insn {
     if idx <= 3 {
         if let Some(nb) = n_form_base(base_op) {
-            return Insn::Plain { op: nb + idx as u8, operands: vec![] };
+            return Insn::Plain {
+                op: nb + idx as u8,
+                operands: vec![],
+            };
         }
     }
     if idx <= 0xff {
-        Insn::Plain { op: base_op, operands: vec![idx as u8] }
+        Insn::Plain {
+            op: base_op,
+            operands: vec![idx as u8],
+        }
     } else {
-        Insn::Plain { op: 0xc4, operands: vec![base_op, (idx >> 8) as u8, idx as u8] }
+        Insn::Plain {
+            op: 0xc4,
+            operands: vec![base_op, (idx >> 8) as u8, idx as u8],
+        }
     }
 }
 
@@ -408,7 +483,9 @@ fn local_load_store(base_op: u8, idx: u16) -> Insn {
 /// the caller's frame is a prerequisite for splicing — the body then occupies `base..base+max_locals`.
 pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
     for insn in insns.iter_mut() {
-        let Insn::Plain { op, operands } = insn else { continue };
+        let Insn::Plain { op, operands } = insn else {
+            continue;
+        };
         let op = *op;
         if let Some((base_op, idx)) = decode_n_form(op) {
             *insn = local_load_store(base_op, idx + base);
@@ -420,27 +497,42 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
             // ret <index>.
             let idx = *operands.first()? as u16 + base;
             *insn = if idx <= 0xff {
-                Insn::Plain { op: 0xa9, operands: vec![idx as u8] }
+                Insn::Plain {
+                    op: 0xa9,
+                    operands: vec![idx as u8],
+                }
             } else {
-                Insn::Plain { op: 0xc4, operands: vec![0xa9, (idx >> 8) as u8, idx as u8] }
+                Insn::Plain {
+                    op: 0xc4,
+                    operands: vec![0xa9, (idx >> 8) as u8, idx as u8],
+                }
             };
         } else if op == 0x84 {
             // iinc <index> <const>.
             let idx = *operands.first()? as u16 + base;
             let c = operands[1];
             *insn = if idx <= 0xff {
-                Insn::Plain { op: 0x84, operands: vec![idx as u8, c] }
+                Insn::Plain {
+                    op: 0x84,
+                    operands: vec![idx as u8, c],
+                }
             } else {
                 // wide iinc: 2-byte index + sign-extended 2-byte const.
                 let chi = if (c as i8) < 0 { 0xff } else { 0 };
-                Insn::Plain { op: 0xc4, operands: vec![0x84, (idx >> 8) as u8, idx as u8, chi, c] }
+                Insn::Plain {
+                    op: 0xc4,
+                    operands: vec![0x84, (idx >> 8) as u8, idx as u8, chi, c],
+                }
             };
         } else if op == 0xc4 {
             // wide <sub-op> <index:2> [<const:2> for iinc].
             let sub = *operands.first()?;
             let idx = ((operands[1] as u16) << 8 | operands[2] as u16) + base;
             if sub == 0x84 {
-                *insn = Insn::Plain { op: 0xc4, operands: vec![0x84, (idx >> 8) as u8, idx as u8, operands[3], operands[4]] };
+                *insn = Insn::Plain {
+                    op: 0xc4,
+                    operands: vec![0x84, (idx >> 8) as u8, idx as u8, operands[3], operands[4]],
+                };
             } else {
                 *insn = local_load_store(sub, idx);
             }
@@ -464,7 +556,13 @@ fn methodref_target(src_cp: &[C], idx: u16) -> Option<(&str, &str)> {
 /// True for the type-bearing ops a `reifiedOperationMarker` precedes: `anewarray`, `checkcast`,
 /// `instanceof`, `multianewarray`.
 fn is_type_op(insn: &Insn) -> bool {
-    matches!(insn, Insn::Plain { op: 0xbd | 0xc0 | 0xc1 | 0xc5, .. })
+    matches!(
+        insn,
+        Insn::Plain {
+            op: 0xbd | 0xc0 | 0xc1 | 0xc5,
+            ..
+        }
+    )
 }
 
 /// Substitute Kotlin's `reifiedOperationMarker` pattern in an inline body: the call (preceded by its
@@ -473,7 +571,12 @@ fn is_type_op(insn: &Insn) -> bool {
 /// from `type_map` (Kotlin type-parameter name → JVM internal name). Returns the `(insn index, target
 /// pool index)` repoints to apply *after* relocation (so the type op isn't re-relocated to `Object`).
 /// This is how `emptyArray<String>()` inlines to `anewarray java/lang/String`.
-pub fn substitute_reified(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter, type_map: &std::collections::HashMap<String, String>) -> Vec<(usize, u16)> {
+pub fn substitute_reified(
+    insns: &mut [Insn],
+    src_cp: &[C],
+    cw: &mut ClassWriter,
+    type_map: &std::collections::HashMap<String, String>,
+) -> Vec<(usize, u16)> {
     let mut patches = Vec::new();
     for i in 0..insns.len() {
         // The marker is `invokestatic kotlin/jvm/internal/Intrinsics.reifiedOperationMarker`.
@@ -485,14 +588,19 @@ pub fn substitute_reified(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter
         }
         // The `ldc "<typeParam>"` immediately before names the reified parameter.
         let name = match &insns[i - 1] {
-            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => match src_cp.get(operands[0] as usize) {
+            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => match src_cp
+                .get(operands[0] as usize)
+            {
                 Some(C::String(u)) => utf8(src_cp, *u).map(|s| s.trim_end_matches('?').to_string()),
                 _ => None,
             },
             _ => None,
         };
         // Erase the marker call and its two argument pushes (mode + type-name).
-        let nop = Insn::Plain { op: 0x00, operands: vec![] };
+        let nop = Insn::Plain {
+            op: 0x00,
+            operands: vec![],
+        };
         insns[i] = nop.clone();
         insns[i - 1] = nop.clone();
         insns[i - 2] = nop;
@@ -528,8 +636,12 @@ pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
 /// exceeds it — the assembler would otherwise widen it, which the caller handles by falling back.
 pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) -> Option<()> {
     for insn in insns.iter_mut() {
-        let Insn::Plain { op, operands } = insn else { continue };
-        let Some((off, width)) = pool_operand(*op) else { continue };
+        let Insn::Plain { op, operands } = insn else {
+            continue;
+        };
+        let Some((off, width)) = pool_operand(*op) else {
+            continue;
+        };
         if *op == 0xba {
             return None; // invokedynamic
         }
@@ -564,7 +676,10 @@ pub fn redirect_returns(insns: &mut [Insn]) {
     for insn in insns.iter_mut() {
         if let Insn::Plain { op, .. } = insn {
             if matches!(*op, 0xac..=0xb1) {
-                *insn = Insn::Branch { op: 0xa7, target: end };
+                *insn = Insn::Branch {
+                    op: 0xa7,
+                    target: end,
+                };
             }
         }
     }
@@ -575,10 +690,14 @@ pub fn redirect_returns(insns: &mut [Insn]) {
 /// method throws `UnsupportedOperationException` at runtime). This recognizes the must-inline case
 /// from the body alone, without parsing the `@Metadata` inline flag.
 pub fn is_reified_inline(body: &MethodCode) -> bool {
-    let Some(insns) = disassemble(&body.code) else { return false };
-    insns.iter().any(|i| matches!(i, Insn::Plain { op: 0xb8, operands } if operands.len() == 2
+    let Some(insns) = disassemble(&body.code) else {
+        return false;
+    };
+    insns.iter().any(|i| {
+        matches!(i, Insn::Plain { op: 0xb8, operands } if operands.len() == 2
         && methodref_target(&body.source_cp, (operands[0] as u16) << 8 | operands[1] as u16)
-            == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker"))))
+            == Some(("kotlin/jvm/internal/Intrinsics", "reifiedOperationMarker")))
+    })
 }
 
 /// Per-parameter `(local slot, store-base opcode)` for a method descriptor, slots starting at `base`
@@ -747,7 +866,11 @@ pub fn decode_stackmap(bytes: &[u8], frame0_locals: Vec<VType>) -> Option<Vec<Fr
             (d, st)
         };
         offset += delta as i64 + 1;
-        frames.push(Frame { offset: offset as usize, locals: locals.clone(), stack });
+        frames.push(Frame {
+            offset: offset as usize,
+            locals: locals.clone(),
+            stack,
+        });
     }
     Some(frames)
 }
@@ -761,7 +884,9 @@ pub fn function_invoke_sites(insns: &[Insn], src_cp: &[C]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, insn)| {
-            let Insn::Plain { op: 0xb9, operands } = insn else { return None };
+            let Insn::Plain { op: 0xb9, operands } = insn else {
+                return None;
+            };
             let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
             let (cls, name) = methodref_target(src_cp, idx)?;
             (name == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")).then_some(i)
@@ -805,7 +930,9 @@ pub fn is_call_spliceable(body: &MethodCode) -> bool {
     if body.has_handlers {
         return false;
     }
-    let Some(mut insns) = disassemble(&body.code) else { return false };
+    let Some(mut insns) = disassemble(&body.code) else {
+        return false;
+    };
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
         return false;
     }
@@ -813,15 +940,21 @@ pub fn is_call_spliceable(body: &MethodCode) -> bool {
     if !function_invoke_sites(&insns, &body.source_cp).is_empty() {
         return false; // a lambda-bearing body — use `is_lambda_spliceable`/the lambda route instead
     }
-    let returns = insns.iter().filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))).count();
-    returns == 1 && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
+    let returns = insns
+        .iter()
+        .filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
+        .count();
+    returns == 1
+        && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
 }
 
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
     if body.has_handlers {
         return false;
     }
-    let Some(mut insns) = disassemble(&body.code) else { return false };
+    let Some(mut insns) = disassemble(&body.code) else {
+        return false;
+    };
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
         return false;
     }
@@ -829,8 +962,12 @@ pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
     if function_invoke_sites(&insns, &body.source_cp).len() != 1 {
         return false;
     }
-    let returns = insns.iter().filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))).count();
-    returns == 1 && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
+    let returns = insns
+        .iter()
+        .filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
+        .count();
+    returns == 1
+        && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
 }
 
 /// Remove kotlinc's entry `Intrinsics.checkNotNullParameter`/`checkNotNullExpressionValue` null-checks
@@ -839,18 +976,28 @@ fn strip_param_null_checks(insns: &mut Vec<Insn>, src_cp: &[C]) {
     let mut drop = vec![false; insns.len()];
     for (i, insn) in insns.iter().enumerate() {
         if let Insn::Plain { op: 0xb8, operands } = insn {
-            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8 | operands.get(1).copied().unwrap_or(0) as u16;
+            let idx = (operands.first().copied().unwrap_or(0) as u16) << 8
+                | operands.get(1).copied().unwrap_or(0) as u16;
             if let Some(("kotlin/jvm/internal/Intrinsics", n)) = methodref_target(src_cp, idx) {
                 if n == "checkNotNullParameter" || n == "checkNotNullExpressionValue" {
                     drop[i] = true;
-                    if i >= 1 { drop[i - 1] = true; }
-                    if i >= 2 { drop[i - 2] = true; }
+                    if i >= 1 {
+                        drop[i - 1] = true;
+                    }
+                    if i >= 2 {
+                        drop[i - 2] = true;
+                    }
                 }
             }
         }
     }
     if drop.iter().any(|&d| d) {
-        *insns = std::mem::take(insns).into_iter().zip(drop).filter(|(_, d)| !d).map(|(x, _)| x).collect();
+        *insns = std::mem::take(insns)
+            .into_iter()
+            .zip(drop)
+            .filter(|(_, d)| !d)
+            .map(|(x, _)| x)
+            .collect();
     }
 }
 
@@ -876,7 +1023,9 @@ pub fn branchless_lambda_segments(
     }
     let invoke = sites[0];
     // Single exit: one return, the last instruction.
-    let returns: Vec<usize> = insns.iter().enumerate()
+    let returns: Vec<usize> = insns
+        .iter()
+        .enumerate()
         .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
         .map(|(j, _)| j)
         .collect();
@@ -888,7 +1037,12 @@ pub fn branchless_lambda_segments(
     let shifted_lambda = base + lambda_slot;
     // The lambda parameter must be loaded exactly once (to feed its single invoke); more loads mean it
     // is used in a way we don't model (passed on, stored), so eliding them would corrupt the stack — bail.
-    if insns.iter().filter(|i| is_aload_of(i, shifted_lambda)).count() != 1 {
+    if insns
+        .iter()
+        .filter(|i| is_aload_of(i, shifted_lambda))
+        .count()
+        != 1
+    {
         return None;
     }
     // `before` = instructions up to the invoke, with the lambda-object loads elided; `after` =
@@ -925,7 +1079,9 @@ fn shift_targets(insns: &mut [Insn], delta: usize) {
     for insn in insns {
         match insn {
             Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target += delta,
-            Insn::TableSwitch { default, targets, .. } => {
+            Insn::TableSwitch {
+                default, targets, ..
+            } => {
                 *default += delta;
                 for t in targets {
                     *t += delta;
@@ -1009,7 +1165,12 @@ pub struct BranchySplice {
 /// with primitive parameters, no exception handlers, and no reified marker; the caller must have an
 /// empty operand-stack baseline (so the frames need no operand-stack prefix). `None` ⇒ fall back to a
 /// real call (never a miscompile).
-pub fn splice_branchy(body: &MethodCode, descriptor: &str, base: u16, cw: &mut ClassWriter) -> Option<BranchySplice> {
+pub fn splice_branchy(
+    body: &MethodCode,
+    descriptor: &str,
+    base: u16,
+    cw: &mut ClassWriter,
+) -> Option<BranchySplice> {
     if body.has_handlers || is_reified_inline(body) {
         return None;
     }
@@ -1028,7 +1189,11 @@ pub fn splice_branchy(body: &MethodCode, descriptor: &str, base: u16, cw: &mut C
     shift_locals(&mut insns, base)?;
     redirect_returns(&mut insns); // returns → `goto end` (target = body insn count)
     let params = param_store_ops(descriptor, base)?;
-    let prologue: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    let prologue: Vec<Insn> = params
+        .iter()
+        .rev()
+        .map(|&(slot, op)| local_load_store(op, slot))
+        .collect();
     let p = prologue.len();
     shift_targets(&mut insns, p); // body targets move past the prologue
     let mut final_insns = prologue;
@@ -1036,14 +1201,32 @@ pub fn splice_branchy(body: &MethodCode, descriptor: &str, base: u16, cw: &mut C
     let offs = insn_offsets(&final_insns);
     let mut frames = Vec::with_capacity(decoded.len() + 1);
     for (f, &idx) in decoded.iter().zip(&frame_idx) {
-        let locals = f.locals.iter().map(|v| relocate_vtype(v, &body.source_cp, cw)).collect::<Option<Vec<_>>>()?;
-        let stack = f.stack.iter().map(|v| relocate_vtype(v, &body.source_cp, cw)).collect::<Option<Vec<_>>>()?;
+        let locals = f
+            .locals
+            .iter()
+            .map(|v| relocate_vtype(v, &body.source_cp, cw))
+            .collect::<Option<Vec<_>>>()?;
+        let stack = f
+            .stack
+            .iter()
+            .map(|v| relocate_vtype(v, &body.source_cp, cw))
+            .collect::<Option<Vec<_>>>()?;
         frames.push((offs[p + idx], locals, stack));
     }
-    Some(BranchySplice { bytes: assemble(&final_insns), frames, join_stack: ret.into_iter().collect() })
+    Some(BranchySplice {
+        bytes: assemble(&final_insns),
+        frames,
+        join_stack: ret.into_iter().collect(),
+    })
 }
 
-pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap<String, String>, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
+pub fn splice(
+    body: &MethodCode,
+    descriptor: &str,
+    base: u16,
+    type_map: &HashMap<String, String>,
+    cw: &mut ClassWriter,
+) -> Option<Vec<Insn>> {
     let mut insns = disassemble(&body.code)?;
     // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
     let patches = substitute_reified(&mut insns, &body.source_cp, cw, type_map);
@@ -1055,7 +1238,11 @@ pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap
     redirect_returns(&mut insns);
     // Prologue: pop the arguments (top = last param) into their slots, declaration order reversed.
     let params = param_store_ops(descriptor, base)?;
-    let mut out: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    let mut out: Vec<Insn> = params
+        .iter()
+        .rev()
+        .map(|&(slot, op)| local_load_store(op, slot))
+        .collect();
     out.extend(insns);
     Some(out)
 }
@@ -1066,7 +1253,12 @@ pub fn splice(body: &MethodCode, descriptor: &str, base: u16, type_map: &HashMap
 /// target and needs no StackMapTable frame, which is what makes it safely emittable today. `None`
 /// (caller emits a normal `invokestatic`) if the body has any branch/switch, isn't single-exit, or
 /// uses a pool entry `relocate_insns` can't relocate (`invokedynamic`).
-pub fn splice_branchless(body: &MethodCode, descriptor: &str, base: u16, cw: &mut ClassWriter) -> Option<Vec<Insn>> {
+pub fn splice_branchless(
+    body: &MethodCode,
+    descriptor: &str,
+    base: u16,
+    cw: &mut ClassWriter,
+) -> Option<Vec<Insn>> {
     // A body with exception handlers needs handler-table relocation (not supported) — bail.
     if body.has_handlers {
         return None;
@@ -1077,7 +1269,9 @@ pub fn splice_branchless(body: &MethodCode, descriptor: &str, base: u16, cw: &mu
         return None;
     }
     // Single exit: exactly one return opcode, and it is the last instruction.
-    let returns: Vec<usize> = insns.iter().enumerate()
+    let returns: Vec<usize> = insns
+        .iter()
+        .enumerate()
         .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
         .map(|(j, _)| j)
         .collect();
@@ -1087,9 +1281,13 @@ pub fn splice_branchless(body: &MethodCode, descriptor: &str, base: u16, cw: &mu
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
     insns.pop(); // drop the trailing return: fall through with the result on the stack
-    // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
+                 // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
     let params = param_store_ops(descriptor, base)?;
-    let mut out: Vec<Insn> = params.iter().rev().map(|&(slot, op)| local_load_store(op, slot)).collect();
+    let mut out: Vec<Insn> = params
+        .iter()
+        .rev()
+        .map(|&(slot, op)| local_load_store(op, slot))
+        .collect();
     out.extend(insns);
     Some(out)
 }
@@ -1101,7 +1299,14 @@ mod tests {
     #[test]
     fn splice_branchless_drops_return_and_stores_args() {
         // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
-        let body = MethodCode { max_stack: 2, max_locals: 1, code: vec![0x1a, 0x06, 0x68, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
+        let body = MethodCode {
+            max_stack: 2,
+            max_locals: 1,
+            code: vec![0x1a, 0x06, 0x68, 0xac],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            has_handlers: false,
+        };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let insns = splice_branchless(&body, "(I)I", 3, &mut cw).expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
@@ -1116,14 +1321,21 @@ mod tests {
         let cp = vec![
             C::Other,
             C::Utf8("kotlin/jvm/functions/Function1".into()), // 1
-            C::Class(1),                                       // 2
-            C::Utf8("invoke".into()),                          // 3
+            C::Class(1),                                      // 2
+            C::Utf8("invoke".into()),                         // 3
             C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()), // 4
-            C::NameAndType(3, 4),                              // 5
-            C::InterfaceMethodref(2, 5),                       // 6
+            C::NameAndType(3, 4),                             // 5
+            C::InterfaceMethodref(2, 5),                      // 6
         ];
         let code = vec![0x2b, 0x2a, 0xb9, 0x00, 0x06, 0x02, 0x00, 0xb0];
-        let body = MethodCode { max_stack: 2, max_locals: 2, code, source_cp: cp, stackmap: None, has_handlers: false };
+        let body = MethodCode {
+            max_stack: 2,
+            max_locals: 2,
+            code,
+            source_cp: cp,
+            stackmap: None,
+            has_handlers: false,
+        };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         // base=2, lambda (block) at original slot 1 → shifted slot 3; receiver `this` at slot 0 → 2.
         let (before, after) = branchless_lambda_segments(&body, 2, 1, &mut cw).expect("segments");
@@ -1138,25 +1350,40 @@ mod tests {
         let cp = vec![
             C::Other,
             C::Utf8("kotlin/jvm/functions/Function1".into()), // 1
-            C::Class(1),                                       // 2
-            C::Utf8("invoke".into()),                          // 3
+            C::Class(1),                                      // 2
+            C::Utf8("invoke".into()),                         // 3
             C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()), // 4
-            C::NameAndType(3, 4),                              // 5
-            C::InterfaceMethodref(2, 5),                       // 6
-            C::Utf8("java/util/Iterator".into()),              // 7
-            C::Class(7),                                       // 8
-            C::Utf8("next".into()),                            // 9
-            C::Utf8("()Ljava/lang/Object;".into()),            // 10
-            C::NameAndType(9, 10),                             // 11
-            C::InterfaceMethodref(8, 11),                      // 12
+            C::NameAndType(3, 4),                             // 5
+            C::InterfaceMethodref(2, 5),                      // 6
+            C::Utf8("java/util/Iterator".into()),             // 7
+            C::Class(7),                                      // 8
+            C::Utf8("next".into()),                           // 9
+            C::Utf8("()Ljava/lang/Object;".into()),           // 10
+            C::NameAndType(9, 10),                            // 11
+            C::InterfaceMethodref(8, 11),                     // 12
         ];
         // aload_1 ; invokeinterface Iterator.next #12 ; aload_2 ; invokeinterface Function1.invoke #6 ; pop
         let insns = vec![
-            Insn::Plain { op: 0x2b, operands: vec![] },
-            Insn::Plain { op: 0xb9, operands: vec![0x00, 0x0c, 0x01, 0x00] },
-            Insn::Plain { op: 0x2c, operands: vec![] },
-            Insn::Plain { op: 0xb9, operands: vec![0x00, 0x06, 0x02, 0x00] },
-            Insn::Plain { op: 0x57, operands: vec![] },
+            Insn::Plain {
+                op: 0x2b,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0xb9,
+                operands: vec![0x00, 0x0c, 0x01, 0x00],
+            },
+            Insn::Plain {
+                op: 0x2c,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0xb9,
+                operands: vec![0x00, 0x06, 0x02, 0x00],
+            },
+            Insn::Plain {
+                op: 0x57,
+                operands: vec![],
+            },
         ];
         assert_eq!(function_invoke_sites(&insns, &cp), vec![3]);
     }
@@ -1167,9 +1394,8 @@ mod tests {
         //   APPEND(252) delta=5, +1 local Integer
         //   FULL(255)  delta=3, locals=[Object #9, Long], stack=[Int]
         let bytes = vec![
-            0x00, 0x02,
-            252, 0x00, 0x05, 0x01,
-            255, 0x00, 0x03, 0x00, 0x02, 0x07, 0x00, 0x09, 0x04, 0x00, 0x01, 0x01,
+            0x00, 0x02, 252, 0x00, 0x05, 0x01, 255, 0x00, 0x03, 0x00, 0x02, 0x07, 0x00, 0x09, 0x04,
+            0x00, 0x01, 0x01,
         ];
         let frames = decode_stackmap(&bytes, vec![VType::Int]).unwrap();
         assert_eq!(frames[0].offset, 5); // -1 + 5 + 1
@@ -1198,7 +1424,14 @@ mod tests {
     #[test]
     fn splice_branchless_bails_on_branch() {
         // `iload_0; ifeq +4; iconst_1; ireturn` — has a branch ⇒ not branchless.
-        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
+        let body = MethodCode {
+            max_stack: 1,
+            max_locals: 1,
+            code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            has_handlers: false,
+        };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         assert!(splice_branchless(&body, "(I)I", 1, &mut cw).is_none());
     }
@@ -1209,14 +1442,14 @@ mod tests {
         let src_cp = vec![
             C::Other,
             C::Utf8("java/lang/Object".into()), // 1
-            C::Class(1),                         // 2
-            C::Utf8("hashCode".into()),          // 3
-            C::Utf8("()I".into()),               // 4
-            C::NameAndType(3, 4),                // 5
-            C::Methodref(2, 5),                  // 6
-            C::Utf8("hi".into()),                // 7
-            C::String(7),                        // 8
-            C::Integer(42),                      // 9
+            C::Class(1),                        // 2
+            C::Utf8("hashCode".into()),         // 3
+            C::Utf8("()I".into()),              // 4
+            C::NameAndType(3, 4),               // 5
+            C::Methodref(2, 5),                 // 6
+            C::Utf8("hi".into()),               // 7
+            C::String(7),                       // 8
+            C::Integer(42),                     // 9
         ];
         let mut cw = ClassWriter::new("Target", "java/lang/Object");
         let m = relocate_const(&src_cp, 6, &mut cw).expect("methodref");
@@ -1234,12 +1467,12 @@ mod tests {
     fn relocates_code_pool_refs() {
         let src_cp = vec![
             C::Other,
-            C::Utf8("Foo".into()),    // 1
-            C::Class(1),              // 2
-            C::Utf8("bar".into()),    // 3
-            C::Utf8("()V".into()),    // 4
-            C::NameAndType(3, 4),     // 5
-            C::Methodref(2, 5),       // 6
+            C::Utf8("Foo".into()), // 1
+            C::Class(1),           // 2
+            C::Utf8("bar".into()), // 3
+            C::Utf8("()V".into()), // 4
+            C::NameAndType(3, 4),  // 5
+            C::Methodref(2, 5),    // 6
         ];
         // invokestatic #6 ; return
         let code = [0xb8, 0x00, 0x06, 0xb1];
@@ -1247,7 +1480,11 @@ mod tests {
         let out = relocate_code(&code, &src_cp, &mut cw).expect("relocate");
         assert_eq!(out.len(), code.len(), "instruction lengths preserved");
         let expected = cw.methodref("Foo", "bar", "()V");
-        assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected, "index points at target methodref");
+        assert_eq!(
+            (out[1] as u16) << 8 | out[2] as u16,
+            expected,
+            "index points at target methodref"
+        );
         assert_eq!(out[3], 0xb1, "return opcode unchanged");
     }
 
@@ -1262,7 +1499,10 @@ mod tests {
         let mut s = disassemble(&code).unwrap();
         shift_locals(&mut s, 4).unwrap();
         // iload_1 → iload 5 (0x15 5), istore_2 → istore 6 (0x36 6), iinc 1→5.
-        assert_eq!(assemble(&s), [0x15, 0x05, 0x36, 0x06, 0x84, 0x05, 0x01, 0xb1]);
+        assert_eq!(
+            assemble(&s),
+            [0x15, 0x05, 0x36, 0x06, 0x84, 0x05, 0x01, 0xb1]
+        );
 
         // Shifting past 3 must promote _N forms to indexed (size grows; assemble relays out).
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
@@ -1273,14 +1513,28 @@ mod tests {
     #[test]
     fn is_reified_inline_negative() {
         // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
-        let body = MethodCode { max_stack: 1, max_locals: 0, code: vec![0x04, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
+        let body = MethodCode {
+            max_stack: 1,
+            max_locals: 0,
+            code: vec![0x04, 0xac],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            has_handlers: false,
+        };
         assert!(!is_reified_inline(&body));
     }
 
     #[test]
     fn splice_identity_function() {
         // inline fun id(x: Int): Int = x  →  body: iload_0; ireturn
-        let body = MethodCode { max_stack: 1, max_locals: 1, code: vec![0x1a, 0xac], source_cp: vec![C::Other], stackmap: None, has_handlers: false };
+        let body = MethodCode {
+            max_stack: 1,
+            max_locals: 1,
+            code: vec![0x1a, 0xac],
+            source_cp: vec![C::Other],
+            stackmap: None,
+            has_handlers: false,
+        };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();
         let insns = splice(&body, "(I)I", 1, &tm, &mut cw).expect("splice");
@@ -1299,24 +1553,42 @@ mod tests {
         let src_cp = vec![
             C::Other,
             C::Utf8("kotlin/jvm/internal/Intrinsics".into()), // 1
-            C::Class(1),                                       // 2
-            C::Utf8("reifiedOperationMarker".into()),          // 3
-            C::Utf8("(ILjava/lang/String;)V".into()),          // 4
-            C::NameAndType(3, 4),                              // 5
-            C::Methodref(2, 5),                                // 6
-            C::Utf8("T?".into()),                              // 7
-            C::String(7),                                      // 8
-            C::Utf8("java/lang/Object".into()),                // 9
-            C::Class(9),                                       // 10
+            C::Class(1),                                      // 2
+            C::Utf8("reifiedOperationMarker".into()),         // 3
+            C::Utf8("(ILjava/lang/String;)V".into()),         // 4
+            C::NameAndType(3, 4),                             // 5
+            C::Methodref(2, 5),                               // 6
+            C::Utf8("T?".into()),                             // 7
+            C::String(7),                                     // 8
+            C::Utf8("java/lang/Object".into()),               // 9
+            C::Class(9),                                      // 10
         ];
         // iconst_0(size); iconst_0(mode); ldc "T?"; invokestatic marker; anewarray Object; areturn
         let mut insns = vec![
-            Insn::Plain { op: 0x03, operands: vec![] },
-            Insn::Plain { op: 0x03, operands: vec![] },
-            Insn::Plain { op: 0x12, operands: vec![8] },
-            Insn::Plain { op: 0xb8, operands: vec![0, 6] },
-            Insn::Plain { op: 0xbd, operands: vec![0, 10] },
-            Insn::Plain { op: 0xb0, operands: vec![] },
+            Insn::Plain {
+                op: 0x03,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x03,
+                operands: vec![],
+            },
+            Insn::Plain {
+                op: 0x12,
+                operands: vec![8],
+            },
+            Insn::Plain {
+                op: 0xb8,
+                operands: vec![0, 6],
+            },
+            Insn::Plain {
+                op: 0xbd,
+                operands: vec![0, 10],
+            },
+            Insn::Plain {
+                op: 0xb0,
+                operands: vec![],
+            },
         ];
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let mut tm = std::collections::HashMap::new();
@@ -1327,11 +1599,18 @@ mod tests {
         // Marker call + its two arg pushes became nops; the size push (insn 0) is untouched.
         assert!(matches!(insns[0], Insn::Plain { op: 0x03, .. }));
         for k in 1..=3 {
-            assert!(matches!(insns[k], Insn::Plain { op: 0x00, .. }), "insn {k} nop");
+            assert!(
+                matches!(insns[k], Insn::Plain { op: 0x00, .. }),
+                "insn {k} nop"
+            );
         }
         set_pool_operand(&mut insns[4], patches[0].1);
         if let Insn::Plain { op: 0xbd, operands } = &insns[4] {
-            assert_eq!((operands[0] as u16) << 8 | operands[1] as u16, patches[0].1, "anewarray now uses String");
+            assert_eq!(
+                (operands[0] as u16) << 8 | operands[1] as u16,
+                patches[0].1,
+                "anewarray now uses String"
+            );
         } else {
             panic!("expected anewarray");
         }
@@ -1342,12 +1621,12 @@ mod tests {
     fn relocate_insns_through_pipeline() {
         let src_cp = vec![
             C::Other,
-            C::Utf8("Foo".into()),  // 1
-            C::Class(1),            // 2
-            C::Utf8("bar".into()),  // 3
-            C::Utf8("()V".into()),  // 4
-            C::NameAndType(3, 4),   // 5
-            C::Methodref(2, 5),     // 6
+            C::Utf8("Foo".into()), // 1
+            C::Class(1),           // 2
+            C::Utf8("bar".into()), // 3
+            C::Utf8("()V".into()), // 4
+            C::NameAndType(3, 4),  // 5
+            C::Methodref(2, 5),    // 6
         ];
         let code = [0xb8, 0x00, 0x06, 0xb1]; // invokestatic #6 ; return
         let mut cw = ClassWriter::new("T", "java/lang/Object");
@@ -1368,8 +1647,13 @@ mod tests {
         let n = insns.len();
         redirect_returns(&mut insns);
         // No return opcodes remain; both replaced by goto.
-        assert!(insns.iter().all(|i| !matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))));
-        let gotos = insns.iter().filter(|i| matches!(i, Insn::Branch { op: 0xa7, target } if *target == n)).count();
+        assert!(insns
+            .iter()
+            .all(|i| !matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))));
+        let gotos = insns
+            .iter()
+            .filter(|i| matches!(i, Insn::Branch { op: 0xa7, target } if *target == n))
+            .count();
         assert_eq!(gotos, 2, "both returns became goto end");
         // Reassembles to valid bytecode of the right shape (goto is 3 bytes vs ireturn's 1).
         let out = assemble(&insns);

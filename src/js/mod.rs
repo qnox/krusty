@@ -41,7 +41,11 @@ pub fn emit_file(ir: &IrFile) -> String {
     // Top-level properties: module-level `let`s initialized in declaration order (after classes,
     // which a `new`-using initializer may reference; before functions, which JS hoists).
     for s in &ir.statics {
-        out.push_str(&format!("let {} = {};\n", s.name, emit_expr(ir, s.init, false)));
+        out.push_str(&format!(
+            "let {} = {};\n",
+            s.name,
+            emit_expr(ir, s.init, false)
+        ));
     }
     for (i, f) in ir.functions.iter().enumerate() {
         if f.dispatch_receiver.is_some() {
@@ -107,18 +111,42 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
         }
         IrExpr::SetValue { var, value } => {
             indent(depth, out);
-            out.push_str(&format!("{} = {};\n", val_name(*var, inst), emit_expr(ir, *value, inst)));
+            out.push_str(&format!(
+                "{} = {};\n",
+                val_name(*var, inst),
+                emit_expr(ir, *value, inst)
+            ));
         }
-        IrExpr::SetField { receiver, class, index, value } => {
+        IrExpr::SetField {
+            receiver,
+            class,
+            index,
+            value,
+        } => {
             indent(depth, out);
             let name = &ir.classes[*class as usize].fields[*index as usize].0;
-            out.push_str(&format!("{}.{} = {};\n", emit_expr(ir, *receiver, inst), name, emit_expr(ir, *value, inst)));
+            out.push_str(&format!(
+                "{}.{} = {};\n",
+                emit_expr(ir, *receiver, inst),
+                name,
+                emit_expr(ir, *value, inst)
+            ));
         }
         IrExpr::SetStatic { index, value } => {
             indent(depth, out);
-            out.push_str(&format!("{} = {};\n", ir.statics[*index as usize].name, emit_expr(ir, *value, inst)));
+            out.push_str(&format!(
+                "{} = {};\n",
+                ir.statics[*index as usize].name,
+                emit_expr(ir, *value, inst)
+            ));
         }
-        IrExpr::While { cond, body, update, post_test, label } => {
+        IrExpr::While {
+            cond,
+            body,
+            update,
+            post_test,
+            label,
+        } => {
             if let Some(l) = label {
                 indent(depth, out);
                 out.push_str(&format!("{l}:\n"));
@@ -134,7 +162,11 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                 // `update` (a `for`-loop increment) goes in the loop header so `continue` runs it,
                 // matching a JS `for (; cond; update)`; a plain `while` has no update.
                 match update {
-                    Some(u) => out.push_str(&format!("for (; {}; {}) {{\n", emit_expr(ir, *cond, inst), emit_expr(ir, *u, inst))),
+                    Some(u) => out.push_str(&format!(
+                        "for (; {}; {}) {{\n",
+                        emit_expr(ir, *cond, inst),
+                        emit_expr(ir, *u, inst)
+                    )),
                     None => out.push_str(&format!("while ({}) {{\n", emit_expr(ir, *cond, inst))),
                 }
                 emit_stmt(ir, *body, depth + 1, inst, out);
@@ -144,11 +176,21 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
         }
         IrExpr::Break { label } => {
             indent(depth, out);
-            out.push_str(&label.as_ref().map(|l| format!("break {l};\n")).unwrap_or_else(|| "break;\n".to_string()));
+            out.push_str(
+                &label
+                    .as_ref()
+                    .map(|l| format!("break {l};\n"))
+                    .unwrap_or_else(|| "break;\n".to_string()),
+            );
         }
         IrExpr::Continue { label } => {
             indent(depth, out);
-            out.push_str(&label.as_ref().map(|l| format!("continue {l};\n")).unwrap_or_else(|| "continue;\n".to_string()));
+            out.push_str(
+                &label
+                    .as_ref()
+                    .map(|l| format!("continue {l};\n"))
+                    .unwrap_or_else(|| "continue;\n".to_string()),
+            );
         }
         other => {
             indent(depth, out);
@@ -186,7 +228,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         },
         IrExpr::GetValue(i) => val_name(*i, inst),
         IrExpr::GetStatic(i) => ir.statics[*i as usize].name.clone(),
-        IrExpr::GetField { receiver, class, index } => {
+        IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } => {
             let name = &ir.classes[*class as usize].fields[*index as usize].0;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
@@ -195,17 +241,42 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
             format!("new {}({})", name, a.join(", "))
         }
-        IrExpr::MethodCall { class, index, receiver, args } => {
+        IrExpr::MethodCall {
+            class,
+            index,
+            receiver,
+            args,
+        } => {
             let fid = ir.classes[*class as usize].methods[*index as usize];
             let name = &ir.functions[fid as usize].name;
             // An omitted argument (`None`) takes its default — `undefined` lets JS apply the native default.
-            let a: Vec<String> = args.iter().map(|x| x.map(|e| emit_expr(ir, e, inst)).unwrap_or_else(|| "undefined".to_string())).collect();
-            format!("{}.{}({})", emit_expr(ir, *receiver, inst), name, a.join(", "))
+            let a: Vec<String> = args
+                .iter()
+                .map(|x| {
+                    x.map(|e| emit_expr(ir, e, inst))
+                        .unwrap_or_else(|| "undefined".to_string())
+                })
+                .collect();
+            format!(
+                "{}.{}({})",
+                emit_expr(ir, *receiver, inst),
+                name,
+                a.join(", ")
+            )
         }
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            format!("({} {} {})", emit_expr(ir, *lhs, inst), js_op(*op), emit_expr(ir, *rhs, inst))
+            format!(
+                "({} {} {})",
+                emit_expr(ir, *lhs, inst),
+                js_op(*op),
+                emit_expr(ir, *rhs, inst)
+            )
         }
-        IrExpr::Call { callee, dispatch_receiver, args } => match callee {
+        IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } => match callee {
             Callee::Local(fid) => {
                 let name = &ir.functions[*fid as usize].name;
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
@@ -218,7 +289,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             }
             // A resolved JVM instance call → `receiver.name(args)`.
             Callee::Virtual { name, .. } => {
-                let recv = dispatch_receiver.map(|r| emit_expr(ir, r, inst)).unwrap_or_default();
+                let recv = dispatch_receiver
+                    .map(|r| emit_expr(ir, r, inst))
+                    .unwrap_or_default();
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}.{}({})", recv, name, a.join(", "))
             }
@@ -233,12 +306,30 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     let r = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     format!("({} + {})", r, emit_expr(ir, args[0], inst))
                 }
-                "kotlin/String.length" | "kotlin/Array.size" => format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
-                "kotlin/String.get" => format!("{}[{}]", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst)),
-                "kotlin/Any.toString" => format!("String({})", emit_expr(ir, dispatch_receiver.unwrap(), inst)),
+                "kotlin/String.length" | "kotlin/Array.size" => {
+                    format!("{}.length", emit_expr(ir, dispatch_receiver.unwrap(), inst))
+                }
+                "kotlin/String.get" => format!(
+                    "{}[{}]",
+                    emit_expr(ir, dispatch_receiver.unwrap(), inst),
+                    emit_expr(ir, args[0], inst)
+                ),
+                "kotlin/Any.toString" => format!(
+                    "String({})",
+                    emit_expr(ir, dispatch_receiver.unwrap(), inst)
+                ),
                 // Arrays are a regular type the JS backend lowers to a JS `Array`.
-                "kotlin/Array.get" => format!("{}[{}]", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst)),
-                "kotlin/Array.set" => format!("({}[{}] = {})", emit_expr(ir, dispatch_receiver.unwrap(), inst), emit_expr(ir, args[0], inst), emit_expr(ir, args[1], inst)),
+                "kotlin/Array.get" => format!(
+                    "{}[{}]",
+                    emit_expr(ir, dispatch_receiver.unwrap(), inst),
+                    emit_expr(ir, args[0], inst)
+                ),
+                "kotlin/Array.set" => format!(
+                    "({}[{}] = {})",
+                    emit_expr(ir, dispatch_receiver.unwrap(), inst),
+                    emit_expr(ir, args[0], inst),
+                    emit_expr(ir, args[1], inst)
+                ),
                 // Primitive arrays lower to JS typed arrays (the real Kotlin/JS representation —
                 // zero-filled, `.length`, indexable). Boolean has no typed array; use a filled Array.
                 _ if fq.ends_with("Array.<init>") => {
@@ -257,7 +348,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 _ => "undefined".to_string(),
             },
         },
-        IrExpr::TypeOp { op, arg, type_operand } => {
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => {
             let a = emit_expr(ir, *arg, inst);
             match op {
                 IrTypeOp::InstanceOf => js_instanceof(&a, type_operand),
@@ -273,7 +368,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             for (cond, body) in branches {
                 match cond {
                     Some(c) => {
-                        s.push_str(&format!("({} ? {} : ", emit_expr(ir, *c, inst), emit_expr(ir, *body, inst)));
+                        s.push_str(&format!(
+                            "({} ? {} : ",
+                            emit_expr(ir, *c, inst),
+                            emit_expr(ir, *body, inst)
+                        ));
                         closes += 1;
                     }
                     None => tail = emit_expr(ir, *body, inst),

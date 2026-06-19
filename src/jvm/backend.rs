@@ -43,13 +43,19 @@ impl Backend for JvmBackend {
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
         let Some(ir) = crate::ir_lower::lower_file(file, info, syms) else {
-            diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "krusty: this construct is not yet supported by the IR backend".to_string(),
+            );
             return outputs;
         };
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
         // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
         let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp) else {
-            diags.error(crate::diag::Span::new(0, 0), "krusty: this construct is not yet supported by the IR backend".to_string());
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "krusty: this construct is not yet supported by the IR backend".to_string(),
+            );
             return outputs;
         };
         for (internal, bytes) in classes {
@@ -63,8 +69,16 @@ impl Backend for JvmBackend {
             .iter()
             .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)));
         if has_facade_members {
-            let facade = facade_name.rsplit('/').next().unwrap_or(&facade_name).to_string();
-            state.module_packages.entry(file.package.clone().unwrap_or_default()).or_default().push(facade);
+            let facade = facade_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&facade_name)
+                .to_string();
+            state
+                .module_packages
+                .entry(file.package.clone().unwrap_or_default())
+                .or_default()
+                .push(facade);
         }
         outputs
     }
@@ -77,6 +91,9 @@ impl Backend for JvmBackend {
         }
         let packages: Vec<(String, Vec<String>)> = state.module_packages.into_iter().collect();
         let module_bytes = crate::metadata::module::build_kotlin_module(&packages);
-        vec![(format!("META-INF/{module_name}.kotlin_module"), module_bytes)]
+        vec![(
+            format!("META-INF/{module_name}.kotlin_module"),
+            module_bytes,
+        )]
     }
 }

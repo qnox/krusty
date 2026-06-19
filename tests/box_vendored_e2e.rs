@@ -24,9 +24,12 @@ fn find_box_class(dir: &Path) -> Option<String> {
                 let p = e.path();
                 if p.is_dir() {
                     walk(&p, found);
-                } else if p.extension().map_or(false, |x| x == "class") {
+                } else if p.extension().is_some_and(|x| x == "class") {
                     if let Ok(ci) = parse_class(&fs::read(&p).unwrap_or_default()) {
-                        if ci.method("box", "()Ljava/lang/String;").map_or(false, |m| m.is_static()) {
+                        if ci
+                            .method("box", "()Ljava/lang/String;")
+                            .is_some_and(|m| m.is_static())
+                        {
                             *found = Some(ci.this_class.replace('/', "."));
                             return;
                         }
@@ -41,7 +44,9 @@ fn find_box_class(dir: &Path) -> Option<String> {
 
 #[test]
 fn vendored_kotlin_box_cases_return_ok() {
-    let Ok(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) else {
+    let Ok(java_home) =
+        std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME"))
+    else {
         eprintln!("skipping vendored box cases: set JAVA_HOME");
         return;
     };
@@ -58,8 +63,12 @@ fn vendored_kotlin_box_cases_return_ok() {
     let work = std::env::temp_dir().join(format!("krusty_vbox_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
 
-    let mut cases: Vec<_> = fs::read_dir(&data).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |x| x == "kt")).collect();
+    let mut cases: Vec<_> = fs::read_dir(&data)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "kt"))
+        .collect();
     cases.sort();
     assert!(!cases.is_empty(), "no vendored box cases found");
 
@@ -86,8 +95,16 @@ public class BoxRun {
 }
 "#;
     fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
-    assert!(jc.status.success(), "javac(BoxRun) failed: {}", String::from_utf8_lossy(&jc.stderr));
+    let jc = Command::new(&javac)
+        .args(["-d", runner.to_str().unwrap()])
+        .arg(runner.join("BoxRun.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac(BoxRun) failed: {}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
 
     // Compile every case with krusty; collect (output dir, box class) for the accepted ones.
     let mut skipped = 0usize;
@@ -95,34 +112,51 @@ public class BoxRun {
     for (i, kt) in cases.iter().enumerate() {
         let out = work.join(format!("o{i}"));
         fs::create_dir_all(&out).unwrap();
-        let kc = Command::new(krusty).args(["-d", out.to_str().unwrap()]).arg(kt).output().expect("krusty");
+        let kc = Command::new(krusty)
+            .args(["-d", out.to_str().unwrap()])
+            .arg(kt)
+            .output()
+            .expect("krusty");
         // The IR backend covers a subset; a case it rejects is *skipped*, never a failure. The gate
         // is: every case krusty *accepts* must run and return "OK" (never miscompile an accepted file).
         if !kc.status.success() {
             skipped += 1;
             continue;
         }
-        let box_class = find_box_class(&out).unwrap_or_else(|| panic!("no box() class for {}", kt.display()));
+        let box_class =
+            find_box_class(&out).unwrap_or_else(|| panic!("no box() class for {}", kt.display()));
         accepted.push((out.to_str().unwrap().to_string(), box_class, kt.as_path()));
     }
 
     // Run all accepted cases in a single JVM: classpath is the runner + stdlib (the parent loader,
     // so `Intrinsics` resolves); each case's own classes load via its `URLClassLoader` argument.
     let mut cp = runner.to_str().unwrap().to_string();
-    if let Some(s) = &stdlib { cp.push(':'); cp.push_str(s); }
+    if let Some(s) = &stdlib {
+        cp.push(':');
+        cp.push_str(s);
+    }
     let mut args: Vec<String> = vec!["-Xverify:all".into(), "-cp".into(), cp, "BoxRun".into()];
     for (dir, class, _) in &accepted {
         args.push(dir.clone());
         args.push(class.clone());
     }
     let run = Command::new(&java).args(&args).output().unwrap();
-    assert!(run.status.success(), "BoxRun failed: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "BoxRun failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
-    let results: std::collections::HashMap<&str, &str> = stdout.lines()
-        .filter_map(|l| l.split_once('\t')).collect();
+    let results: std::collections::HashMap<&str, &str> =
+        stdout.lines().filter_map(|l| l.split_once('\t')).collect();
     for (_, class, kt) in &accepted {
         let got = results.get(class.as_str()).copied().unwrap_or("<missing>");
-        assert!(got == "OK", "box() did not return OK for {}: got {:?}", kt.display(), got);
+        assert!(
+            got == "OK",
+            "box() did not return OK for {}: got {:?}",
+            kt.display(),
+            got
+        );
     }
     let _ = fs::remove_dir_all(&work);
     eprintln!("vendored Kotlin box conformance (IR backend): {} OK, {skipped} skipped (unsupported), {} total", accepted.len(), cases.len());
