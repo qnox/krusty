@@ -615,7 +615,14 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             let params: Vec<Ty> = m.params.iter().map(|p| ty_of_ref(&p.ty, &class_names, &mtp, diags)).collect();
                             let ret = m.ret.as_ref().map(|r| ty_of_ref(r, &class_names, &mtp, diags)).unwrap_or_else(|| {
                                 if let FunBody::Expr(e) = &m.body {
-                                    let t = infer_lit_ty_p(file, *e, &class_names, &local_rets, &props);
+                                    // The method's own parameters are in scope for its expression body, so
+                                    // `fun m(x: Int) = x + 1` infers `Int` — add them to the class-property
+                                    // scope before inferring the return type.
+                                    let mut scope = props.clone();
+                                    for p in &m.params {
+                                        scope.push((p.name.clone(), ty_of_ref(&p.ty, &class_names, &mtp, diags), false));
+                                    }
+                                    let t = infer_lit_ty_p(file, *e, &class_names, &local_rets, &scope);
                                     if t != Ty::Error { return t; }
                                 }
                                 // The overridable members `Comparable.compareTo`/`Any.equals`/`hashCode`

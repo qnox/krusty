@@ -355,6 +355,22 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // A class method's expression-body return type is inferred with its own PARAMETERS in scope
+    // (`fun m(x: Int) = x + 1` → Int), which also unblocks a bound method reference `obj::m`.
+    ("MethodParamInference", r#"
+class C(val base: Int) {
+    fun inc(x: Int) = x + 1
+    fun add(a: Int, b: Int) = a + b + base
+}
+fun box(): String {
+    val c = C(10)
+    if (c.inc(5) != 6) return "f1"
+    if (c.add(2, 3) != 15) return "f2"
+    val r = listOf(1, 2, 3).map(c::inc)            // bound method ref
+    if (r != listOf(2, 3, 4)) return "f3:$r"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u
