@@ -82,6 +82,10 @@ pub struct ClassSig {
     /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, usize>,
+    /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
+    /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
+    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
+    pub value_field: Option<(String, Ty)>,
 }
 
 impl ClassSig {
@@ -1024,6 +1028,12 @@ pub fn collect_signatures_with_cp(
                         .inner_of
                         .as_ref()
                         .and_then(|_| internal.rsplit_once('$').map(|(o, _)| o.to_string()));
+                    // A `value class` is represented unboxed as its sole property's type.
+                    let value_field = if c.is_value {
+                        props.first().map(|(n, t, _)| (n.clone(), *t))
+                    } else {
+                        None
+                    };
                     table.classes.insert(
                         c.name.clone(),
                         ClassSig {
@@ -1044,6 +1054,7 @@ pub fn collect_signatures_with_cp(
                             secondary_ctors,
                             tparam_names,
                             generic_props,
+                            value_field,
                         },
                     );
                 }
