@@ -2188,6 +2188,14 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 371 — test-suite speed (owner: round must be <60s)**. (a) The extension/top-level-function
+  index is now shared process-wide via a path-keyed global cache (`global_ext_cache`), like the
+  type/jimage indexes — the box harness's 16 workers stop each rebuilding it (check −2.7s thread-sum).
+  (b) `feature_box_e2e` compiles snippets **in-process** through a shared `common::compile_in_process`
+  helper (same `lex→check→lower→emit` pipeline as the conformance harness, warm caches) instead of
+  spawning the krusty binary per snippet — that test dropped 24.5s→6s. Full validation round (gate + e2e
+  + lib) execution is now ~29s. No behavior change; gate still 838/0-FAIL.
+
 - ✅ **Phase 370 — direct `for` over `Byte`/`Short` range + step type coercion** (825→838). `Stmt::For`
   over `Byte`/`Short` operands widens to an `Int` counter (checker + lowering), and the loop `step` is
   coerced to the counter type (`0L..n step 3` adapts the `Int` step to `Long` — was a verify error).

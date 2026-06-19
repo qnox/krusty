@@ -48,6 +48,15 @@ fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Process-global extension/top-level-function index, keyed by the classpath path set. Scanning every
+/// jar's static methods is identical for a given classpath, so it happens once per process rather than
+/// once per worker thread (the box harness compiles thousands of files across all cores against the
+/// same stdlib classpath) — the same sharing as [`global_type_cache`]/[`global_jimage_cache`].
+fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
@@ -91,7 +100,7 @@ pub struct TypeIndex {
 pub struct Classpath {
     entries: Vec<Entry>,
     cache: RefCell<HashMap<String, Option<ClassInfo>>>,
-    ext: RefCell<Option<ExtIndex>>,
+    ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
     /// Lazily-built index of the JDK jimage: internal class name → `(file offset, uncompressed size)`,
     /// so JDK class bytes can be seek-read on demand (the jimage stores classes uncompressed). Shared
@@ -340,6 +349,13 @@ impl Classpath {
         if self.ext.borrow().is_some() {
             return;
         }
+        // Built once per classpath process-wide (scanning every jar's statics is identical for a given
+        // classpath) — shared across worker threads via the global cache, like the type/jimage indexes.
+        let key: Vec<PathBuf> = self.entries.iter().map(|e| e.path().to_path_buf()).collect();
+        if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
+            *self.ext.borrow_mut() = Some(idx.clone());
+            return;
+        }
         // Pass 1: collect a *lean* record per class — its `super_class` and its public static methods
         // (names+descriptors only, not the full `ClassInfo`). The stdlib's extension/top-level functions
         // live in package-private multifile *part* classes (`RangesKt___RangesKt`) that the public
@@ -392,6 +408,8 @@ impl Classpath {
                 cur = c.super_class.clone();
             }
         }
+        let idx = std::sync::Arc::new(idx);
+        global_ext_cache().lock().unwrap().insert(key, idx.clone());
         *self.ext.borrow_mut() = Some(idx);
     }
 }
