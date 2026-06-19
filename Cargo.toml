@@ -25,3 +25,15 @@ path = "src/main.rs"
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Fast-iteration profile for the test/conformance round. The in-loop tests don't need optimization, so
+# this is unoptimized (`opt-level = 0`, inherited from `dev`) for a seconds-long rebuild after an edit —
+# but with `overflow-checks`/`debug-assertions` OFF: krusty relies on wrapping arithmetic (hashes, JVM
+# value math), which a debug build's overflow checks abort on (SIGABRT). `debug = false` drops debuginfo
+# for a faster link. Run the round with `cargo test --profile gate …` (see run-tests.sh), not `--release`.
+[profile.gate]
+inherits = "dev"
+overflow-checks = false
+debug-assertions = false
+debug = false
+incremental = true

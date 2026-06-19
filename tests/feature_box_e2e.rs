@@ -1152,6 +1152,20 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Unsigned `in`-range membership (`x in a..b` for UInt/ULong) is the bounds-check intrinsic with
+    // UNSIGNED comparison (`Integer/Long.compareUnsigned`), so values past the sign bit order correctly.
+    ("UnsignedInRange", r#"
+fun box(): String {
+    if (2u !in 1u..3u) return "f1"
+    if (5u in 1u..3u) return "f2"
+    val big = 4000000000u
+    if (big !in 1u..4000000001u) return "f3"
+    if (big in 1u..3u) return "f4"
+    if (10uL !in 0uL..100uL) return "f5"
+    if (20000000000uL !in 0uL..30000000000uL) return "f6"
+    return "OK"
+}
+"#),
 ];
 
 #[test]

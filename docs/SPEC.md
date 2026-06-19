@@ -649,3 +649,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   erased-`Object` element overload (`plus(Iterable<T>, T)`) and nest the list instead of selecting the
   concat overload (`plus(Iterable<T>, Iterable<T>)`). The lowering re-resolves and emits the call
   (`inline` per the callee). Incomparable candidates fall back to first-match (stable).
+
+- **Unsigned `in`-range membership + a fast test profile.** `x in a..b` / `x !in a..b` for `UInt`/`ULong`
+  operands lowers to the same bounds-check intrinsic as the signed case, but each comparison goes through
+  `Integer.compareUnsigned`/`Long.compareUnsigned` (`compareUnsigned(p, q) <op> 0`) rather than a signed
+  opcode — so values past the sign bit (`4000000000u`) order correctly, matching kotlinc's `uintCompare`.
+  Iterating an unsigned range *value* (`for (i in 0u..n)`, which needs the mangled `UIntRange` getters) is
+  still pending; direct `for (i in 0u until n)` already worked. (Infra: the in-loop test round now builds
+  with an unoptimized `gate` cargo profile — overflow-checks off so krusty's wrapping arithmetic doesn't
+  abort — for seconds-long rebuilds; the conformance worker stack is 64 MB so unoptimized recursion fits.)

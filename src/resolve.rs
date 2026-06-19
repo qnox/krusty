@@ -2682,7 +2682,7 @@ impl<'a> Checker<'a> {
                 let et = self.expr(end);
                 // Only primitive numeric/char ranges are lowered (to a comparison chain). Any other
                 // operand type (a range over user/reference types) is rejected so the file is skipped.
-                let prim = |t: &Ty| matches!(t, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte | Ty::Double | Ty::Float);
+                let prim = |t: &Ty| matches!(t, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte | Ty::Double | Ty::Float | Ty::UInt | Ty::ULong);
                 // Require uniform operand types — the lowering emits direct same-type comparisons, so a
                 // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
                 if prim(&vt) && vt == st && st == et {

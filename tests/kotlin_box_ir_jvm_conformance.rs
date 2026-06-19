@@ -457,7 +457,10 @@ fn kotlin_codegen_box_conformance() {
     // Build a thread pool with a large stack (8 MiB) so deeply-nested source files don't
     // overflow the default 2 MiB Rayon stack during recursive descent parsing/checking.
     let pool = rayon::ThreadPoolBuilder::new()
-        .stack_size(8 * 1024 * 1024)
+        // Generous worker stacks: the recursive-descent parser/lowering uses far more stack per frame in
+        // an unoptimized (`--profile gate`) build than in `--release`, so a deeply nested test would
+        // overflow an 8 MB stack. 64 MB keeps the fast-iteration profile robust.
+        .stack_size(64 * 1024 * 1024)
         .build()
         .unwrap();
     let n_threads = pool.current_num_threads();
