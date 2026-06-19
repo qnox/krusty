@@ -200,8 +200,11 @@ impl Ty {
             "IntArray" => Ty::Int,
             "LongArray" => Ty::Long,
             "DoubleArray" => Ty::Double,
+            "FloatArray" => Ty::Float,
             "BooleanArray" => Ty::Boolean,
             "CharArray" => Ty::Char,
+            "ByteArray" => Ty::Byte,
+            "ShortArray" => Ty::Short,
             _ => return None,
         })
     }

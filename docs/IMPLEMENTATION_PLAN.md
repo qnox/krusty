@@ -2188,6 +2188,11 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 382 — `ByteArray`/`ShortArray`/`FloatArray` constructors + data-class array-property skip**
+  (878→884). Added the 3 missing primitive arrays to the checker's `primitive_array_element` (lowering
+  already had all 8). Skip a data class with an array property (its erased-to-Object field + reference-
+  semantics synthesized members would miscompile). `tests/feature_box_e2e.rs::MorePrimitiveArrays`.
+
 - ✅ **Phase 381 — `as` to a primitive type (unbox cast)** (871→878). `x as Int` on a reference operand →
   `checkcast Integer; intValue()` (the emitter's existing `unbox_to`); checker allows a non-unsigned
   primitive target, lowering emits `ImplicitCoercion`. `tests/feature_box_e2e.rs::AsToPrimitive`.

@@ -725,3 +725,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ClassCastException` at the `checkcast`, matching kotlinc. Each standard primitive is supported; `UInt`/
   `ULong` are excluded (their cast needs the inline-class box, not `Integer`). A nullable primitive target
   (`x as Int?`) resolves to the boxed wrapper and is unaffected.
+
+- **`ByteArray`/`ShortArray`/`FloatArray` constructors + data-class array-property skip.** The checker's
+  primitive-array-element table (`Ty::primitive_array_element`) was missing `ByteArray`/`ShortArray`/
+  `FloatArray` though the lowering always handled all eight, so `ByteArray(n)` etc. were "unresolved" —
+  added the three. Separately, a `data class` with an array property is now skipped: krusty erases the
+  array field to an `Object` field and synthesizes `equals`/`hashCode`/`toString` with reference semantics
+  rather than kotlinc's `Arrays.equals`/`hashCode`/`toString`, so it would miscompile (a property-type
+  array data field is not modeled yet).
