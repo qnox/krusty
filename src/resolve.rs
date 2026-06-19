@@ -565,6 +565,26 @@ pub fn collect_signatures_with_cp(files: &[File], libraries: Box<dyn LibrarySet>
                             }
                         }
                     }
+                    // A subclass's expression-bodied methods can reference INHERITED backing-field
+                    // properties (`fun f() = x` where `x` is declared in a base class), so add the
+                    // superclass chain's properties to the return-type inference scope.
+                    let mut sup = c.base_class.clone();
+                    let mut guard = 0;
+                    while let Some(bn) = sup {
+                        guard += 1; if guard > 32 { break; }
+                        let Some(bc) = file.decls.iter().filter_map(|&d| match file.decl(d) { Decl::Class(x) => Some(x), _ => None }).find(|x| x.name == bn) else { break };
+                        for p in bc.props.iter().filter(|p| p.is_property) {
+                            props.push((p.name.clone(), ty_of_ref(&p.ty, &class_names, &ctp, diags), p.is_var));
+                        }
+                        for bp in &bc.body_props {
+                            let ty = match &bp.ty {
+                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                None => bp.init.map(|i| infer_lit_ty_p(file, i, &class_names, &fun_rets, &[])).unwrap_or(Ty::Error),
+                            };
+                            if ty != Ty::Error { props.push((bp.name.clone(), ty, bp.is_var)); }
+                        }
+                        sup = bc.base_class.clone();
+                    }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
@@ -4366,7 +4386,11 @@ impl<'a> Checker<'a> {
                 // ones. The target must be a mutable numeric variable — a non-numeric type would
                 // need a user `inc`/`dec` operator krusty doesn't support (reject, never miscompile).
                 let span = self.file.stmt_spans[s.0 as usize];
+                let inherited = || if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
+                    self.lookup_prop(&internal, &name)
+                } else { None };
                 let found = self.lookup(&name).map(|l| (l.ty, l.is_var))
+                    .or_else(inherited)
                     .or_else(|| self.syms.props.get(&name).copied());
                 match found {
                     Some((ty, is_var)) => {
@@ -4398,15 +4422,24 @@ impl<'a> Checker<'a> {
                         // A top-level property write from a companion member targets the wrong class.
                         self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: top-level property access from a companion member is not supported".to_string());
                     }
-                    None => match self.syms.props.get(&name).copied() {
-                        Some((lty, is_var)) => {
-                            if !is_var {
-                                self.diags.error(self.file.stmt_spans[s.0 as usize], format!("'val' cannot be reassigned."));
+                    None => {
+                        let span = self.file.stmt_spans[s.0 as usize];
+                        // A bare write to an *inherited* `var` member (`x = …` where `x` is declared in a
+                        // superclass): the own properties are in the implicit-`this` scope (found by
+                        // `lookup` above), but inherited ones are resolved through `this`'s class chain.
+                        let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
+                            self.lookup_prop(&internal, &name)
+                        } else { None };
+                        match inherited.or_else(|| self.syms.props.get(&name).copied()) {
+                            Some((lty, is_var)) => {
+                                if !is_var {
+                                    self.diags.error(span, format!("'val' cannot be reassigned."));
+                                }
+                                self.expect_assignable(lty, vt, span, "assignment");
                             }
-                            self.expect_assignable(lty, vt, self.file.stmt_spans[s.0 as usize], "assignment");
-                        }
-                        None => {
-                            self.diags.error(self.file.stmt_spans[s.0 as usize], format!("unresolved reference '{name}'."));
+                            None => {
+                                self.diags.error(span, format!("unresolved reference '{name}'."));
+                            }
                         }
                     },
                 } }
