@@ -2695,13 +2695,15 @@ impl<'a> Checker<'a> {
             Expr::RangeTo { lo, hi, .. } => {
                 let lt = self.expr(lo);
                 let rt = self.expr(hi);
-                // `a..b` / `a..<b` over a primitive numeric type constructs the matching stdlib range
-                // object (`Int` → `IntRange`, `Long` → `LongRange`, `Char` → `CharRange`). Require
-                // uniform operand types; any other element type is rejected (the file is skipped).
+                // `a..b` / `a..<b` constructs the matching stdlib range object. `Char..Char` is a
+                // `CharRange`; the integer family widens like kotlinc's `rangeTo` overloads — any of
+                // `Byte`/`Short`/`Int` yields an `IntRange`, and if either operand is `Long` a
+                // `LongRange`. Unsigned and floating ranges are not modeled here (the file is skipped).
+                let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
                 match (lt, rt) {
-                    (Ty::Int, Ty::Int) => Ty::obj("kotlin/ranges/IntRange"),
-                    (Ty::Long, Ty::Long) => Ty::obj("kotlin/ranges/LongRange"),
                     (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
+                    _ if small_int(&lt) && small_int(&rt) => Ty::obj("kotlin/ranges/IntRange"),
+                    _ if (small_int(&lt) || lt == Ty::Long) && (small_int(&rt) || rt == Ty::Long) => Ty::obj("kotlin/ranges/LongRange"),
                     _ => {
                         self.diags.error(self.span(e), "krusty: range expression is only supported for Int/Long/Char operands".to_string());
                         Ty::Error

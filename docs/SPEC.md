@@ -618,3 +618,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `f(arg)` lowers through the `Function1.invoke` path). The reference lowers to the existing
   `PropertyReference{1,0}Impl` singleton/instance — no new IR. (Arity is read structurally from the
   `FunctionN`/`KPropertyN` class name, never by member-name matching.)
+
+- **Integer-family `rangeTo` widening + generic-vararg literal adaptation.** A range expression `a..b`
+  (as a *value*) follows kotlinc's `rangeTo` overloads: `Char..Char` is a `CharRange`; any combination of
+  `Byte`/`Short`/`Int` yields an `IntRange`, and a `Long` operand makes a `LongRange` (the bounds are
+  coerced to the element type — `Byte`→`Int` is a no-op on the JVM stack). Iterating a stored range value
+  uses the same overflow-safe counted loop as a direct `for` (break when the counter reaches the inclusive
+  `last` *before* incrementing, so a range ending at `Int.MAX_VALUE`/`Long.MAX_VALUE` doesn't wrap past it
+  and spin). Separately, a generic `vararg` resolved with a bound element type (`listOf<Long>(3, 4)`)
+  adapts integer **literals** to that element type — the literal `3` is the constant `3L`, boxed as `Long`,
+  not `Integer` — matching kotlinc's compile-time literal adaptation. Only constant literals adapt (a
+  non-literal `Int` in that position is a kotlinc error, so krusty never silently inserts an `i2l`). The
+  bound element type is carried on `LibraryCallable.vararg_elem`, recovered from the callee's generic
+  signature with the call's explicit type arguments bound first. (Direct `for (x in b1..b5)` over `Byte`/
+  `Short` via the `Stmt::For` path is still pending — only range *values* widen so far.)

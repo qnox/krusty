@@ -57,6 +57,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
+    /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
+    /// call or when the element type is not recovered. The backend uses it to coerce each packed
+    /// element to that type before boxing (an integer literal in `listOf<Long>(3)` becomes a boxed
+    /// `Long`, not `Integer`), since the JVM array element is erased to `Object`.
+    pub vararg_elem: Option<Ty>,
 }
 
 /// The shape of a library type: enough for the front end to resolve member accesses against it

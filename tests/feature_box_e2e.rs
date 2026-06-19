@@ -1106,6 +1106,36 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Integer-family `rangeTo` widening: `Byte..Byte`/`Short..Short` build an `IntRange`; a `Long` operand
+    // makes a `LongRange`. Plus `listOf<Long>` literal adaptation (the int literals box as `Long`) and the
+    // overflow-safe counted loop for a range ending at `Int.MAX_VALUE` (must not wrap and spin).
+    ("RangeWidenAndVararg", r#"
+fun box(): String {
+    val b1: Byte = 1; val b5: Byte = 5
+    val rb = b1..b5
+    var sb = 0
+    for (x in rb) sb += x
+    if (sb != 15) return "fb"
+
+    val s1: Short = 2; val s4: Short = 4
+    val rs = s1..s4
+    var ss = 0
+    for (x in rs) ss += x
+    if (ss != 9) return "fs"
+
+    val rl = 3L..6L
+    var sl = 0L
+    for (y in rl) sl += y
+    if (sl != 18L) return "fl"
+    if (listOf<Long>(3, 4, 5, 6) != listOf<Long>(3L, 4L, 5L, 6L)) return "fv"
+
+    val rmax = (Int.MAX_VALUE - 2)..Int.MAX_VALUE
+    var cnt = 0
+    for (i in rmax) { cnt++; if (cnt > 10) return "foverflow" }
+    if (cnt != 3) return "fc"
+    return "OK"
+}
+"#),
 ];
 
 #[test]

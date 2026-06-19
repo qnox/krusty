@@ -2188,6 +2188,13 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 369 — integer-family range widening + generic-vararg literal adaptation** (808→825).
+  `Byte`/`Short`/`Int` range values → `IntRange`, a `Long` operand → `LongRange` (checker + lowering).
+  `listOf<Long>(3)` adapts the int literal to a boxed `Long` via `LibraryCallable.vararg_elem` (only
+  literals adapt — kotlinc semantics, no runtime `i2l`). `lower_foreach_range` made overflow-safe
+  (break-before-increment) like `Stmt::For`, so a stored range ending at `Int.MAX_VALUE` doesn't spin.
+  `tests/feature_box_e2e.rs::RangeWidenAndVararg`.
+
 - ✅ **Phase 368 — a property reference is a function value** (`C::n` as `(C)->Int`). `KProperty1`/
   `KProperty0` accepted where a `Function1`/`Function0` of the matching arity is expected — in the checker
   (`expect_assignable`), the JVM library overload resolution (`arg_fits`, so `list.map(C::n)` works), and
