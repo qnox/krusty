@@ -3610,20 +3610,34 @@ impl<'a> Lower<'a> {
                     RangeKind::Until => (sv, ev, true),
                     RangeKind::DownTo => (ev, sv, false),
                 };
-                let get = |this: &mut Self, idx: u32| this.ir.add_expr(IrExpr::GetValue(idx));
+                // A comparison `a <op> b` on the loaded temps. For an unsigned element type the operands
+                // are compared via `Integer/Long.compareUnsigned(a, b) <op> 0` (a signed opcode would
+                // misorder values past the sign bit), matching kotlinc's unsigned-range membership.
+                let elem = self.info.ty(value);
+                let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> u32 {
+                    let la = this.ir.add_expr(IrExpr::GetValue(a));
+                    let lb = this.ir.add_expr(IrExpr::GetValue(b));
+                    if elem.is_unsigned() {
+                        let (owner, prim) = if elem == Ty::UInt { ("java/lang/Integer", "I") } else { ("java/lang/Long", "J") };
+                        let call = this.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static { owner: owner.to_string(), name: "compareUnsigned".to_string(), descriptor: format!("({prim}{prim})I"), inline: false },
+                            dispatch_receiver: None, args: vec![la, lb],
+                        });
+                        let zero = this.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                        this.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: call, rhs: zero })
+                    } else {
+                        this.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: la, rhs: lb })
+                    }
+                };
                 let cond = if negated {
                     // value < lo  ||  value (> | >=) hi
-                    let v1 = get(self, vv); let l1 = get(self, lo);
-                    let c1 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Lt, lhs: v1, rhs: l1 });
-                    let v2 = get(self, vv); let h2 = get(self, hi);
-                    let c2 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt }, lhs: v2, rhs: h2 });
+                    let c1 = cmp(self, IrBinOp::Lt, vv, lo);
+                    let c2 = cmp(self, if hi_strict { IrBinOp::Ge } else { IrBinOp::Gt }, vv, hi);
                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs: c1, rhs: c2 })
                 } else {
                     // lo <= value  &&  value (< | <=) hi
-                    let l1 = get(self, lo); let v1 = get(self, vv);
-                    let c1 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::Le, lhs: l1, rhs: v1 });
-                    let v2 = get(self, vv); let h2 = get(self, hi);
-                    let c2 = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: if hi_strict { IrBinOp::Lt } else { IrBinOp::Le }, lhs: v2, rhs: h2 });
+                    let c1 = cmp(self, IrBinOp::Le, lo, vv);
+                    let c2 = cmp(self, if hi_strict { IrBinOp::Lt } else { IrBinOp::Le }, vv, hi);
                     self.ir.add_expr(IrExpr::PrimitiveBinOp { op: IrBinOp::And, lhs: c1, rhs: c2 })
                 };
                 self.ir.add_expr(IrExpr::Block { stmts: vec![var_s, var_e, var_v], value: Some(cond) })
