@@ -475,6 +475,32 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     }
                 }
+                // Property getter bridges: a property overriding a supertype property with a different
+                // erased type (a covariant override `from: Sub` over `from: Super`, or a generic
+                // `val x: T` erased to `Object` overridden with a concrete type) needs a synthetic
+                // `getX()` returning the supertype's (erased) type that delegates to the concrete getter —
+                // else a call through the supertype reference resolves to the missing erased getter.
+                if !c.is_interface {
+                    let cid = lo.classes[&internal].id;
+                    for sup in lo.syms.supertype_internals(&internal) {
+                        let Some(sc) = lo.syms.class_by_internal(&sup) else { continue };
+                        for (pname, sty, _) in sc.props.clone() {
+                            if let Some((own_ty, _)) = lo.syms.prop_of(&internal, &pname) {
+                                if sty.descriptor() != own_ty.descriptor() && !own_ty.is_primitive() {
+                                    let gname = getter_name(&pname);
+                                    let already = lo.ir.classes[cid as usize].bridges.iter().any(|b| b.name == gname && b.erased_params.is_empty());
+                                    if !already {
+                                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                            name: gname,
+                                            erased_params: vec![], erased_ret: ty_to_ir(sty),
+                                            concrete_params: vec![], concrete_ret: ty_to_ir(own_ty),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Interface bridges: for each implemented-interface method, if the class's actual
                 // implementation (declared or inherited) has a different erased signature than the
                 // interface's, add a bridge with the interface's descriptor delegating to the impl.

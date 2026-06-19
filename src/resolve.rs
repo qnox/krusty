@@ -2003,17 +2003,18 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        // Property getters need the same check: a supertype property whose (erased) type differs from
-        // the class's own property type (e.g. a generic interface `val x: T` → `Object`, overridden
-        // with a concrete type) would need a bridge `getX`, which krusty does not synthesize.
+        // A property overriding a supertype property with a different erased type needs a bridge `getX()`
+        // returning the supertype's (erased) type — the lowering synthesizes it (an `ACC_BRIDGE` getter
+        // delegating to the concrete one). A primitive own-type would need (un)boxing in that bridge,
+        // which the property-bridge path doesn't emit yet — reject only that case.
         for sup in self.syms.supertype_internals(internal) {
             let Some(sc) = self.syms.class_by_internal(&sup) else { continue };
             for (pname, sty, _) in sc.props.clone() {
                 if let Some((own_ty, _)) = self.syms.prop_of(internal, &pname) {
-                    if sty.descriptor() != own_ty.descriptor() {
+                    if sty.descriptor() != own_ty.descriptor() && own_ty.is_primitive() {
                         self.diags.error(
                             span,
-                            format!("krusty: property '{pname}' needs a bridge getter (covariant/generic override is not supported)"),
+                            format!("krusty: property '{pname}' getter bridge with a primitive type is not supported"),
                         );
                         return;
                     }
