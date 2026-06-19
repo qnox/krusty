@@ -28,18 +28,18 @@ jobs:
     # Skip entirely until the gist is configured.
     if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
-      - uses: actions/setup-java@v4
+      - uses: extractions/setup-just@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'
       # Reference kotlinc dist + codegen/box corpus, cached by manifest hash. `just conformance`
       # provisions both on a miss (same recipes as local), so this is "download once, then restore".
       - name: cache kotlin toolchain + box corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .kotlinc
@@ -59,7 +59,7 @@ jobs:
             echo "color=$color"; echo "version=$(just max-version)"
           } >> "$GITHUB_OUTPUT"
       - name: publish conformance badge → gist
-        uses: Schneegans/dynamic-badges-action@v1.7.0
+        uses: Schneegans/dynamic-badges-action@v1.8.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}
@@ -68,7 +68,7 @@ jobs:
           message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.scanned }})
           color: ${{ steps.c.outputs.color }}
       - name: publish kotlin-version badge → gist
-        uses: Schneegans/dynamic-badges-action@v1.7.0
+        uses: Schneegans/dynamic-badges-action@v1.8.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.CONFORMANCE_GIST_ID }}

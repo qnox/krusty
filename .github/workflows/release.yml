@@ -32,7 +32,7 @@ jobs:
           - { triple: x86_64-pc-windows-msvc,    os: windows-latest }
     runs-on: ${{ matrix.target.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history: build number = total commit count
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target.triple }}
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - name: install aarch64-linux linker
         if: matrix.target.cross
         run: |
@@ -55,7 +55,7 @@ jobs:
         id: pkg
         shell: bash
         run: echo "path=$(just package "${{ matrix.target.triple }}")" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: krusty-${{ matrix.target.triple }}
           path: ${{ steps.pkg.outputs.path }}
@@ -68,12 +68,12 @@ jobs:
     permissions:
       contents: write # only this job writes (creates the release/tag)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - name: collect all target artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: krusty-*
           path: dist
@@ -85,7 +85,7 @@ jobs:
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
       - name: publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
           name: krusty ${{ steps.v.outputs.ver }}
