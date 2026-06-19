@@ -53,7 +53,8 @@ pub fn compile<B: Backend>(
         if diags.has_errors() {
             continue; // collect all diagnostics before bailing; emit nothing
         }
-        outputs.extend(backend.lower_file(file, &info, syms, &stems[i], &mut state, diags)); // back-end: lower
+        outputs.extend(backend.lower_file(file, &info, syms, &stems[i], &mut state, diags));
+        // back-end: lower
         // `info` (per-file checked state) drops here, before the next file — streaming shape.
     }
     if !diags.has_errors() {

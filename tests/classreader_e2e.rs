@@ -30,8 +30,16 @@ fn reads_real_javac_class() {
     )
     .unwrap();
 
-    let javac = Command::new("javac").args(["J.java"]).current_dir(&dir).output().expect("javac");
-    assert!(javac.status.success(), "javac failed: {}", String::from_utf8_lossy(&javac.stderr));
+    let javac = Command::new("javac")
+        .args(["J.java"])
+        .current_dir(&dir)
+        .output()
+        .expect("javac");
+    assert!(
+        javac.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
 
     let bytes = fs::read(dir.join("J.class")).unwrap();
     let info = parse_class(&bytes).expect("parse J.class");
@@ -42,7 +50,9 @@ fn reads_real_javac_class() {
     let add = info.method("add", "(II)I").expect("add");
     assert!(add.is_public() && add.is_static());
 
-    let hi = info.method("hi", "(Ljava/lang/String;)Ljava/lang/String;").expect("hi");
+    let hi = info
+        .method("hi", "(Ljava/lang/String;)Ljava/lang/String;")
+        .expect("hi");
     assert!(hi.is_public() && !hi.is_static());
 
     let scale = info.method("scale", "(DI)D").expect("scale");
@@ -66,16 +76,37 @@ fn reads_method_body_lazily() {
     let dir = std::env::temp_dir().join(format!("krusty_crb_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("B.java"), "public class B { public static int add(int a, int b) { return a + b; } }").unwrap();
-    let javac = Command::new("javac").args(["B.java"]).current_dir(&dir).output().expect("javac");
-    assert!(javac.status.success(), "javac failed: {}", String::from_utf8_lossy(&javac.stderr));
+    fs::write(
+        dir.join("B.java"),
+        "public class B { public static int add(int a, int b) { return a + b; } }",
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args(["B.java"])
+        .current_dir(&dir)
+        .output()
+        .expect("javac");
+    assert!(
+        javac.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
     let bytes = fs::read(dir.join("B.class")).unwrap();
 
     // The lazy reader returns the matching method's real bytecode body.
-    let code = krusty::jvm::classreader::read_method_code(&bytes, "add", "(II)I").expect("add body");
-    assert!(code.max_locals >= 2, "two int params need >=2 locals, got {}", code.max_locals);
+    let code =
+        krusty::jvm::classreader::read_method_code(&bytes, "add", "(II)I").expect("add body");
+    assert!(
+        code.max_locals >= 2,
+        "two int params need >=2 locals, got {}",
+        code.max_locals
+    );
     // `return a + b` ends in iadd (0x60) then ireturn (0xac).
-    assert!(code.code.windows(2).any(|w| w == [0x60, 0xac]), "expected iadd;ireturn in {:?}", code.code);
+    assert!(
+        code.code.windows(2).any(|w| w == [0x60, 0xac]),
+        "expected iadd;ireturn in {:?}",
+        code.code
+    );
     assert!(!code.source_cp.is_empty());
 
     // A non-existent method / descriptor yields None (no body, not a panic).
@@ -94,8 +125,18 @@ fn classpath_method_code_caches() {
     let dir = std::env::temp_dir().join(format!("krusty_cpc_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("C.java"), "public class C { public static int id(int a) { return a; } }").unwrap();
-    assert!(Command::new("javac").args(["C.java"]).current_dir(&dir).output().unwrap().status.success());
+    fs::write(
+        dir.join("C.java"),
+        "public class C { public static int id(int a) { return a; } }",
+    )
+    .unwrap();
+    assert!(Command::new("javac")
+        .args(["C.java"])
+        .current_dir(&dir)
+        .output()
+        .unwrap()
+        .status
+        .success());
 
     let cp = krusty::jvm::classpath::Classpath::new(vec![dir.clone()]);
     let a = cp.method_code("C", "id", "(I)I").expect("body");
@@ -115,20 +156,33 @@ fn assembler_round_trips_real_bytecode() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     // A method with a loop (branches) and a switch — exercises Branch + LookupSwitch/TableSwitch.
-    fs::write(dir.join("A.java"), r#"public class A {
+    fs::write(
+        dir.join("A.java"),
+        r#"public class A {
         public static int f(int x) {
             int s = 0;
             for (int i = 0; i < x; i++) s += i;
             switch (x) { case 1: return 1; case 5: return 5; case 9: return 9; default: return s; }
         }
-    }"#).unwrap();
-    assert!(Command::new("javac").args(["A.java"]).current_dir(&dir).output().unwrap().status.success());
+    }"#,
+    )
+    .unwrap();
+    assert!(Command::new("javac")
+        .args(["A.java"])
+        .current_dir(&dir)
+        .output()
+        .unwrap()
+        .status
+        .success());
     let bytes = fs::read(dir.join("A.class")).unwrap();
     let body = krusty::jvm::classreader::read_method_code(&bytes, "f", "(I)I").expect("f body");
 
     let insns = krusty::jvm::inline::disassemble(&body.code).expect("disassemble");
     let re = krusty::jvm::inline::assemble(&insns);
-    assert_eq!(re, body.code, "disassemble∘assemble is identity on real bytecode (branches + switch)");
+    assert_eq!(
+        re, body.code,
+        "disassemble∘assemble is identity on real bytecode (branches + switch)"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

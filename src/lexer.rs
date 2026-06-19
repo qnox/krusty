@@ -8,7 +8,14 @@ use crate::diag::{DiagSink, Span};
 use crate::token::{keyword, Token, TokenKind};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
-    Lexer { b: src.as_bytes(), i: 0, out: Vec::new(), diags, pending: std::collections::VecDeque::new() }.run()
+    Lexer {
+        b: src.as_bytes(),
+        i: 0,
+        out: Vec::new(),
+        diags,
+        pending: std::collections::VecDeque::new(),
+    }
+    .run()
 }
 
 struct Lexer<'a> {
@@ -42,13 +49,25 @@ impl<'a> Lexer<'a> {
     }
 
     fn peek(&self) -> u8 {
-        if self.i < self.b.len() { self.b[self.i] } else { 0 }
+        if self.i < self.b.len() {
+            self.b[self.i]
+        } else {
+            0
+        }
     }
     fn peek2(&self) -> u8 {
-        if self.i + 1 < self.b.len() { self.b[self.i + 1] } else { 0 }
+        if self.i + 1 < self.b.len() {
+            self.b[self.i + 1]
+        } else {
+            0
+        }
     }
     fn peek3(&self) -> u8 {
-        if self.i + 2 < self.b.len() { self.b[self.i + 2] } else { 0 }
+        if self.i + 2 < self.b.len() {
+            self.b[self.i + 2]
+        } else {
+            0
+        }
     }
     fn three(&mut self, kind: TokenKind) -> TokenKind {
         self.i += 3;
@@ -59,7 +78,10 @@ impl<'a> Lexer<'a> {
         self.skip_trivia();
         let lo = self.i as u32;
         if self.i >= self.b.len() {
-            return Token { kind: TokenKind::Eof, span: Span::new(lo, lo) };
+            return Token {
+                kind: TokenKind::Eof,
+                span: Span::new(lo, lo),
+            };
         }
         let c = self.b[self.i];
         let kind = match c {
@@ -114,11 +136,17 @@ impl<'a> Lexer<'a> {
             c if is_ident_start(c) => return self.ident(lo),
             _ => {
                 self.i += 1;
-                self.diags.error(Span::new(lo, self.i as u32), format!("unexpected character '{}'", c as char));
+                self.diags.error(
+                    Span::new(lo, self.i as u32),
+                    format!("unexpected character '{}'", c as char),
+                );
                 TokenKind::Unknown
             }
         };
-        Token { kind, span: Span::new(lo, self.i as u32) }
+        Token {
+            kind,
+            span: Span::new(lo, self.i as u32),
+        }
     }
 
     fn one(&mut self, k: TokenKind) -> TokenKind {
@@ -165,8 +193,10 @@ impl<'a> Lexer<'a> {
         // Hex (`0xFF`) / binary (`0b1010`) integer literals (digits, `_` separators, optional `L`).
         if self.b[self.i] == b'0' && matches!(self.peek2(), b'x' | b'X' | b'b' | b'B') {
             self.i += 2; // consume `0x`/`0b`
-            // hex digits (a superset of binary) or `_` separators — stops at the `L` long suffix.
-            while self.i < self.b.len() && (self.b[self.i].is_ascii_hexdigit() || self.b[self.i] == b'_') {
+                         // hex digits (a superset of binary) or `_` separators — stops at the `L` long suffix.
+            while self.i < self.b.len()
+                && (self.b[self.i].is_ascii_hexdigit() || self.b[self.i] == b'_')
+            {
                 self.i += 1;
             }
             let kind = if self.peek() == b'L' {
@@ -175,11 +205,19 @@ impl<'a> Lexer<'a> {
             } else if self.peek() == b'u' || self.peek() == b'U' {
                 // `0xFFu` (UInt) / `0xFFuL` (ULong).
                 self.i += 1;
-                if self.peek() == b'L' || self.peek() == b'l' { self.i += 1; TokenKind::ULongLit } else { TokenKind::UIntLit }
+                if self.peek() == b'L' || self.peek() == b'l' {
+                    self.i += 1;
+                    TokenKind::ULongLit
+                } else {
+                    TokenKind::UIntLit
+                }
             } else {
                 TokenKind::IntLit
             };
-            return Token { kind, span: Span::new(lo, self.i as u32) };
+            return Token {
+                kind,
+                span: Span::new(lo, self.i as u32),
+            };
         }
         let mut is_double = false;
         while self.i < self.b.len() && (self.b[self.i].is_ascii_digit() || self.b[self.i] == b'_') {
@@ -226,7 +264,10 @@ impl<'a> Lexer<'a> {
         } else {
             TokenKind::IntLit
         };
-        Token { kind, span: Span::new(lo, self.i as u32) }
+        Token {
+            kind,
+            span: Span::new(lo, self.i as u32),
+        }
     }
 
     fn char_lit(&mut self, lo: u32) -> Token {
@@ -241,9 +282,15 @@ impl<'a> Lexer<'a> {
         if self.i < self.b.len() {
             self.i += 1; // closing quote
         } else {
-            self.diags.error(Span::new(lo, self.i as u32), "unterminated character literal");
+            self.diags.error(
+                Span::new(lo, self.i as u32),
+                "unterminated character literal",
+            );
         }
-        Token { kind: TokenKind::CharLit, span: Span::new(lo, self.i as u32) }
+        Token {
+            kind: TokenKind::CharLit,
+            span: Span::new(lo, self.i as u32),
+        }
     }
 
     fn string(&mut self, lo: u32) -> Token {
@@ -266,9 +313,13 @@ impl<'a> Lexer<'a> {
         if self.i < self.b.len() {
             self.i += 1; // closing quote
         } else {
-            self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+            self.diags
+                .error(Span::new(lo, self.i as u32), "unterminated string literal");
         }
-        Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) }
+        Token {
+            kind: TokenKind::StringLit,
+            span: Span::new(lo, self.i as u32),
+        }
     }
 
     /// Lex a raw string `"""..."""`. Content is verbatim (no escapes); the closing delimiter is a run
@@ -280,7 +331,8 @@ impl<'a> Lexer<'a> {
         let close_start;
         loop {
             if self.i >= self.b.len() {
-                self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+                self.diags
+                    .error(Span::new(lo, self.i as u32), "unterminated string literal");
                 close_start = self.i;
                 break;
             }
@@ -305,13 +357,19 @@ impl<'a> Lexer<'a> {
             if self.b[j] == b'$' {
                 let next = self.b.get(j + 1).copied().unwrap_or(0);
                 if next == b'{' || is_ident_start(next) {
-                    self.diags.error(Span::new(lo, self.i as u32), "raw string interpolation is not supported");
+                    self.diags.error(
+                        Span::new(lo, self.i as u32),
+                        "raw string interpolation is not supported",
+                    );
                     break;
                 }
             }
             j += 1;
         }
-        Token { kind: TokenKind::StringLit, span: Span::new(lo, self.i as u32) }
+        Token {
+            kind: TokenKind::StringLit,
+            span: Span::new(lo, self.i as u32),
+        }
     }
 
     /// Does the string starting at `self.i` (`"`) contain a `$ident` / `${` interpolation?
@@ -337,7 +395,10 @@ impl<'a> Lexer<'a> {
     /// `TemplateStart (StrChunk | Dollar Ident | Dollar LBrace <expr> RBrace)* TemplateEnd`,
     /// returning the first token and queueing the rest.
     fn string_template(&mut self, lo: u32) -> Token {
-        let mut toks: Vec<Token> = vec![Token { kind: TokenKind::TemplateStart, span: Span::new(lo, lo + 1) }];
+        let mut toks: Vec<Token> = vec![Token {
+            kind: TokenKind::TemplateStart,
+            span: Span::new(lo, lo + 1),
+        }];
         self.i += 1; // opening quote
         let mut chunk_lo = self.i;
         while self.i < self.b.len() && self.b[self.i] != b'"' {
@@ -349,15 +410,24 @@ impl<'a> Lexer<'a> {
             let next = self.b.get(self.i + 1).copied().unwrap_or(0);
             if c == b'$' && (next == b'{' || is_ident_start(next)) {
                 if self.i > chunk_lo {
-                    toks.push(Token { kind: TokenKind::StrChunk, span: Span::new(chunk_lo as u32, self.i as u32) });
+                    toks.push(Token {
+                        kind: TokenKind::StrChunk,
+                        span: Span::new(chunk_lo as u32, self.i as u32),
+                    });
                 }
                 let dollar_lo = self.i;
                 self.i += 1; // consume `$`
-                toks.push(Token { kind: TokenKind::Dollar, span: Span::new(dollar_lo as u32, self.i as u32) });
+                toks.push(Token {
+                    kind: TokenKind::Dollar,
+                    span: Span::new(dollar_lo as u32, self.i as u32),
+                });
                 if self.b[self.i] == b'{' {
                     let lb = self.i;
                     self.i += 1;
-                    toks.push(Token { kind: TokenKind::LBrace, span: Span::new(lb as u32, self.i as u32) });
+                    toks.push(Token {
+                        kind: TokenKind::LBrace,
+                        span: Span::new(lb as u32, self.i as u32),
+                    });
                     let mut depth = 1;
                     loop {
                         let t = self.lex_one();
@@ -380,7 +450,10 @@ impl<'a> Lexer<'a> {
                     while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
                         self.i += 1;
                     }
-                    toks.push(Token { kind: TokenKind::Ident, span: Span::new(id_lo as u32, self.i as u32) });
+                    toks.push(Token {
+                        kind: TokenKind::Ident,
+                        span: Span::new(id_lo as u32, self.i as u32),
+                    });
                 }
                 chunk_lo = self.i;
             } else {
@@ -388,14 +461,21 @@ impl<'a> Lexer<'a> {
             }
         }
         if self.i > chunk_lo {
-            toks.push(Token { kind: TokenKind::StrChunk, span: Span::new(chunk_lo as u32, self.i as u32) });
+            toks.push(Token {
+                kind: TokenKind::StrChunk,
+                span: Span::new(chunk_lo as u32, self.i as u32),
+            });
         }
         if self.i < self.b.len() {
             self.i += 1; // closing quote
         } else {
-            self.diags.error(Span::new(lo, self.i as u32), "unterminated string literal");
+            self.diags
+                .error(Span::new(lo, self.i as u32), "unterminated string literal");
         }
-        toks.push(Token { kind: TokenKind::TemplateEnd, span: Span::new(self.i as u32, self.i as u32) });
+        toks.push(Token {
+            kind: TokenKind::TemplateEnd,
+            span: Span::new(self.i as u32, self.i as u32),
+        });
         let first = toks.remove(0);
         self.pending.extend(toks);
         first
@@ -415,7 +495,11 @@ mod tests {
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         let mut d = DiagSink::new();
-        lex(src, &mut d).into_iter().map(|t| t.kind).filter(|k| *k != TokenKind::Newline).collect()
+        lex(src, &mut d)
+            .into_iter()
+            .map(|t| t.kind)
+            .filter(|k| *k != TokenKind::Newline)
+            .collect()
     }
 
     #[test]
@@ -424,7 +508,10 @@ mod tests {
         let k = kinds("fun f(a: Int, b: String): String = a");
         assert_eq!(
             k,
-            vec![KwFun, Ident, LParen, Ident, Colon, Ident, Comma, Ident, Colon, Ident, RParen, Colon, Ident, Eq, Ident, Eof]
+            vec![
+                KwFun, Ident, LParen, Ident, Colon, Ident, Comma, Ident, Colon, Ident, RParen,
+                Colon, Ident, Eq, Ident, Eof
+            ]
         );
     }
 
@@ -466,6 +553,9 @@ mod tests {
     fn member_call_dotted() {
         use TokenKind::*;
         // `a.toString()` — Dot must not be confused with a double literal.
-        assert_eq!(kinds("a.toString()"), vec![Ident, Dot, Ident, LParen, RParen, Eof]);
+        assert_eq!(
+            kinds("a.toString()"),
+            vec![Ident, Dot, Ident, LParen, RParen, Eof]
+        );
     }
 }

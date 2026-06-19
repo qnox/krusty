@@ -1,2 +1,4 @@
 target/
 krusty-out/
+docs/badges/
+.kotlinc/

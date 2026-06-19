@@ -239,15 +239,33 @@ impl Ty {
 
     /// True for JVM reference types (where `null` is a valid value).
     pub fn is_reference(self) -> bool {
-        matches!(self, Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_))
+        matches!(
+            self,
+            Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_)
+        )
     }
 
     pub fn is_numeric(self) -> bool {
-        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double)
+        matches!(
+            self,
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double
+        )
     }
 
     pub fn is_primitive(self) -> bool {
-        matches!(self, Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double | Ty::Boolean | Ty::Char | Ty::UInt | Ty::ULong)
+        matches!(
+            self,
+            Ty::Int
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+                | Ty::Boolean
+                | Ty::Char
+                | Ty::UInt
+                | Ty::ULong
+        )
     }
 
     /// True for the unsigned integer types (inline classes over a signed primitive).
@@ -315,7 +333,11 @@ impl Ty {
     pub fn promote(a: Ty, b: Ty) -> Option<Ty> {
         if a.is_numeric() && b.is_numeric() {
             let r = if a.rank() >= b.rank() { a } else { b };
-            Some(if matches!(r, Ty::Byte | Ty::Short) { Ty::Int } else { r })
+            Some(if matches!(r, Ty::Byte | Ty::Short) {
+                Ty::Int
+            } else {
+                r
+            })
         } else {
             None
         }

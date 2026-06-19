@@ -106,8 +106,15 @@ fn best_overload<'a>(
     args: &[Ty],
 ) -> Option<&'a LibraryMember> {
     let named = candidates.filter(|m| m.name == name);
-    named.clone().find(|m| m.params == *args)
-        .or_else(|| named.clone().find(|m| m.params.len() == args.len() && m.params.iter().zip(args).all(|(p, a)| arg_assignable(p, a))))
+    named
+        .clone()
+        .find(|m| m.params == *args)
+        .or_else(|| {
+            named.clone().find(|m| {
+                m.params.len() == args.len()
+                    && m.params.iter().zip(args).all(|(p, a)| arg_assignable(p, a))
+            })
+        })
         .or_else(|| named.clone().find(|m| params_prefix(&m.params, args)))
 }
 
@@ -118,7 +125,16 @@ impl LibraryType {
         if let Some(m) = self.constructors.iter().find(|m| m.params == *args) {
             return Some(m);
         }
-        let widened: Vec<Ty> = args.iter().map(|t| if t.is_reference() { Ty::obj("kotlin/Any") } else { *t }).collect();
+        let widened: Vec<Ty> = args
+            .iter()
+            .map(|t| {
+                if t.is_reference() {
+                    Ty::obj("kotlin/Any")
+                } else {
+                    *t
+                }
+            })
+            .collect();
         self.constructors.iter().find(|m| m.params == widened)
     }
 
@@ -188,7 +204,13 @@ pub trait LibrarySet {
     /// (`receiver == Some(t)`, passed as the callable's first argument). `type_args` are the call's
     /// explicit type arguments (`emptyList<Int>()`), bound to the callable's formal type parameters
     /// when the value arguments don't determine them; empty when none are written.
-    fn resolve_callable(&self, _name: &str, _receiver: Option<Ty>, _args: &[Ty], _type_args: &[Ty]) -> Option<LibraryCallable> {
+    fn resolve_callable(
+        &self,
+        _name: &str,
+        _receiver: Option<Ty>,
+        _args: &[Ty],
+        _type_args: &[Ty],
+    ) -> Option<LibraryCallable> {
         None
     }
 
@@ -223,7 +245,12 @@ pub trait LibrarySet {
     /// from the `0`), so `arg_tys[i]` is `Some` for a typed non-lambda argument and `None` for a lambda
     /// not yet typed. Lets the checker type lambda bodies before resolving the call. Empty inner vec for
     /// a non-lambda argument; `None` if no such extension.
-    fn extension_lambda_param_types(&self, _recv: Ty, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+    fn extension_lambda_param_types(
+        &self,
+        _recv: Ty,
+        _name: &str,
+        _arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
         None
     }
 
@@ -231,7 +258,11 @@ pub trait LibrarySet {
     /// *receiver-less top-level* library function (`applyIt(5) { it + 1 }`): the lambda parameter types
     /// come from the function's generic `Signature` (`it: Int` from `f: (Int) -> Int`), which the erased
     /// `Function1` descriptor hides. Lets the checker type a lib fn's lambda argument before resolving.
-    fn toplevel_lambda_param_types(&self, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
+    fn toplevel_lambda_param_types(
+        &self,
+        _name: &str,
+        _arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Vec<Ty>>> {
         None
     }
 
@@ -254,7 +285,12 @@ pub trait LibrarySet {
     /// [`resolve_callable`](Self::resolve_callable) with a receiver, but ALSO matching `@InlineOnly`
     /// package-private candidates (which `resolve_callable` hides, since they aren't callable). The
     /// caller must inline the result, never emit a call. `None` for non-JVM platforms.
-    fn resolve_scope_inline(&self, _name: &str, _receiver: Ty, _args: &[Ty]) -> Option<LibraryCallable> {
+    fn resolve_scope_inline(
+        &self,
+        _name: &str,
+        _receiver: Ty,
+        _args: &[Ty],
+    ) -> Option<LibraryCallable> {
         None
     }
 }
@@ -264,12 +300,21 @@ pub trait LibrarySet {
 // implementation of the inherited-member walk without duplicating it or depending on the backend.
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
-pub fn resolve_constructor(lib: &dyn LibrarySet, internal: &str, args: &[Ty]) -> Option<LibraryMember> {
+pub fn resolve_constructor(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
     lib.resolve_type(internal)?.ctor(args).cloned()
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
-pub fn resolve_companion(lib: &dyn LibrarySet, internal: &str, name: &str, args: &[Ty]) -> Option<LibraryMember> {
+pub fn resolve_companion(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    name: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
     let t = lib.resolve_type(internal)?;
     if !t.is_public {
         return None;
@@ -279,13 +324,27 @@ pub fn resolve_companion(lib: &dyn LibrarySet, internal: &str, name: &str, args:
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
 /// member may be inherited from a (possibly non-public) supertype, so walk the chain breadth-first.
-pub fn resolve_instance(lib: &dyn LibrarySet, internal: &str, name: &str, args: &[Ty]) -> Option<LibraryMember> {
+pub fn resolve_instance(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    name: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
     if !lib.resolve_type(internal)?.is_public {
         return None;
     }
     // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
     // so a reference argument matches against an `Any` parameter — try the exact args, then widened.
-    let widened: Vec<Ty> = args.iter().map(|t| if t.is_reference() { Ty::obj("kotlin/Any") } else { *t }).collect();
+    let widened: Vec<Ty> = args
+        .iter()
+        .map(|t| {
+            if t.is_reference() {
+                Ty::obj("kotlin/Any")
+            } else {
+                *t
+            }
+        })
+        .collect();
     let mut seen = std::collections::HashSet::new();
     let mut q = std::collections::VecDeque::new();
     q.push_back(internal.to_string());
@@ -293,8 +352,13 @@ pub fn resolve_instance(lib: &dyn LibrarySet, internal: &str, name: &str, args: 
         if !seen.insert(cur.clone()) {
             continue;
         }
-        let Some(t) = lib.resolve_type(&cur) else { continue };
-        if let Some(m) = t.instance_member(name, args).or_else(|| t.instance_member(name, &widened)) {
+        let Some(t) = lib.resolve_type(&cur) else {
+            continue;
+        };
+        if let Some(m) = t
+            .instance_member(name, args)
+            .or_else(|| t.instance_member(name, &widened))
+        {
             return Some(m.clone());
         }
         q.extend(t.supertypes);

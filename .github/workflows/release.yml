@@ -1,0 +1,94 @@
+name: release
+
+# Auto-build + publish ONE release on every push to master (reqs #1 + #5).
+#
+# Versioning: krusty ships a single release line. The version is krusty's own —
+# <max-supported-Kotlin-reference-version>-build.<n> (e.g. 2.4.20-build.3) — where <n> is the
+# git-derived build number that resets per reference version (`just version`). The build fans out across
+# OS/arch targets; the published release is tagged v<version> with all target binaries attached.
+on:
+  push:
+    branches: [master]
+
+# Least privilege: only the publish job gets write; everything else is read-only.
+permissions:
+  contents: read
+
+# Don't let two master pushes publish releases on top of each other.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Build + package one binary per OS/arch target.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true }
+          - { triple: aarch64-apple-darwin,      os: macos-14 }
+          - { triple: x86_64-pc-windows-msvc,    os: windows-latest }
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: build number = total commit count
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target.triple }}
+      - uses: extractions/setup-just@v2
+      - name: install aarch64-linux linker
+        if: matrix.target.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: build
+        shell: bash
+        run: just build-release "${{ matrix.target.triple }}"
+      - name: package
+        id: pkg
+        shell: bash
+        run: echo "path=$(just package "${{ matrix.target.triple }}")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: krusty-${{ matrix.target.triple }}
+          path: ${{ steps.pkg.outputs.path }}
+          if-no-files-found: error
+
+  # Publish a single GitHub release with every target's binary attached.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only this job writes (creates the release/tag)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: extractions/setup-just@v2
+      - name: collect all target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: krusty-*
+          path: dist
+          merge-multiple: true
+      - name: compute version + tag
+        id: v
+        run: |
+          ver=$(just version)
+          echo "ver=$ver"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: krusty ${{ steps.v.outputs.ver }}
+          target_commitish: ${{ github.sha }}
+          files: dist/**
+          fail_on_unmatched_files: true
