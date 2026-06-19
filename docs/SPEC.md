@@ -687,3 +687,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `super.toString()` reaching `Object`/an open stdlib method work). Modeled by a new `Callee::Special`
   (the first non-virtual instance-call node). `owner` is the direct superclass — the JVM resolves
   `invokespecial` up the chain to the actual declaring class.
+
+- **`if`/`when` branch join: two values of the same class.** Two branches whose static types are the
+  same class (`List<C>` and `List<D>`, or `A` and `A`) join to that class with erased type arguments
+  (`List<*>`). The runtime class is identical, so the merge stack frame is exactly that class — safe to
+  emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
+  can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
+  read on the result resolves against the raw class (element type `Any`).

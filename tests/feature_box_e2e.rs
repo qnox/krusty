@@ -1213,6 +1213,19 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Two `if`/`when` branches of the SAME class join to that class (erased type args): the runtime class
+    // is identical so the merge frame is well-typed.
+    ("SameClassJoin", r#"
+fun box(): String {
+    val a = listOf(1, 2)
+    val b = listOf("x", "y", "z")
+    val c = if (a.size > 5) a else b
+    if (c.size != 3) return "f1: ${c.size}"
+    val d = when (1) { 1 -> a; else -> b }
+    if (d.size != 2) return "f2: ${d.size}"
+    return "OK"
+}
+"#),
 ];
 
 #[test]
