@@ -2337,14 +2337,9 @@ impl<'a> Lower<'a> {
                 // desugared to a compound assignment by the parser; an external `this`, e.g. an inlined
                 // `apply`, isn't handled here.)
                 if self.lookup(&name).is_none() {
-                    let (this_v, _) = self.lookup("this")?;
-                    let cur = self.cur_class.clone()?;
-                    let (class, idx) = {
-                        let ci = self.classes.get(&cur)?;
-                        let idx = ci.fields.iter().position(|(fn_, _)| *fn_ == name)?;
-                        (ci.id, idx as u32)
-                    };
-                    let (fty, is_var) = self.syms.prop_of(&cur, &name)?;
+                    let (this_v, this_ty) = self.lookup("this")?;
+                    let internal = this_ty.obj_internal()?.to_string();
+                    let (fty, is_var) = self.syms.prop_of(&internal, &name)?;
                     if !is_var { return None; }
                     let one_c = match fty {
                         Ty::Int | Ty::Byte | Ty::Short | Ty::Char => IrConst::Int(1),
@@ -2354,8 +2349,17 @@ impl<'a> Lower<'a> {
                         _ => return None,
                     };
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
+                    // A field of *this* class is read/written directly; an inherited one (or an external
+                    // `this`) goes through its getter/setter accessors.
+                    let own = self.cur_class.as_ref().and_then(|c| self.classes.get(c))
+                        .and_then(|ci| ci.fields.iter().position(|(fn_, _)| *fn_ == name).map(|i| (ci.id, i as u32)));
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    let cur_val = self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx });
+                    let cur_val = if let Some((class, idx)) = own {
+                        self.ir.add_expr(IrExpr::GetField { receiver: recv, class, index: idx })
+                    } else {
+                        let (gclass, gindex, _, _) = self.resolve_method(&internal, &getter_name(&name))?;
+                        self.ir.add_expr(IrExpr::MethodCall { class: gclass, index: gindex, receiver: recv, args: vec![] })
+                    };
                     let one = self.ir.add_expr(IrExpr::Const(one_c));
                     let nv = if matches!(fty, Ty::Byte | Ty::Short | Ty::Char) {
                         let cur_i = self.ir.add_expr(IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg: cur_val, type_operand: ty_to_ir(Ty::Int) });
@@ -2365,7 +2369,12 @@ impl<'a> Lower<'a> {
                         self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs: cur_val, rhs: one })
                     };
                     let recv2 = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    return Some(self.ir.add_expr(IrExpr::SetField { receiver: recv2, class, index: idx, value: nv }));
+                    return Some(if let Some((class, idx)) = own {
+                        self.ir.add_expr(IrExpr::SetField { receiver: recv2, class, index: idx, value: nv })
+                    } else {
+                        let (sclass, sindex, _, _) = self.resolve_method(&internal, &setter_name(&name))?;
+                        self.ir.add_expr(IrExpr::MethodCall { class: sclass, index: sindex, receiver: recv2, args: vec![Some(nv)] })
+                    });
                 }
                 let (v, ty) = self.lookup(&name)?;
                 let one = match ty {

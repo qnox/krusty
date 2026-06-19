@@ -189,6 +189,24 @@ fun box(): String {
     return "OK"
 }
 "#),
+    // Bare access to INHERITED `var`/`val` members from a subclass method: read, write, and `++`/`--`
+    // resolve through the class's superclass chain (inherited writes/incdec go via the getter/setter).
+    ("InheritedMembers", r#"
+open class A(val base: Int) { var count = 0; var label = "x" }
+class B(b: Int) : A(b) {
+    fun read() = base + count                 // inherited read (inferred return)
+    fun mutate() { count = 10; count++; label = "y" }
+}
+fun box(): String {
+    val b = B(3)
+    if (b.read() != 3) return "f1:${b.read()}"
+    b.mutate()
+    if (b.count != 11) return "f2:${b.count}"
+    if (b.label != "y") return "f3"
+    if (b.read() != 14) return "f4:${b.read()}"
+    return "OK"
+}
+"#),
     ("Unsigned", r#"
 fun box(): String {
     val u1 = 1u; val u2 = 2u

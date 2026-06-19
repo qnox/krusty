@@ -359,6 +359,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Bare access to INHERITED members** from a subclass method (`fun f() = x` / `x = …` / `x++` where `x`
+  is declared in a superclass): the checker resolves bare reads/writes/inc-dec through the class's
+  superclass chain (`lookup_prop`/`prop_of` already recurse; the `Assign`/`IncDec` checkers now consult
+  `this`'s class chain, not just locals + top-level props). At signature-collection time the superclass
+  chain's backing-field properties are added to the expression-body return-type inference scope, so
+  `fun f() = inheritedProp` infers its type. Inherited writes and `++`/`--` lower through the property
+  getter/setter (an own field stays a direct `getfield`/`putfield`). `InheritedMembers` in
+  `tests/feature_box_e2e.rs`. (An inferred return from an inherited *method call* — `fun f() = inheritedFn()`
+  — is still not inferred; annotate the return.)
 - **Bare `x++` / `x--` on a `var` field** (implicit `this.x`, statement position): `this.x = this.x ± 1`
   via a direct field read/write inside the owning class, reusing the local-`++` `Byte`/`Short`/`Char`
   width-wrap (widen to `Int`, op, narrow back). The field's type comes from `syms.prop_of`. (`obj.x++` and
