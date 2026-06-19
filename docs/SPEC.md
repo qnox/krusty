@@ -359,6 +359,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
+  `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
+  block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
+  would leave a dead branch target without the stackmap frame the JVM verifier requires (`VerifyError:
+  Expecting a stack map frame` — seen with `try { throw …; <unreachable> } catch …`).
+- **A `for`-range `step` is evaluated exactly once** (hoisted to a temp before the loop), not per
+  iteration — a side-effecting `step` (`a until b step sideEffect()`) must run a single time, matching
+  kotlinc's evaluation order. `DeadCodeAndStep` in `tests/feature_box_e2e.rs`.
 - **Inferred return type from a method call** (`fun b() = a()`, `this.a()`, or an inherited method): the
   expression-body return-type inference scope is seeded with this class's and its superclasses' methods
   that have an *explicit* return type, so a sibling/`this`/inherited call resolves. (A *chained* inference

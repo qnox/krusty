@@ -1140,14 +1140,30 @@ impl<'a> Lower<'a> {
     /// Append a loop body's statements to `out`: a block's statements (plus its trailing expression),
     /// or a single non-block body expression (`for (x in xs) f(x)` — no braces). Returns `None` if any
     /// statement can't be lowered.
+    /// A statement that transfers control away unconditionally (`return`/`break`/`continue`, or an
+    /// expression of type `Nothing` — a `throw` or a call that never returns). Code after it in the same
+    /// block is unreachable; kotlinc drops it, and emitting it would leave the verifier without the
+    /// stackmap frame a (dead) branch target needs (`VerifyError: Expecting a stack map frame`).
+    fn stmt_diverges(&self, s: crate::ast::StmtId) -> bool {
+        match self.afile.stmt(s) {
+            Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) => true,
+            Stmt::Expr(e) => self.info.ty(*e) == Ty::Nothing,
+            _ => false,
+        }
+    }
+
     fn append_body_stmts(&mut self, body: AstExprId, out: &mut Vec<u32>) -> Option<()> {
         match self.afile.expr(body).clone() {
             Expr::Block { stmts, trailing } => {
+                let mut diverged = false;
                 for s in stmts {
                     self.append_stmt(s, out)?;
+                    if self.stmt_diverges(s) { diverged = true; break; }
                 }
-                if let Some(t) = trailing {
-                    out.push(self.expr(t)?);
+                if !diverged {
+                    if let Some(t) = trailing {
+                        out.push(self.expr(t)?);
+                    }
                 }
             }
             _ => out.push(self.expr(body)?),
@@ -2166,8 +2182,16 @@ impl<'a> Lower<'a> {
         let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else { return None };
         let depth = self.scope.len();
         let mut out = Vec::new();
+        let mut diverged = false;
         for s in stmts {
             self.append_stmt(s, &mut out)?;
+            if self.stmt_diverges(s) { diverged = true; break; }
+        }
+        // A block that diverges before its trailing value (`{ …; throw X; <unreachable trailing> }`)
+        // needs no `return` — the diverging statement already transfers control; the trailing is dead.
+        if diverged {
+            self.scope.truncate(depth);
+            return Some(self.ir.add_expr(IrExpr::Block { stmts: out, value: None }));
         }
         if let Some(t) = trailing {
             let tt = self.info.ty(t);
@@ -2517,7 +2541,20 @@ impl<'a> Lower<'a> {
                 // body + increment
                 let mut out = Vec::new();
                 if self.append_body_stmts(body, &mut out).is_none() { self.scope.truncate(depth); return None; }
-                let step = match range.step { Some(e) => self.expr(e)?, None => self.ir.add_expr(IrExpr::Const(one)) };
+                // The step is evaluated ONCE (after the bounds, before the loop), not per iteration — a
+                // side-effecting `step` (`a step logged(2)`) must run a single time. Hoist it to a temp.
+                let var_step = match range.step {
+                    Some(e) => {
+                        let sv = self.expr(e)?;
+                        let step_v = self.fresh_value();
+                        Some((self.ir.add_expr(IrExpr::Variable { index: step_v, ty: elem_ir.clone(), init: Some(sv) }), step_v))
+                    }
+                    None => None,
+                };
+                let step = match var_step {
+                    Some((_, step_v)) => self.ir.add_expr(IrExpr::GetValue(step_v)),
+                    None => self.ir.add_expr(IrExpr::Const(one)),
+                };
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) { IrBinOp::Sub } else { IrBinOp::Add };
                 let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
                 let inc_val = self.ir.add_expr(IrExpr::PrimitiveBinOp { op: inc_op, lhs: gi2, rhs: step });
@@ -2539,7 +2576,10 @@ impl<'a> Lower<'a> {
                 let wbody = self.ir.add_expr(IrExpr::Block { stmts: out, value: None });
                 let wh = self.ir.add_expr(IrExpr::While { cond, body: wbody, update: Some(update), post_test: false, label });
                 self.scope.truncate(depth);
-                Some(self.ir.add_expr(IrExpr::Block { stmts: vec![var_i, var_end, wh], value: None }))
+                let mut prologue = vec![var_i, var_end];
+                if let Some((vs, _)) = var_step { prologue.push(vs); }
+                prologue.push(wh);
+                Some(self.ir.add_expr(IrExpr::Block { stmts: prologue, value: None }))
             }
             // `for (x in arr)` over an array → an index loop `i=0; while (i<arr.size) { x=arr[i]; …; i++ }`.
             Stmt::ForEach { name, iterable, body, label } => self.lower_for_each(&name, iterable, body, label),
@@ -2917,18 +2957,20 @@ impl<'a> Lower<'a> {
             Expr::Block { stmts, trailing } => {
                 let depth = self.scope.len();
                 let mut out = Vec::new();
+                let mut diverged = false;
                 for &s in &stmts {
                     if self.append_stmt(s, &mut out).is_none() {
                         self.scope.truncate(depth);
                         return None;
                     }
+                    if self.stmt_diverges(s) { diverged = true; break; }
                 }
                 let value = match trailing {
-                    Some(t) => match self.expr(t) {
+                    Some(t) if !diverged => match self.expr(t) {
                         Some(v) => Some(v),
                         None => { self.scope.truncate(depth); return None; }
                     },
-                    None => None,
+                    _ => None,
                 };
                 self.scope.truncate(depth);
                 self.ir.add_expr(IrExpr::Block { stmts: out, value })
