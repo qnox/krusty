@@ -1520,6 +1520,22 @@ fun box(): String {
 }
 "#,
     ),
+    // `ByteArray`/`ShortArray`/`FloatArray` size + init constructors (the checker had only Int/Long/
+    // Double/Boolean/Char).
+    (
+        "MorePrimitiveArrays",
+        r#"
+fun box(): String {
+    val b = ByteArray(3); b[0] = 5; b[1] = 7
+    if (b[0] + b[1] != 12) return "fb"
+    val s = ShortArray(2) { (it * 10).toShort() }
+    if (s[1] != 10.toShort()) return "fs"
+    val f = FloatArray(3) { it * 1.5f }
+    if (f[2] != 3.0f) return "ff"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
