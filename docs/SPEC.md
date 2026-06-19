@@ -359,6 +359,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **Inferred return type from a method call** (`fun b() = a()`, `this.a()`, or an inherited method): the
+  expression-body return-type inference scope is seeded with this class's and its superclasses' methods
+  that have an *explicit* return type, so a sibling/`this`/inherited call resolves. (A *chained* inference
+  where the callee is itself an inferred-body method — `fun b()=a(); fun c()=b()` — isn't resolved; the
+  callee needs an explicit return. Top-level function-call inference was already supported.)
 - **Bare access to INHERITED members** from a subclass method (`fun f() = x` / `x = …` / `x++` where `x`
   is declared in a superclass): the checker resolves bare reads/writes/inc-dec through the class's
   superclass chain (`lookup_prop`/`prop_of` already recurse; the `Assign`/`IncDec` checkers now consult
