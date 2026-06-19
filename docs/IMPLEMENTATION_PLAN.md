@@ -2188,6 +2188,12 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 - ✅ **Phase 274 — unbox primitive lambda parameters from the `FunctionN` signature**. `mapIndexed`'s index
   is `Int`, not boxed `Integer`. `tests/mapindexed_e2e.rs`.
 
+- ✅ **Phase 375 — `if`/`when` primitive+`null` branch join → boxed nullable wrapper** (843→845). A branch
+  that is a primitive joined with `null` types as the boxed wrapper (`if (c) true else null` → `Boolean?`);
+  the if/when lowering coerces each branch to a reference result type so the primitive branch is boxed at
+  the merge (else a VerifyError). A broader two-references→`Any` join was reverted (frame-merge VerifyError).
+  `tests/feature_box_e2e.rs::PrimitiveNullJoin`.
+
 - ✅ **Phase 374 — unsigned range values + inline-class mangled-member resolution** (843, +0 capability).
   `0u..5u`→`UIntRange` (ctor with `DefaultConstructorMarker`), iterated via kotlinc's mangled getters
   (`getFirst-pVg5ArA`) — new `LibrarySet::mangled_member` looks the real name up from the classpath
