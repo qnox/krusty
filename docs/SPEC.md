@@ -359,6 +359,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **A class method's expression-body return type is inferred with its own parameters in scope**
+  (`fun m(x: Int) = x + 1` → `Int`). Signature collection adds the method's parameters (alongside the
+  class properties) to the literal-inference scope; previously only the properties were visible, so a
+  body referencing a parameter inferred `Unit` and then tripped a return-type mismatch against the body.
+  This also unblocks a **bound method reference** `obj::m` whose method has an inferred return.
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
