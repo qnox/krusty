@@ -4,6 +4,55 @@ use std::path::PathBuf;
 
 use krusty::jvm::classpath::Classpath;
 
+/// Compile Kotlin `src` to `(internal_name, class_bytes)` pairs entirely in-process — the same pipeline
+/// (`lex → parse → check → ir_lower → ir_emit`) the conformance harness uses, sharing the process-global
+/// classpath caches (type/ext/jimage indexes) across every call. This is dramatically faster than
+/// spawning the `krusty` binary once per snippet (each subprocess rebuilds those indexes from scratch).
+/// `cp_jars` are the `-classpath` jars; `jdk_modules` is the JDK `lib/modules` jimage (the bootclasspath).
+/// Returns `None` on any compile error (an unsupported feature), like the CLI's non-zero exit.
+#[allow(dead_code)]
+pub fn compile_in_process(src: &str, stem: &str, cp_jars: &[PathBuf], jdk_modules: Option<&std::path::Path>) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::diag::DiagSink;
+    use krusty::jvm::names::file_class_name;
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+    let mut diags = DiagSink::new();
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse(src, &toks, &mut diags)];
+    if diags.has_errors() {
+        return None;
+    }
+    let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    // Reuse one `Classpath` per classpath set on this thread (warm caches across snippets).
+    thread_local! {
+        static CP: std::cell::RefCell<std::collections::HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let cp = CP.with(|c| {
+        c.borrow_mut()
+            .entry(cp_paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
+            .clone()
+    });
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let file = &files[0];
+    let info = check_file(file, &syms, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let facade = file_class_name(stem, file.package.as_deref());
+    let ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp)?;
+    if outputs.is_empty() { None } else { Some(outputs) }
+}
+
 /// Locate a complete kotlin-stdlib jar from standard local caches, mirroring how a drop-in
 /// `kotlinc` user supplies it via `-classpath`. "Complete" = the jar's `TypeAliasesKt` facades
 /// yield type aliases when scanned (so `Exception` etc. resolve). Returns `None` if none is found,

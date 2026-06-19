@@ -1155,12 +1155,6 @@ fn feature_snippets_run() {
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
     let jdk_modules = format!("{java_home}/lib/modules");
-    let compile_cp = if std::path::Path::new(&jdk_modules).exists() {
-        format!("{stdlib}:{jdk_modules}")
-    } else {
-        stdlib.clone()
-    };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let work = std::env::temp_dir().join(format!("krusty_feat_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).unwrap();
@@ -1187,15 +1181,24 @@ public class BoxRun {
     let jc = Command::new(&javac).args(["-d", runner.to_str().unwrap()]).arg(runner.join("BoxRun.java")).output().unwrap();
     assert!(jc.status.success(), "javac(BoxRun): {}", String::from_utf8_lossy(&jc.stderr));
 
-    // Compile every snippet with krusty into its own dir.
+    // Compile every snippet in-process (sharing the process-global classpath caches) and write its
+    // class bytes into its own dir — a per-snippet dir keeps the JVM runner's class loaders isolated, so
+    // two snippets that both declare e.g. `class C` don't collide. In-process compilation avoids spawning
+    // the krusty binary (and rebuilding the stdlib/jimage indexes) once per snippet.
+    let cp_jars = common::classpath_jars_for("// WITH_STDLIB");
+    let jdk_modules = std::path::Path::new(&jdk_modules);
+    let modules_opt = jdk_modules.exists().then_some(jdk_modules);
     let mut cases: Vec<(String, String)> = Vec::new(); // (dir, boxClass)
     for (i, (stem, src)) in SNIPPETS.iter().enumerate() {
         let dir = work.join(format!("s{i}"));
         fs::create_dir_all(&dir).unwrap();
-        let kt = dir.join(format!("{stem}.kt"));
-        fs::write(&kt, src).unwrap();
-        let out = Command::new(krusty).args(["-cp", &compile_cp, "-d", dir.to_str().unwrap()]).arg(&kt).output().unwrap();
-        assert!(out.status.success(), "krusty {stem}: {}", String::from_utf8_lossy(&out.stderr));
+        let classes = common::compile_in_process(src, stem, &cp_jars, modules_opt)
+            .unwrap_or_else(|| panic!("krusty {stem}: in-process compile failed"));
+        for (internal, bytes) in &classes {
+            let path = dir.join(format!("{internal}.class"));
+            if let Some(parent) = path.parent() { fs::create_dir_all(parent).unwrap(); }
+            fs::write(&path, bytes).unwrap();
+        }
         cases.push((dir.to_str().unwrap().to_string(), format!("{stem}Kt")));
     }
 
