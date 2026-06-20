@@ -2756,9 +2756,15 @@ impl<'a> Lower<'a> {
                 stmts: vec![ret],
                 value: None,
             });
-            if let Some(fid) =
-                self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body, true)
-            {
+            if let Some(fid) = self.add_synth_method(
+                internal,
+                class_id,
+                "toString",
+                vec![],
+                Ty::String,
+                body,
+                true,
+            ) {
                 self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
             }
         }
@@ -2793,9 +2799,9 @@ impl<'a> Lower<'a> {
                     ty: ty_to_ir(Ty::Int),
                     init: Some(h0),
                 }));
-                for i in 1..fields.len() {
+                for (i, f) in fields.iter().enumerate().skip(1) {
                     let fv = self.this_field(class_id, i as u32);
-                    let h = self.field_hash(fv, fields[i].1);
+                    let h = self.field_hash(fv, f.1);
                     let prev = self.ir.add_expr(IrExpr::GetValue(RV));
                     let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
                     let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -2857,9 +2863,15 @@ impl<'a> Lower<'a> {
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
             let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-            if let Some(fid) =
-                self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body, true)
-            {
+            if let Some(fid) = self.add_synth_method(
+                internal,
+                class_id,
+                "equals",
+                vec![obj],
+                Ty::Boolean,
+                body,
+                true,
+            ) {
                 self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
             }
         }

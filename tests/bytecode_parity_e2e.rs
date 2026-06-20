@@ -274,8 +274,7 @@ fn data_class_copy_null_checks_nonnull_reference_params() {
     let copy = &text[text.find(" copy(").expect("copy method")..];
     let copy = &copy[..copy.find("copy$default").unwrap_or(copy.len())];
     assert!(
-        copy.contains("checkNotNullParameter")
-            && copy.contains("// String s"),
+        copy.contains("checkNotNullParameter") && copy.contains("// String s"),
         "copy must null-check its non-null String param `s`:\n{copy}"
     );
     // Exactly one guard — the `Int` param must NOT be checked.
@@ -428,7 +427,10 @@ fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
         .output()
         .unwrap();
     if !cc.status.success() {
-        eprintln!("skip (kotlinc failed): {}", String::from_utf8_lossy(&cc.stderr));
+        eprintln!(
+            "skip (kotlinc failed): {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
         let _ = fs::remove_dir_all(&dir);
         return;
     }
