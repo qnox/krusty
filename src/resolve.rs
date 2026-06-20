@@ -6096,16 +6096,16 @@ impl<'a> Checker<'a> {
         // read-only `List` it does NOT resolve, so this returns false and `coll += x` lowers as
         // `coll = coll.plus(x)` (reassignment). No mutability predicate — the candidate's Kotlin
         // receiver type decides, like every other operator overload.
-        if rt != Ty::Error && matches!(recv, Ty::Obj(..)) {
-            if self
+        if rt != Ty::Error
+            && matches!(recv, Ty::Obj(..))
+            && self
                 .syms
                 .libraries
                 .resolve_scope_inline(aname, recv, &[rt])
                 .is_some()
-            {
-                self.plus_assign.insert(s);
-                return true;
-            }
+        {
+            self.plus_assign.insert(s);
+            return true;
         }
         false
     }
