@@ -78,3 +78,71 @@ return if (log == \"abcdef\") \"OK\" else log\n\
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A `return` inside both the `try` body and the `finally`: the finally's `return` overrides the
+/// try's, and the finally still runs. Regression: inlining the finally at the try's `return` used
+/// to re-inline the same finally at the finally's own `return`, recursing until the stack overflowed.
+#[test]
+fn finally_return_overrides_try_return() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping finally_e2e: set JAVA_HOME");
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping finally_e2e: no kotlin-stdlib jar found");
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_finret_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let src = "var log = \"\"\n\
+fun foo(): Int {\n\
+try { log = log + \"Done\"; return 0 } finally { log = log + \"Finally\"; return 1 }\n\
+}\n\
+fun box(): String {\n\
+val r = foo()\n\
+return if (r == 1 && log == \"DoneFinally\") \"OK\" else \"r=\" + r + \" log=\" + log\n\
+}\n";
+    fs::write(dir.join("F.kt"), src).unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("F.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed to compile return-in-finally: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(FKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
