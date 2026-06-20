@@ -2572,6 +2572,18 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 398 — top-level property field modifiers + accessors (bytecode parity)  ✅
+- Closed parity divergence #2. krusty emitted a top-level `val`/`var` as a bare `public static` field
+  with no accessor; kotlinc emits `private static final` (val) / `private static` (var) **plus** a
+  `public static final getX()` (and `setX()` for a `var`, with `checkNotNullParameter("<set-?>")` on a
+  non-null reference param). `const val` stays `public static final` with no accessor (kotlinc inlines it).
+- `IrStatic` gains `is_var`/`is_const`. `emit_statics` emits the kotlinc field flags + accessors; a
+  `GetStatic`/`SetStatic` reads/writes the private field DIRECTLY from within the facade but routes
+  through `getX()`/`setX()` from any other class (kotlinc's cross-file property-access compilation).
+- Verified byte-exact vs kotlinc on `val x; var y` reference (`private static final int x` + `getX` +
+  `getY` + `setY`). Box gate held 1076 OK, 0 FAIL; property e2e green. (Parity % on the annotation/array-
+  heavy 30-file prefix is flat — those files have no top-level vals; the fix is exact where it applies.)
+
 ### Phase 397 — comparison→branch fusion (bytecode parity)  ✅
 - Closed parity divergence #1 (the biggest lever). krusty *materialized* a 0/1 boolean for every
   comparison and tested it with `ifeq`/`ifne` (`iload;iload;if_icmplt L;iconst_0;goto;iconst_1;ifeq`);

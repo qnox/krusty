@@ -105,11 +105,61 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         return;
     }
     for s in &ir.statics {
-        cw.add_field(
-            0x0009, /* PUBLIC | STATIC */
-            &s.name,
-            &ir_ty_to_jvm(&s.ty).descriptor(),
-        );
+        // kotlinc: `const val` → `public static final`; a plain `val` → `private static final`; a `var`
+        // → `private static` (mutated through the synthesized setter). The private field is read/written
+        // directly only from within the facade; other classes go through the get/set accessors.
+        let acc = if s.is_const {
+            0x0019 // PUBLIC | STATIC | FINAL
+        } else if s.is_var {
+            0x000A // PRIVATE | STATIC
+        } else {
+            0x001A // PRIVATE | STATIC | FINAL
+        };
+        cw.add_field(acc, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
+    }
+    // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
+    // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
+    // `const val` is `public static final` with no accessor (kotlinc inlines const reads).
+    for s in &ir.statics {
+        if s.is_const {
+            continue;
+        }
+        let jt = ir_ty_to_jvm(&s.ty);
+        let desc = jt.descriptor();
+        let mut g = CodeBuilder::new(0);
+        let fref = cw.fieldref(facade, &s.name, &desc);
+        g.getstatic(fref, slot_words(jt) as i32);
+        emit_return(jt, &mut g);
+        g.ensure_locals(0);
+        g.link();
+        cw.add_method(0x0019, &prop_getter_name(&s.name), &format!("(){desc}"), &g);
+        if s.is_var {
+            let words = slot_words(jt);
+            let mut st = CodeBuilder::new(words);
+            // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
+            if jt.is_reference() && !ir_ty_nullable(&s.ty) {
+                st.aload(0);
+                st.push_string("<set-?>", cw);
+                let m = cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "checkNotNullParameter",
+                    "(Ljava/lang/Object;Ljava/lang/String;)V",
+                );
+                st.invokestatic(m, 2, 0);
+            }
+            load(jt, 0, &mut st);
+            let fref = cw.fieldref(facade, &s.name, &desc);
+            st.putstatic(fref, slot_words(jt) as i32);
+            st.ret_void();
+            st.ensure_locals(words);
+            st.link();
+            cw.add_method(
+                0x0019,
+                &prop_setter_name(&s.name),
+                &format!("({desc})V"),
+                &st,
+            );
+        }
     }
     let mut e = Emitter {
         ir,
@@ -1578,10 +1628,21 @@ impl<'a> Emitter<'a> {
                 let s = &self.ir.statics[index as usize];
                 let jt = ir_ty_to_jvm(&s.ty);
                 let name = s.name.clone();
+                let is_const = s.is_const;
                 let facade = self.facade.clone();
                 self.emit_value(value, code);
-                let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
-                code.putstatic(fref, slot_words(jt) as i32);
+                // Within the facade write the field directly; from another class go through `setX()`.
+                if self.owner == facade || is_const {
+                    let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
+                    code.putstatic(fref, slot_words(jt) as i32);
+                } else {
+                    let m = self.cw.methodref(
+                        &facade,
+                        &prop_setter_name(&name),
+                        &format!("({})V", jt.descriptor()),
+                    );
+                    code.invokestatic(m, slot_words(jt) as i32, 0);
+                }
             }
             IrExpr::While {
                 cond,
@@ -1692,9 +1753,22 @@ impl<'a> Emitter<'a> {
                 let s = &self.ir.statics[*i as usize];
                 let jt = ir_ty_to_jvm(&s.ty);
                 let name = s.name.clone();
+                let is_const = s.is_const;
                 let facade = self.facade.clone();
-                let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
-                code.getstatic(fref, slot_words(jt) as i32);
+                // Within the facade (or a `const val`, which is public) read the field directly; from
+                // another class a plain top-level property is private, so go through `getX()` — kotlinc's
+                // cross-file property-access compilation.
+                if self.owner == facade || is_const {
+                    let fref = self.cw.fieldref(&facade, &name, &jt.descriptor());
+                    code.getstatic(fref, slot_words(jt) as i32);
+                } else {
+                    let m = self.cw.methodref(
+                        &facade,
+                        &prop_getter_name(&name),
+                        &format!("(){}", jt.descriptor()),
+                    );
+                    code.invokestatic(m, 0, slot_words(jt) as i32);
+                }
             }
             IrExpr::New {
                 class,
@@ -3655,6 +3729,33 @@ pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
         }
         _ => Ty::Error,
     }
+}
+
+/// `true` if a lowered IR type is a nullable reference (`String?` etc.).
+fn ir_ty_nullable(t: &IrType) -> bool {
+    matches!(t, IrType::Class { nullable: true, .. })
+}
+
+/// JVM accessor names for a top-level property, matching kotlinc: `x`→`getX`/`setX`; an `is`-prefixed
+/// boolean keeps its name on the getter (`isOpen`→`isOpen`) and drops `is` on the setter (`setOpen`).
+fn prop_getter_name(prop: &str) -> String {
+    let b = prop.as_bytes();
+    if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
+        return prop.to_string();
+    }
+    let mut c = prop.chars();
+    format!("get{}{}", c.next().unwrap().to_uppercase(), c.as_str())
+}
+
+fn prop_setter_name(prop: &str) -> String {
+    let b = prop.as_bytes();
+    let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
+        &prop[2..]
+    } else {
+        prop
+    };
+    let mut c = base.chars();
+    format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
 }
 
 fn slot_words(t: Ty) -> u16 {

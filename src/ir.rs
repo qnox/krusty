@@ -555,6 +555,11 @@ pub struct IrStatic {
     pub ty: IrType,
     /// The initializer expression (run in `<clinit>` in declaration order).
     pub init: ExprId,
+    /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
+    pub is_var: bool,
+    /// `const val` ⇒ kotlinc keeps the field `public static final` (inlined at use) with no accessor;
+    /// a plain top-level `val`/`var` is `private static [final]` + a `public static` getter/setter.
+    pub is_const: bool,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
