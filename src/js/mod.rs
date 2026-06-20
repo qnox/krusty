@@ -287,6 +287,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
                 format!("{}({})", name, a.join(", "))
             }
+            // A cross-file top-level function — by name (JS has a flat function namespace).
+            Callee::CrossFile { name, .. } => {
+                let a: Vec<String> = args.iter().map(|&x| emit_expr(ir, x, inst)).collect();
+                format!("{}({})", name, a.join(", "))
+            }
             // A resolved JVM instance call → `receiver.name(args)`.
             Callee::Virtual { name, .. } => {
                 let recv = dispatch_receiver

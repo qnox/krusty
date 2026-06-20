@@ -49,7 +49,25 @@ fn main() {
 
     let cp = std::rc::Rc::new(Classpath::new(opts.classpath.clone()));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+
+    // Multi-file: map each top-level (non-extension, non-inline) function to the facade class of the
+    // file that declares it, so lowering a call to a function in ANOTHER file emits a cross-facade
+    // `invokestatic` instead of bailing. Only the driver knows each file's stem→facade.
+    if files.len() > 1 {
+        use krusty::ast::Decl;
+        use krusty::jvm::names::file_class_name;
+        for (i, file) in files.iter().enumerate() {
+            let facade = file_class_name(&stems[i], file.package.as_deref());
+            for &d in &file.decls {
+                if let Decl::Fun(f) = file.decl(d) {
+                    if f.receiver.is_none() && !f.is_inline {
+                        syms.fn_facades.insert(f.name.clone(), facade.clone());
+                    }
+                }
+            }
+        }
+    }
 
     // Common pipeline: front-end type-check each file, then lower through the selected backend
     // (JVM today; see docs/ARCHITECTURE.md). `-target wasm|js` would select a different backend here.

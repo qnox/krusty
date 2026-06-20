@@ -4,6 +4,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -108,4 +110,73 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
     }
 
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Multi-file compilation: a call to a top-level function defined in ANOTHER source file lowers to a
+/// cross-facade `invokestatic` (not a bail). Compile both files with the krusty binary, run `box()`.
+#[test]
+fn cross_file_top_level_function_call() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping cross_file: set JAVA_HOME");
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping cross_file: no kotlin-stdlib jar");
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xfile_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "fun helper(x: Int): Int = x * 2\nfun tag(s: String): String = s + \"!\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "fun box(): String {\n  if (helper(21) != 42) return \"f1\"\n  if (tag(\"hi\") != \"hi!\") return \"f2\"\n  return \"OK\"\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .arg(dir.join("B.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-file compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -2572,6 +2572,22 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 404 — multifile: cross-file top-level function calls  ✅
+- A call to a top-level function defined in ANOTHER source file of the same compilation now lowers to a
+  cross-facade `invokestatic` instead of bailing. The driver already runs global signatures + per-file
+  lowering; the missing piece was codegen knowing the *other* file's facade. Added (no signature
+  threading): `SymbolTable.fn_facades` (fn name → facade internal), populated ONLY by the multi-file
+  driver (it knows each file's stem→facade); a backend-agnostic `Callee::CrossFile { facade, name,
+  params, ret }` (carries `IrType`s so `ir_lower` builds no JVM descriptor — the JVM emitter does);
+  `ir_lower` emits it for a `Name` call that misses local `fun_ids` but hits `fn_facades` (simple
+  exact-arity case; vararg/defaults bail); JVM `emit` → `invokestatic <facade>.<name>(desc)`; JS by name.
+- Single-file/in-process callers leave `fn_facades` empty → unchanged (box gate 1076 OK, 0 FAIL).
+- **TDD:** `cli_dropin_e2e::cross_file_top_level_function_call` — compiles `A.kt` (helper/tag) + `B.kt`
+  (box calling them) with the krusty binary, links via `javac`, runs `box()` → "OK".
+- NEXT multifile steps (each a phase): cross-file top-level *property* access (via the other facade's
+  `getX`/`setX`), then the conformance harness splitting `// FILE:` blocks to actually exercise the 1330
+  multifile corpus tests (this codegen is +0 corpus until the harness does that).
+
 ### Phase 403 — safe-call + elvis primitive fusion (no boxing)  ✅
 - `recv?.<prop> ?: default` with a PRIMITIVE result no longer boxes. krusty lowered `s?.length` to a
   boxed `Integer?` (the safe-call must be null-capable) and the elvis then unboxed it — `Integer.valueOf`

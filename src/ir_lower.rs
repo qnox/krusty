@@ -7295,6 +7295,31 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: None,
                             args: a,
                         })
+                    } else if let Some(facade) = self.syms.fn_facades.get(&fname).cloned() {
+                        // A top-level function defined in ANOTHER file of this multi-file compilation →
+                        // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
+                        // omitted defaults) is modeled here; anything else bails (skips the file).
+                        let sig = self.syms.funs.get(&fname).cloned()?;
+                        if sig.vararg
+                            || sig.required != sig.params.len()
+                            || args.len() != sig.params.len()
+                        {
+                            return None;
+                        }
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&sig.params) {
+                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                        }
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::CrossFile {
+                                facade,
+                                name: fname.clone(),
+                                params: sig.params.iter().map(|t| ty_to_ir(*t)).collect(),
+                                ret: ty_to_ir(sig.ret),
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        })
                     } else if let Some(c) = {
                         // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no

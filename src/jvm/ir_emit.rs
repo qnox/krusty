@@ -1924,6 +1924,24 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::External(fq) => self.emit_intrinsic(fq, dispatch_receiver, args, code),
+                Callee::CrossFile {
+                    facade,
+                    name,
+                    params,
+                    ret,
+                } => {
+                    // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
+                    let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                    let ret = ir_ty_to_jvm(ret);
+                    let (facade, name) = (facade.clone(), name.clone());
+                    let args = args.clone();
+                    self.emit_operands(&args, code);
+                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    let m = self
+                        .cw
+                        .methodref(&facade, &name, &method_descriptor(&param_tys, ret));
+                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                }
                 Callee::Static {
                     owner,
                     name,
@@ -3568,6 +3586,7 @@ impl<'a> Emitter<'a> {
                 ..
             } => match callee {
                 Callee::Local(fid) => ir_ty_to_jvm(&self.ir.functions[*fid as usize].ret),
+                Callee::CrossFile { ret, .. } => ir_ty_to_jvm(ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
                     .map(|r| self.array_elem(r))
