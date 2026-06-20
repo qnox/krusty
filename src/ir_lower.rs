@@ -2007,6 +2007,30 @@ impl<'a> Lower<'a> {
     /// The constructor descriptor is resolved from the classpath; arguments are coerced to its
     /// parameter types. Bails when the constructor can't be resolved or arity mismatches.
     fn lower_external_new(&mut self, internal: &str, args: &[AstExprId]) -> Option<u32> {
+        // A user class defined in ANOTHER file of this compilation (found by internal name in the global
+        // symbol table, but not in THIS file's IR classes) → construct via `NewCrossFile` from its
+        // `ClassSig` ctor params. Only the simple exact-arity primary-ctor case (defaults/secondary bail).
+        if let Some(cs) = self.syms.class_by_internal(internal) {
+            // A sibling-file value class (unboxed — no instance `<init>`), annotation (an interface +
+            // synthetic impl), or inner class (needs an outer instance) isn't constructed via a plain
+            // cross-file `new`; bail those (the test skips rather than miscompiles).
+            if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
+                return None;
+            }
+            if !cs.is_interface && cs.ctor_params.len() == args.len() {
+                let params: Vec<IrType> = cs.ctor_params.iter().map(|t| ty_to_ir(*t)).collect();
+                let mut a = Vec::new();
+                for (arg, pty) in args.iter().zip(&params) {
+                    a.push(self.lower_arg(*arg, pty)?);
+                }
+                return Some(self.ir.add_expr(IrExpr::NewCrossFile {
+                    internal: internal.to_string(),
+                    params,
+                    args: a,
+                }));
+            }
+            return None; // sibling-file user class but arity/defaults/secondary not modeled cross-file
+        }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
         let ctor =
             crate::libraries::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
@@ -5969,6 +5993,33 @@ impl<'a> Lower<'a> {
                     };
                     self.ir.add_expr(IrExpr::Call {
                         callee: Callee::External("kotlin/String.length".to_string()),
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    })
+                } else if let Some((owner, ret_ty, is_iface)) = match &rt {
+                    // A property read on a class defined in ANOTHER file → its `getX()` accessor (the
+                    // backing field is private). Resolved from the sibling class's `ClassSig`.
+                    Ty::Obj(i, _) if self.class_of(rt).is_none() => self
+                        .syms
+                        .class_by_internal(i)
+                        .filter(|cs| cs.value_field.is_none())
+                        .and_then(|cs| {
+                            cs.props
+                                .iter()
+                                .find(|(n, _, _)| n == &name)
+                                .map(|(_, t, _)| (i.to_string(), *t, cs.is_interface))
+                        }),
+                    _ => None,
+                } {
+                    let recv = self.expr(receiver)?;
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFileVirtual {
+                            owner,
+                            name: getter_name(&name),
+                            params: vec![],
+                            ret: ty_to_ir(ret_ty),
+                            interface: is_iface,
+                        },
                         dispatch_receiver: Some(recv),
                         args: vec![],
                     })

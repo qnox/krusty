@@ -293,7 +293,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 format!("{}({})", name, a.join(", "))
             }
             // A resolved JVM instance call → `receiver.name(args)`.
-            Callee::Virtual { name, .. } => {
+            Callee::Virtual { name, .. } | Callee::CrossFileVirtual { name, .. } => {
                 let recv = dispatch_receiver
                     .map(|r| emit_expr(ir, r, inst))
                     .unwrap_or_default();

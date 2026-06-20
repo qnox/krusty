@@ -1992,6 +1992,33 @@ impl<'a> Emitter<'a> {
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
+                Callee::CrossFileVirtual {
+                    owner,
+                    name,
+                    params,
+                    ret,
+                    interface,
+                } => {
+                    let owner = owner.clone();
+                    let name = name.clone();
+                    let interface = *interface;
+                    let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                    let ret = ir_ty_to_jvm(ret);
+                    let descriptor = method_descriptor(&param_tys, ret);
+                    let recv = dispatch_receiver.expect("cross-file virtual call needs a receiver");
+                    let args = args.clone();
+                    let mut ops = vec![recv];
+                    ops.extend(args.iter().copied());
+                    self.emit_operands(&ops, code);
+                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    if interface {
+                        let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                        code.invokeinterface(m, aw, slot_words(ret) as i32);
+                    } else {
+                        let m = self.cw.methodref(&owner, &name, &descriptor);
+                        code.invokevirtual(m, aw, slot_words(ret) as i32);
+                    }
+                }
                 Callee::Special {
                     owner,
                     name,
@@ -2316,6 +2343,40 @@ impl<'a> Emitter<'a> {
                 if args.iter().any(|&a| self.records_frame(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack (its merge frame
                     // would omit them) — evaluate args into temps first, then build.
+                    let temps = self.spill_to_temps(&args, code);
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                } else {
+                    let ci = self.cw.class_ref(&owner);
+                    code.new_obj(ci);
+                    code.dup();
+                    for &a in &args {
+                        self.emit_value(a, code);
+                    }
+                    let m = self.cw.methodref(&owner, "<init>", &desc);
+                    code.invokespecial(m, aw, 0);
+                }
+            }
+            IrExpr::NewCrossFile {
+                internal,
+                params,
+                args,
+            } => {
+                let owner = internal.clone();
+                let param_tys: Vec<Ty> = params.iter().map(ir_ty_to_jvm).collect();
+                let desc = method_descriptor(&param_tys, Ty::Unit);
+                let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let args = args.clone();
+                if args.iter().any(|&a| self.records_frame(a)) {
                     let temps = self.spill_to_temps(&args, code);
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
@@ -2726,6 +2787,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::NotNullAssert { operand } => self.records_frame(*operand),
             IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
+            IrExpr::NewCrossFile { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
             IrExpr::RefSet { holder, value, .. } => {
                 self.records_frame(*holder) || self.records_frame(*value)
@@ -3598,6 +3660,7 @@ impl<'a> Emitter<'a> {
                 Callee::Static { descriptor, .. }
                 | Callee::Virtual { descriptor, .. }
                 | Callee::Special { descriptor, .. } => ty_from_descriptor_ret(descriptor),
+                Callee::CrossFileVirtual { ret, .. } => ir_ty_to_jvm(ret),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt
@@ -3636,6 +3699,7 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::NewExternal { internal, .. } => Ty::obj(internal),
+            IrExpr::NewCrossFile { internal, .. } => Ty::obj(internal),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::NewArray { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),

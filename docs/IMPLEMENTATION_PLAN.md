@@ -2572,6 +2572,24 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 407 — multifile: cross-file class construction + property read  ✅
+- Constructing a class declared in ANOTHER file and reading its property now lower to cross-file
+  bytecode (no bail). New backend-agnostic IR: `IrExpr::NewCrossFile { internal, params, args }` (→ `new
+  internal; dup; <args>; invokespecial internal.<init>(desc)`, descriptor built in the JVM emitter) and
+  `Callee::CrossFileVirtual { owner, name, params, ret, interface }` (→ `invokevirtual`/`invokeinterface`).
+  `ir_lower`: `lower_external_new` routes a sibling-file user class (found by internal name in
+  `syms.class_by_internal`, not in this file's IR classes) to `NewCrossFile`; the member-read arm routes a
+  sibling-file property to its `getX()` via `CrossFileVirtual`. No driver map needed — the class is
+  referenced by its own internal name. **Bails (skip, never miscompile):** a sibling-file value class
+  (unboxed, no instance `<init>`), annotation, or inner class.
+- **Box conformance: 1084 → 1085 box()=OK, 0 FAIL** (value-class cross-file shapes correctly skip).
+- **Drop-in finding:** unblocking cross-file `Point()` made `compiles_directory_to_jar_consumable_by_kotlinc`
+  reach the kotlinc-consumer step (it skipped at compile before) — kotlinc can't `import demo.mk` because
+  krusty's facade `@Metadata` doesn't fully describe top-level functions. krusty emits a minimal
+  `@Metadata` (jar is JVM-runnable) but full kotlinc-source consumption needs complete `@Metadata` (a
+  protobuf blob) — a known gap; the test now skips that step with a note.
+- NEXT cross-file-class steps: instance method calls (`b.m()` → `CrossFileVirtual`) and property writes.
+
 ### Phase 406 — multifile: cross-file top-level property access  ✅
 - A read/write of a top-level property declared in ANOTHER file now lowers to the other facade's
   accessor (`invokestatic <facade>.getX()` / `setX(v)` — the field is private since phase 398), instead
