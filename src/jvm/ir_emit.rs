@@ -1606,8 +1606,35 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::SetValue { var, value } => {
                 let (slot, jt) = self.slots[&var];
-                self.emit_value(value, code);
-                store(jt, slot, code);
+                // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
+                // compiles to `iinc slot, k` (kotlinc's form), not load/const/add/store.
+                let delta: Option<i32> = if jt == Ty::Int {
+                    if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(value) {
+                        let cint = |e: u32| match self.ir.expr(e) {
+                            IrExpr::Const(IrConst::Int(k)) => Some(*k),
+                            _ => None,
+                        };
+                        let isvar =
+                            |e: u32| matches!(self.ir.expr(e), IrExpr::GetValue(v) if *v == var);
+                        match op {
+                            IrBinOp::Add if isvar(lhs) => cint(rhs),
+                            IrBinOp::Add if isvar(rhs) => cint(lhs),
+                            IrBinOp::Sub if isvar(lhs) => cint(rhs).map(|k| -k),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                match delta {
+                    Some(d) if (-128..=127).contains(&d) => code.iinc(slot, d as i8),
+                    _ => {
+                        self.emit_value(value, code);
+                        store(jt, slot, code);
+                    }
+                }
             }
             IrExpr::SetField {
                 receiver,
@@ -2981,10 +3008,25 @@ impl<'a> Emitter<'a> {
             }
             return;
         }
-        // Numeric: int-category fuses to `if_icmp*`; Long/Double/Float compares 3-way then tests vs 0
-        // with a single-operand `if*` (kotlinc's `lcmp;ifge` shape).
+        // Numeric. A comparison against the integer literal `0` uses the single-operand compare-to-zero
+        // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
+        // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
+        let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
+        if int_cat && zero(rhs) {
+            self.emit_value(lhs, code);
+            self.frame(target, vec![], code);
+            self.cmp0_branch(op, jt, target, code);
+            return;
+        }
+        if int_cat && zero(lhs) {
+            self.emit_value(rhs, code);
+            self.frame(target, vec![], code);
+            self.cmp0_branch(swap_cmp(op), jt, target, code);
+            return;
+        }
+        // int-category fuses to `if_icmp*`; Long/Double/Float → 3-way compare then single-operand `if*`.
         self.emit_operands(&[lhs, rhs], code);
-        let three_way = matches!(lt, Ty::Long | Ty::Double | Ty::Float);
         // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false (kotlinc).
         let nan_l = matches!(op, Gt | Ge);
         match lt {
@@ -3006,22 +3048,8 @@ impl<'a> Emitter<'a> {
             _ => {}
         }
         self.frame(target, vec![], code);
-        if three_way {
-            match (op, jt) {
-                (Lt, true) => code.iflt(target),
-                (Lt, false) => code.ifge(target),
-                (Le, true) => code.ifle(target),
-                (Le, false) => code.ifgt(target),
-                (Gt, true) => code.ifgt(target),
-                (Gt, false) => code.ifle(target),
-                (Ge, true) => code.ifge(target),
-                (Ge, false) => code.iflt(target),
-                (Eq, true) => code.ifeq(target),
-                (Eq, false) => code.ifne(target),
-                (Ne, true) => code.ifne(target),
-                (Ne, false) => code.ifeq(target),
-                _ => unreachable!(),
-            }
+        if !int_cat {
+            self.cmp0_branch(op, jt, target, code);
         } else {
             match (op, jt) {
                 (Lt, true) => code.if_icmplt(target),
@@ -3038,6 +3066,28 @@ impl<'a> Emitter<'a> {
                 (Ne, false) => code.if_icmpeq(target),
                 _ => unreachable!(),
             }
+        }
+    }
+
+    /// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,
+    /// taken when `(value <op> 0) == jt`. Used for `x <op> 0` and for the 3-way `lcmp`/`dcmp*`/`fcmp*`
+    /// result tested against 0.
+    fn cmp0_branch(&self, op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
+        use IrBinOp::*;
+        match (op, jt) {
+            (Lt, true) => code.iflt(target),
+            (Lt, false) => code.ifge(target),
+            (Le, true) => code.ifle(target),
+            (Le, false) => code.ifgt(target),
+            (Gt, true) => code.ifgt(target),
+            (Gt, false) => code.ifle(target),
+            (Ge, true) => code.ifge(target),
+            (Ge, false) => code.iflt(target),
+            (Eq, true) => code.ifeq(target),
+            (Eq, false) => code.ifne(target),
+            (Ne, true) => code.ifne(target),
+            (Ne, false) => code.ifeq(target),
+            _ => unreachable!(),
         }
     }
 
@@ -3753,6 +3803,19 @@ pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
             Ty::obj(&format!("kotlin/jvm/functions/Function{}", params.len()))
         }
         _ => Ty::Error,
+    }
+}
+
+/// Swap the operands of a comparison operator (`a < b` ≡ `b > a`) — used to normalize `0 <op> x` into
+/// `x <swapped-op> 0` so the single-operand compare-to-zero branch applies.
+fn swap_cmp(op: IrBinOp) -> IrBinOp {
+    use IrBinOp::*;
+    match op {
+        Lt => Gt,
+        Le => Ge,
+        Gt => Lt,
+        Ge => Le,
+        o => o,
     }
 }
 
