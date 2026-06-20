@@ -118,6 +118,24 @@ fun box(): String {
 }
 "#,
     ),
+    // The `Unit` singleton used as a VALUE (not a type) — `Unit`, `take(Unit)`, `val u = Unit` — is the
+    // `kotlin/Unit` object, materialized as `getstatic kotlin/Unit.INSTANCE`. `toString()` is "kotlin.Unit"
+    // and the singleton compares equal (and identical) to itself.
+    (
+        "UnitAsValue",
+        r#"
+fun take(x: Any): String = x.toString()
+fun box(): String {
+    val u = Unit
+    if (u.toString() != "kotlin.Unit") return "f0: $u"
+    if (take(Unit) != "kotlin.Unit") return "f1"
+    if (u != Unit) return "f2"
+    val any: Any = Unit
+    if (any !== Unit) return "f3"
+    return "OK"
+}
+"#,
+    ),
     // `for (x in <iterable> step n)` where the iterable is not a `..` literal (a progression val, a
     // `.reversed()` result, a chained `step`): the for-range parser continues the trailing `step`
     // infix call so the whole `progression.step(n)` becomes the loop iterable.

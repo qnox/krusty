@@ -806,6 +806,12 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 box_prim_free(cw, &mut code, cr);
             } else if er.is_primitive() && cr.is_primitive() {
                 emit_num_conv(cr, er, &mut code);
+            } else if cr == Ty::Unit && er.is_reference() {
+                // A `Unit`-returning override bridged to a reference-returning supertype method
+                // (`B.foo(): Unit` over `A.foo(): Any`): the JVM call is void, so materialize the
+                // `kotlin/Unit` singleton the erased bridge must return.
+                let f = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                code.getstatic(f, 1);
             } // reference→reference: concrete return is a subtype of erased — no cast needed
         }
         emit_return(er, &mut code);
@@ -3750,6 +3756,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
             IrExpr::NewArray { element_type, .. } => Ty::array(ir_ty_to_jvm(element_type)),
+            IrExpr::UnitInstance => Ty::obj("kotlin/Unit"),
             IrExpr::Try { result, .. } => ir_ty_to_jvm(result),
             _ => Ty::Error,
         }

@@ -3909,13 +3909,17 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
-                    match self.syms.props.get(&n) {
-                        Some(&(ty, _)) => ty, // top-level property
-                        None => {
-                            self.diags
-                                .error(self.span(e), format!("unresolved reference '{n}'."));
-                            Ty::Error
-                        }
+                    if let Some(&(ty, _)) = self.syms.props.get(&n) {
+                        ty // top-level property
+                    } else if n == "Unit" {
+                        // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
+                        // Unit`) — the `kotlin/Unit` object, read as its `INSTANCE` in lowering. Only a
+                        // fallback: any local/property/object named `Unit` was resolved above.
+                        Ty::obj("kotlin/Unit")
+                    } else {
+                        self.diags
+                            .error(self.span(e), format!("unresolved reference '{n}'."));
+                        Ty::Error
                     }
                 }
             },
