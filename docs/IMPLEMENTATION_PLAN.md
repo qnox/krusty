@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 408 — multifile: cross-file class method calls + property writes  ✅
+- Completes cross-file class *use*: an instance method call (`b.m(args)`) and a `var` property write
+  (`b.tag = v`) on a class declared in ANOTHER file now lower to `CrossFileVirtual` (`invokevirtual`
+  the method / `setX(v)`), not a bail. `ir_lower`: the member-call arm gets a sibling-file branch (own
+  methods, exact arity; inherited/vararg/defaulted bail) after the local user-method branch; the
+  `AssignMember` arm gets a sibling-file `var`→`setX` branch before its `class_of(rt)?`. Value-class
+  receivers still bail. **Box conformance: 1085 → 1086 box()=OK, 0 FAIL.**
+- TDD: `cli_dropin_e2e::cross_file_class_construct_and_property_read` extended — construct + property
+  read + method call + `var` write across files, run to "OK". Cross-file class *use* (construct, field
+  read/write, method call) is now functional; remaining cross-file gaps: inherited members, enums/objects.
+
 ### Phase 407 — multifile: cross-file class construction + property read  ✅
 - Constructing a class declared in ANOTHER file and reading its property now lower to cross-file
   bytecode (no bail). New backend-agnostic IR: `IrExpr::NewCrossFile { internal, params, args }` (→ `new

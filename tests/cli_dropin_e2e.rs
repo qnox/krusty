@@ -189,8 +189,9 @@ fn cross_file_top_level_function_and_property() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Multi-file: constructing a class declared in ANOTHER file and reading its property lowers to a
-/// cross-file `new`/`invokespecial <init>` + `getX()` (not a bail). Compile both files, run `box()`.
+/// Multi-file: construct a class declared in ANOTHER file, read a property, CALL a method, and WRITE a
+/// `var` — all lower to cross-file bytecode (`new`/`invokespecial <init>`, `getX`, `invokevirtual`,
+/// `setX`), not a bail. Compile both files, run `box()`.
 #[test]
 fn cross_file_class_construct_and_property_read() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
@@ -209,10 +210,14 @@ fn cross_file_class_construct_and_property_read() {
     let dir = std::env::temp_dir().join(format!("krusty_xcls_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("A.kt"), "class Box(val x: Int, val tag: String)\n").unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "class Box(val x: Int, var tag: String) {\n  fun doubled(): Int = x * 2\n}\n",
+    )
+    .unwrap();
     fs::write(
         dir.join("B.kt"),
-        "fun box(): String {\n  val b = Box(21, \"hi\")\n  if (b.x != 21) return \"f1\"\n  if (b.tag != \"hi\") return \"f2\"\n  return \"OK\"\n}\n",
+        "fun box(): String {\n  val b = Box(21, \"hi\")\n  if (b.x != 21) return \"f1\"\n  if (b.tag != \"hi\") return \"f2\"\n  if (b.doubled() != 42) return \"f3\"\n  b.tag = \"bye\"\n  if (b.tag != \"bye\") return \"f4: ${b.tag}\"\n  return \"OK\"\n}\n",
     )
     .unwrap();
     let kc = Command::new(krusty)
