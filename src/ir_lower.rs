@@ -2576,7 +2576,12 @@ impl<'a> Lower<'a> {
     /// boundary (`Objects.hashCode`) so the value class's own `hashCode` runs.
     fn field_hash(&mut self, v: u32, t: Ty) -> u32 {
         match t {
-            Ty::Int | Ty::Short | Ty::Byte | Ty::Char => v,
+            // kotlinc hashes each primitive field via its boxed type's static `hashCode(prim)` (so the
+            // bytecode matches even though `Integer.hashCode(I)` is the identity on `int`).
+            Ty::Int => self.static_call("java/lang/Integer.hashCode", vec![v]),
+            Ty::Short => self.static_call("java/lang/Short.hashCode", vec![v]),
+            Ty::Byte => self.static_call("java/lang/Byte.hashCode", vec![v]),
+            Ty::Char => self.static_call("java/lang/Character.hashCode", vec![v]),
             Ty::Boolean => self.static_call("java/lang/Boolean.hashCode", vec![v]),
             Ty::Long => self.static_call("java/lang/Long.hashCode", vec![v]),
             Ty::Double => self.static_call("java/lang/Double.hashCode", vec![v]),
@@ -2762,39 +2767,60 @@ impl<'a> Lower<'a> {
             );
         }
 
-        // hashCode(): `h(f1)`, then `result*31 + h(fN)` (0 for an empty data class).
+        // hashCode(): kotlinc emits `return 0` for an empty data class, `return h(f0)` for a single field,
+        // and for ≥2 fields a `result` LOCAL it folds into — `result = h(f0); result = result*31 + h(fN);
+        // return result` (an explicit `istore`/`iload` round-trip per field). Match that shape exactly.
         {
-            let result = if fields.is_empty() {
-                self.ir.add_expr(IrExpr::Const(IrConst::Int(0)))
+            let body = if fields.is_empty() {
+                let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let ret = self.ir.add_expr(IrExpr::Return(Some(zero)));
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret],
+                    value: None,
+                })
+            } else if fields.len() == 1 {
+                let fv = self.this_field(class_id, 0);
+                let h = self.field_hash(fv, fields[0].1);
+                let ret = self.ir.add_expr(IrExpr::Return(Some(h)));
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret],
+                    value: None,
+                })
             } else {
-                let mut acc: Option<u32> = None;
-                for (i, (_, t)) in fields.iter().enumerate() {
+                // `result` occupies the first local slot after `this` (hashCode takes no parameters).
+                const RV: u32 = 1;
+                let mut stmts = Vec::new();
+                let f0 = self.this_field(class_id, 0);
+                let h0 = self.field_hash(f0, fields[0].1);
+                stmts.push(self.ir.add_expr(IrExpr::Variable {
+                    index: RV,
+                    ty: ty_to_ir(Ty::Int),
+                    init: Some(h0),
+                }));
+                for i in 1..fields.len() {
                     let fv = self.this_field(class_id, i as u32);
-                    let h = self.field_hash(fv, *t);
-                    acc = Some(match acc {
-                        None => h,
-                        Some(prev) => {
-                            let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
-                            let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::Mul,
-                                lhs: prev,
-                                rhs: c31,
-                            });
-                            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::Add,
-                                lhs: mul,
-                                rhs: h,
-                            })
-                        }
+                    let h = self.field_hash(fv, fields[i].1);
+                    let prev = self.ir.add_expr(IrExpr::GetValue(RV));
+                    let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
+                    let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Mul,
+                        lhs: prev,
+                        rhs: c31,
                     });
+                    let add = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Add,
+                        lhs: mul,
+                        rhs: h,
+                    });
+                    stmts.push(self.ir.add_expr(IrExpr::SetValue {
+                        var: RV,
+                        value: add,
+                    }));
                 }
-                acc.unwrap()
+                let getr = self.ir.add_expr(IrExpr::GetValue(RV));
+                stmts.push(self.ir.add_expr(IrExpr::Return(Some(getr))));
+                self.ir.add_expr(IrExpr::Block { stmts, value: None })
             };
-            let ret = self.ir.add_expr(IrExpr::Return(Some(result)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
             self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true);
         }
 
