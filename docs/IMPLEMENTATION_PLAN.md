@@ -2572,6 +2572,22 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 415 — data-class `equals` byte-identical + `instanceof` branch fusion (bytecode parity)  ✅
+- kotlinc's data-class `equals` has a specific shape krusty diverged from on three counts: (1) a missing
+  `if (this === other) return true` referential-identity fast-path; (2) the `other !is T` guard
+  materialized a boolean (`instanceof; iconst_1; ixor; ifeq`) instead of kotlinc's direct
+  `instanceof; ifne <ok>` branch; (3) `other` was re-`checkcast` on every field access instead of cast
+  ONCE into a local (`checkcast; astore_2`, then `aload_2`).
+- Fixes: (A) `emit_cond_branch` now fuses an `InstanceOf`/`NotInstanceOf` (reference target) condition
+  into `instanceof; if{ne,eq}` — no 0/1 boolean — the same fusion the comparison ops already had; this is
+  general (every `when`/`if` with an `is`/`!is` condition benefits). (B) the `equals` synth emits the
+  identity fast-path (new `guard_return_bool`, reusing the existing `RefEq`→`if_acmp` fusion), then the
+  `!is` guard, then `val o = other as T` into a local (`IrExpr::Variable`), with each field read off the
+  local. Field compares (`Intrinsics.areEqual` for refs, `if_icmp` for primitives) were already correct.
+- A `data class D(val s: String, val n: Int)` `equals` is now **byte-identical** to kotlinc 2.4.0
+  (verified differentially). The shared `instanceof`-fusion change held the box gate at **1087 OK, 0 FAIL**.
+  TDD: `bytecode_parity_e2e::data_class_equals_is_byte_identical_to_kotlinc`.
+
 ### Phase 414 — data-class `hashCode`: non-null `String` field via `String.hashCode` (bytecode parity)  ✅
 - kotlinc hashes a non-null reference field via `invokevirtual <type>.hashCode()` (so a non-null `String`
   field is `s.hashCode()`); krusty routed ALL references through `Objects.hashCode` (functionally correct,
