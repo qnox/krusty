@@ -2580,9 +2580,11 @@ bodies exist only as jar bytecode):
   call-bound `(logged()..logged()).reversed()` keeps the iterable path (skips) — guarded after the
   `forInRangeLiteralReversed` evaluation-order test showed the swap. Both `(a..b)` (a `RangeTo`) and the
   value-form `(a downTo b)` (which parses as the infix call `a.downTo(b)`) are handled → `b downTo a` /
-  `b..a`; `until`-reversed (off-by-one) is deferred. TDD: feature snippet `ForInReversedLiteralRange`
-  (`..`, `0..3`, and `downTo` forms). Box gate 1076 OK, 0 FAIL (a capability step; corpus `forInReversed`
-  files carry other blockers, so +0 today, but the `.reversed()` blocker is now gone for them).
+  `b..a`. `until`-reversed (`(a until b).reversed()` → `(b-1) downTo a`) is also handled: the `hi-1` is
+  built after the simplicity check (which is on the ORIGINAL bound). All `..`/`downTo`/`until` reversed
+  literal forms now lower. TDD: feature snippet `ForInReversedLiteralRange` (`..`, `0..3`, `downTo`,
+  `until`). Box gate 1076 OK, 0 FAIL (a capability step; corpus `forInReversed` files carry other
+  blockers, so +0 today, but the `.reversed()` blocker is now gone for them).
 
 ### Phase 401 — string templates → single `StringBuilder` (bytecode parity)  ✅
 - krusty lowered a template `"a${x}b"` to a chain of `String.plus` calls — the backend emitted ONE

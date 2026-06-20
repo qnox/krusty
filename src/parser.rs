@@ -2659,31 +2659,58 @@ impl<'a> Parser<'a> {
                                         | Expr::Name(_)
                                 )
                             };
-                            // The reversed range as `(start, end, kind)`: a `..`/`downTo`/`until` literal
-                            // flips to the descending/ascending counted loop. `..` is `RangeTo`; the
-                            // value-form `downTo`/`until` parse as infix calls `a.downTo(b)`.
-                            let reversed: Option<(ExprId, ExprId, RangeKind)> =
-                                match self.file.expr(receiver).clone() {
-                                    Expr::RangeTo { lo, hi, kind } => match kind {
-                                        RangeKind::Through => Some((hi, lo, RangeKind::DownTo)),
-                                        RangeKind::DownTo => Some((hi, lo, RangeKind::Through)),
-                                        RangeKind::Until => None, // (hi-1) downTo lo — off-by-one
-                                    },
-                                    // `(a downTo b).reversed()` → `b..a`; `until`-reversed is off-by-one.
-                                    Expr::Call {
-                                        callee: ic,
-                                        args: ia,
-                                    } if ia.len() == 1 => match self.file.expr(ic).clone() {
-                                        Expr::Member {
-                                            receiver: a,
-                                            name: op,
-                                        } if op == "downTo" => Some((ia[0], a, RangeKind::Through)),
-                                        _ => None,
-                                    },
+                            // The reversed range as `(start_base, end, kind, minus_one)`: a
+                            // `..`/`downTo`/`until` literal flips to the descending/ascending counted
+                            // loop. `..` is `RangeTo`; the value-form `downTo`/`until` parse as infix
+                            // calls `a.downTo(b)`. `until`-reversed iterates `(hi-1) downTo lo`, so
+                            // `minus_one` subtracts 1 from `start_base` AFTER the simplicity check (which
+                            // is on the ORIGINAL bound, not the derived `hi-1`).
+                            let reversed: Option<(ExprId, ExprId, RangeKind, bool)> = match self
+                                .file
+                                .expr(receiver)
+                                .clone()
+                            {
+                                Expr::RangeTo { lo, hi, kind } => match kind {
+                                    RangeKind::Through => Some((hi, lo, RangeKind::DownTo, false)),
+                                    RangeKind::DownTo => Some((hi, lo, RangeKind::Through, false)),
+                                    RangeKind::Until => Some((hi, lo, RangeKind::DownTo, true)),
+                                },
+                                // The value-form `(a downTo b)` / `(a until b)` parse as infix calls.
+                                Expr::Call {
+                                    callee: ic,
+                                    args: ia,
+                                } if ia.len() == 1 => match self.file.expr(ic).clone() {
+                                    Expr::Member {
+                                        receiver: a,
+                                        name: op,
+                                    } if op == "downTo" => {
+                                        Some((ia[0], a, RangeKind::Through, false))
+                                    }
+                                    Expr::Member {
+                                        receiver: a,
+                                        name: op,
+                                    } if op == "until" => Some((ia[0], a, RangeKind::DownTo, true)),
                                     _ => None,
-                                };
-                            if let Some((s, en, kind)) = reversed {
-                                if simple(self, s) && simple(self, en) {
+                                },
+                                _ => None,
+                            };
+                            if let Some((start_base, en, kind, minus_one)) = reversed {
+                                if simple(self, start_base) && simple(self, en) {
+                                    // `until`-reversed: descending from `hi-1`.
+                                    let s = if minus_one {
+                                        let sp = self.file.expr_spans[start_base.0 as usize];
+                                        let one = self.file.add_expr(Expr::IntLit(1), sp);
+                                        self.file.add_expr(
+                                            Expr::Binary {
+                                                op: BinOp::Sub,
+                                                lhs: start_base,
+                                                rhs: one,
+                                            },
+                                            sp,
+                                        )
+                                    } else {
+                                        start_base
+                                    };
                                     let range = ForRange {
                                         start: s,
                                         end: en,
