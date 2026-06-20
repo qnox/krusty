@@ -105,6 +105,16 @@ pub struct TypeIndex {
     pub type_aliases: HashMap<String, String>,
 }
 
+/// Per-class `@Metadata` cache shape: class internal name → (function name → its single decoded Kotlin
+/// type, e.g. the return type). Shared by [`Classpath::metadata_return_type`].
+type MetaTypeCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>;
+/// Per-class `@Metadata` cache for an overloaded property: class internal name → (function name → ALL its
+/// Kotlin extension-receiver names). Used by [`Classpath::metadata_receiver_types`].
+type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>;
+/// The Kotlin collection hierarchy (class internal name → direct supertype internal names), shared via
+/// `Rc` from the per-instance cache once read from `collections.kotlin_builtins`.
+type CollectionSupers = std::rc::Rc<HashMap<String, Vec<String>>>;
+
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -123,13 +133,13 @@ pub struct Classpath {
     inline_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
     /// Cache of each class's `@Metadata` function name → Kotlin return-type internal name (decodes the
     /// read-only/mutable distinction the JVM signature erases — `mutableListOf` → `MutableList`).
-    meta_returns: RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>,
+    meta_returns: MetaTypeCache,
     /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
     /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
-    meta_receivers: RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>,
+    meta_receivers: MetaReceiverCache,
     /// The Kotlin collection hierarchy read from `collections.kotlin_builtins` (class → direct
     /// supertypes), built once on first use. Empty if no stdlib is on the classpath.
-    collection_supers: RefCell<Option<std::rc::Rc<HashMap<String, Vec<String>>>>>,
+    collection_supers: RefCell<Option<CollectionSupers>>,
 }
 
 impl Classpath {
@@ -228,7 +238,7 @@ impl Classpath {
     /// function metadata of its own — merge the part classes named in its `d1`.
     fn metadata_fn_type(
         &self,
-        cache: &RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>,
+        cache: &MetaTypeCache,
         internal: &str,
         fn_name: &str,
         decode: impl Fn(&ClassInfo) -> HashMap<String, String>,
@@ -257,7 +267,7 @@ impl Classpath {
 
     /// The Kotlin collection hierarchy (class internal name → direct supertype internal names), read
     /// once from `kotlin/collections/collections.kotlin_builtins` on the classpath. Cached per-instance.
-    fn collection_supertypes(&self) -> std::rc::Rc<HashMap<String, Vec<String>>> {
+    fn collection_supertypes(&self) -> CollectionSupers {
         if let Some(m) = self.collection_supers.borrow().as_ref() {
             return m.clone();
         }
