@@ -121,6 +121,15 @@ pub struct Classpath {
     /// Cache of the `inline` function names declared by a class (from its `@Metadata`), so inline
     /// recognition at a call site doesn't re-decode the metadata per call.
     inline_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
+    /// Cache of each class's `@Metadata` function name → Kotlin return-type internal name (decodes the
+    /// read-only/mutable distinction the JVM signature erases — `mutableListOf` → `MutableList`).
+    meta_returns: RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>,
+    /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
+    /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
+    meta_receivers: RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>,
+    /// The Kotlin collection hierarchy read from `collections.kotlin_builtins` (class → direct
+    /// supertypes), built once on first use. Empty if no stdlib is on the classpath.
+    collection_supers: RefCell<Option<std::rc::Rc<HashMap<String, Vec<String>>>>>,
 }
 
 impl Classpath {
@@ -152,7 +161,143 @@ impl Classpath {
             jimage: RefCell::new(None),
             bodies: RefCell::new(HashMap::new()),
             inline_names: RefCell::new(HashMap::new()),
+            meta_returns: RefCell::new(HashMap::new()),
+            meta_receivers: RefCell::new(HashMap::new()),
+            collection_supers: RefCell::new(None),
         }
+    }
+
+    /// The Kotlin return-type internal name of function `fn_name` declared in class `internal`, decoded
+    /// from `@Metadata` (`mutableListOf` → `kotlin/collections/MutableList` vs `listOf` → `…/List`). The
+    /// JVM descriptor/`Signature` erase both to `java/util/List`; only `@Metadata` carries the distinction.
+    /// A multifile FACADE (`CollectionsKt`) has no function metadata of its own — its `@Metadata` `d1`
+    /// lists the PART class names, which hold the functions; merge the parts.
+    pub fn metadata_return_type(&self, internal: &str, fn_name: &str) -> Option<String> {
+        self.metadata_fn_type(
+            &self.meta_returns,
+            internal,
+            fn_name,
+            super::metadata::package_function_return_types,
+        )
+    }
+
+    /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
+    /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
+    /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases
+    /// the receiver to its first parameter; only `@Metadata` keeps the read-only/mutable identity. Empty
+    /// for a non-extension function.
+    pub fn metadata_receiver_types(&self, internal: &str, fn_name: &str) -> Vec<String> {
+        if let Some(m) = self.meta_receivers.borrow().get(internal) {
+            return m.get(fn_name).cloned().unwrap_or_default();
+        }
+        let ci = self.find(internal);
+        let mut map = ci
+            .as_ref()
+            .map(super::metadata::package_function_receivers)
+            .unwrap_or_default();
+        if map.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        // UNION across parts: a name (`forEach`) is overloaded across receivers
+                        // (`Iterable` in one part, `Iterator`/`CharSequence`/… in others), so the
+                        // receiver lists must concatenate — first-wins would drop the supertype that
+                        // actually applies and wrongly reject the call.
+                        for (k, v) in super::metadata::package_function_receivers(&pci) {
+                            let e = map.entry(k).or_default();
+                            for x in v {
+                                if !e.contains(&x) {
+                                    e.push(x);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let rc = std::rc::Rc::new(map);
+        let hit = rc.get(fn_name).cloned().unwrap_or_default();
+        self.meta_receivers
+            .borrow_mut()
+            .insert(internal.to_string(), rc);
+        hit
+    }
+
+    /// Shared cache+decode for the per-function `@Metadata` type lookups: decode the class's `Package`
+    /// metadata with `decode` (return type / receiver type), and — for a multifile FACADE that has no
+    /// function metadata of its own — merge the part classes named in its `d1`.
+    fn metadata_fn_type(
+        &self,
+        cache: &RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>,
+        internal: &str,
+        fn_name: &str,
+        decode: impl Fn(&ClassInfo) -> HashMap<String, String>,
+    ) -> Option<String> {
+        if let Some(m) = cache.borrow().get(internal) {
+            return m.get(fn_name).cloned();
+        }
+        let ci = self.find(internal);
+        let mut map = ci.as_ref().map(&decode).unwrap_or_default();
+        if map.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        for (k, v) in decode(&pci) {
+                            map.entry(k).or_insert(v);
+                        }
+                    }
+                }
+            }
+        }
+        let rc = std::rc::Rc::new(map);
+        let hit = rc.get(fn_name).cloned();
+        cache.borrow_mut().insert(internal.to_string(), rc);
+        hit
+    }
+
+    /// The Kotlin collection hierarchy (class internal name → direct supertype internal names), read
+    /// once from `kotlin/collections/collections.kotlin_builtins` on the classpath. Cached per-instance.
+    fn collection_supertypes(&self) -> std::rc::Rc<HashMap<String, Vec<String>>> {
+        if let Some(m) = self.collection_supers.borrow().as_ref() {
+            return m.clone();
+        }
+        let mut map = HashMap::new();
+        for e in &self.entries {
+            if let Entry::Jar(j) = e {
+                if let Some(bytes) =
+                    read_jar_entry(j, "kotlin/collections/collections.kotlin_builtins")
+                {
+                    map = super::metadata::builtins_supertypes(&bytes);
+                    break;
+                }
+            }
+        }
+        let rc = std::rc::Rc::new(map);
+        *self.collection_supers.borrow_mut() = Some(rc.clone());
+        rc
+    }
+
+    /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
+    /// — i.e. one whose read-only/mutable identity is known here. A platform `java/util/List` or a user
+    /// class is NOT (the front end never produces the former for a Kotlin collection; both keep their
+    /// JVM-erased resolution).
+    pub fn is_kotlin_collection(&self, internal: &str) -> bool {
+        self.collection_supertypes().contains_key(internal)
+    }
+
+    /// Whether `sub` is, or transitively is a subtype of, `sup` within the Kotlin collection hierarchy
+    /// read from `collections.kotlin_builtins` (`MutableList <: MutableCollection`; `List` is NOT). The
+    /// generic subtype query behind extension applicability — `MutableCollection.plusAssign` applies to a
+    /// `MutableList` receiver but not a read-only `List`, exactly as kotlinc's overload resolution.
+    pub fn kotlin_subtype(&self, sub: &str, sup: &str) -> bool {
+        let supers = self.collection_supertypes();
+        fn walk(map: &HashMap<String, Vec<String>>, sub: &str, sup: &str) -> bool {
+            sub == sup
+                || map
+                    .get(sub)
+                    .is_some_and(|ss| ss.iter().any(|s| walk(map, s, sup)))
+        }
+        walk(&supers, sub, sup)
     }
 
     pub fn empty() -> Classpath {

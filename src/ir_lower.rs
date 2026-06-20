@@ -4010,16 +4010,39 @@ impl<'a> Lower<'a> {
         }
         // Member operator: `recv.plusAssign(arg)`.
         let internal = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())?;
-        let (class, index, mfid, _) = self.resolve_method(&internal, aname)?;
-        let params = self.ir.functions[mfid as usize].params.clone();
-        if params.len() == 1 {
-            let r = self.expr(lhs)?;
-            let a = self.lower_arg(rhs, &params[0])?;
-            return Some(self.ir.add_expr(IrExpr::MethodCall {
-                class,
-                index,
-                receiver: r,
-                args: vec![Some(a)],
+        if let Some((class, index, mfid, _)) = self.resolve_method(&internal, aname) {
+            let params = self.ir.functions[mfid as usize].params.clone();
+            if params.len() == 1 {
+                let r = self.expr(lhs)?;
+                let a = self.lower_arg(rhs, &params[0])?;
+                return Some(self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver: r,
+                    args: vec![Some(a)],
+                }));
+            }
+        }
+        // Classpath inline `MutableCollection.plusAssign` (`@InlineOnly`): emit an inline
+        // `invokestatic owner.plusAssign(recv, arg)` — the bytecode splicer expands its real body
+        // (`add`/`addAll`) at the call site (nothing about `add`/`addAll` is hardcoded here).
+        let arg_ty = self.info.ty(rhs);
+        let c = self
+            .syms
+            .libraries
+            .resolve_scope_inline(aname, self.recv_ty(lhs), &[arg_ty])?;
+        if c.params.len() == 2 {
+            let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
+            let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
+            return Some(self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: c.owner,
+                    name: c.name,
+                    descriptor: c.descriptor,
+                    inline: true,
+                },
+                dispatch_receiver: None,
+                args: vec![r, a],
             }));
         }
         None
@@ -9131,15 +9154,14 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         .any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
     if is_class {
         Ty::obj(&class_internal(file, &r.name))
-    } else if let Some(jvm) = crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&r.name) {
-        // A built-in collection/reference type (`List`, `Map`, `Comparable`, …) resolves to its JVM
-        // interface instead of erasing to `Object` — so e.g. a `List<T>` field keeps a `java/util/List`
-        // descriptor (distinct from a `T`-typed `Object`), which value-class member synthesis needs.
-        // `Any` keeps its Kotlin identity (`kotlin/Any`); the front end uses that, not `java/lang/Object`.
-        if jvm == "java/lang/Object" {
+    } else if let Some(internal) = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(&r.name) {
+        // A built-in collection/reference type resolves to its FRONT-END Kotlin name — a collection keeps
+        // `kotlin/collections/{List,MutableList,…}` (read-only vs mutable; emit erases to `java/util/List`),
+        // other built-ins keep their JVM identity. `Any` stays `kotlin/Any`, not `java/lang/Object`.
+        if internal == "java/lang/Object" {
             Ty::obj("kotlin/Any")
         } else {
-            Ty::obj(jvm)
+            Ty::obj(internal)
         }
     } else {
         Ty::obj("kotlin/Any")

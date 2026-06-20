@@ -3,7 +3,7 @@
 //! `java/util/List`. This is the foundation for distinguishing read-only vs mutable collections.
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::metadata::package_function_return_types;
+use krusty::jvm::metadata::{builtins_supertypes, package_function_return_types};
 use std::path::PathBuf;
 
 fn stdlib() -> Option<PathBuf> {
@@ -47,5 +47,93 @@ fn collection_factory_return_types_distinguish_mutable() {
     assert_eq!(
         rets.get("arrayListOf").map(String::as_str),
         Some("java/util/ArrayList")
+    );
+}
+
+/// The Kotlin collection hierarchy is read from `collections.kotlin_builtins` exactly as kotlinc stores
+/// it — the read-only/mutable supertyping (`MutableList : List, MutableCollection`) that exists in no JVM
+/// descriptor. Parsed straight from the jar entry (`PackageFragment` + `QualifiedNameTable`).
+#[test]
+fn builtins_supertypes_decode_collection_hierarchy() {
+    let Some(jar) = stdlib() else {
+        eprintln!("skip: set KRUSTY_KOTLINC");
+        return;
+    };
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+    let mut entry = zip
+        .by_name("kotlin/collections/collections.kotlin_builtins")
+        .expect("collections.kotlin_builtins in stdlib jar");
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+    let h = builtins_supertypes(&bytes);
+    assert_eq!(
+        h.get("kotlin/collections/MutableList").map(Vec::as_slice),
+        Some(
+            &[
+                "kotlin/collections/List".to_string(),
+                "kotlin/collections/MutableCollection".to_string()
+            ][..]
+        )
+    );
+    assert_eq!(
+        h.get("kotlin/collections/List").map(Vec::as_slice),
+        Some(&["kotlin/collections/Collection".to_string()][..])
+    );
+    assert_eq!(
+        h.get("kotlin/collections/MutableMap").map(Vec::as_slice),
+        Some(&["kotlin/collections/Map".to_string()][..])
+    );
+}
+
+/// The Classpath subtype helpers built on that hierarchy: `MutableList <: MutableCollection`, but the
+/// read-only `List` is NOT — which is exactly what makes `MutableCollection.plusAssign` apply to a
+/// `MutableList` receiver and not to a `List`. A non-builtin name (`ArrayList`) is not in the hierarchy.
+#[test]
+fn kotlin_collection_subtyping() {
+    let Some(jar) = stdlib() else {
+        eprintln!("skip: set KRUSTY_KOTLINC");
+        return;
+    };
+    let cp = Classpath::new(vec![jar]);
+    assert!(cp.is_kotlin_collection("kotlin/collections/MutableList"));
+    assert!(cp.is_kotlin_collection("kotlin/collections/List"));
+    assert!(!cp.is_kotlin_collection("java/util/ArrayList"));
+    assert!(cp.kotlin_subtype(
+        "kotlin/collections/MutableList",
+        "kotlin/collections/MutableCollection"
+    ));
+    assert!(cp.kotlin_subtype(
+        "kotlin/collections/MutableMap",
+        "kotlin/collections/MutableMap"
+    ));
+    assert!(!cp.kotlin_subtype(
+        "kotlin/collections/List",
+        "kotlin/collections/MutableCollection"
+    ));
+}
+
+/// `@Metadata` carries the Kotlin extension-receiver of `plusAssign` — `MutableCollection`/`MutableMap`
+/// — which the JVM signature erases to a `java/util/Collection`/`Map` parameter. This is what lets
+/// overload resolution reject `plusAssign` on a read-only `List` (no `Mutable*` receiver is its supertype).
+#[test]
+fn plus_assign_receiver_is_mutable() {
+    let Some(jar) = stdlib() else {
+        eprintln!("skip: set KRUSTY_KOTLINC");
+        return;
+    };
+    let cp = Classpath::new(vec![jar]);
+    let krs = cp.metadata_receiver_types("kotlin/collections/CollectionsKt", "plusAssign");
+    assert!(
+        krs.iter()
+            .any(|k| k == "kotlin/collections/MutableCollection"),
+        "plusAssign must have a MutableCollection receiver, got {krs:?}"
+    );
+    // `plus` (read-only) must NOT carry a Mutable receiver — else it would be wrongly rejected on `List`.
+    let plus = cp.metadata_receiver_types("kotlin/collections/CollectionsKt", "plus");
+    assert!(
+        !plus
+            .iter()
+            .any(|k| k.starts_with("kotlin/collections/Mutable")),
+        "plus must not be a Mutable* extension, got {plus:?}"
     );
 }

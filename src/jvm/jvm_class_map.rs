@@ -72,6 +72,32 @@ pub fn kotlin_builtin_to_jvm(simple: &str) -> Option<&'static str> {
     })
 }
 
+/// Map a Kotlin built-in type's **simple name** to its FRONT-END Kotlin internal name. Differs from
+/// [`kotlin_builtin_to_jvm`] only for the COLLECTION types: the front end keeps `List` vs `MutableList`
+/// distinct (`kotlin/collections/List` vs `…/MutableList`) so the read-only/mutable distinction survives
+/// until emit, where [`to_jvm_internal`] erases both to the single JVM interface (`java/util/List`). All
+/// other built-ins (`String`, `Comparable`, …) have no such distinction and keep their JVM identity.
+pub fn kotlin_builtin_to_internal(simple: &str) -> Option<&'static str> {
+    Some(match simple {
+        "Iterable" => "kotlin/collections/Iterable",
+        "MutableIterable" => "kotlin/collections/MutableIterable",
+        "Collection" => "kotlin/collections/Collection",
+        "MutableCollection" => "kotlin/collections/MutableCollection",
+        "List" => "kotlin/collections/List",
+        "MutableList" => "kotlin/collections/MutableList",
+        "Set" => "kotlin/collections/Set",
+        "MutableSet" => "kotlin/collections/MutableSet",
+        "Map" => "kotlin/collections/Map",
+        "MutableMap" => "kotlin/collections/MutableMap",
+        "Iterator" => "kotlin/collections/Iterator",
+        "MutableIterator" => "kotlin/collections/MutableIterator",
+        "ListIterator" => "kotlin/collections/ListIterator",
+        "MutableListIterator" => "kotlin/collections/MutableListIterator",
+        // Non-collection built-ins keep their JVM identity (no read-only/mutable distinction).
+        other => return kotlin_builtin_to_jvm(other),
+    })
+}
+
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
 /// the JDK naming convention (`…Exception`/`…Error`, or `java/lang/Throwable` itself). Used only to
 /// admit the no-arg / single-`String` constructor shapes every JDK throwable provides — the type

@@ -3206,6 +3206,16 @@ impl<'a> Checker<'a> {
         if sub == sup {
             return true;
         }
+        // The Kotlin collection interfaces all erase to one JVM interface; compare on the erased names so
+        // `MutableList`/`List` (and a `kotlin/collections/List` vs a platform `java/util/List`) are
+        // mutually assignable — the read-only/mutable distinction is enforced only at the `+=` operator,
+        // not in general assignability. Also lets a `kotlin/collections/MutableList` reach
+        // `java/util/Collection` via the JVM hierarchy walk below.
+        let sub = crate::jvm::jvm_class_map::to_jvm_internal(sub);
+        let sup = crate::jvm::jvm_class_map::to_jvm_internal(sup);
+        if sub == sup {
+            return true;
+        }
         if let Some(c) = self.syms.class_by_internal(sub) {
             if c.interfaces.iter().any(|i| i == sup) {
                 return true;
@@ -6071,15 +6081,33 @@ impl<'a> Checker<'a> {
                 .filter(|sig| sig.params.len() == 1)
                 .map(|sig| sig.params[0])
         });
-        let Some(param) = param else {
-            return false;
-        };
         let rt = self.expr(rhs);
-        if rt != Ty::Error {
-            self.expect_assignable(param, rt, self.span(rhs), "operator argument");
+        if let Some(param) = param {
+            if rt != Ty::Error {
+                self.expect_assignable(param, rt, self.span(rhs), "operator argument");
+            }
+            self.plus_assign.insert(s);
+            return true;
         }
-        self.plus_assign.insert(s);
-        true
+        // Otherwise resolve a `plusAssign` operator on the receiver, exactly as kotlinc does: if one is
+        // applicable the lowerer splices its (inline) body (`MutableCollection.plusAssign` → `add`/
+        // `addAll`). Applicability is Kotlin-type-aware (see `extension_callable`): for a `MutableList`
+        // or a concrete `ArrayList` receiver `plusAssign` resolves and `+=` mutates in place; for a
+        // read-only `List` it does NOT resolve, so this returns false and `coll += x` lowers as
+        // `coll = coll.plus(x)` (reassignment). No mutability predicate — the candidate's Kotlin
+        // receiver type decides, like every other operator overload.
+        if rt != Ty::Error && matches!(recv, Ty::Obj(..)) {
+            if self
+                .syms
+                .libraries
+                .resolve_scope_inline(aname, recv, &[rt])
+                .is_some()
+            {
+                self.plus_assign.insert(s);
+                return true;
+            }
+        }
+        false
     }
 
     fn stmt(&mut self, s: StmtId) {
