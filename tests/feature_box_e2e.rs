@@ -2450,6 +2450,21 @@ fun box(): String {
 }
 "#,
     ),
+    // `for (i in (a..b).reversed())` over a literal range → descending counted loop (phase 402).
+    (
+        "ForInReversedLiteralRange",
+        r#"
+fun box(): String {
+    var s = 0
+    for (i in (1..4).reversed()) s = s * 10 + i
+    if (s != 4321) return "f1: $s"
+    var t = 0
+    for (i in (0..3).reversed()) t = t * 10 + i
+    if (t != 3210) return "f2: $t"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
