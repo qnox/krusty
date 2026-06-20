@@ -2572,6 +2572,16 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 410 — data-class member emission order (bytecode parity)  ✅
+- kotlinc emits data-class members as `componentN, copy, copy$default, toString, hashCode, equals`;
+  krusty appended `copy`/`copy$default` LAST (after toString/hashCode/equals). Moved the `copy` synth
+  block before `toString` in `synth_data_members` so the order matches. Runtime-identical → box gate 1086
+  OK, 0 FAIL. TDD: `bytecode_parity_e2e::data_class_member_order_matches_kotlin` (asserts
+  componentN < copy < toString).
+- Remaining data-class parity gaps (each a future phase): synth methods are `public` not `public final`;
+  `copy` lacks `checkNotNullParameter` on non-null reference params; `hashCode` boxes an `Int` field to
+  `Objects.hashCode(Object)` + a temp local instead of `Integer.hashCode(I)` on the stack.
+
 ### Phase 409 — data-class `toString` → single `StringBuilder` (bytecode parity)  ✅
 - The synthesized `data class` `toString` chained `String.plus` (one `StringBuilder` per `+`); kotlinc
   emits ONE. Rebuilt it as a single `IrExpr::StringConcat` (the phase-401 node): the class name + first
