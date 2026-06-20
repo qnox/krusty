@@ -2572,6 +2572,24 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 416 — user `plusAssign`/`minusAssign`/… operators (`+=` on a `val`)  ✅
+- `target op= rhs` where `op=`'s receiver has a user-defined `plusAssign` (etc.) operator is an IN-PLACE
+  CALL (`target.plusAssign(rhs)`), legal even on a `val` — NOT a reassignment. krusty's parser desugars
+  `op=` to `target = target op rhs`, so the checker hit its `'val' cannot be reassigned` guard and rejected
+  (the single biggest standard-Kotlin skip bucket — 217 first-errors in the front-end survey).
+- Fix: the checker (`try_user_plus_assign`, called atop `Stmt::Assign`/`Stmt::AssignMember`) detects a
+  desugared compound assign whose target type has a USER `plusAssign`/`minusAssign`/`timesAssign`/
+  `divAssign`/`remAssign` (member via `method_of`, or extension via `ext_funs`), type-checks the argument,
+  and marks the statement in new `TypeInfo.plus_assign`. The lowerer (`lower_plus_assign`) emits the call:
+  member → `invokevirtual recv.opAssign(arg)`, extension → `invokestatic owner.opAssign(recv, arg)`.
+- **SCOPED TO USER OPERATORS** (member of a source class / source extension fn): a classpath `+=` such as
+  `MutableList += x` (whose `plusAssign` is `@InlineOnly`, no static body to splice) is NOT in `method_of`/
+  `ext_funs`, so it keeps its existing `target = target + rhs` lowering — no regression. SOUND because for a
+  `val`, `val = val op rhs` can only have come from `val op= rhs` (explicit `val = …` is always an error).
+- Box gate **1087 → 1091 (+4), 0 FAIL**. TDD: `feature_box_e2e::UserPlusAssign` (member + extension opAssign
+  on a `val` property and a local `val`). Corpus `objects/compoundAssignmentToPropertyWithQualifier` now
+  box()=OK (val-property extension plusAssign, object `val`, nested anon).
+
 ### Phase 415 — data-class `equals` byte-identical + `instanceof` branch fusion (bytecode parity)  ✅
 - kotlinc's data-class `equals` has a specific shape krusty diverged from on three counts: (1) a missing
   `if (this === other) return true` referential-identity fast-path; (2) the `other !is T` guard

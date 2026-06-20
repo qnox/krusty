@@ -14,6 +14,30 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // A user `plusAssign`/`minusAssign` operator: `target op= rhs` is an in-place CALL, legal even on a
+    // `val` (member operator AND extension operator), not a reassignment.
+    (
+        "UserPlusAssign",
+        r#"
+class Box(var v: String) {
+    operator fun plusAssign(s: String) { v += s }   // member opAssign
+}
+class Acc(var n: Int)
+operator fun Acc.minusAssign(d: Int) { n -= d }     // extension opAssign
+class Holder { val b = Box("O"); val a = Acc(10) }
+fun box(): String {
+    val h = Holder()
+    h.b += "K"          // val property, member plusAssign
+    h.a -= 3            // val property, extension minusAssign
+    val local = Box("x")
+    local += "y"        // local val, member plusAssign
+    if (h.b.v != "OK") return "fail b=${h.b.v}"
+    if (h.a.n != 7) return "fail a=${h.a.n}"
+    if (local.v != "xy") return "fail local=${local.v}"
+    return "OK"
+}
+"#,
+    ),
     // `for (x in <iterable> step n)` where the iterable is not a `..` literal (a progression val, a
     // `.reversed()` result, a chained `step`): the for-range parser continues the trailing `step`
     // infix call so the whole `progression.step(n)` becomes the loop iterable.

@@ -1730,6 +1730,19 @@ fn is_builtin_operator_method(name: &str) -> bool {
     )
 }
 
+/// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
+/// arithmetic compound operators have an `…Assign` form.
+fn assign_op_name(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Add => "plusAssign",
+        BinOp::Sub => "minusAssign",
+        BinOp::Mul => "timesAssign",
+        BinOp::Div => "divAssign",
+        BinOp::Rem => "remAssign",
+        _ => return None,
+    })
+}
+
 fn infer_lit_ty(
     file: &File,
     e: ExprId,
@@ -2013,6 +2026,11 @@ pub struct TypeInfo {
     /// by name (a file-wide set); the lowerer boxes any matching `var` it declares (over-boxing an
     /// unrelated same-named `var` is harmless — an extra indirection, never incorrect).
     pub boxed_vars: std::collections::HashSet<String>,
+    /// `StmtId`s of compound assignments (`target op= rhs`) the parser desugared to `target = target op
+    /// rhs`, but where `target`'s type has a USER-defined `plusAssign`/`minusAssign`/… operator — so the
+    /// statement is an in-place operator CALL (`target.plusAssign(rhs)`), legal even on a `val`, NOT a
+    /// reassignment. The lowerer resolves the operator and emits the call for these.
+    pub plus_assign: std::collections::HashSet<StmtId>,
 }
 
 /// A bridge method: erased signature (the supertype's descriptor, what callers invoke) delegating to
@@ -2064,6 +2082,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
         boxed_vars: std::collections::HashSet::new(),
+        plus_assign: std::collections::HashSet::new(),
         local_fun_captures: std::collections::HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
@@ -2496,6 +2515,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         bridges: c.bridges,
         boxed_vars: c.boxed_vars,
         local_fun_captures: c.local_fun_captures,
+        plus_assign: c.plus_assign,
     }
 }
 
@@ -2528,6 +2548,7 @@ struct Checker<'a> {
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
     boxed_vars: std::collections::HashSet<String>,
+    plus_assign: std::collections::HashSet<StmtId>,
     local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
@@ -6016,6 +6037,51 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
+    /// A compound assignment `target op= rhs` (parser-desugared to `target = target op rhs`, so `value`
+    /// is `Binary { op, lhs: <target read>, rhs }`) is an in-place operator call — legal even on a `val`
+    /// — when `target`'s type has a USER-defined `op`Assign operator (member, or extension). Detect that,
+    /// type-check the argument, and mark the statement for the lowerer (which emits `target.opAssign(rhs)`).
+    /// Returns true if handled (the caller must then skip the ordinary reassignment checks). Restricted to
+    /// USER operators so a classpath `+=` (e.g. `MutableList`, whose `plusAssign` is `@InlineOnly`) keeps
+    /// its existing `target = target + rhs` lowering.
+    fn try_user_plus_assign(&mut self, s: StmtId, value: ExprId) -> bool {
+        let Expr::Binary { op, lhs, rhs } = self.file.expr(value).clone() else {
+            return false;
+        };
+        let Some(aname) = assign_op_name(op) else {
+            return false;
+        };
+        let recv = self.expr(lhs);
+        if recv == Ty::Error {
+            return false;
+        }
+        // Parameter type of the user operator, if one exists (member first, then extension).
+        let param = if let Ty::Obj(internal, _) = &recv {
+            self.syms
+                .method_of(internal, aname)
+                .filter(|sig| sig.params.len() == 1)
+                .map(|sig| sig.params[0])
+        } else {
+            None
+        }
+        .or_else(|| {
+            self.syms
+                .ext_funs
+                .get(&(recv.descriptor(), aname.to_string()))
+                .filter(|sig| sig.params.len() == 1)
+                .map(|sig| sig.params[0])
+        });
+        let Some(param) = param else {
+            return false;
+        };
+        let rt = self.expr(rhs);
+        if rt != Ty::Error {
+            self.expect_assignable(param, rt, self.span(rhs), "operator argument");
+        }
+        self.plus_assign.insert(s);
+        true
+    }
+
     fn stmt(&mut self, s: StmtId) {
         match self.file.stmt(s).clone() {
             Stmt::Local {
@@ -6171,6 +6237,10 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Assign { name, value } => {
+                // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
+                if self.try_user_plus_assign(s, value) {
+                    return;
+                }
                 let vt = self.expr(value);
                 // `field = …` inside a setter writes the backing field.
                 if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
@@ -6237,6 +6307,10 @@ impl<'a> Checker<'a> {
                 name,
                 value,
             } => {
+                // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
+                if self.try_user_plus_assign(s, value) {
+                    return;
+                }
                 let rt = self.expr(receiver);
                 let vt = self.expr(value);
                 let span = self.file.stmt_spans[s.0 as usize];

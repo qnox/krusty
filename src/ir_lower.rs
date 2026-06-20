@@ -3978,7 +3978,62 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Lower a compound assignment the checker marked as a user `opAssign` operator call (`plus_assign`):
+    /// `target op= rhs` → `target.plusAssign(rhs)` (member `invokevirtual`, or extension `invokestatic`
+    /// with the receiver as the first argument). `value` is the parser's desugared `Binary { op, lhs, rhs }`
+    /// where `lhs` is the target read.
+    fn lower_plus_assign(&mut self, value: AstExprId) -> Option<u32> {
+        let Expr::Binary { op, lhs, rhs } = self.afile.expr(value).clone() else {
+            return None;
+        };
+        let aname = match op {
+            BinOp::Add => "plusAssign",
+            BinOp::Sub => "minusAssign",
+            BinOp::Mul => "timesAssign",
+            BinOp::Div => "divAssign",
+            BinOp::Rem => "remAssign",
+            _ => return None,
+        };
+        let recv_desc = self.recv_ty(lhs).descriptor();
+        // Extension operator: `invokestatic owner.plusAssign(recv, arg)` (receiver is the first param).
+        if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, aname.to_string())) {
+            let params = self.ir.functions[fid as usize].params.clone();
+            if params.len() == 2 {
+                let r = self.lower_arg(lhs, &params[0])?;
+                let a = self.lower_arg(rhs, &params[1])?;
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
+                    args: vec![r, a],
+                }));
+            }
+        }
+        // Member operator: `recv.plusAssign(arg)`.
+        let internal = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())?;
+        let (class, index, mfid, _) = self.resolve_method(&internal, aname)?;
+        let params = self.ir.functions[mfid as usize].params.clone();
+        if params.len() == 1 {
+            let r = self.expr(lhs)?;
+            let a = self.lower_arg(rhs, &params[0])?;
+            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                class,
+                index,
+                receiver: r,
+                args: vec![Some(a)],
+            }));
+        }
+        None
+    }
+
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
+        // A compound assignment routed to a user `opAssign` operator (checker-marked) — emit the call.
+        if self.info.plus_assign.contains(&s) {
+            if let Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } =
+                self.afile.stmt(s).clone()
+            {
+                return self.lower_plus_assign(value);
+            }
+        }
         match self.afile.stmt(s).clone() {
             Stmt::Expr(e) => self.expr(e),
             Stmt::Return(e) => {
