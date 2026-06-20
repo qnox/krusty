@@ -2846,18 +2846,29 @@ impl<'a> Emitter<'a> {
             return;
         }
         self.emit_operands(&[lhs, rhs], code);
-        // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`.
+        // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`. For float
+        // types `>`/`>=` use the `*l` variant (NaN → -1) and `<`/`<=` the `*g` variant (NaN → +1), so a
+        // NaN operand makes the comparison false either way — matching kotlinc.
+        let nan_l = matches!(op, IrBinOp::Gt | IrBinOp::Ge);
         match lt {
             Ty::Long => {
                 code.lcmp();
                 code.push_int(0, self.cw);
             }
             Ty::Double => {
-                code.dcmpg();
+                if nan_l {
+                    code.dcmpl();
+                } else {
+                    code.dcmpg();
+                }
                 code.push_int(0, self.cw);
             }
             Ty::Float => {
-                code.fcmpg();
+                if nan_l {
+                    code.fcmpl();
+                } else {
+                    code.fcmpg();
+                }
                 code.push_int(0, self.cw);
             }
             _ => {}
@@ -2974,10 +2985,24 @@ impl<'a> Emitter<'a> {
         // with a single-operand `if*` (kotlinc's `lcmp;ifge` shape).
         self.emit_operands(&[lhs, rhs], code);
         let three_way = matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false (kotlinc).
+        let nan_l = matches!(op, Gt | Ge);
         match lt {
             Ty::Long => code.lcmp(),
-            Ty::Double => code.dcmpg(),
-            Ty::Float => code.fcmpg(),
+            Ty::Double => {
+                if nan_l {
+                    code.dcmpl()
+                } else {
+                    code.dcmpg()
+                }
+            }
+            Ty::Float => {
+                if nan_l {
+                    code.fcmpl()
+                } else {
+                    code.fcmpg()
+                }
+            }
             _ => {}
         }
         self.frame(target, vec![], code);

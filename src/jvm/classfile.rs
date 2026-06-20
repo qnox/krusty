@@ -775,6 +775,9 @@ impl CodeBuilder {
     pub fn dcmpg(&mut self) {
         self.op(0x98, -3);
     }
+    pub fn dcmpl(&mut self) {
+        self.op(0x97, -3);
+    }
     pub fn ifnull(&mut self, l: Label) {
         self.branch(0xc6, l, -1);
     }
@@ -1013,6 +1016,9 @@ impl CodeBuilder {
     /// `fcmpg`: pops two floats, pushes an int (-1/0/1).
     pub fn fcmpg(&mut self) {
         self.op(0x96, -1);
+    }
+    pub fn fcmpl(&mut self) {
+        self.op(0x95, -1);
     }
 
     // conversions
