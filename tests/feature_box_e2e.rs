@@ -20,6 +20,25 @@ const SNIPPETS: &[(&str, &str)] = &[
         "CharCompanionConst",
         "fun box(): String {\n    val l = listOf(Char.MAX_VALUE, Char.MIN_VALUE)\n    if (l[0] != '\\uFFFF') return \"f0\"\n    if (l[1] != '\\u0000') return \"f1\"\n    return \"OK\"\n}\n",
     ),
+    // A `Char` range with a `step` keeps `Char` loop elements (the step is an `Int`), and a stepped
+    // `Int`/`Long` range near MAX/MIN_VALUE terminates without wrapping past the bound (overflow-safe).
+    (
+        "SteppedRangeCharAndOverflow",
+        r#"
+fun box(): String {
+    val sb = StringBuilder()
+    for (c in 'a'..'e' step 2) sb.append(c)        // a,c,e (loop var is Char, step Int)
+    if (sb.toString() != "ace") return "char: $sb"
+    val a = ArrayList<Int>()
+    for (i in Int.MAX_VALUE - 5..Int.MAX_VALUE step 3) a.add(i)   // MaxI-5, MaxI-2 (no wrap)
+    if (a.toString() != "[2147483642, 2147483645]") return "int: $a"
+    val b = ArrayList<Long>()
+    for (i in Long.MAX_VALUE - 5..Long.MAX_VALUE step 3) b.add(i) // no wrap on Long either
+    if (b.size != 2) return "long: $b"
+    return "OK"
+}
+"#,
+    ),
     // A user `plusAssign`/`minusAssign` operator: `target op= rhs` is an in-place CALL, legal even on a
     // `val` (member operator AND extension operator), not a reassignment.
     (

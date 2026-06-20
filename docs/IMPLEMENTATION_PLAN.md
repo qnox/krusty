@@ -2572,6 +2572,22 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 418 — stepped ranges: `Char` step element type + overflow-safe termination  ✅
+- Two coupled bugs in `for (i in a..b step n)` (`Stmt::For`): **(1)** the checker validated the `step` value
+  against the *element* type, so a `Char`/`Byte`/`Short` range (`'a'..'e' step 2`) rejected its `Int` step
+  with "type mismatch: Int but Char" — but Kotlin's `step` is always `Int` (`Long` for a Long/ULong
+  progression). **(2)** the loop broke on `i == end`, which a non-unit step may never hit near
+  `MAX_VALUE`/`MIN_VALUE`, so `i ± step` wrapped past the bound and looped forever / produced wrong
+  elements (`MaxI-5..MaxI step 3`).
+- Fixes: (1) the step's expected type is `Int` (`Long` only for a `Long`/`ULong` range). (2) for a stepped
+  signed `Int`/`Long`-family range, break when the NEXT value would pass `end` OR wraps around (`next < i`
+  ascending / `next > i` descending detects the overflow) — overflow-safe without a wider accumulator, so
+  it covers `Long` too. Matches kotlinc's `getProgressionLastElement` semantics.
+- Box gate **1091 → 1102 (+11), 0 FAIL** (unblocks stepped-range corpus files: char ranges, and
+  `ranges/literal/inexactToMaxValue`/`inexactDownToMinValue` overflow edges). TDD:
+  `feature_box_e2e::SteppedRangeCharAndOverflow`. With phase 417 (Char companion const) this clears 2 of the
+  3 pre-existing bugs blocking the (ready, +111) classpath collection `+=` — re-applying that is next.
+
 ### Phase 417 — `Char.MAX_VALUE`/`MIN_VALUE` companion constants keep their `Char` type when boxed  ✅
 - A `Char` companion constant is read back from the classpath as an integer `ConstantValue`, and lowering
   emitted it as `IrConst::Int` — so in a vararg/generic position (`listOf(Char.MAX_VALUE, …)`) it boxed to
