@@ -2572,6 +2572,27 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 396 — bytecode-parity instrument + baseline  ✅
+- `src/bin/bytediff.rs`: normalized `javap -c -p` diff of krusty vs real kotlinc per class (strips
+  source banner, bytecode offsets, constant-pool indices; keeps signatures + instruction mnemonics +
+  operands + resolved `// …` comments). The first measurement of the project's *bytecode-equality* goal
+  (the `box()=OK` gate only proved runtime correctness). Opt-in, slow (one kotlinc launch/file), not in
+  the <60s gate. Docs in `docs/DIFF_KOTLINC.md`.
+- **Baseline (first 15 both-compile files):** ~9.5% classes normalized-byte-identical. RANKED divergences
+  (the bytecode-parity backlog):
+  1. **Loop shape (biggest lever — every loop):** krusty emits test-at-bottom (`goto TEST; BODY; TEST:
+     if_icmplt BODY`), kotlinc emits test-at-top exit-forward (`if_icmpge END` at the top). Affects all
+     `forEach*Array`/range/while loops. Runtime-equivalent, so the box gate stays green — pure parity.
+  2. **Top-level `val`/`var` field:** krusty emits a `public static` field; kotlinc emits `private static
+     final` (val) / `private static` (var) + a `public static getX()`/`setX()` and routes cross-class
+     reads through the getter. Needs getter/setter emission + read-via-getter from other classes.
+  3. **Annotation instances:** krusty emits `final class A`; kotlinc emits `interface A extends
+     java.lang.annotation.Annotation` + a synthetic `<facade>$annotationImpl$A$0` impl. Structural.
+  4. **Branch-condition polarity** (`if_icmpeq`/`if_icmplt` vs kotlinc's inverted `if_icmpne`/`if_icmpge`)
+     — falls out of the loop-shape fix.
+  Method: pick a divergence → fix the emitter → re-run `bytediff` → confirm the % rises with box gate at
+  0 FAIL. NEXT parity phase: match kotlinc's loop codegen shape (item 1).
+
 ### Phase 395 — classes with no primary constructor  ✅
 - Support `class A { constructor(…) { … } }` (no primary ctor): each secondary becomes its own `<init>`.
   A `super(…)`/implicit-delegating ctor runs the field initializers + `init {}` blocks before its body;
