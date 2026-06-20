@@ -57,14 +57,30 @@ fn main() {
     if files.len() > 1 {
         use krusty::ast::Decl;
         use krusty::jvm::names::file_class_name;
+        // Collect (name, facade) first — inserting into syms.{fn,prop}_facades while reading syms.props
+        // would conflict-borrow.
+        let mut fns: Vec<(String, String)> = Vec::new();
+        let mut props: Vec<(String, String)> = Vec::new();
         for (i, file) in files.iter().enumerate() {
             let facade = file_class_name(&stems[i], file.package.as_deref());
             for &d in &file.decls {
-                if let Decl::Fun(f) = file.decl(d) {
-                    if f.receiver.is_none() && !f.is_inline {
-                        syms.fn_facades.insert(f.name.clone(), facade.clone());
+                match file.decl(d) {
+                    Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                        fns.push((f.name.clone(), facade.clone()))
                     }
+                    Decl::Property(p) if p.receiver.is_none() => {
+                        props.push((p.name.clone(), facade.clone()))
+                    }
+                    _ => {}
                 }
+            }
+        }
+        for (name, facade) in fns {
+            syms.fn_facades.insert(name, facade);
+        }
+        for (name, facade) in props {
+            if let Some(&(ty, is_var)) = syms.props.get(&name) {
+                syms.prop_facades.insert(name, (facade, ty, is_var));
             }
         }
     }

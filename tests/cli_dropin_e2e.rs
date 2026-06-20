@@ -112,10 +112,11 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// Multi-file compilation: a call to a top-level function defined in ANOTHER source file lowers to a
-/// cross-facade `invokestatic` (not a bail). Compile both files with the krusty binary, run `box()`.
+/// Multi-file compilation: a top-level function call AND a top-level property read/write that target
+/// declarations in ANOTHER source file lower to cross-facade `invokestatic` (function, `getX`/`setX`),
+/// not a bail. Compile both files with the krusty binary, link via javac, run `box()`.
 #[test]
-fn cross_file_top_level_function_call() {
+fn cross_file_top_level_function_and_property() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping cross_file: set JAVA_HOME");
         return;
@@ -136,12 +137,12 @@ fn cross_file_top_level_function_call() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("A.kt"),
-        "fun helper(x: Int): Int = x * 2\nfun tag(s: String): String = s + \"!\"\n",
+        "fun helper(x: Int): Int = x * 2\nfun tag(s: String): String = s + \"!\"\nval GREETING = \"hi\"\nvar counter = 10\n",
     )
     .unwrap();
     fs::write(
         dir.join("B.kt"),
-        "fun box(): String {\n  if (helper(21) != 42) return \"f1\"\n  if (tag(\"hi\") != \"hi!\") return \"f2\"\n  return \"OK\"\n}\n",
+        "fun box(): String {\n  if (helper(21) != 42) return \"f1\"\n  if (tag(\"hi\") != \"hi!\") return \"f2\"\n  if (GREETING != \"hi\") return \"f3\"\n  counter = counter + 5\n  if (counter != 15) return \"f4: $counter\"\n  return \"OK\"\n}\n",
     )
     .unwrap();
     let kc = Command::new(krusty)

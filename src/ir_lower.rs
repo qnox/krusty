@@ -4093,6 +4093,24 @@ impl<'a> Lower<'a> {
                         index: idx,
                         value: val,
                     }))
+                } else if let Some((facade, ty, is_var)) =
+                    self.syms.prop_facades.get(&name).cloned()
+                {
+                    // A `var` from ANOTHER file → call its facade's `setX(v)` (the field is private).
+                    if !is_var {
+                        return None;
+                    }
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFile {
+                            facade,
+                            name: setter_name(&name),
+                            params: vec![ty_to_ir(ty)],
+                            ret: crate::ir::IrType::Unit,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![val],
+                    }))
                 } else {
                     // `this` is an external receiver (an inlined `apply`/`run` whose backing field is
                     // private) — write through the property setter `setX(v)`.
@@ -5612,6 +5630,19 @@ impl<'a> Lower<'a> {
                     })
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
+                } else if let Some((facade, ty, _)) = self.syms.prop_facades.get(&n).cloned() {
+                    // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
+                    // private), reusing the backend-agnostic cross-file callee.
+                    self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFile {
+                            facade,
+                            name: getter_name(&n),
+                            params: vec![],
+                            ret: ty_to_ir(ty),
+                        },
+                        dispatch_receiver: None,
+                        args: vec![],
+                    })
                 } else if let Some(class) = self
                     .classes
                     .get(&class_internal(self.afile, &n))
