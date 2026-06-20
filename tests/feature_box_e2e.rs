@@ -289,6 +289,18 @@ fun box(): String {
 }
 "#,
     ),
+    // `return throw e` — the returned value itself diverges (athrow), so the trailing return opcode is
+    // unreachable dead code the verifier rejects unless dropped.
+    (
+        "ReturnThrow",
+        r#"
+fun t(b: Boolean): String {
+    if (b) return throw RuntimeException("boom")
+    return "OK"
+}
+fun box(): String = t(false)
+"#,
+    ),
     // An arithmetic operand that is branchy (`5 + if (c) 1 else 2`, `r += if (…) … else …`) spills the
     // other operand to a temp so it isn't stranded on the stack across the branch's merge frame.
     (

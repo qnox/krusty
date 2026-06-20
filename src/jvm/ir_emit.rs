@@ -1475,7 +1475,12 @@ impl<'a> Emitter<'a> {
             IrExpr::Return(v) => match v {
                 Some(v) => {
                     self.emit_value(v, code);
-                    emit_return(self.ret, code);
+                    // `return <diverging>` (`return throw e`, `return error(..)`): the value already
+                    // transferred control (athrow / a `Nothing`-returning call), so the trailing return
+                    // opcode is unreachable dead code the verifier rejects (no stack-map frame). Skip it.
+                    if !self.diverges(v) {
+                        emit_return(self.ret, code);
+                    }
                 }
                 None => code.ret_void(),
             },
