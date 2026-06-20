@@ -279,10 +279,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let ret = sig.ret;
                 let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                 let param_checks = param_checks_for(m, &sig.params);
+                // The checker `Ty` carries no nullability, so recover the declared `?` from the method's
+                // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
+                // return (`Ucn?`) must stay the boxed `X`, not erase to the unboxed underlying.
+                let ret_ir = ty_to_ir(ret);
+                let ret_ir = if m.ret.as_ref().is_some_and(|r| r.nullable) {
+                    mark_nullable(ret_ir)
+                } else {
+                    ret_ir
+                };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: m.name.clone(),
                     params,
-                    ret: ty_to_ir(ret),
+                    ret: ret_ir,
                     body: None,
                     is_static: false,
                     dispatch_receiver: Some(internal.clone()),
@@ -3757,9 +3766,24 @@ impl<'a> Lower<'a> {
                     Some(r) => r.nullable,
                     None => {
                         if let ast::Expr::Call { callee, .. } = self.afile.expr(init) {
-                            matches!(self.afile.expr(*callee), ast::Expr::Name(n)
-                                if self.afile.decls.iter().any(|&d| matches!(self.afile.decl(d),
-                                    ast::Decl::Fun(f) if &f.name == n && f.ret.as_ref().is_some_and(|rr| rr.nullable))))
+                            match self.afile.expr(*callee) {
+                                // A free-function call (`val x = zap()` where `zap(): T?`).
+                                ast::Expr::Name(n) => self.afile.decls.iter().any(|&d| matches!(self.afile.decl(d),
+                                    ast::Decl::Fun(f) if &f.name == n && f.ret.as_ref().is_some_and(|rr| rr.nullable))),
+                                // A method call (`val x = t.foo()` where `foo(): T?`): resolve the method on the
+                                // receiver's class and read its (nullability-carrying) IR return type — a nullable
+                                // value-class return (`X?`) is a boxed `X`, so the local must stay boxed, not unbox.
+                                ast::Expr::Member { receiver, name } => {
+                                    let recv_ty = self.info.ty(*receiver);
+                                    recv_ty
+                                        .obj_internal()
+                                        .and_then(|internal| self.resolve_method(internal, name))
+                                        .is_some_and(|(_, _, fid, _)| {
+                                            matches!(self.ir.functions[fid as usize].ret, IrType::Class { nullable: true, .. })
+                                        })
+                                }
+                                _ => false,
+                            }
                         } else {
                             false
                         }

@@ -330,12 +330,15 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     {
                         *p = erase(p, &under);
                     }
-                    // Whether the SUPERTYPE method returns the value class LITERALLY (`fun bar(): Gx` →
-                    // kotlinc mangles + erases its return) vs a generic `T` erased to `Object`
-                    // (`fun foo(): T`). The former → bridge returns the erased underlying, NO box; the
-                    // latter → bridge BOXES the value class back to `Object`.
+                    // Whether the SUPERTYPE method returns the value class in its UNBOXED form — a non-null
+                    // literal (`fun bar(): Gx`), OR a nullable `X?` whose underlying is a non-null reference
+                    // (so `X?` stays UNBOXED, carrying null itself, e.g. `X(val x: Any)`). Then the bridge
+                    // returns the erased underlying, NO box. A nullable `X?` that BOXES (over a primitive /
+                    // null-capable chain, e.g. `X(val x: Any?)` → `LX;`) or a generic `T` (erased `Object`)
+                    // → bridge BOXES the value class back.
                     let supertype_returns_vc = matches!(&b.erased_ret,
-                        IrType::Class { fq_name, .. } if under.contains_key(fq_name));
+                        IrType::Class { fq_name, nullable, .. }
+                            if under.contains_key(fq_name) && (!*nullable || !nullable_is_boxed(fq_name, &under)));
                     if supertype_returns_vc {
                         b.concrete_ret = erase(&b.concrete_ret, &under);
                         b.erased_ret = b.concrete_ret.clone();

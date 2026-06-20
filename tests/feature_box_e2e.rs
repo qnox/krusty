@@ -1913,6 +1913,53 @@ fun box(): String = (Dw() as Bw<Aw, Aw>).g(Aw("OK"), Aw("Fail"))
 "#,
     ),
     (
+        // A class method returning a nullable value class over a PRIMITIVE underlying must keep it BOXED
+        // (`X?` can't be the unboxed `int`), and the inferred local `val r = h.get(..)` must carry the `?`.
+        "ValueClassNullableMemberReturnBoxes",
+        r#"
+@JvmInline value class Wrapn(val i: Int)
+class Holdern { fun get(b: Boolean): Wrapn? = if (b) Wrapn(5) else null }
+fun box(): String {
+    val h = Holdern()
+    if (h.get(false) != null) return "f1"
+    val r = h.get(true)
+    if (r == null) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    (
+        // An override returning a value class through an interface declaring `X?`: the override mangles by
+        // the interface's nullable signature + a bridge. Boxed `X?` (over `Any?`) and unboxed `X?` (over a
+        // non-null `Any`) take different bridge return-box decisions.
+        "ValueClassOverrideNullableInterfaceReturnBoxed",
+        r#"
+@JvmInline value class Xob(val x: Any?)
+interface IFob { fun foo(): Xob? }
+class Tob : IFob { override fun foo(): Xob = Xob(null) }
+fun box(): String {
+    val t1: IFob = Tob()
+    val x1 = t1.foo()
+    if (x1 != Xob(null)) return "f1: $x1"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassOverrideNullableInterfaceReturnUnboxed",
+        r#"
+@JvmInline value class Xou(val x: Any)
+interface IFou { fun foo(): Xou? }
+class Tou : IFou { override fun foo(): Xou = Xou("OK") }
+fun box(): String {
+    val t1: IFou = Tou()
+    val x1 = t1.foo()
+    if (x1 != Xou("OK")) return "f1: $x1"
+    return "OK"
+}
+"#,
+    ),
+    (
         "ValueClassComparableBridgeKeepsBoxedParam",
         r#"
 @JvmInline value class Fooc(val x: Int) : Comparable<Fooc> { override fun compareTo(other: Fooc): Int = 10 }
