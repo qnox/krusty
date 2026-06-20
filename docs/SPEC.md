@@ -527,6 +527,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
   `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
   `UserInline` snippet in `tests/feature_box_e2e.rs`.
+- **Collection `+=` (read-only vs mutable).** `coll += x` mutates in place when a `plusAssign` operator is
+  applicable to the receiver, else reassigns (`coll = coll.plus(x)`) — exactly kotlinc's augmented-assignment
+  resolution, with NO mutability predicate. The read-only/mutable distinction (`List` vs `MutableList`) is a
+  Kotlin-type fact that exists in no JVM descriptor (both erase to `java/util/List`); krusty keeps the Kotlin
+  type in the front end (`kotlin/collections/{List,MutableList}`, decoded from `@Metadata` return types) and
+  erases it ONLY at emit (`to_jvm_internal`). The Kotlin collection hierarchy (`MutableList : List,
+  MutableCollection`) is read from `kotlin/collections/collections.kotlin_builtins` (a `PackageFragment`
+  proto, resolved via its `QualifiedNameTable` exactly as kotlinc's `NameResolverImpl`), never hardcoded.
+  Applicability is generic: a candidate whose Kotlin extension receiver (from `@Metadata`
+  `Function.receiver_type`) is a collection type the receiver does not subtype is rejected — so
+  `MutableCollection.plusAssign` applies to `MutableList`/`ArrayList` but not to a read-only `List`. For a
+  mutable receiver the inline `plusAssign` body is spliced (`add`/`addAll`). Tested:
+  `feature_box_e2e::CollectionPlusAssign` and `tests/metadata_return_types.rs` (hierarchy parse, subtyping,
+  `plusAssign` receiver).
 
 ## 8. Success criteria for the PoC
 

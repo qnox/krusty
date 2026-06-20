@@ -82,6 +82,42 @@ fun box(): String {
 }
 "#,
     ),
+    // Collection `+=`: resolved exactly as kotlinc (no mutability predicate). A `MutableList`/`MutableSet`/
+    // `MutableMap` receiver (and a concrete `ArrayList`) resolves `MutableCollection.plusAssign`, spliced
+    // to in-place `add`/`addAll`; a read-only `List` has NO applicable `plusAssign` (the candidate's Kotlin
+    // receiver is `MutableCollection`, not a supertype of `List`), so `l += x` lowers as `l = l.plus(x)`
+    // (reassignment of the `var`). The read-only/mutable distinction comes from `@Metadata`/builtins, never
+    // from the JVM type (both erase to `java/util/List`).
+    (
+        "CollectionPlusAssign",
+        r#"
+fun box(): String {
+    val ml = mutableListOf(1, 2)
+    ml += 3                 // MutableList.plusAssign(element) -> add
+    ml += listOf(4, 5)      // MutableList.plusAssign(elements) -> addAll
+    if (ml != listOf(1, 2, 3, 4, 5)) return "f0=$ml"
+
+    val ms = mutableSetOf("a")
+    ms += "b"
+    if (ms.size != 2 || !ms.contains("b")) return "f1=$ms"
+
+    val mm = mutableMapOf(1 to "x")
+    mm += (2 to "y")        // MutableMap.plusAssign(pair)
+    if (mm.size != 2 || mm[2] != "y") return "f2=$mm"
+
+    val al = ArrayList<Int>()   // concrete mutable class
+    al += 7
+    if (al[0] != 7) return "f3=$al"
+
+    var ro = listOf(1, 2)   // read-only: += is reassignment (l = l.plus(x))
+    val before = ro
+    ro += 3
+    if (ro != listOf(1, 2, 3)) return "f4=$ro"
+    if (before != listOf(1, 2)) return "f5 read-only mutated: $before"
+    return "OK"
+}
+"#,
+    ),
     // `for (x in <iterable> step n)` where the iterable is not a `..` literal (a progression val, a
     // `.reversed()` result, a chained `step`): the for-range parser continues the trailing `step`
     // infix call so the whole `progression.step(n)` becomes the loop iterable.

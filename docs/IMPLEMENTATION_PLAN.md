@@ -2572,6 +2572,41 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 422 — Kotlin-type-aware collection `+=` (read-only/mutable), the way kotlinc does it  ✅
+- Goal: `coll += x` mutates in place for a mutable collection but reassigns (`coll = coll.plus(x)`) for a
+  read-only one — decided exactly as kotlinc, with NO mutability predicate and NO hardcoded hierarchy, and
+  with type erasure happening ONLY at emit. The read-only/mutable identity exists in no JVM descriptor
+  (`List` and `MutableList` both erase to `java/util/List`); it lives in `@Metadata` and `.kotlin_builtins`.
+- Front-end types flipped to Kotlin: `resolve_callable` returns `kotlin/collections/{List,MutableList,…}`
+  (return type from `@Metadata`, `meta_collection_ret`); `ir_lower::ty_of` and the resolver seed use
+  `kotlin_builtin_to_internal` (keeps `List` vs `MutableList`). `to_jvm_internal` erases both to
+  `java/util/*` at the bytecode boundary (phase 420). So `mutableListOf()` is a `MutableList`, `listOf()` a
+  read-only `List`, through the whole front end.
+- The Kotlin collection hierarchy (`MutableList : List, MutableCollection`) is READ from
+  `kotlin/collections/collections.kotlin_builtins` on the classpath — a `BuiltInsBinaryVersion` header +
+  `PackageFragment` proto, resolved through its `QualifiedNameTable`/`StringTable` exactly as kotlinc's
+  `NameResolverImpl` (`metadata::builtins_supertypes`; `Class.supertype_id` → `type_table` →
+  `Type.class_name`). NOT hardcoded.
+- Resolution is Kotlin-type-aware, generically (kotlinc has no `is_mutable_collection`): `+=` resolves a
+  `plusAssign` operator candidate; `extension_callable` rejects a candidate whose Kotlin receiver (decoded
+  from `@Metadata` `Function.receiver_type`, `metadata_receiver_types`) is a collection type the actual
+  receiver is not a subtype of (`Classpath::kotlin_subtype` over the builtins hierarchy). So
+  `MutableCollection.plusAssign` applies to `MutableList`/`ArrayList` but NOT to a read-only `List`, which
+  then lows as `list = list.plus(x)`. Names are overloaded across receivers (`plus` on
+  `Collection`/`Map`/`Set`), so the receiver set is UNIONed across facade parts and "subtype of any" admits
+  the call — first-wins dropped `Iterable.forEach` and broke read-only iteration. No erased type makes the
+  decision; the JVM descriptors are only lookup keys.
+- For a mutable receiver the (inline) `plusAssign` body is spliced (`MutableCollection.plusAssign` →
+  `add`/`addAll`) by the existing bytecode inliner (`Callee::Static{inline:true}`).
+- Box gate **1285, 0 FAIL** (+183 vs 1102), gate ~19s. TDD: `feature_box_e2e::CollectionPlusAssign`
+  (MutableList/Set/Map + concrete ArrayList mutate; read-only `List += x` reassigns and does NOT mutate the
+  original) and `metadata_return_types::{builtins_supertypes_decode_collection_hierarchy,
+  kotlin_collection_subtyping, plus_assign_receiver_is_mutable}`.
+- Follow-up: the gate is keyed lazily by `@Metadata` only for collection receivers (cheap); generalizing
+  Kotlin-receiver applicability to ALL extension resolution (and indexing extensions by their Kotlin
+  receiver) would let the same mechanism replace remaining JVM-erased shortcuts. The `arg_fits`/
+  `supertype_descriptors` JVM-erased lookup remains as the candidate-enumeration layer.
+
 ### Phase 421 — numeric overload resolution prefers the widest int (`until` MIN_VALUE guard)  ✅
 - krusty collapses `Byte`/`Short`/`Int` → `Ty::Int` (`desc_to_ty`), so numeric overloads that differ only
   in a `Byte`/`Short` vs `Int` parameter become indistinguishable after parsing — `RangesKt.until(Int,Int)`,

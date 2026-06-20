@@ -5,7 +5,7 @@
 
 use super::classpath::Classpath;
 use super::jvm_class_map::{
-    kotlin_builtin_to_jvm, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
+    kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
 use crate::libraries::{LibraryCallable, LibraryMember, LibrarySeed, LibrarySet, LibraryType};
 use crate::types::Ty;
@@ -45,6 +45,31 @@ impl JvmLibraries {
             for c in self.cp.find_extensions(&recv_desc, name) {
                 if !c.public && !allow_non_public {
                     continue;
+                }
+                // Kotlin-receiver applicability: the candidate matched on the JVM-erased lookup key, but
+                // the read-only/mutable distinction survives only in Kotlin types. When the receiver is a
+                // Kotlin collection type, consult this name's `@Metadata` receiver types: among those that
+                // are themselves Kotlin collection types, the receiver must be a subtype of at least one.
+                // A name is overloaded across receivers (`plus` on `Collection`/`Map`/`Set`), so "any" is
+                // correct — `list + x` keeps the `Collection.plus` overload, while `MutableCollection.
+                // plusAssign` (receivers all `Mutable*`) has NONE applicable to a read-only `List`, so it
+                // is rejected and `list += x` falls through to `list = list.plus(x)`. Exactly kotlinc's
+                // overload resolution; no erased type makes the decision.
+                if let Ty::Obj(recv_internal, _) = &receiver {
+                    if self.cp.is_kotlin_collection(recv_internal) {
+                        let krs = self.cp.metadata_receiver_types(&c.owner, &c.name);
+                        let coll: Vec<&String> = krs
+                            .iter()
+                            .filter(|kr| self.cp.is_kotlin_collection(kr))
+                            .collect();
+                        if !coll.is_empty()
+                            && !coll
+                                .iter()
+                                .any(|kr| self.cp.kotlin_subtype(recv_internal, kr))
+                        {
+                            continue;
+                        }
+                    }
                 }
                 let (params, ret) = parse_method_desc(&c.descriptor);
                 // params[0] is the receiver (keyed by `recv_desc`); the rest are the call arguments.
@@ -133,6 +158,19 @@ impl JvmLibraries {
             });
         }
         None
+    }
+
+    /// If `owner.name`'s `@Metadata` return type is a Kotlin collection interface (`mutableListOf` →
+    /// `kotlin/collections/MutableList`), rebuild the logical `ret` with that class (keeping the element
+    /// type arguments recovered from the JVM signature). The JVM signature erased it to `java/util/List`,
+    /// dropping the read-only/mutable distinction; this restores it. Non-collection returns are unchanged.
+    fn meta_collection_ret(&self, owner: &str, name: &str, ret: Ty) -> Ty {
+        if let Some(meta) = self.cp.metadata_return_type(owner, name) {
+            if meta.starts_with("kotlin/collections/") {
+                return Ty::obj_args(&meta, ret.type_args());
+            }
+        }
+        ret
     }
 }
 
@@ -570,10 +608,16 @@ impl LibrarySet for JvmLibraries {
         // mapped types (`Comparable`, `Throwable`, `List`, …), not `.class` files. Classpath types
         // above take precedence (`or_insert`).
         for name in BUILTIN_MAPPED_NAMES {
-            if let Some(internal) = kotlin_builtin_to_jvm(name) {
-                class_names
-                    .entry(name.to_string())
-                    .or_insert_with(|| internal.to_string());
+            if let Some(internal) = kotlin_builtin_to_internal(name) {
+                if internal.starts_with("kotlin/collections/") {
+                    // FORCE the Kotlin collection type (read-only vs mutable) over any classpath
+                    // `java/util/List` — the front end must keep the distinction; emit erases it.
+                    class_names.insert(name.to_string(), internal.to_string());
+                } else {
+                    class_names
+                        .entry(name.to_string())
+                        .or_insert_with(|| internal.to_string());
+                }
             }
         }
         LibrarySeed {
@@ -1042,6 +1086,9 @@ impl LibrarySet for JvmLibraries {
                     gsig_to_ty(&rsig, &binds)
                 })
                 .unwrap_or(*ret);
+            // Restore the Kotlin read-only/mutable collection type from `@Metadata` (the JVM signature
+            // erased `mutableListOf`'s `MutableList<T>` to `java/util/List<T>`).
+            let ret_ty = self.meta_collection_ret(&c.owner, &c.name, ret_ty);
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
