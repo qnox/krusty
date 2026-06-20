@@ -396,6 +396,17 @@ pub struct IrFunction {
 #[derive(Clone, Debug)]
 pub struct IrClass {
     pub fq_name: String,
+    /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
+    /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
+    pub is_value: bool,
+    /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
+    /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
+    /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
+    pub type_param_bounds: Vec<(String, IrType)>,
+    /// Parallel to `fields`: the source type-parameter NAME a field was declared with (`val x: T` →
+    /// `Some("T")`), else `None` for a concrete type. Platform-neutral; lets the value-class pass pick the
+    /// CORRECT bound for a generic underlying (vs guessing), independent of erasure dropping the name.
+    pub field_type_params: Vec<Option<String>>,
     pub supertypes: Vec<IrType>,
     /// Instance fields `(name, type)`. The first `ctor_param_count` are the primary-constructor
     /// parameters (stored directly from args, in order); any after them are class-body properties
@@ -504,6 +515,13 @@ pub struct Bridge {
     pub erased_ret: IrType,
     pub concrete_params: Vec<IrType>,
     pub concrete_ret: IrType,
+    /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
+    /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
+    /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
+    pub target_name: Option<String>,
+    /// When set, the bridge boxes its (unboxed value-class) result with `<owner>.box-impl` before
+    /// returning — a value-class-returning override seen through a supertype hands back a boxed `X`.
+    pub box_ret: Option<String>,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.

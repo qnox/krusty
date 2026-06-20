@@ -2086,15 +2086,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                         c.diags.error(sc.span, "krusty: a secondary constructor must delegate to the primary (this(…))".to_string());
                     }
                 }
-                // `@JvmInline value class` needs kotlinc's unboxed `-impl`/`box-impl`/`unbox-impl`
-                // codegen + use-site name mangling; compiling it as a normal class miscompiles
-                // inline-class equality/identity (verified FAILs). Skip until that lands.
-                if cl.is_value {
-                    c.diags.error(
-                        cl.span,
-                        "krusty: value/inline classes are not supported".to_string(),
-                    );
-                }
+                // `@JvmInline value class` compiles UNBOXED (a value is its underlying type; `X.class`
+                // carries the static `-impl` members). The lowering handles construction + sole-property
+                // access; uses it can't represent unboxed yet (a value-class-typed local/param/field/
+                // return, boxing, equality) make `lower_file` bail so the file skips rather than
+                // miscompile. No blanket rejection here.
                 // An annotation with an array member needs content-based equals/hashCode
                 // (`Arrays.equals`/`Arrays.hashCode`) per the annotation contract — krusty's synthesized
                 // members use reference equality, so reject it rather than miscompile equality.
@@ -3177,6 +3173,30 @@ impl<'a> Checker<'a> {
         }
         let s = c.super_internal.clone()?;
         self.lookup_prop(&s, name)
+    }
+
+    /// Silent (non-erroring) assignability of each argument to a constructor's parameters — used to pick
+    /// between a same-arity primary and a secondary constructor (`Sc(Int)` vs `Sc(String)`).
+    fn ctor_args_match(&self, params: &[Ty], args: &[Ty]) -> bool {
+        params.len() == args.len()
+            && params.iter().zip(args).all(|(&p, &a)| {
+                p == a
+                    || p == Ty::Error
+                    || a == Ty::Error
+                    || a == Ty::Nothing
+                    || (a == Ty::Null && p.is_reference())
+                    || p == Ty::obj("kotlin/Any")
+                    || a == Ty::obj("kotlin/Any")
+                    || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_is_subtype(x, e))
+                    || (p == Ty::Long && matches!(a, Ty::Int | Ty::Byte | Ty::Short | Ty::Char))
+                    || (matches!(p, Ty::Byte | Ty::Short)
+                        && matches!(a, Ty::Int | Ty::Byte | Ty::Short))
+                    || (matches!(p, Ty::Float | Ty::Double)
+                        && matches!(
+                            a,
+                            Ty::Int | Ty::Long | Ty::Byte | Ty::Short | Ty::Char | Ty::Float
+                        ))
+            })
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
@@ -5606,6 +5626,28 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         } else {
+                            // Primary arity matches but the argument TYPES may not (a same-arity
+                            // secondary, e.g. `Sc(Int)` primary vs `Sc(String)` secondary) — prefer a
+                            // secondary whose parameter types accept the arguments.
+                            if got == ctor_params.len()
+                                && !self.ctor_args_match(&ctor_params, &arg_tys)
+                            {
+                                if let Some(sparams) = cls
+                                    .secondary_ctors
+                                    .iter()
+                                    .find(|sp| self.ctor_args_match(sp, &arg_tys))
+                                {
+                                    for (i, (p, a)) in sparams.iter().zip(&arg_tys).enumerate() {
+                                        self.expect_assignable(
+                                            *p,
+                                            *a,
+                                            self.span(args[i]),
+                                            "argument",
+                                        );
+                                    }
+                                    return self.ctor_result(call, &cls.internal);
+                                }
+                            }
                             for (i, (p, a)) in ctor_params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }

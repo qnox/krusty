@@ -53,7 +53,10 @@ pub fn compile_in_process(
         return None;
     }
     let facade = file_class_name(stem, file.package.as_deref());
-    let ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+        return None; // value-class shape not lowered — skip, don't miscompile
+    }
     let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp)?;
     if outputs.is_empty() {
         None

@@ -366,6 +366,9 @@ pub struct ClassDecl {
     pub name: String,
     /// Generic type-parameter names (`class C<T>`), erased to `Any`/`Object`.
     pub type_params: Vec<String>,
+    /// Declared non-`Any` upper bounds (`<T: String>` → `("T", String)`). A value class's underlying
+    /// type parameter erases to its bound (`value class S<T: String>(val x: T)` → `String`), like kotlinc.
+    pub type_param_bounds: Vec<(String, TypeRef)>,
     pub props: Vec<PropParam>,
     /// Member functions declared in the class body (instance methods). v0: no secondary ctors.
     pub methods: Vec<FunDecl>,

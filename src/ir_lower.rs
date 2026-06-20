@@ -125,6 +125,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 })
                 .collect();
             let fields: Vec<(String, Ty)> = ctor_fields.into_iter().chain(body_fields).collect();
+            // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
+            // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
+            // backing-field body props). Neutral metadata for the value-class pass's bound resolution.
+            let mut field_type_params: Vec<Option<String>> = c
+                .props
+                .iter()
+                .filter(|p| p.is_property)
+                .map(|p| {
+                    c.type_params
+                        .contains(&p.ty.name)
+                        .then(|| p.ty.name.clone())
+                })
+                .collect();
+            if inner_outer.is_some() {
+                field_type_params.insert(0, None);
+            }
+            field_type_params.extend(
+                c.body_props
+                    .iter()
+                    .filter(|p| is_backing_field_prop(p))
+                    .map(|_| None),
+            );
             let class_ty = IrType::Class {
                 fq_name: internal.clone(),
                 type_args: vec![],
@@ -177,10 +199,31 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
+                is_value: c.is_value,
+                type_param_bounds: c
+                    .type_param_bounds
+                    .iter()
+                    .map(|(n, tr)| {
+                        let bt = ty_to_ir(ty_of(file, tr));
+                        (n.clone(), if tr.nullable { mark_nullable(bt) } else { bt })
+                    })
+                    .collect(),
+                field_type_params,
                 supertypes: vec![],
                 fields: fields
                     .iter()
-                    .map(|(n, t)| (n.clone(), ty_to_ir(*t)))
+                    .map(|(n, t)| {
+                        let ir = ty_to_ir(*t);
+                        // A field carries its declared nullability into the IrType (`Ty` drops it). The
+                        // JVM value-class pass keys boxing + null-check elision on a value class's
+                        // underlying `?` (`X(val v: Int?)` → nullable `Integer`).
+                        let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable) {
+                            mark_nullable(ir)
+                        } else {
+                            ir
+                        };
+                        (n.clone(), ir)
+                    })
                     .collect(),
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
@@ -188,11 +231,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_args: inner_outer
                     .iter()
                     .map(|o| (ty_to_ir(Ty::obj(o)), true))
-                    .chain(
-                        c.props
-                            .iter()
-                            .map(|p| (ty_to_ir(ty_of(file, &p.ty)), p.is_property)),
-                    )
+                    .chain(c.props.iter().map(|p| {
+                        // Carry a declared `?` into the ctor-param IrType (like the field), so a nullable
+                        // value-class parameter erases to the boxed `X` consistently with its getter/field.
+                        let t = ty_to_ir(ty_of(file, &p.ty));
+                        let t = if p.ty.nullable { mark_nullable(t) } else { t };
+                        (t, p.is_property)
+                    }))
                     .collect(),
                 init_body: None,
                 methods: vec![],
@@ -346,7 +391,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 for (pi, (pname, is_var)) in field_props.iter().enumerate() {
                     let fidx = pi + field_offset;
                     let fty = fields[fidx].1;
-                    let fty_ir = ty_to_ir(fty);
+                    // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
+                    // bare `Ty` — so a nullable value-class property getter erases consistently with the
+                    // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
+                    let fty_ir = lo.ir.classes[id as usize].fields[fidx].1.clone();
                     let gname = getter_name(pname);
                     if !methods.contains_key(&gname) {
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
@@ -423,6 +471,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: comp_fq.clone(),
+                    is_value: false,
+                    type_param_bounds: vec![],
+                    field_type_params: vec![],
                     supertypes: vec![],
                     fields: vec![],
                     ctor_param_count: 0,
@@ -491,19 +542,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 lo.synth_data_members(&internal, id, ctor_param_count as usize);
             }
-            // A `@JvmInline value class X(val v: U)` carries kotlinc's unboxed-support members:
-            // `box-impl(U):X`, `unbox-impl():U`, `constructor-impl(U):U` (the normal path already
-            // emitted the `U` field, the `<init>(U)`, and the `getV()` getter).
-            if c.is_value {
-                if let Some((_, u)) = lo
-                    .syms
-                    .classes
-                    .get(&c.name)
-                    .and_then(|s| s.value_field.clone())
-                {
-                    lo.synth_value_members(&internal, id, u);
-                }
-            }
+            // A `@JvmInline value class` is emitted as a plain single-field class here (field, `<init>`,
+            // getter); the JVM `value_classes` pass synthesizes its unboxed-support members
+            // (`box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0`/`equals`/`hashCode`/`toString`).
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
             if !c.delegations.is_empty() {
@@ -544,13 +585,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.ext_fun_ids.insert((recv_desc, f.name.clone()), id);
             } else {
                 let sig = syms.funs.get(&f.name)?;
-                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let params: Vec<IrType> = sig
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let ir = ty_to_ir(*t);
+                        if f.params.get(i).is_some_and(|p| p.ty.nullable) {
+                            mark_nullable(ir)
+                        } else {
+                            ir
+                        }
+                    })
+                    .collect();
                 let ret = ty_to_ir(
                     info.fun_ret_overrides
                         .get(&f.name)
                         .copied()
                         .unwrap_or(sig.ret),
                 );
+                let ret = if f.ret.as_ref().is_some_and(|r| r.nullable) {
+                    mark_nullable(ret)
+                } else {
+                    ret
+                };
                 let param_checks = param_checks_for(f, &sig.params);
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
@@ -673,6 +731,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     erased_ret: br,
                                     concrete_params: op,
                                     concrete_ret: or,
+                                    target_name: None,
+                                    box_ret: None,
                                 });
                             }
                         }
@@ -746,6 +806,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                                 erased_ret: ty_to_ir(sty),
                                                 concrete_params: vec![],
                                                 concrete_ret: ty_to_ir(own_ty),
+                                                target_name: None,
+                                                box_ret: None,
                                             },
                                         );
                                     }
@@ -782,6 +844,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                         erased_ret: ir_,
                                         concrete_params: cp,
                                         concrete_ret: cr,
+                                        target_name: None,
+                                        box_ret: None,
                                     });
                                 }
                             }
@@ -812,6 +876,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                                 erased_ret: ir_,
                                                 concrete_params: cp,
                                                 concrete_ret: cr,
+                                                target_name: None,
+                                                box_ret: None,
                                             },
                                         );
                                     }
@@ -1094,8 +1160,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
-                // Secondary constructors (`constructor(p) : this(args) { body }`): each an extra
-                // `<init>(p)` delegating to the primary. Only `this(…)` delegation is supported.
+                // `<init>(p)` delegating to the primary. Only `this(…)` delegation is supported. For a
+                // value class the JVM value-class pass turns these lowered `IrSecondaryCtor`s into static
+                // `constructor-impl` overloads (and the call site records `ctor_params`, routing
+                // `Sc("x")` → `constructor-impl(String)`).
                 if !c.secondary_ctors.is_empty() {
                     let class_id = lo.classes[&internal].id;
                     let primary_param_tys: Vec<IrType> = {
@@ -1187,6 +1255,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sub_fq = format!("{internal}${entry_name}");
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: sub_fq.clone(),
+                            is_value: false,
+                            type_param_bounds: vec![],
+                            field_type_params: vec![],
                             supertypes: vec![],
                             fields: vec![],
                             ctor_param_count: 0,
@@ -2233,7 +2304,9 @@ impl<'a> Lower<'a> {
             args,
         })
     }
-    /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`).
+    /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`). A value-class
+    /// field reads here as its erased underlying; the JVM value-class pass boxes it at the reference
+    /// boundary (`Objects.hashCode`) so the value class's own `hashCode` runs.
     fn field_hash(&mut self, v: u32, t: Ty) -> u32 {
         match t {
             Ty::Int | Ty::Short | Ty::Byte | Ty::Char => v,
@@ -2284,98 +2357,6 @@ impl<'a> Lower<'a> {
         self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(cond), blk)],
         })
-    }
-
-    /// Register a synthesized `static` method on a class (e.g. a value class's `box-impl`): no `this`
-    /// receiver, value index 0 is the first parameter. Pushed onto the class's method list so the
-    /// emitter writes it (with `ACC_STATIC`); not name-resolved (the lowering calls it via `Static`).
-    fn add_synth_static_method(
-        &mut self,
-        internal: &str,
-        class_id: ClassId,
-        name: &str,
-        params: Vec<IrType>,
-        ret: Ty,
-        body: u32,
-    ) {
-        let fid = self.ir.add_fun(IrFunction {
-            name: name.to_string(),
-            params,
-            ret: ty_to_ir(ret),
-            body: Some(body),
-            is_static: true,
-            // `Some(owner)` keeps it OUT of the top-level facade (which emits dispatch-receiver-less
-            // functions); it is emitted as a `static` member of its class. `is_static` (not this field)
-            // is what suppresses the `this` slot.
-            dispatch_receiver: Some(internal.to_string()),
-            param_checks: Vec::new(),
-        });
-        self.ir.classes[class_id as usize].methods.push(fid);
-    }
-
-    /// Synthesize a `@JvmInline value class X(val v: U)`'s unboxed-support members: `unbox-impl(): U`
-    /// (instance — returns the field), `box-impl(U): X` (static — `new X(u)`), and `constructor-impl(U):
-    /// U` (static — returns its argument; the underlying-value-validating factory). The `U` field, the
-    /// `<init>(U)`, and the `getV()` getter come from the ordinary single-field class path.
-    fn synth_value_members(&mut self, internal: &str, class_id: ClassId, underlying: Ty) {
-        let u_ir = ty_to_ir(underlying);
-        // unbox-impl(): U  —  `return this.field0`
-        {
-            let get = self.this_field(class_id, 0);
-            let ret = self.ir.add_expr(IrExpr::Return(Some(get)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            self.add_synth_method(
-                internal,
-                class_id,
-                "unbox-impl",
-                vec![],
-                underlying,
-                body,
-                false,
-            );
-        }
-        // box-impl(U): X  —  `return new X(u)`
-        {
-            let arg = self.ir.add_expr(IrExpr::GetValue(0));
-            let new = self.ir.add_expr(IrExpr::New {
-                class: class_id,
-                args: vec![arg],
-                ctor_params: Some(vec![u_ir.clone()]),
-            });
-            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            self.add_synth_static_method(
-                internal,
-                class_id,
-                "box-impl",
-                vec![u_ir.clone()],
-                Ty::obj(internal),
-                body,
-            );
-        }
-        // constructor-impl(U): U  —  `return u`  (the unboxed underlying value)
-        {
-            let arg = self.ir.add_expr(IrExpr::GetValue(0));
-            let ret = self.ir.add_expr(IrExpr::Return(Some(arg)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            self.add_synth_static_method(
-                internal,
-                class_id,
-                "constructor-impl",
-                vec![u_ir],
-                underlying,
-                body,
-            );
-        }
     }
 
     /// Synthesize a `data class`'s `componentN`/`toString`/`hashCode`/`equals` as IR methods over the
@@ -2848,6 +2829,9 @@ impl<'a> Lower<'a> {
         };
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
+            is_value: false,
+            type_param_bounds: vec![],
+            field_type_params: vec![],
             supertypes: vec![],
             fields: vec![],
             ctor_param_count: 0,
@@ -3758,9 +3742,31 @@ impl<'a> Lower<'a> {
                 let it = self.lower_arg(init, &ty_to_ir(kty))?;
                 let v = self.fresh_value();
                 self.scope.push((name.clone(), v, kty));
+                // A nullable-declared local (`val v: X? = null`) carries its nullability into the IrType —
+                // `Ty` drops it, but the JVM value-class pass keys boxing (`X(null)` vs `null`) on it.
+                let mut var_ty = ty_to_ir(kty);
+                // The local is nullable if explicitly declared `?`, OR (when inferred) its initializer is a
+                // call to a function with a nullable return — `Ty` drops nullability, so a `val x = zap()`
+                // where `zap(): ZN2?` would otherwise type `x` non-null and the JVM value-class pass would
+                // treat a boxed `ZN2?` as unboxed.
+                let nullable = match ty.as_ref() {
+                    Some(r) => r.nullable,
+                    None => {
+                        if let ast::Expr::Call { callee, .. } = self.afile.expr(init) {
+                            matches!(self.afile.expr(*callee), ast::Expr::Name(n)
+                                if self.afile.decls.iter().any(|&d| matches!(self.afile.decl(d),
+                                    ast::Decl::Fun(f) if &f.name == n && f.ret.as_ref().is_some_and(|rr| rr.nullable))))
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if nullable {
+                    var_ty = mark_nullable(var_ty);
+                }
                 Some(self.ir.add_expr(IrExpr::Variable {
                     index: v,
-                    ty: ty_to_ir(kty),
+                    ty: var_ty,
                     init: Some(it),
                 }))
             }
@@ -3786,12 +3792,35 @@ impl<'a> Lower<'a> {
                         value: val,
                     }));
                 }
+                // A backing field of the enclosing class (`this.<field>`) shadows a same-named top-level
+                // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
+                // class member first). Requires `this` in scope (a class member, not a top-level function).
+                let own_field = self.lookup("this").and_then(|(this_v, _)| {
+                    self.cur_class
+                        .as_ref()
+                        .and_then(|c| self.classes.get(c))
+                        .and_then(|ci| {
+                            ci.fields
+                                .iter()
+                                .position(|(fn_, _)| *fn_ == name)
+                                .map(|i| (this_v, ci.id, i as u32, ty_to_ir(ci.fields[i].1)))
+                        })
+                });
                 if let Some((v, sty)) = self.lookup(&name) {
                     // Coerce to the slot's declared type — a generic-erased `Object` value assigned to a
                     // typed `var` gets the `checkcast` kotlinc inserts (else the slot frame is
                     // inconsistent: `String?` at init vs `Object` after the assignment).
                     let val = self.lower_arg(value, &ty_to_ir(sty))?;
                     Some(self.ir.add_expr(IrExpr::SetValue { var: v, value: val }))
+                } else if let Some((this_v, class, idx, field_ty)) = own_field {
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let val = self.lower_arg(value, &field_ty)?;
+                    Some(self.ir.add_expr(IrExpr::SetField {
+                        receiver: recv,
+                        class,
+                        index: idx,
+                        value: val,
+                    }))
                 } else if let Some((idx, ty)) = self.statics.get(&name).cloned() {
                     let val = self.lower_arg(value, &ty_to_ir(ty))?;
                     Some(self.ir.add_expr(IrExpr::SetStatic {
@@ -3799,31 +3828,11 @@ impl<'a> Lower<'a> {
                         value: val,
                     }))
                 } else {
-                    // Unqualified write to a `var` member of `this`. Inside the owning class it is the
-                    // backing field (`this.<field> = …`, a direct `putfield`); when `this` is an external
-                    // receiver (an inlined `apply`/`run` whose backing field is private), it must go
-                    // through the property setter `setX(v)`.
+                    // `this` is an external receiver (an inlined `apply`/`run` whose backing field is
+                    // private) — write through the property setter `setX(v)`.
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    let own_field = self
-                        .cur_class
-                        .as_ref()
-                        .and_then(|c| self.classes.get(c))
-                        .and_then(|ci| {
-                            ci.fields
-                                .iter()
-                                .position(|(fn_, _)| *fn_ == name)
-                                .map(|i| (ci.id, i as u32, ty_to_ir(ci.fields[i].1)))
-                        });
-                    if let Some((class, idx, field_ty)) = own_field {
-                        let val = self.lower_arg(value, &field_ty)?;
-                        Some(self.ir.add_expr(IrExpr::SetField {
-                            receiver: recv,
-                            class,
-                            index: idx,
-                            value: val,
-                        }))
-                    } else {
+                    {
                         let internal = this_ty.obj_internal()?.to_string();
                         let (sclass, sindex, sfid, _) =
                             self.resolve_method(&internal, &setter_name(&name))?;
@@ -4778,9 +4787,12 @@ impl<'a> Lower<'a> {
                 };
                 let rv = self.expr(receiver)?;
                 let v = self.fresh_value();
+                // The `?.` receiver is NULLABLE by construction — carry that into the temp's IrType (`Ty`
+                // drops it). For a value-class receiver this keeps it BOXED (`MyC?` → `LMyC;`), so storing
+                // the boxed `as?`/nullable value doesn't mismatch an unboxed-`int` slot.
                 let var = self.ir.add_expr(IrExpr::Variable {
                     index: v,
-                    ty: ty_to_ir(rty),
+                    ty: mark_nullable(ty_to_ir(rty)),
                     init: Some(rv),
                 });
                 let get1 = self.ir.add_expr(IrExpr::GetValue(v));
@@ -4913,6 +4925,20 @@ impl<'a> Lower<'a> {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: member,
                         type_operand: ty_to_ir(result_ty),
+                    })
+                } else if result_ty.obj_internal().is_some_and(|i| {
+                    self.syms
+                        .classes
+                        .get(i.rsplit('/').next().unwrap_or(i))
+                        .is_some_and(|c| c.value_field.is_some())
+                }) {
+                    // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
+                    // underlying, but the `when` merges it with a `null` branch — coerce to the NULLABLE
+                    // value class so the JVM value-class pass `box-impl`s it (both branches then references).
+                    self.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: member,
+                        type_operand: mark_nullable(ty_to_ir(result_ty)),
                     })
                 } else {
                     member
@@ -7205,9 +7231,31 @@ impl<'a> Lower<'a> {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        // A secondary constructor whose parameter types MATCH the arguments is preferred
+                        // over a lenient primary match (`Sc("x")` is the `String` secondary, not the
+                        // `Int` primary coerced). Compare the argument IR types to each secondary's.
+                        let arg_irs: Vec<IrType> =
+                            args.iter().map(|a| ty_to_ir(self.info.ty(*a))).collect();
+                        let typed_secondary = self.ir.classes[class as usize]
+                            .secondary_ctors
+                            .clone()
+                            .into_iter()
+                            .find(|sc| sc.params == arg_irs);
                         // The primary constructor (exact/defaulted positional match), else a secondary
                         // constructor selected by argument count.
-                        if let Some(a) = self.lower_args_defaulted(e, &meta, &args, &field_tys) {
+                        if let Some(sc) = typed_secondary {
+                            let mut a = Vec::new();
+                            for (arg, pt) in args.iter().zip(&sc.params) {
+                                a.push(self.lower_arg(*arg, pt)?);
+                            }
+                            self.ir.add_expr(IrExpr::New {
+                                class,
+                                args: a,
+                                ctor_params: Some(sc.params),
+                            })
+                        } else if let Some(a) =
+                            self.lower_args_defaulted(e, &meta, &args, &field_tys)
+                        {
                             self.ir.add_expr(IrExpr::New {
                                 class,
                                 args: a,
@@ -7879,6 +7927,15 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: vec![],
                         })
+                    } else if name == "hashCode" && args.is_empty() {
+                        // `x.hashCode()` → the `Any.hashCode` virtual (dispatches to any override),
+                        // not a by-index member — so it needs no class-side method table entry.
+                        let recv = self.expr(receiver)?;
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::External("kotlin/Any.hashCode".to_string()),
+                            dispatch_receiver: Some(recv),
+                            args: vec![],
+                        })
                     } else if let Some((internal, desc, is_iface, mparams, mret)) = {
                         // A classpath *instance* method `recv.name(args)` → `invokevirtual`/
                         // `invokeinterface recvType.name:descriptor` (descriptor from the classpath; no
@@ -8383,7 +8440,23 @@ fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     }
 }
 
-/// Map a krusty `Ty` to a backend-agnostic `IrType` (a Kotlin FqName).
+/// Force an `IrType::Class` to be nullable — carry a declared `?` into the IrType (`Ty` drops it). The
+/// JVM value-class pass keys unboxed-vs-boxed representation on a value class's underlying nullability.
+fn mark_nullable(t: IrType) -> IrType {
+    if let IrType::Class {
+        fq_name, type_args, ..
+    } = t
+    {
+        IrType::Class {
+            fq_name,
+            type_args,
+            nullable: true,
+        }
+    } else {
+        t
+    }
+}
+
 pub(crate) fn ty_to_ir(t: Ty) -> IrType {
     let fq = match t {
         Ty::Int => "kotlin/Int",
@@ -8506,6 +8579,8 @@ fn param_checks_for(f: &ast::FunDecl, param_tys: &[Ty]) -> Vec<Option<String>> {
         .zip(param_tys)
         .map(|(p, ty)| {
             let is_type_param = f.type_params.contains(&p.ty.name);
+            // A value-class parameter is erased to its underlying type; the null-check applies to that
+            // (a primitive underlying gets none — the param is a primitive local, not a reference).
             if !p.ty.nullable && !is_type_param && ty.is_reference() {
                 Some(p.name.clone())
             } else {

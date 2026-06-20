@@ -801,6 +801,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             props,
             methods,
             companion_methods: Vec::new(),
@@ -916,15 +917,17 @@ impl<'a> Parser<'a> {
                 is_private: false,
             };
         }
-        let (type_params, non_null_type_params, reified_type_params) = if self.at(TokenKind::Lt) {
-            self.parse_type_params()
-        } else {
-            (
-                Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-            )
-        };
+        let (type_params, non_null_type_params, reified_type_params, _type_param_bounds) =
+            if self.at(TokenKind::Lt) {
+                self.parse_type_params()
+            } else {
+                (
+                    Vec::new(),
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::new(),
+                    Vec::new(),
+                )
+            };
         // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
         // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
         let first_name = if self.at(TokenKind::Ident) {
@@ -1080,13 +1083,14 @@ impl<'a> Parser<'a> {
             self.diags.error(self.tok().span, "expected class name");
             "<error>".to_string()
         };
-        let (type_params, _, _) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, type_param_bounds) = if self.at(TokenKind::Lt) {
             self.parse_type_params()
         } else {
             (
                 Vec::new(),
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
+                Vec::new(),
             )
         };
         let mut props = Vec::new();
@@ -1313,6 +1317,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             type_params,
+            type_param_bounds,
             props,
             methods,
             companion_methods,
@@ -1434,13 +1439,14 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (type_params, _, _) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, _) = if self.at(TokenKind::Lt) {
             self.parse_type_params()
         } else {
             (
                 Vec::new(),
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
+                Vec::new(),
             )
         };
         let (supertypes, _base, _base_args, _) = self.parse_supertypes();
@@ -1504,6 +1510,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             type_params,
+            type_param_bounds: Vec::new(),
             props: Vec::new(),
             methods,
             companion_methods: Vec::new(),
@@ -1621,6 +1628,7 @@ impl<'a> Parser<'a> {
         let synth = ClassDecl {
             name: name.clone(),
             type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             props: Vec::new(),
             methods,
             companion_methods: Vec::new(),
@@ -1739,6 +1747,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             props: Vec::new(),
             methods,
             companion_methods: Vec::new(),
@@ -1970,18 +1979,21 @@ impl<'a> Parser<'a> {
     /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
     /// the `: Any`-bounded (non-null) names, and the `reified` names (which an `inline` function may
     /// use concretely — `is T`, `as T`, `T::class` — and which codegen specializes per call site).
+    #[allow(clippy::type_complexity)]
     fn parse_type_params(
         &mut self,
     ) -> (
         Vec<String>,
         std::collections::HashSet<String>,
         std::collections::HashSet<String>,
+        Vec<(String, TypeRef)>,
     ) {
         let mut names = Vec::new();
         let mut non_null = std::collections::HashSet::new();
         let mut reified = std::collections::HashSet::new();
+        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         if !self.eat(TokenKind::Lt) {
-            return (names, non_null, reified);
+            return (names, non_null, reified, bounds);
         }
         loop {
             self.skip_newlines();
@@ -2024,13 +2036,20 @@ impl<'a> Parser<'a> {
                             .to_string(),
                     );
                 }
+                // Record an upper bound so a value class's underlying type parameter can take its bound's
+                // type/nullability (`value class S<T: String>` → `String`; `<T: String?>`/`<T: Any?>` →
+                // null-capable). A NON-NULL `Any` bound carries nothing useful (the erasure is already
+                // `Object`); a NULLABLE `Any?` bound DOES (it makes the value class null-capable).
+                if !tname.is_empty() && (bound.name != "Any" || bound.nullable) {
+                    bounds.push((tname.clone(), bound));
+                }
             }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
         self.expect(TokenKind::Gt, "'>'");
-        (names, non_null, reified)
+        (names, non_null, reified, bounds)
     }
 
     // ---- statements ----
