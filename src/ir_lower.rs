@@ -2650,6 +2650,53 @@ impl<'a> Lower<'a> {
             );
         }
 
+        // copy(f1, f2, …): `return P(f1, f2, …)`. Emitted BEFORE toString/hashCode/equals to match
+        // kotlinc's data-class member order (componentN, copy, copy$default, toString, hashCode, equals).
+        {
+            let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
+            let args: Vec<u32> = (0..fields.len())
+                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                .collect();
+            let new = self.ir.add_expr(IrExpr::New {
+                class: class_id,
+                args,
+                ctor_params: None,
+            });
+            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
+            let body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret],
+                value: None,
+            });
+            if let Some(copy_fid) = self.add_synth_method(
+                internal,
+                class_id,
+                "copy",
+                params,
+                Ty::obj(internal),
+                body,
+                true,
+            ) {
+                // Each `copy` parameter defaults to the corresponding property of the receiver (the JVM
+                // backend realizes this as `copy$default`). The mask is one `int` (≤31 params).
+                if fields.len() <= 31 {
+                    let defaults: Vec<Option<u32>> = (0..fields.len())
+                        .map(|i| {
+                            let this = self.ir.add_expr(IrExpr::GetValue(0));
+                            Some(self.ir.add_expr(IrExpr::GetField {
+                                receiver: this,
+                                class: class_id,
+                                index: i as u32,
+                            }))
+                        })
+                        .collect();
+                    self.ir.fn_param_defaults.insert(copy_fid, defaults);
+                    self.ir
+                        .fn_param_names
+                        .insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
+                }
+            }
+        }
+
         // toString(): `"Simple(f1=" + f1 + ", f2=" + f2 + ")"`.
         {
             let simple = internal
@@ -2787,56 +2834,6 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             );
-        }
-
-        // copy(f1, f2, …): `return P(f1, f2, …)`. (A `copy` call with named/omitted arguments — the
-        // common form — still needs the `$default` mechanism; this enables the full-positional call.)
-        {
-            let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
-            let args: Vec<u32> = (0..fields.len())
-                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
-                .collect();
-            let new = self.ir.add_expr(IrExpr::New {
-                class: class_id,
-                args,
-                ctor_params: None,
-            });
-            let ret = self.ir.add_expr(IrExpr::Return(Some(new)));
-            let body = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            if let Some(copy_fid) = self.add_synth_method(
-                internal,
-                class_id,
-                "copy",
-                params,
-                Ty::obj(internal),
-                body,
-                true,
-            ) {
-                // Each `copy` parameter defaults to the corresponding property of the receiver — the
-                // backend-agnostic meaning. (The JVM backend realizes this as `copy$default`.) The
-                // `$default` mask is one `int`, so it covers ≤31 parameters; a wider data class uses
-                // copy() positionally only (the multi-mask form isn't modeled).
-                if fields.len() <= 31 {
-                    let defaults: Vec<Option<u32>> = (0..fields.len())
-                        .map(|i| {
-                            let this = self.ir.add_expr(IrExpr::GetValue(0));
-                            Some(self.ir.add_expr(IrExpr::GetField {
-                                receiver: this,
-                                class: class_id,
-                                index: i as u32,
-                            }))
-                        })
-                        .collect();
-                    self.ir.fn_param_defaults.insert(copy_fid, defaults);
-                    // `copy`'s parameters are named after the properties — used to map named args.
-                    self.ir
-                        .fn_param_names
-                        .insert(copy_fid, fields.iter().map(|(n, _)| n.clone()).collect());
-                }
-            }
         }
     }
 

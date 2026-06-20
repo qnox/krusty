@@ -233,6 +233,31 @@ fn data_class_tostring_uses_single_stringbuilder() {
     );
 }
 
+#[test]
+fn data_class_member_order_matches_kotlin() {
+    // kotlinc emits data-class members in the order: componentN, copy, copy$default, toString, hashCode,
+    // equals. krusty must match (copy before toString), not append copy last.
+    let Some((dir, jh)) = krusty_compile(
+        "dcorder",
+        "data class P(val x: Int, val y: String)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let out = Command::new(format!("{jh}/bin/javap"))
+        .arg("-p")
+        .arg(dir.join("P.class"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pos = |needle: &str| text.find(needle);
+    let (c2, copy, ts) = (pos("component2"), pos(" copy("), pos("toString("));
+    assert!(
+        c2 < copy && copy < ts,
+        "data-class member order must be componentN, copy, …, toString:\n{text}"
+    );
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]
