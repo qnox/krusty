@@ -2572,6 +2572,16 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 409 — data-class `toString` → single `StringBuilder` (bytecode parity)  ✅
+- The synthesized `data class` `toString` chained `String.plus` (one `StringBuilder` per `+`); kotlinc
+  emits ONE. Rebuilt it as a single `IrExpr::StringConcat` (the phase-401 node): the class name + first
+  field name merge into one `"P(x="` constant, then field values, `", name="` separators, and `")"` (a
+  single char → `append(C)`). Verified vs kotlinc: `P.toString` now ONE StringBuilder, `ldc "P(x="`,
+  `append(I)`, `append(", y=")`, `append(C)`. Removed the now-unused `str_plus` helper. Box gate 1086 OK,
+  0 FAIL (runtime-identical). TDD: `bytecode_parity_e2e::data_class_tostring_uses_single_stringbuilder`.
+- (A separate data-class parity gap remains: member *emission order* — krusty emits `copy`/`copy$default`
+  in a different order than kotlinc; a future ordering pass.)
+
 ### Phase 408 — multifile: cross-file class method calls + property writes  ✅
 - Completes cross-file class *use*: an instance method call (`b.m(args)`) and a `var` property write
   (`b.tag = v`) on a class declared in ANOTHER file now lower to `CrossFileVirtual` (`invokevirtual`
