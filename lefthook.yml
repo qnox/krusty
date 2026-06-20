@@ -14,11 +14,22 @@
 
 pre-commit:
   commands:
-    lint:
-      run: just lint
+    # Auto-format only the staged Rust files (not the whole tree), then re-stage them so the commit
+    # is always rustfmt-clean — no "fix it and commit again" round-trip. `stage_fixed` re-adds any
+    # file rustfmt rewrote.
+    fmt:
+      glob: "*.rs"
+      run: rustfmt --edition 2021 {staged_files}
+      stage_fixed: true
+    # clippy stays a check (whole-crate; can't be scoped to single files reliably).
+    clippy:
+      run: just clippy-baseline-check
 
 pre-push:
   commands:
+    # Whole-tree backstop: `just lint` (fmt-check + clippy) re-runs `cargo fmt --all --check`, which
+    # catches drift the per-file pre-commit could miss — e.g. a commit replayed by `git rebase`
+    # (pre-commit doesn't fire on those) — before code leaves the machine.
     lint:
       priority: 1
       run: just lint
