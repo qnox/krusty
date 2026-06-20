@@ -2572,6 +2572,13 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 399 — float/double compare `dcmpl`/`fcmpl` for `>`/`>=` (bytecode parity + NaN)  ✅
+- krusty used `dcmpg`/`fcmpg` for ALL float/double comparisons; kotlinc uses the `*l` variant for `>`
+  and `>=` (NaN → -1) and the `*g` variant for `<`/`<=` (NaN → +1), so a NaN operand makes the
+  comparison false either way. Added `dcmpl`/`fcmpl` to `CodeBuilder`; both `emit_compare` and the fused
+  `emit_compare_branch` now pick `*l` for `Gt`/`Ge`. Verified `a > b` → `dcmpl;ifle` (kotlinc's exact
+  shape). Also a NaN-comparison *correctness* fix. Box gate 1076 OK, 0 FAIL.
+
 ### Phase 398 — top-level property field modifiers + accessors (bytecode parity)  ✅
 - Closed parity divergence #2. krusty emitted a top-level `val`/`var` as a bare `public static` field
   with no accessor; kotlinc emits `private static final` (val) / `private static` (var) **plus** a
