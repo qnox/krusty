@@ -3104,6 +3104,42 @@ impl<'a> Emitter<'a> {
                 return;
             }
         }
+        // Fuse `x is T` / `x !is T` (a reference target) into `instanceof; if{ne,eq}` — no 0/1 boolean is
+        // materialized (kotlinc's shape, e.g. a data class `equals`' `instanceof; ifne <ok>`).
+        let inst_fuse = if let IrExpr::TypeOp {
+            op: to,
+            arg,
+            type_operand,
+        } = self.ir.expr(cond)
+        {
+            if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) {
+                let jvm_ty = ir_ty_to_jvm(type_operand);
+                (!jvm_ty.is_primitive()).then(|| (*to, *arg, ref_internal(jvm_ty)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((to, arg, internal)) = inst_fuse {
+            self.emit_value(arg, code);
+            let ci = self.cw.class_ref(&internal);
+            code.instance_of(ci);
+            self.frame(target, vec![], code);
+            // Stack holds 1 iff `arg instanceof T`. The condition is true on `instanceof` for `InstanceOf`
+            // and on `!instanceof` for `NotInstanceOf`; jump when the condition equals `jump_when_true`.
+            let jump_on_instance = if matches!(to, IrTypeOp::InstanceOf) {
+                jump_when_true
+            } else {
+                !jump_when_true
+            };
+            if jump_on_instance {
+                code.ifne(target);
+            } else {
+                code.ifeq(target);
+            }
+            return;
+        }
         self.emit_value(cond, code);
         self.frame(target, vec![], code);
         if jump_when_true {

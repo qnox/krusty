@@ -2636,7 +2636,11 @@ impl<'a> Lower<'a> {
     }
     /// `if (cond) return false` — a no-`else` statement-`when` whose only branch diverges.
     fn guard_return_false(&mut self, cond: u32) -> u32 {
-        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        self.guard_return_bool(cond, false)
+    }
+    /// `if (cond) return <b>` — a no-`else` statement-`when` whose only branch diverges.
+    fn guard_return_bool(&mut self, cond: u32, b: bool) -> u32 {
+        let f = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)));
         let ret = self.ir.add_expr(IrExpr::Return(Some(f)));
         let blk = self.ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
@@ -2849,10 +2853,28 @@ impl<'a> Lower<'a> {
             }
         }
 
-        // equals(other): `if (other !is T) return false; if (f1 != o.f1) return false; …; return true`.
+        // equals(other), matching kotlinc's shape exactly:
+        //   if (this === other) return true
+        //   if (other !is T) return false
+        //   val o = other as T            // cast ONCE into a local, then reuse
+        //   if (this.f1 != o.f1) return false; …
+        //   return true
         {
             let class_ty = ty_to_ir(Ty::obj(internal));
+            // The cast result lives in the first local slot after `this` (0) and `other` (1).
+            const OV: u32 = 2;
             let mut stmts = Vec::new();
+            // `this === other` referential-identity fast-path.
+            let this0 = self.ir.add_expr(IrExpr::GetValue(0));
+            let other0 = self.ir.add_expr(IrExpr::GetValue(1));
+            let ident = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::RefEq,
+                lhs: this0,
+                rhs: other0,
+            });
+            let id_guard = self.guard_return_bool(ident, true);
+            stmts.push(id_guard);
+            // `other !is T` → return false.
             let other = self.ir.add_expr(IrExpr::GetValue(1));
             let not_inst = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::NotInstanceOf,
@@ -2861,16 +2883,23 @@ impl<'a> Lower<'a> {
             });
             let g = self.guard_return_false(not_inst);
             stmts.push(g);
+            // `val o = other as T` — one checkcast, stored to the local.
+            let other_v = self.ir.add_expr(IrExpr::GetValue(1));
+            let ocast = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: other_v,
+                type_operand: class_ty.clone(),
+            });
+            stmts.push(self.ir.add_expr(IrExpr::Variable {
+                index: OV,
+                ty: class_ty.clone(),
+                init: Some(ocast),
+            }));
             for (i, (_, t)) in fields.iter().enumerate() {
                 let af = self.this_field(class_id, i as u32);
-                let other_v = self.ir.add_expr(IrExpr::GetValue(1));
-                let ocast = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: other_v,
-                    type_operand: class_ty.clone(),
-                });
+                let o_local = self.ir.add_expr(IrExpr::GetValue(OV));
                 let bf = self.ir.add_expr(IrExpr::GetField {
-                    receiver: ocast,
+                    receiver: o_local,
                     class: class_id,
                     index: i as u32,
                 });

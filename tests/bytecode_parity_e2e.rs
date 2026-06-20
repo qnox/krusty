@@ -475,3 +475,41 @@ fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
         "all-primitive data-class hashCode must be byte-identical to kotlinc"
     );
 }
+
+/// A data class `equals` must be byte-identical to kotlinc: the `this === other` identity fast-path, the
+/// `instanceof; ifne` guard (no materialized boolean), a single `checkcast` into a local, then per-field
+/// `Intrinsics.areEqual` / `if_icmp` compares.
+#[test]
+fn data_class_equals_is_byte_identical_to_kotlinc() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
+        return;
+    };
+    let src = "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n";
+    let Some((dir, jh)) = krusty_compile("dceq", src) else {
+        return;
+    };
+    let kdir = dir.join("kref");
+    fs::create_dir_all(&kdir).unwrap();
+    let cc = Command::new(&kotlinc)
+        .arg(dir.join("B.kt"))
+        .args(["-d", kdir.to_str().unwrap()])
+        .env("JAVA_HOME", &jh)
+        .output()
+        .unwrap();
+    if !cc.status.success() {
+        eprintln!("skip (kotlinc failed): {}", String::from_utf8_lossy(&cc.stderr));
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    let slice = |full: &str| -> String {
+        let s = full.find("boolean equals").expect("equals method");
+        let rest = &full[s..];
+        let end = rest[1..].find("\n\n").map(|p| p + 1).unwrap_or(rest.len());
+        normalize(&rest[..end])
+    };
+    let kr = slice(&javap(&jh, &dir.join("D.class")));
+    let kc = slice(&javap(&jh, &kdir.join("D.class")));
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(kr, kc, "data-class equals must be byte-identical to kotlinc");
+}
