@@ -122,6 +122,12 @@ pub struct SymbolTable {
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
     pub class_names: HashMap<String, String>,
+    /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
+    /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
+    /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
+    /// function defined in ANOTHER file as a cross-facade `invokestatic` (`Callee::CrossFile`) instead
+    /// of bailing. A function defined in the file being lowered is resolved locally first.
+    pub fn_facades: HashMap<String, String>,
 }
 
 impl Default for SymbolTable {
@@ -137,6 +143,7 @@ impl Default for SymbolTable {
             ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
             class_names: HashMap::new(),
+            fn_facades: HashMap::new(),
         }
     }
 }

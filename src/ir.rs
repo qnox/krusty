@@ -55,6 +55,16 @@ pub type ClassId = u32;
 pub enum Callee {
     Local(FunId),
     External(String),
+    /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
+    /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `IrType`s
+    /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
+    /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
+    CrossFile {
+        facade: String,
+        name: String,
+        params: Vec<IrType>,
+        ret: IrType,
+    },
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
