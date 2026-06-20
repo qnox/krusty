@@ -2572,6 +2572,18 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 397 — comparison→branch fusion (bytecode parity)  ✅
+- Closed parity divergence #1 (the biggest lever). krusty *materialized* a 0/1 boolean for every
+  comparison and tested it with `ifeq`/`ifne` (`iload;iload;if_icmplt L;iconst_0;goto;iconst_1;ifeq`);
+  kotlinc fuses the comparison into the branch. New `emit_cond_branch`/`emit_compare_branch` in
+  `ir_emit` emit a single inverted-polarity jump (`if_icmpge`/`ifnull`/`if_acmpeq`/`lcmp;ifge`/
+  `areEqual;ifeq`) instead. Wired into every conditional-branch site: `While` pre-test, `do…while`
+  post-test, and each `when`/`if` branch condition. Runtime-identical → box gate stays 0 FAIL.
+- **Parity: ~9.5% → ~13.6%** normalized-byte-identical (measured by `bytediff`, samples differ in size
+  but the loop/if `if_icmp*` shape now matches kotlinc exactly — verified on `for (i in 0 until 4)`).
+- Remaining parity backlog: top-level `val`/`var` field modifiers + getter routing; annotation
+  instances as interfaces; float compare `dcmpg`/`dcmpl` NaN-polarity selection (krusty always `dcmpg`).
+
 ### Phase 396 — bytecode-parity instrument + baseline  ✅
 - `src/bin/bytediff.rs`: normalized `javap -c -p` diff of krusty vs real kotlinc per class (strips
   source banner, bytecode offsets, constant-pool indices; keeps signatures + instruction mnemonics +
