@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 400 — `iinc` + compare-to-zero (bytecode parity)  ✅
+- Two pervasive loop/branch codegen fixes found via `bytediff`:
+  - **`iinc`**: `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k` now
+    compiles to `iinc slot, k` (kotlinc's form) instead of `iload;iconst;iadd;istore`. Every counting loop.
+  - **compare-to-zero**: a comparison with the integer literal `0` (`x != 0`, `x < 0`, …) uses the
+    single-operand `ifeq`/`iflt`/… branch (kotlinc's form) instead of `iconst_0;if_icmp*`. `0 <op> x` is
+    normalized via `swap_cmp`. Ubiquitous (loop bounds, guards).
+- Together these make a whole class of loops byte-identical: e.g. `forEachIntArray.kt` now matches
+  kotlinc's `box()` instruction-for-instruction (verified by normalized `javap` diff). Box gate 1076 OK,
+  0 FAIL. (Aggregate `bytediff` % rising; the 8 array-foreach classes in the 60-file sample flip.)
+
 ### Drop-in finding — Kotlin `@Metadata` not emitted (Kotlin↔Kotlin interop gap)
 - Phase 398 made top-level properties **Java-consumable** (a real interop milestone — verified: `javac`
   compiles + links against krusty's `getX`/`setX`). But a *Kotlin* consumer (real kotlinc) importing a
