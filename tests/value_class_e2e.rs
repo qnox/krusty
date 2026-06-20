@@ -31,7 +31,9 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     let syms = collect_signatures(&files, &mut d2);
     let info = check_file(&files[0], &syms, &mut d2);
 
-    let ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
+    let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
+    // The value-class `-impl` members are synthesized by the JVM pass (not `ir_lower`).
+    assert!(krusty::jvm::value_classes::lower_value_classes(&mut ir));
     let facade = file_class_name("S", None);
     let cp = Classpath::new(vec![]);
     let classes = emit_all(&ir, &facade, &cp).expect("emit");

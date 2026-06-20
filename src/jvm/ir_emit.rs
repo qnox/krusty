@@ -686,9 +686,19 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             }
         }
         let argw: i32 = cp.iter().map(|t| slot_words(*t) as i32).sum();
-        let m = cw.methodref(&c.fq_name, &b.name, &method_descriptor(&cp, cr));
+        // A value-class boxing bridge calls the mangled override (`target_name`) which returns the
+        // erased underlying, then boxes the result back to `X` with `X.box-impl`.
+        let target = b.target_name.as_deref().unwrap_or(&b.name);
+        let m = cw.methodref(&c.fq_name, target, &method_descriptor(&cp, cr));
         code.invokevirtual(m, argw, slot_words(cr) as i32);
-        if cr != er {
+        if let Some(owner) = &b.box_ret {
+            let bi = cw.methodref(
+                owner,
+                "box-impl",
+                &format!("({}){}", cr.descriptor(), Ty::obj(owner).descriptor()),
+            );
+            code.invokestatic(bi, slot_words(cr) as i32, 1);
+        } else if cr != er {
             if er.is_reference() && cr.is_primitive() {
                 box_prim_free(cw, &mut code, cr);
             } else if er.is_primitive() && cr.is_primitive() {
@@ -2365,6 +2375,37 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref("java/lang/String", "valueOf", desc);
                 code.invokestatic(m, slot_words(ty) as i32, 1);
             }
+            "kotlin/Any.hashCode" => {
+                let r = recv.unwrap();
+                let ty = self.value_ty(r);
+                self.emit_value(r, code);
+                match ty {
+                    // A primitive hashes via its wrapper's static `hashCode`.
+                    Ty::Int | Ty::Short | Ty::Byte | Ty::Char => {}
+                    Ty::Long => {
+                        let m = self.cw.methodref("java/lang/Long", "hashCode", "(J)I");
+                        code.invokestatic(m, 2, 1);
+                    }
+                    Ty::Boolean => {
+                        let m = self.cw.methodref("java/lang/Boolean", "hashCode", "(Z)I");
+                        code.invokestatic(m, 1, 1);
+                    }
+                    Ty::Double => {
+                        let m = self.cw.methodref("java/lang/Double", "hashCode", "(D)I");
+                        code.invokestatic(m, 2, 1);
+                    }
+                    Ty::Float => {
+                        let m = self.cw.methodref("java/lang/Float", "hashCode", "(F)I");
+                        code.invokestatic(m, 1, 1);
+                    }
+                    // A reference dispatches to its `hashCode` override.
+                    _ => {
+                        let owner = ref_internal(ty);
+                        let m = self.cw.methodref(&owner, "hashCode", "()I");
+                        code.invokevirtual(m, 0, 1);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -3290,6 +3331,7 @@ fn ref_internal(t: Ty) -> String {
 fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
         "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
+        "kotlin/Any.hashCode" => Ty::Int,
         "kotlin/String.length" | "kotlin/Array.size" | "java/lang/Enum.ordinal" => Ty::Int,
         "kotlin/String.get" => Ty::Char,
         "kotlin/Array.set" => Ty::Unit,
@@ -3386,7 +3428,7 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
     }
 }
 
-fn ir_ty_to_jvm(t: &IrType) -> Ty {
+pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
     match t {
         IrType::Unit => Ty::Unit,
         IrType::Nothing => Ty::Nothing,

@@ -1554,6 +1554,796 @@ fun box(): String {
 }
 "#,
     ),
+    // ---- @JvmInline value classes ----
+    // Unboxed construction + sole-property access + a member function (dispatched on the boxed value).
+    (
+        "ValueClassMemberFn",
+        r#"
+@JvmInline
+value class Meters(val v: Int) {
+    fun doubled(): Int = v * 2
+    fun label(): String = "m=$v"
+}
+fun box(): String {
+    val m = Meters(21)
+    if (m.v != 21) return "f1"
+    if (m.doubled() != 42) return "f2:${m.doubled()}"
+    if (m.label() != "m=21") return "f3:${m.label()}"
+    return "OK"
+}
+"#,
+    ),
+    // Synthesized equals/hashCode/toString over the single underlying field.
+    (
+        "ValueClassEqHashStr",
+        r#"
+@JvmInline
+value class Id(val raw: String)
+fun box(): String {
+    val a = Id("x")
+    if (a != Id("x")) return "f1"
+    if (a == Id("y")) return "f2"
+    if (a.hashCode() != Id("x").hashCode()) return "f3"
+    if (a.toString() != "Id(raw=x)") return "f4:$a"
+    return "OK"
+}
+"#,
+    ),
+    // Mixed `==`: a value class compared to `Any`/another type is FALSE (boxed identity, type-checked),
+    // not a raw compare of the underlying — `Id("x") == "x"` must be false.
+    (
+        "ValueClassMixedEquality",
+        r#"
+@JvmInline
+value class Id(val raw: String)
+@JvmInline
+value class Count(val n: Int)
+fun eqAny(a: Any?, b: Any?) = a == b
+fun box(): String {
+    if (eqAny(Id("x"), "x")) return "f1"          // value class vs raw String -> false
+    if (!eqAny(Id("x"), Id("x"))) return "f2"      // same value class -> true
+    if (eqAny(Count(1), 1)) return "f3"            // value class vs raw Int -> false
+    if (!eqAny(Count(7), Count(7))) return "f4"
+    if (eqAny(Count(1), Count(2))) return "f5"
+    return "OK"
+}
+"#,
+    ),
+    // A nullable value class (`Id?` over a reference underlying) boxes/erases correctly, including in
+    // `==` against a non-null and against null.
+    (
+        "ValueClassNullable",
+        r#"
+@JvmInline
+value class Id(val raw: String)
+fun wrap(s: String): Id? = if (s.isEmpty()) null else Id(s)
+fun box(): String {
+    if (wrap("") != null) return "f1"
+    if (wrap("a") == null) return "f2"
+    if (wrap("a")!!.raw != "a") return "f3"
+    if (wrap("a") != Id("a")) return "f4"
+    return "OK"
+}
+"#,
+    ),
+    // A value-class value in a string template renders via its `toString` (boxed), not the raw field.
+    (
+        "ValueClassStringTemplate",
+        r#"
+@JvmInline
+value class Tag(val v: Int)
+fun box(): String {
+    val t = Tag(42)
+    val s = "tag=$t"
+    return if (s == "tag=Tag(v=42)") "OK" else "f:$s"
+}
+"#,
+    ),
+    // A value class whose underlying is a nullable primitive (`Int?`): the unboxed value may be null,
+    // so no spurious non-null parameter check, and `.v` reads back null.
+    (
+        "ValueClassNullablePrimitiveUnderlying",
+        r#"
+@JvmInline
+value class Opt(val v: Int?)
+fun useOpt(x: Opt): String = if (x.v == null) "none" else "some:${x.v}"
+fun box(): String {
+    if (useOpt(Opt(null)) != "none") return "f1"
+    if (useOpt(Opt(5)) != "some:5") return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // Equality on a PRIMITIVE-underlying value class: same-class compares the underlying directly,
+    // mixed-with-Any compares boxed (type-checked).
+    (
+        "ValueClassPrimitiveEquality",
+        r#"
+@JvmInline
+value class Px(val v: Int)
+fun nullableVsUnboxed(s: Px?, t: Px) = s == t
+fun box(): String {
+    if (Px(1) != Px(1)) return "f1"
+    if (Px(1) == Px(2)) return "f2"
+    val a: Any = Px(1)
+    if (a != Px(1)) return "f3"
+    if (a == Px(2)) return "f4"
+    if (a == 1) return "f5"
+    if (!nullableVsUnboxed(Px(3), Px(3))) return "f6"   // A? == A, same value -> true
+    if (nullableVsUnboxed(Px(3), Px(4))) return "f7"
+    if (nullableVsUnboxed(null, Px(3))) return "f8"     // null != Px(3)
+    return "OK"
+}
+"#,
+    ),
+    // A value class IMPLEMENTING an interface: a member call on the unboxed value dispatches directly,
+    // but assigning it to the interface type boxes (the box implements the interface; the raw underlying
+    // does not), so virtual dispatch through the interface works.
+    (
+        "ValueClassImplementsInterface",
+        r#"
+interface IFoo { fun tag(): String }
+@JvmInline
+value class Str(val value: String) : IFoo { override fun tag(): String = "t:$value" }
+fun box(): String {
+    val s = Str("OK")
+    if (s.tag() != "t:OK") return "f1:${s.tag()}"
+    val f: IFoo = s
+    return if (f.tag() == "t:OK") "OK" else "f2:${f.tag()}"
+}
+"#,
+    ),
+    // A concrete class overriding an interface method that returns a value class — the override returns
+    // the unboxed value, dispatched virtually through the interface.
+    (
+        "ValueClassOverride",
+        r#"
+@JvmInline
+value class Wrap(val s: String)
+interface Base { fun get(): Wrap }
+class Impl(val w: Wrap) : Base { override fun get(): Wrap = w }
+fun box(): String {
+    val b: Base = Impl(Wrap("OK"))
+    return b.get().s
+}
+"#,
+    ),
+    // A value-class-returning override through a GENERIC interface: the override is emitted under a
+    // mangled `-<hash>` name (returning the unboxed underlying) plus an `Object` boxing bridge, so the
+    // erased virtual call hands back a boxed value (`is X` holds, `(x as X).v` unboxes).
+    (
+        "ValueClassGenericOverrideBridge",
+        r#"
+@JvmInline
+value class Gx(val v: Any)
+interface IFooG<T> { fun foo(): T; fun bar(): Gx }
+class TestGx : IFooG<Gx> {
+    override fun foo(): Gx = Gx("O")
+    override fun bar(): Gx = Gx("K")
+}
+fun box(): String {
+    val t: IFooG<Gx> = TestGx()
+    val tFoo: Any = t.foo()
+    if (tFoo !is Gx) return "f1: $tFoo"
+    return (t.foo() as Gx).v.toString() + t.bar().v.toString()
+}
+"#,
+    ),
+    // A value class returned from a lambda (`() -> X`) is boxed at the lambda body's tail, so a generic
+    // `() -> T` consumer hands back a boxed value the caller can unbox.
+    (
+        "ValueClassReturnedFromLambda",
+        r#"
+@JvmInline
+value class Lx(val x: Any)
+fun useLx(x: Lx): String = x.x as String
+fun <T> callL(fn: () -> T): T = fn()
+fun box(): String = useLx(callL { Lx("OK") })
+"#,
+    ),
+    // A NESTED value class (`Nb(val a: Na)` where `Na` is itself a value class): both unbox to the
+    // innermost underlying; property chains read through, and equality compares the final underlying.
+    (
+        "ValueClassNested",
+        r#"
+@JvmInline
+value class Na(val x: Int)
+@JvmInline
+value class Nb(val a: Na)
+fun box(): String {
+    val b = Nb(Na(42))
+    if (b.a.x != 42) return "f1:${b.a.x}"
+    if (b != Nb(Na(42))) return "f2"
+    if (b == Nb(Na(7))) return "f3"
+    return "OK"
+}
+"#,
+    ),
+    // A value class with a SECONDARY constructor delegating to the primary.
+    (
+        "ValueClassOverrideGenericWithVcParam",
+        r#"
+@JvmInline value class Mk(val i: Int)
+interface Iface<T> { fun foo(i: Mk): T }
+@JvmInline value class Wrp(val a: Any)
+class CG : Iface<Wrp> { override fun foo(i: Mk): Wrp = Wrp("OK") }
+fun box(): String {
+    val g: Iface<Wrp> = CG()
+    val r: Wrp = g.foo(Mk(0))
+    if (r.a != "OK") return "f1"
+    val r2: Wrp = CG().foo(Mk(0))
+    if (r2.a != "OK") return "f2"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassOverriddenReturnThroughMangledInterface",
+        r#"
+@JvmInline value class Xb(val x: String)
+interface IBar1<T> { fun foo(x: T): Xb }
+interface IBar2 { fun foo(x: String): Xb }
+class TestBar : IBar1<String>, IBar2 { override fun foo(x: String): Xb = Xb(x) }
+fun box(): String {
+    val t1: IBar1<String> = TestBar()
+    val t2: IBar2 = TestBar()
+    return t1.foo("O").x + t2.foo("K").x
+}
+"#,
+    ),
+    (
+        "ValueClassUnboundedGenericNullCapable",
+        r#"
+@JvmInline value class Ag<T>(val x: T)
+fun <T> isNullVac(s: Ag<T>) = s == null
+fun mk(): Ag<String?> = Ag(null)
+fun box(): String {
+    if (isNullVac(mk())) return "f1"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassPropertyThroughInterface",
+        r#"
+interface Bse { val id: Int }
+@JvmInline value class Chld(val id2: Int) : Bse { override val id: Int get() = id2 }
+interface Bse2 { val prop: Bse }
+class Chld2(override val prop: Chld) : Bse2
+fun box(): String {
+    val y: Bse2 = Chld2(Chld(5))
+    if (y.prop.id != 5) return "f1:${y.prop.id}"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassInferredNullableLocal",
+        r#"
+@JvmInline value class Zq1(val x: String)
+@JvmInline value class Zqn(val z: Zq1?)
+@JvmInline value class Zqn2(val z: Zqn)
+fun zq(b: Boolean): Zqn2? = if (b) null else Zqn2(Zqn(null))
+fun zeq(a: Any?, b: Any?) = a == b
+fun box(): String {
+    val x = zq(true)
+    val y = zq(false)
+    if (zeq(x, y)) return "f1"
+    if (x != null) return "f2"
+    if (y == null) return "f3"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassSafeCallReturningVc",
+        r#"
+@JvmInline value class Zs(val x: Int)
+class Ah { fun foo() = Zs(42) }
+fun tst(a: Ah?): Zs = a?.foo()!!
+fun box(): String {
+    val t = tst(Ah())
+    if (t.x != 42) return "f:${t.x}"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassSafeCastAndAccessInMember",
+        r#"
+interface MyIf
+var k5sink: Any? = null
+fun k5save(a: Any?) { k5sink = a }
+@JvmInline value class MyCv(val value: Int): MyIf {
+    fun foo(other: MyIf) { k5save((other as? MyCv)?.value) }
+}
+fun box(): String {
+    val x = MyCv(5)
+    x.foo(x)
+    if (k5sink != 5) return "f:$k5sink"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassMemberWithVcParamCall",
+        r#"
+interface IFp<T> { fun foo(x: T): String }
+@JvmInline value class Zp(val x: Int) : IFp<Zp> { override fun foo(x: Zp) = "OK" }
+fun box(): String = Zp(1).foo(Zp(2))
+"#,
+    ),
+    (
+        "MemberFieldShadowsTopLevel",
+        r#"
+var shadowResult = "Fail"
+@JvmInline value class Av(val value: String) { fun f() = value + "K" }
+class Bh(val a: Av) { val shadowResult: String; init { shadowResult = a.f() } }
+fun box(): String = Bh(Av("O")).shadowResult
+"#,
+    ),
+    (
+        "ValueClassInitBlockNotInBoxImpl",
+        r#"
+@JvmInline value class Icb(val i: Int) { init { icbCounter += i } }
+var icbCounter = 0
+fun <T> ident(t: T) = t
+fun box(): String {
+    val ic = Icb(42)
+    if (icbCounter != 42) return "f1:$icbCounter"
+    icbCounter = 0
+    ident(ic)
+    if (icbCounter != 0) return "f2:$icbCounter"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassWrappingValueClassBoxes",
+        r#"
+@JvmInline value class Res<T>(val a: Any?)
+fun box(): String {
+    val a = Res<Int>(1)
+    val c = Res<Res<Int>>(a)
+    if (a.a !is Int) return "f1"
+    if (c.a !is Res<*>) return "f2"
+    if ((c.a as Res<*>).a !is Int) return "f3"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassGenericReceiverNoSpuriousUnbox",
+        r#"
+@JvmInline value class Gs<T: String>(val s: T)
+class GsHolder(val g: Gs<String>) {
+    constructor(x: String, g: Gs<String>) : this(Gs(x + g.s))
+}
+fun box(): String {
+    if (GsHolder("O", Gs("K")).g.s != "OK") return "f1"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "ValueClassSecondaryCtor",
+        r#"
+@JvmInline
+value class Sc(val v: Int) {
+    constructor(s: String) : this(s.length)
+}
+fun box(): String {
+    if (Sc(3).v != 3) return "f1"
+    if (Sc("abcde").v != 5) return "f2:${Sc("abcde").v}"
+    return "OK"
+}
+"#,
+    ),
+    // An enum class with a value-class constructor param (`enum Te(val s: Sv) { OK(Sv("OK")) }`): the
+    // entry arg `Sv("OK")` in `<clinit>` rewrites `new Sv` → `constructor-impl`.
+    (
+        "ValueClassEnumConstructor",
+        r#"
+@JvmInline value class Sev(val string: String)
+enum class Te(val s: Sev) { OK(Sev("OK")) }
+fun box(): String = Te.OK.s.string
+"#,
+    ),
+    // A REGULAR class's secondary constructor with value-class params (`Test(x: String, s: Sv)`): its
+    // params erase, and its `this(Sv(…))` delegation body rewrites `new Sv` → `constructor-impl` and
+    // unboxes `s.string`.
+    (
+        "ValueClassRegularClassSecondaryCtor",
+        r#"
+@JvmInline value class Sv(val string: String)
+class TestSc(val s: Sv) { constructor(x: String, s: Sv) : this(Sv(x + s.string)) }
+fun box(): String {
+    if (TestSc("O", Sv("K")).s.string != "OK") return "f1"
+    return "OK"
+}
+"#,
+    ),
+    // A value-class member call INSIDE a regular class's `init { … }` block — the init block runs in
+    // `<init>` over the unboxed ctor params, so the `a.f()` receiver (an unboxed value class) must box.
+    (
+        "ValueClassMemberCallInInitBlock",
+        r#"
+@JvmInline value class Iv(val value: String) { fun f() = value + "K" }
+class Holder(val a: Iv) {
+    val result: String
+    init { result = a.f() }
+}
+fun box(): String {
+    if (Holder(Iv("O")).result != "OK") return "f1"
+    return "OK"
+}
+"#,
+    ),
+    // A base-class constructor argument that is a value class (`class Sub(x: Vb) : Base(x)`): the super
+    // call runs in the subclass `<init>` over its unboxed ctor params, so the arg is rewritten/boxed.
+    (
+        "ValueClassSuperCtorArg",
+        r#"
+@JvmInline value class Vb(val s: String)
+abstract class BaseVb(val x: Vb)
+class SubVb(x: Vb) : BaseVb(x)
+sealed class SealedVb(val x: Vb)
+class SubSealed(x: Vb) : SealedVb(x)
+fun box(): String {
+    if (SubVb(Vb("OK")).x.s != "OK") return "f1"
+    if (SubSealed(Vb("OK")).x.s != "OK") return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // A value class whose underlying is a BOXED value class (`Hzn(val z: Hz1?)`, `Hz1(val x: Int)`): its
+    // synthesized hashCode/equals must operate on the immediate erased underlying (`LHz1;`, a reference →
+    // `Hz1`'s own hashCode/equals), NOT the final `Int` of the nested chain.
+    (
+        "ValueClassNestedBoxedHashEq",
+        r#"
+@JvmInline value class Hz1(val x: Int)
+@JvmInline value class Hzn(val z: Hz1?)
+fun hznWrap(n: Int): Hzn? = if (n < 0) null else Hzn(Hz1(n))
+fun box(): String {
+    if (hznWrap(-1) != null) return "f1"
+    if (hznWrap(42)!!.z!!.x != 42) return "f2"
+    if (hznWrap(42) != hznWrap(42)) return "f3"
+    if (hznWrap(42).hashCode() != hznWrap(42).hashCode()) return "f4"
+    return "OK"
+}
+"#,
+    ),
+    // A value class whose nested underlying chain is null-capable (`Nc2(val z: Nc1)`, `Nc1(val z: Ncs?)`):
+    // `<init>` emits NO `checkNotNullParameter` on the null-capable param, and `Nc2?` BOXES so `Nc2(Nc1(null))`
+    // ≠ a `null` `Nc2?`.
+    (
+        "ValueClassNestedNullCapable",
+        r#"
+@JvmInline value class Ncs(val x: String)
+@JvmInline value class Nc1(val z: Ncs?)
+@JvmInline value class Nc2(val z: Nc1)
+fun ncMk(b: Boolean): Nc2? = if (b) null else Nc2(Nc1(null))
+fun ncEq(a: Any?, b: Any?) = a == b
+fun box(): String {
+    val x: Nc2? = ncMk(true)
+    val y: Nc2? = ncMk(false)
+    if (ncEq(x, y)) return "f1"
+    if (x != null) return "f2"
+    if (y == null) return "f3"
+    return "OK"
+}
+"#,
+    ),
+    // A value class over a NULLABLE reference (`NrefA(val x: String?)`), nested (`NrefN(val z: NrefA?)`):
+    // `NrefA?`/`NrefN?` box (underlying holds null). The `!!.z!!.x` chain must `unbox-impl` at each step —
+    // order-independently of when the inner `.z` access is rewritten (step-4 `targets` iterate unordered).
+    (
+        "ValueClassNestedNullableRef",
+        r#"
+@JvmInline value class NrefA(val x: String?)
+@JvmInline value class NrefN(val z: NrefA?)
+fun nrefWrap1(x: String): NrefA? = if (x.length == 0) null else NrefA(x)
+fun nrefWrapN(x: String): NrefN? = if (x.length == 0) null else NrefN(NrefA(x))
+fun box(): String {
+    if (nrefWrap1("") != null) return "f1"
+    if (nrefWrap1("a")!!.x != "a") return "f2"
+    if (nrefWrapN("") != null) return "f3"
+    if (nrefWrapN("a")!!.z!!.x != "a") return "f4"
+    return "OK"
+}
+"#,
+    ),
+    // A value class whose underlying is ITSELF a value class (`Z2(val z: Z1)`), returned nullable.
+    // The nested chain erases to the final underlying (`Int`); a nullable return is the boxed wrapper.
+    (
+        "ValueClassNestedNullable",
+        r#"
+@JvmInline
+value class NnstA(val x: Int)
+@JvmInline
+value class NnstB(val z: NnstA)
+fun nnstWrap2(n: Int): NnstB? = if (n < 0) null else NnstB(NnstA(n))
+fun box(): String {
+    if (nnstWrap2(-1) != null) return "f1"
+    if (nnstWrap2(42) == null) return "f2"
+    if (nnstWrap2(42)!!.z.x != 42) return "f3:${nnstWrap2(42)!!.z.x}"
+    return "OK"
+}
+"#,
+    ),
+    // A `super.f(vc)` call to a method mangled because it takes a value-class parameter — the super
+    // (invokespecial) call must use the mangled name + erased descriptor.
+    (
+        "ValueClassMangledSuperCall",
+        r#"
+@JvmInline
+value class Iv(val i: Int)
+abstract class Ab { abstract fun f(i: Iv): String }
+open class Bs : Ab() { override fun f(i: Iv): String = "OK" }
+class Cs : Bs() { override fun f(i: Iv): String = super.f(i) }
+fun box(): String = Cs().f(Iv(0))
+"#,
+    ),
+    // A value class boxed to `Any` then tested with `is` against an interface it does NOT implement —
+    // the box is not a `Comparable`/`Number`, so all branches are false.
+    (
+        "ValueClassBoxedInstanceOf",
+        r#"
+@JvmInline
+value class Xs(val x: String)
+@JvmInline
+value class Yi(val x: Int)
+fun box(): String = when {
+    (Xs("") as Any) is Comparable<*> -> "1"
+    (Yi(2) as Any) is Comparable<*> -> "2"
+    (Xs("") as Any) is Number -> "3"
+    (Yi(2) as Any) is Number -> "4"
+    else -> "OK"
+}
+"#,
+    ),
+    // A nullable value class flowing into a stdlib call (a map key) boxes null-safely — a `null` value
+    // class stays `null`, not `box-impl(null)` (which would hit the ctor's non-null check).
+    (
+        "ValueClassNullableIntoStdlib",
+        r#"
+class Uuid
+@JvmInline
+value class ValueId(val value: Uuid)
+fun box(): String {
+    val m = mutableMapOf<ValueId?, String>()
+    val v: ValueId? = null
+    m[v] = "OK"
+    return m[v]!!
+}
+"#,
+    ),
+    // A data class with VALUE-CLASS fields: its synthesized `toString`/`equals`/`hashCode` box each
+    // value-class field so the value class's own methods run (`a=1`, structural equality).
+    (
+        "DataClassWithValueClassFields",
+        r#"
+@JvmInline
+value class Aug(val x: Int) { override fun toString(): String = (x + 1).toString() }
+data class Pair2(val a: Aug, val b: Aug)
+fun box(): String {
+    val p = Pair2(Aug(0), Aug(4))
+    if (p.toString() != "Pair2(a=1, b=5)") return "f1:$p"
+    if (p != Pair2(Aug(0), Aug(4))) return "f2"
+    if (p == Pair2(Aug(9), Aug(4))) return "f3"
+    if (p.hashCode() != Pair2(Aug(0), Aug(4)).hashCode()) return "f4"
+    return "OK"
+}
+"#,
+    ),
+    // Value classes in string templates: multiple appends, `+` concat, and a nullable value rendering
+    // as "null".
+    (
+        "ValueClassStringTemplateConcat",
+        r#"
+@JvmInline
+value class Z(val value: Int)
+fun t1(z: Z) = "$z$z"
+fun t2(z: Z) = "-" + z
+fun t3(z: Z?) = "$z"
+fun box(): String {
+    if (t1(Z(42)) != "Z(value=42)Z(value=42)") return "f1:${t1(Z(42))}"
+    if (t2(Z(42)) != "-Z(value=42)") return "f2:${t2(Z(42))}"
+    if (t3(null) != "null") return "f3:${t3(null)}"
+    if (t3(Z(7)) != "Z(value=7)") return "f4:${t3(Z(7))}"
+    return "OK"
+}
+"#,
+    ),
+    // A value class with a CUSTOM `toString` override — the user's wins (not the synthesized default),
+    // including in a string template.
+    (
+        "ValueClassCustomToString",
+        r#"
+@JvmInline
+value class Augmented(val x: Int) {
+    override fun toString(): String = (x + 1).toString()
+}
+fun box(): String {
+    val a = Augmented(0)
+    if (a.toString() != "1") return "f1:${a.toString()}"
+    if ("$a" != "1") return "f2:$a"
+    return "OK"
+}
+"#,
+    ),
+    // A value class implementing an interface, returned through `if/else` branches as the interface
+    // type — each branch boxes so the interface method dispatches.
+    (
+        "ValueClassBranchInterfaceReturn",
+        r#"
+interface Base { fun result(): Int }
+@JvmInline
+value class Inlined(val x: Int) : Base { override fun result(): Int = x }
+fun foo(b: Boolean): Base = if (b) Inlined(0) else Inlined(1)
+fun box(): String {
+    if (foo(true).result() != 0) return "f1"
+    if (foo(false).result() != 1) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // A function whose declared return type is `Any?` (a supertype) returning a value-class value must
+    // box it at the return.
+    (
+        "ValueClassReturnedAsAny",
+        r#"
+@JvmInline
+value class W(val v: Int)
+fun make(): W = W(7)
+fun makeAny(): Any? = make()
+fun box(): String {
+    val a = makeAny()
+    if (a !is W) return "f1"
+    if ((a as W).v != 7) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // Value-class member functions calling each other, including one taking a value-class parameter and
+    // passing `this` — the member bodies run on the boxed object.
+    (
+        "ValueClassMembersCallMembers",
+        r#"
+@JvmInline
+value class Foo(val x: Int) {
+    fun empty() = ""
+    fun withParam(a: String) = a
+    fun withInlineClassParam(f: Foo) = f.toString()
+    fun test(): String = empty() + withParam("hello") + withInlineClassParam(this)
+    override fun toString(): String = x.toString()
+}
+fun box(): String = if (Foo(12).test() != "hello12") "fail" else "OK"
+"#,
+    ),
+    // A GENERIC value class (`Gc<T>(val v: T)`): the type parameter erases to its bound (`Any`/the
+    // upper bound), construction + property access + nullable wrapping behave like the erased form.
+    (
+        "ValueClassGeneric",
+        r#"
+@JvmInline
+value class Gc<T>(val v: T)
+fun wrap(s: String): Gc<String>? = if (s.isEmpty()) null else Gc(s)
+fun box(): String {
+    val g = Gc("OK")
+    if (g.v != "OK") return "f1"
+    if (wrap("") != null) return "f2"
+    if (wrap("a")!!.v != "a") return "f3"
+    return "OK"
+}
+"#,
+    ),
+    // A property reference to a value class's member (`Z::x`), invoked via `.get(boxedReceiver)`.
+    (
+        "ValueClassPropertyRef",
+        r#"
+@JvmInline
+value class Z(val x: Int)
+fun box(): String {
+    if ((Z::x).get(Z(42)) != 42) return "f1"
+    return "OK"
+}
+"#,
+    ),
+    // A value class over a `Double` uses IEEE TOTAL-ORDER equality (kotlinc): `NaN == NaN` is true and
+    // `0.0 != -0.0`, via `equals-impl0` delegating to the boxed `Double` compare, not bare `==`.
+    (
+        "ValueClassDoubleTotalOrder",
+        r#"
+@JvmInline
+value class D(val v: Double)
+fun box(): String {
+    if (D(Double.NaN) != D(Double.NaN)) return "f1"
+    if (D(0.0) == D(-0.0)) return "f2"
+    if (D(1.5) != D(1.5)) return "f3"
+    return "OK"
+}
+"#,
+    ),
+    // Equality for a value class over a NULLABLE underlying (`Any?`): `== null` on a non-null value is
+    // vacuously false; a nullable value participates in null checks and same-class structural compares.
+    (
+        "ValueClassNullableUnderlyingEquality",
+        r#"
+@JvmInline
+value class Av(val x: Any?)
+fun vacuousLeft(s: Av) = s == null
+fun nullLeft(s: Av?) = s == null
+fun sameNullable(s: Av?, t: Av?) = s == t
+fun box(): String {
+    if (vacuousLeft(Av(0))) return "f1"
+    if (vacuousLeft(Av(null))) return "f1b"
+    if (nullLeft(Av(0))) return "f2"
+    if (nullLeft(Av(null))) return "f2b"   // Av(null) is a non-null Av wrapping null -> NOT null
+    if (!nullLeft(null)) return "f3"
+    if (!sameNullable(null, null)) return "f4"
+    if (!sameNullable(Av(1), Av(1))) return "f5"
+    if (sameNullable(Av(1), Av(2))) return "f6"
+    if (sameNullable(null, Av(1))) return "f7"
+    if (!sameNullable(Av(null), Av(null))) return "f8"   // both Av(null) -> equal
+    if (sameNullable(null, Av(null))) return "f9"        // null != Av(null)
+    return "OK"
+}
+"#,
+    ),
+    // An array of value-class values: each element is boxed (a reference array of the boxed type), read
+    // back and unboxed on access.
+    (
+        "ValueClassArray",
+        r#"
+@JvmInline
+value class Vc(val v: Int)
+fun box(): String {
+    val arr = arrayOf(Vc(1), Vc(2), Vc(3))
+    var sum = 0
+    for (x in arr) sum += x.v
+    if (sum != 6) return "f1:$sum"
+    if (arr[1].v != 2) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    // A nested value class whose `init` block reads the value-class field's property.
+    (
+        "ValueClassNestedInitBlock",
+        r#"
+var sink = "Fail"
+@JvmInline
+value class A2(val value: String)
+@JvmInline
+value class B2(val a: A2) { init { sink = a.value } }
+fun box(): String {
+    B2(A2("OK"))
+    return sink
+}
+"#,
+    ),
+    // A value class with an `init` block: the validation runs in `constructor-impl` on construction.
+    (
+        "ValueClassInitBlock",
+        r#"
+@JvmInline
+value class Pos(val v: Int) {
+    init { if (v < 0) throw IllegalArgumentException("neg") }
+}
+fun box(): String {
+    val p = Pos(5)
+    if (p.v != 5) return "f1"
+    try {
+        Pos(-1)
+        return "f2"
+    } catch (e: IllegalArgumentException) {
+        return "OK"
+    }
+}
+"#,
+    ),
 ];
 
 #[test]

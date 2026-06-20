@@ -230,13 +230,17 @@ fn compile_source(
 
     let t4 = std::time::Instant::now();
     // Lower the checked file to krusty-ir, then emit JVM bytecode (the sole codegen path).
-    let ir = match lower_file(file, &info, &syms) {
+    let mut ir = match lower_file(file, &info, &syms) {
         Some(ir) => ir,
         None => {
             T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
             return None;
         }
     };
+    if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+        T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        return None; // value-class shape not yet lowered — skip, don't miscompile
+    }
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp) {
         Some(o) => o,
         None => {
@@ -724,7 +728,10 @@ fn kotlin_codegen_box_conformance() {
         files.len(),
         failures.len()
     );
-    for f in failures.iter().take(25) {
+    let fail_cap = env("KRUSTY_FAIL_CAP")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25usize);
+    for f in failures.iter().take(fail_cap) {
         eprintln!("  FAIL {f}");
     }
     assert!(

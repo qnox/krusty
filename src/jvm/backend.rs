@@ -42,13 +42,23 @@ impl Backend for JvmBackend {
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
-        let Some(ir) = crate::ir_lower::lower_file(file, info, syms) else {
+        let Some(mut ir) = crate::ir_lower::lower_file(file, info, syms) else {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),
             );
             return outputs;
         };
+        // JVM-only IR→IR transform: realize `@JvmInline value class`es as their unboxed underlying type
+        // (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected). A
+        // value-class shape it can't yet lower → skip the file (same as any unsupported construct).
+        if !crate::jvm::value_classes::lower_value_classes(&mut ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "krusty: this value-class shape is not yet supported by the IR backend".to_string(),
+            );
+            return outputs;
+        }
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
         // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
         let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp) else {
