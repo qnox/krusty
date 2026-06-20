@@ -20,6 +20,25 @@ const SNIPPETS: &[(&str, &str)] = &[
         "CharCompanionConst",
         "fun box(): String {\n    val l = listOf(Char.MAX_VALUE, Char.MIN_VALUE)\n    if (l[0] != '\\uFFFF') return \"f0\"\n    if (l[1] != '\\u0000') return \"f1\"\n    return \"OK\"\n}\n",
     ),
+    // `a until b` resolves to the `Int` overload (which has the `MIN_VALUE` guard), not the guard-less
+    // `Byte`/`Short` overload krusty's `Byte`/`Short`/`Int` → `Int` collapse made indistinguishable:
+    // `2 until Int.MIN_VALUE` must be EMPTY, not wrap to `2..Int.MAX_VALUE`.
+    (
+        "UntilIntOverloadGuard",
+        r#"
+fun box(): String {
+    val empty = 2 until Int.MIN_VALUE   // value-form `until` → Int overload (MIN_VALUE guard) → empty
+    var n = 0
+    for (i in empty) n++
+    if (n != 0) return "f1:$n"
+    val r = 0 until 5
+    var s = 0
+    for (i in r) s += i                 // 0+1+2+3+4 = 10
+    if (s != 10) return "f2:$s"
+    return "OK"
+}
+"#,
+    ),
     // A `Char` range with a `step` keeps `Char` loop elements (the step is an `Int`), and a stepped
     // `Int`/`Long` range near MAX/MIN_VALUE terminates without wrapping past the bound (overflow-safe).
     (

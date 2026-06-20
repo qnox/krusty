@@ -2572,6 +2572,21 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 421 — numeric overload resolution prefers the widest int (`until` MIN_VALUE guard)  ✅
+- krusty collapses `Byte`/`Short`/`Int` → `Ty::Int` (`desc_to_ty`), so numeric overloads that differ only
+  in a `Byte`/`Short` vs `Int` parameter become indistinguishable after parsing — `RangesKt.until(Int,Int)`,
+  `until(Int,Byte)`, `until(Int,Short)` all parse as params `[Int,Int]`. The pick landed on the `Byte`
+  overload (descriptor `(IB)`), which — unlike the `Int` one — has NO `MIN_VALUE` guard, so a *value-form*
+  `2 until Int.MIN_VALUE` wrapped to `2..Int.MAX_VALUE` (a near-infinite range) instead of being empty.
+- Fix: in `extension_callable`, `matches.sort_by_key(descriptor_narrowing)` (count of `Byte`/`Short`
+  primitive params) before the most-specific pick — preferring the WIDEST descriptor, which is how kotlinc
+  resolves an `Int` argument (to the `Int` overload). General: any numeric-overloaded stdlib function now
+  selects the `Int` variant for an `Int` arg, matching kotlinc.
+- Box gate **1102, 0 FAIL** (the corpus files exercising this also need collection `+=` to compile, deferred
+  — see roadmap memory). TDD: `feature_box_e2e::UntilIntOverloadGuard` (`2 until Int.MIN_VALUE` is empty;
+  a normal `0 until 5` still iterates 0..4). This is the one independently-valuable piece extracted from the
+  (reverted) collection-`+=` work; the full read-only/mutable refactor is the next big phase (memory).
+
 ### Phase 420 — emit-erasure infrastructure for Kotlin collection types  ✅
 - Prerequisite for keeping `kotlin/collections/{List,MutableList,…}` distinct in the front end: every
   Ty→JVM-name emit point must erase them to the single JVM interface (`java/util/List`), or Kotlin-only
