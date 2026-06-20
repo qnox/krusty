@@ -3865,7 +3865,9 @@ fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
 fn ref_internal(t: Ty) -> String {
     match t {
         Ty::String => "java/lang/String".to_string(),
-        Ty::Obj(n, _) => n.to_string(),
+        // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
+        // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
+        Ty::Obj(n, _) => crate::jvm::jvm_class_map::to_jvm_internal(n).to_string(),
         Ty::Array(_) => t.descriptor(),
         _ => "java/lang/Object".to_string(),
     }

@@ -108,6 +108,16 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if internal == "kotlin/Throwable" {
         return "java/lang/Throwable";
     }
+    // Emit-only erasure of the Kotlin collection types (read-only AND mutable) to their single JVM
+    // interface — `kotlin/collections/MutableList` → `java/util/List`, `…/List` → `java/util/List`, etc.
+    // The front end keeps the two distinct (read-only vs mutable); they collapse only here at the bytecode
+    // boundary. ONE-WAY (not in the bidirectional `TYPE_MAP`), so `to_kotlin_internal` never has to pick
+    // ambiguously between `List`/`MutableList` when it reads a raw `java/util/List` descriptor.
+    if let Some(simple) = internal.strip_prefix("kotlin/collections/") {
+        if let Some(j) = kotlin_builtin_to_jvm(simple) {
+            return j;
+        }
+    }
     TYPE_MAP
         .iter()
         .find(|(k, _)| *k == internal)
@@ -140,4 +150,25 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
         Ty::Char => "java/lang/Character",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_jvm_internal;
+
+    #[test]
+    fn collection_types_erase_to_jvm_at_emit() {
+        // Read-only and mutable Kotlin collections both collapse to the single JVM interface here.
+        assert_eq!(to_jvm_internal("kotlin/collections/List"), "java/util/List");
+        assert_eq!(to_jvm_internal("kotlin/collections/MutableList"), "java/util/List");
+        assert_eq!(to_jvm_internal("kotlin/collections/Map"), "java/util/Map");
+        assert_eq!(to_jvm_internal("kotlin/collections/MutableMap"), "java/util/Map");
+        assert_eq!(
+            to_jvm_internal("kotlin/collections/MutableCollection"),
+            "java/util/Collection"
+        );
+        // A user/JDK class passes through unchanged.
+        assert_eq!(to_jvm_internal("demo/Foo"), "demo/Foo");
+        assert_eq!(to_jvm_internal("java/util/List"), "java/util/List");
+    }
 }
