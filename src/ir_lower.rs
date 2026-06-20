@@ -2556,13 +2556,6 @@ impl<'a> Lower<'a> {
     fn ir_const_str(&mut self, s: String) -> u32 {
         self.ir.add_expr(IrExpr::Const(IrConst::String(s)))
     }
-    fn str_plus(&mut self, acc: u32, arg: u32) -> u32 {
-        self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/String.plus".to_string()),
-            dispatch_receiver: Some(acc),
-            args: vec![arg],
-        })
-    }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
         let this = self.ir.add_expr(IrExpr::GetValue(0));
         self.ir.add_expr(IrExpr::GetField {
@@ -2664,15 +2657,18 @@ impl<'a> Lower<'a> {
                 .next()
                 .unwrap_or(internal)
                 .replace('$', ".");
-            let mut acc = self.ir_const_str(format!("{simple}("));
+            // Build ONE `StringConcat` (kotlinc emits a single `StringBuilder`): the class-name prefix is
+            // merged with the first field's `name=` (`"P(x="`), then each field value, `", name="`
+            // separators, and a closing `")"`.
+            let mut parts: Vec<u32> = Vec::new();
+            let mut prefix = format!("{simple}(");
             for (i, (name, _)) in fields.iter().enumerate() {
-                let sep = if i == 0 {
-                    format!("{name}=")
+                if i == 0 {
+                    prefix.push_str(&format!("{name}="));
+                    parts.push(self.ir_const_str(std::mem::take(&mut prefix)));
                 } else {
-                    format!(", {name}=")
-                };
-                let s = self.ir_const_str(sep);
-                acc = self.str_plus(acc, s);
+                    parts.push(self.ir_const_str(format!(", {name}=")));
+                }
                 let mut fv = self.this_field(class_id, i as u32);
                 // A data class renders an array property with `java.util.Arrays.toString(field)` (so
                 // `[true]`, not the default `[Z@hash`), matching kotlinc.
@@ -2690,10 +2686,13 @@ impl<'a> Lower<'a> {
                         args: vec![fv],
                     });
                 }
-                acc = self.str_plus(acc, fv);
+                parts.push(fv);
             }
-            let close = self.ir_const_str(")".to_string());
-            acc = self.str_plus(acc, close);
+            if fields.is_empty() {
+                parts.push(self.ir_const_str(prefix));
+            }
+            parts.push(self.ir_const_str(")".to_string()));
+            let acc = self.ir.add_expr(IrExpr::StringConcat(parts));
             let ret = self.ir.add_expr(IrExpr::Return(Some(acc)));
             let body = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![ret],

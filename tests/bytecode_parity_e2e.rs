@@ -203,6 +203,36 @@ fn single_interpolation_uses_string_valueof() {
     );
 }
 
+// ---- data-class toString: one StringBuilder + merged prefix + append(C) ----------------------
+
+#[test]
+fn data_class_tostring_uses_single_stringbuilder() {
+    // A data class's synthesized `toString` must build with ONE StringBuilder (kotlinc's shape), not a
+    // chain of `String.plus` (one StringBuilder per `+`). The class-name + first field name merge into a
+    // single `"P(x="` constant, and the closing `")"` single char appends as a char.
+    let Some((dir, jh)) = krusty_compile(
+        "dctostr",
+        "data class P(val x: Int, val y: String)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("P.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sbs = d.matches("class java/lang/StringBuilder").count();
+    assert_eq!(
+        sbs, 1,
+        "data-class toString must allocate ONE StringBuilder:\n{d}"
+    );
+    assert!(
+        d.contains("String P(x="),
+        "the class name + first field should merge into one `P(x=` constant:\n{d}"
+    );
+    assert!(
+        d.contains("StringBuilder.append:(C)"),
+        "the closing `)` should append as a char:\n{d}"
+    );
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]
