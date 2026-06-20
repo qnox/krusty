@@ -2572,6 +2572,29 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 419 — `@Metadata` function return-type decoding (read-only/mutable foundation)  ✅
+- ROOT CAUSE found (with the maintainer): krusty erases `List`/`MutableList` (and `Map`/`MutableMap`, …)
+  to `java/util/List` in the FRONT END, so it can't distinguish a read-only collection from a mutable one
+  (`roList.add()` wrongly accepted; `coll += x` can't choose `plus`-reassign vs `plusAssign`). The
+  distinction is NOT in the JVM descriptor OR the JVM generic `Signature` — both report `java/util/List<T>`
+  for `listOf` AND `mutableListOf` (verified via `javap`). It lives ONLY in `@kotlin/Metadata`.
+- Foundation built here: `metadata.rs` now decodes each `Package` function's Kotlin RETURN type, faithful
+  to kotlinc's reader: (a) `decode_d1` drops the leading `UTF8_MODE_MARKER` (U+0000) per
+  `BitEncoding.decodeBytes`; (b) `split_d1` separates the delimited `StringTableTypes` prefix from the
+  `Package`; (c) a full `JvmNameResolver` (`StringTableTypes` records expanded by `range` +
+  `PREDEFINED_STRINGS` table + `NONE`/`INTERNAL_TO_CLASS_ID`/`DESC_TO_CLASS_ID` ops + substring/replace)
+  resolves a `Type.class_name` id (`Function.return_type = 3`, `Type.class_name = 6`) to its Kotlin
+  internal name. `package_function_return_types` exposes name -> Kotlin return type.
+- VERIFIED vs the real stdlib: `mutableListOf` -> `kotlin/collections/MutableList`, `listOf` ->
+  `kotlin/collections/List`, `emptyList` -> `List`, `arrayListOf` -> `java/util/ArrayList`. TDD:
+  `tests/metadata_return_types.rs`. The `decode_d1`/`package_inline` rewrite (now splits off the ST prefix
+  instead of skip-tolerating it) held the box gate at **1102, 0 FAIL** (inline detection, which feeds the
+  bytecode splicer, unchanged).
+- NEXT (wires it in): `resolve_callable`/`resolve_type` use the `@Metadata` Kotlin types; the front end
+  keeps `kotlin/collections/{List,MutableList,…}` distinct; `to_jvm_internal`/`ref_internal` erase to
+  `java/util/*` only at emit; read-only types reject mutators; then collection `+=` is correct (mutable ->
+  `plusAssign` inline-spliced, read-only -> `plus`-reassign) with no hardcoding.
+
 ### Phase 418 — stepped ranges: `Char` step element type + overflow-safe termination  ✅
 - Two coupled bugs in `for (i in a..b step n)` (`Stmt::For`): **(1)** the checker validated the `step` value
   against the *element* type, so a `Char`/`Byte`/`Short` range (`'a'..'e' step 2`) rejected its `Int` step
