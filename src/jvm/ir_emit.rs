@@ -1598,9 +1598,8 @@ impl<'a> Emitter<'a> {
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
                 if !post_test {
-                    self.emit_value(cond, code);
-                    self.frame(end, vec![], code);
-                    code.ifeq(end);
+                    // Jump out of the loop when the condition is false (fused comparison branch).
+                    self.emit_cond_branch(cond, end, false, code);
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
                 self.loop_stack.push((cont, end, label.clone()));
@@ -1618,9 +1617,7 @@ impl<'a> Emitter<'a> {
                 self.loop_stack.pop();
                 if post_test {
                     // `do…while`: loop back while the condition holds, then fall through to `end`.
-                    self.emit_value(cond, code);
-                    self.frame(start, vec![], code);
-                    code.ifne(start);
+                    self.emit_cond_branch(cond, start, true, code);
                 } else {
                     self.frame(start, vec![], code);
                     code.goto(start);
@@ -2811,6 +2808,140 @@ impl<'a> Emitter<'a> {
         code.bind(end);
     }
 
+    /// Emit a conditional jump to `target`, taken exactly when `cond` evaluates to `jump_when_true`.
+    /// When `cond` is a primitive/reference comparison it is FUSED into the branch (`if_icmpge`,
+    /// `ifnull`, `if_acmpeq`, `lcmp;ifge`, …) instead of materializing a 0/1 boolean and testing it
+    /// with `ifeq`/`ifne` — the bytecode kotlinc emits for every `if`/`while`/`for` over a comparison.
+    fn emit_cond_branch(
+        &mut self,
+        cond: u32,
+        target: Label,
+        jump_when_true: bool,
+        code: &mut CodeBuilder,
+    ) {
+        if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
+            use IrBinOp::*;
+            if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {
+                self.emit_compare_branch(op, lhs, rhs, target, jump_when_true, code);
+                return;
+            }
+        }
+        self.emit_value(cond, code);
+        self.frame(target, vec![], code);
+        if jump_when_true {
+            code.ifne(target);
+        } else {
+            code.ifeq(target);
+        }
+    }
+
+    /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when
+    /// the comparison's result equals `jt` — no 0/1 boolean is materialized. Mirrors `emit_compare`'s
+    /// operand/3-way/null/ref handling but ends in one fused branch with the right polarity.
+    fn emit_compare_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) {
+        use IrBinOp::*;
+        let lt = self.value_ty(lhs);
+        // Referential identity (`===`/`!==`) on references → `if_acmpeq`/`if_acmpne`.
+        if matches!(op, RefEq | RefNe) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+            self.emit_operands(&[lhs, rhs], code);
+            self.frame(target, vec![], code);
+            if (op == RefEq) == jt {
+                code.if_acmpeq(target);
+            } else {
+                code.if_acmpne(target);
+            }
+            return;
+        }
+        let op = match op {
+            RefEq => Eq,
+            RefNe => Ne,
+            o => o,
+        };
+        // `x == null` / `x != null` → `ifnull`/`ifnonnull`.
+        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
+        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+        if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
+            let operand = if lhs_null { rhs } else { lhs };
+            self.emit_value(operand, code);
+            self.frame(target, vec![], code);
+            if (op == Eq) == jt {
+                code.ifnull(target);
+            } else {
+                code.ifnonnull(target);
+            }
+            return;
+        }
+        // Reference structural `==`/`!=` → `Intrinsics.areEqual` then test the `Z` result.
+        if matches!(op, Eq | Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+            self.emit_operands(&[lhs, rhs], code);
+            let m = self.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "areEqual",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+            );
+            code.invokestatic(m, 2, 1);
+            self.frame(target, vec![], code);
+            if (op == Eq) == jt {
+                code.ifne(target); // areEqual true ⇒ equal
+            } else {
+                code.ifeq(target);
+            }
+            return;
+        }
+        // Numeric: int-category fuses to `if_icmp*`; Long/Double/Float compares 3-way then tests vs 0
+        // with a single-operand `if*` (kotlinc's `lcmp;ifge` shape).
+        self.emit_operands(&[lhs, rhs], code);
+        let three_way = matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        match lt {
+            Ty::Long => code.lcmp(),
+            Ty::Double => code.dcmpg(),
+            Ty::Float => code.fcmpg(),
+            _ => {}
+        }
+        self.frame(target, vec![], code);
+        if three_way {
+            match (op, jt) {
+                (Lt, true) => code.iflt(target),
+                (Lt, false) => code.ifge(target),
+                (Le, true) => code.ifle(target),
+                (Le, false) => code.ifgt(target),
+                (Gt, true) => code.ifgt(target),
+                (Gt, false) => code.ifle(target),
+                (Ge, true) => code.ifge(target),
+                (Ge, false) => code.iflt(target),
+                (Eq, true) => code.ifeq(target),
+                (Eq, false) => code.ifne(target),
+                (Ne, true) => code.ifne(target),
+                (Ne, false) => code.ifeq(target),
+                _ => unreachable!(),
+            }
+        } else {
+            match (op, jt) {
+                (Lt, true) => code.if_icmplt(target),
+                (Lt, false) => code.if_icmpge(target),
+                (Le, true) => code.if_icmple(target),
+                (Le, false) => code.if_icmpgt(target),
+                (Gt, true) => code.if_icmpgt(target),
+                (Gt, false) => code.if_icmple(target),
+                (Ge, true) => code.if_icmpge(target),
+                (Ge, false) => code.if_icmplt(target),
+                (Eq, true) => code.if_icmpeq(target),
+                (Eq, false) => code.if_icmpne(target),
+                (Ne, true) => code.if_icmpne(target),
+                (Ne, false) => code.if_icmpeq(target),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     fn emit_when(&mut self, branches: &[(Option<u32>, u32)], code: &mut CodeBuilder) {
         let end = code.new_label();
         let has_else = branches.iter().any(|(c, _)| c.is_none());
@@ -2828,10 +2959,9 @@ impl<'a> Emitter<'a> {
         for (cond, body) in branches {
             match cond {
                 Some(c) => {
-                    self.emit_value(*c, code);
+                    // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
-                    self.frame(next, vec![], code);
-                    code.ifeq(next);
+                    self.emit_cond_branch(*c, next, false, code);
                     self.emit_value(*body, code);
                     if is_stmt {
                         discard(self.value_ty(*body), code);
