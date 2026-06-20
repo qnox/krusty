@@ -291,6 +291,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // no mangling involved.
     {
         for c in &mut ir.classes {
+            // A value class keeps its own members' value-class PARAMS boxed (`compareTo(LFoo;)`), so a
+            // bridge ON a value class delegates with the boxed param — no unboxing. A REGULAR class's
+            // value-class-param method erases that param to the underlying, so its bridge unboxes.
+            let owner_is_value = c.is_value;
             for b in &mut c.bridges {
                 let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
                 if let Some(m) =
@@ -298,45 +302,71 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 {
                     b.target_name = Some(m.clone());
                 }
-                if let IrType::Class {
-                    fq_name,
-                    nullable: false,
-                    ..
-                } = &b.concrete_ret.clone()
-                {
-                    if under.contains_key(fq_name) {
-                        if b.target_name.is_none() {
-                            b.target_name = Some(b.name.clone());
-                        }
-                        // The bridge satisfies the (mangled) SUPERTYPE method, so it takes that method's
-                        // mangled name: `vc_mangle` over the override's params + the SUPERTYPE's declared
-                        // return. A VC param (`foo(i: Marker)`) mangles by the param; a literal-VC return
-                        // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
-                        // `Object`) does not.
-                        b.name = vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under);
-                        // A value-class PARAM erases to its underlying in both the bridge descriptor and the
-                        // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
-                        // which keys on the un-erased param type.
-                        for p in b
-                            .erased_params
-                            .iter_mut()
-                            .chain(b.concrete_params.iter_mut())
-                        {
+                let concrete_ret_vc = match &b.concrete_ret {
+                    IrType::Class {
+                        fq_name,
+                        nullable: false,
+                        ..
+                    } if under.contains_key(fq_name) => Some(fq_name.clone()),
+                    _ => None,
+                };
+                if let Some(fq_name) = concrete_ret_vc {
+                    if b.target_name.is_none() {
+                        b.target_name = Some(b.name.clone());
+                    }
+                    // The bridge satisfies the (mangled) SUPERTYPE method, so it takes that method's
+                    // mangled name: `vc_mangle` over the override's params + the SUPERTYPE's declared
+                    // return. A VC param (`foo(i: Marker)`) mangles by the param; a literal-VC return
+                    // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
+                    // `Object`) does not.
+                    b.name = vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under);
+                    // A value-class PARAM erases to its underlying in both the bridge descriptor and the
+                    // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
+                    // which keys on the un-erased param type.
+                    for p in b
+                        .erased_params
+                        .iter_mut()
+                        .chain(b.concrete_params.iter_mut())
+                    {
+                        *p = erase(p, &under);
+                    }
+                    // Whether the SUPERTYPE method returns the value class LITERALLY (`fun bar(): Gx` →
+                    // kotlinc mangles + erases its return) vs a generic `T` erased to `Object`
+                    // (`fun foo(): T`). The former → bridge returns the erased underlying, NO box; the
+                    // latter → bridge BOXES the value class back to `Object`.
+                    let supertype_returns_vc = matches!(&b.erased_ret,
+                        IrType::Class { fq_name, .. } if under.contains_key(fq_name));
+                    if supertype_returns_vc {
+                        b.concrete_ret = erase(&b.concrete_ret, &under);
+                        b.erased_ret = b.concrete_ret.clone();
+                    } else {
+                        b.box_ret = Some(fq_name.clone());
+                        b.concrete_ret = erase(&b.concrete_ret, &under);
+                    }
+                } else if b.target_name.is_some() && !owner_is_value {
+                    // A bridge to a mangled override whose VALUE-CLASS PARAMS erased to their underlying:
+                    // a generic supertype method (`B.f(T,U)`) keeps its erased `f(Object,Object)` bridge
+                    // signature but delegates to the concrete mangled `f-<hash>(<underlying>…)`. The
+                    // incoming args are BOXED `X` (the generic call site boxes), so record each value-class
+                    // param to `checkcast` + `unbox-impl`, then erase the param to its underlying for the
+                    // target call descriptor. The bridge's OWN name/params (the erased generic) are unchanged.
+                    let vc_params: Vec<Option<String>> = b
+                        .concrete_params
+                        .iter()
+                        .map(|p| match p {
+                            IrType::Class {
+                                fq_name,
+                                nullable: false,
+                                ..
+                            } if under.contains_key(fq_name) => Some(fq_name.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if vc_params.iter().any(Option::is_some) {
+                        for p in b.concrete_params.iter_mut() {
                             *p = erase(p, &under);
                         }
-                        // Whether the SUPERTYPE method returns the value class LITERALLY (`fun bar(): Gx` →
-                        // kotlinc mangles + erases its return) vs a generic `T` erased to `Object`
-                        // (`fun foo(): T`). The former → bridge returns the erased underlying, NO box; the
-                        // latter → bridge BOXES the value class back to `Object`.
-                        let supertype_returns_vc = matches!(&b.erased_ret,
-                            IrType::Class { fq_name, .. } if under.contains_key(fq_name));
-                        if supertype_returns_vc {
-                            b.concrete_ret = erase(&b.concrete_ret, &under);
-                            b.erased_ret = b.concrete_ret.clone();
-                        } else {
-                            b.box_ret = Some(fq_name.clone());
-                            b.concrete_ret = erase(&b.concrete_ret, &under);
-                        }
+                        b.unbox_params = vc_params;
                     }
                 }
             }

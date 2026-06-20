@@ -1903,6 +1903,28 @@ fun box(): String = Bg2(Ag2("O")).gicResult
 "#,
     ),
     (
+        "ValueClassGenericInterfaceBridgeUnbox",
+        r#"
+@JvmInline value class Aw(val s: String)
+interface Bw<T, U> { fun g(x: T, y: U): String }
+open class Cw { open fun g(x: Aw, y: Aw): String = y.s }
+class Dw : Cw(), Bw<Aw, Aw> { override fun g(x: Aw, y: Aw): String = x.s }
+fun box(): String = (Dw() as Bw<Aw, Aw>).g(Aw("OK"), Aw("Fail"))
+"#,
+    ),
+    (
+        "ValueClassComparableBridgeKeepsBoxedParam",
+        r#"
+@JvmInline value class Fooc(val x: Int) : Comparable<Fooc> { override fun compareTo(other: Fooc): Int = 10 }
+fun box(): String {
+    val f1 = Fooc(42)
+    val ff1: Comparable<Fooc> = f1
+    if (ff1.compareTo(f1) != 10) return "Fail"
+    return "OK"
+}
+"#,
+    ),
+    (
         "ValueClassInitBlockNotInBoxImpl",
         r#"
 @JvmInline value class Icb(val i: Int) { init { icbCounter += i } }
