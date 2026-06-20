@@ -65,6 +65,17 @@ pub enum Callee {
         params: Vec<IrType>,
         ret: IrType,
     },
+    /// An instance method (or property accessor) of a class defined in ANOTHER file of the same
+    /// compilation — `invokevirtual`/`invokeinterface owner.name(params)ret` on the `dispatch_receiver`.
+    /// Like `Virtual` but carries `IrType`s (the JVM backend builds the descriptor), so `ir_lower` needs
+    /// no JVM descriptor for a sibling-file user class (resolved from its `ClassSig`).
+    CrossFileVirtual {
+        owner: String,
+        name: String,
+        params: Vec<IrType>,
+        ret: IrType,
+        interface: bool,
+    },
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
@@ -285,6 +296,15 @@ pub enum IrExpr {
     NewExternal {
         internal: String,
         ctor_desc: String,
+        args: Vec<ExprId>,
+    },
+    /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
+    /// invokespecial internal.<init>(params)V`. Like `NewExternal` but carries the ctor parameter types
+    /// as `IrType`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
+    /// classpath one with a library-provided descriptor.
+    NewCrossFile {
+        internal: String,
+        params: Vec<IrType>,
         args: Vec<ExprId>,
     },
     /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a

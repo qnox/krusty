@@ -2496,9 +2496,9 @@ fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) 
             push(*receiver, out);
             push(*value, out);
         }
-        IrExpr::New { args, .. } | IrExpr::NewExternal { args, .. } => {
-            args.iter().for_each(|a| push(*a, out))
-        }
+        IrExpr::New { args, .. }
+        | IrExpr::NewExternal { args, .. }
+        | IrExpr::NewCrossFile { args, .. } => args.iter().for_each(|a| push(*a, out)),
         IrExpr::MethodCall { receiver, args, .. } => {
             push(*receiver, out);
             args.iter().flatten().for_each(|a| push(*a, out));
