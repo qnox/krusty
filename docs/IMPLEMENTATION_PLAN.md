@@ -2572,6 +2572,20 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 420 — emit-erasure infrastructure for Kotlin collection types  ✅
+- Prerequisite for keeping `kotlin/collections/{List,MutableList,…}` distinct in the front end: every
+  Ty→JVM-name emit point must erase them to the single JVM interface (`java/util/List`), or Kotlin-only
+  names would leak into bytecode (`instanceof`/`checkcast`/method-owner refs, descriptors).
+- `to_jvm_internal` now erases `kotlin/collections/*` → `java/util/*` (via `kotlin_builtin_to_jvm` on the
+  simple name) as a ONE-WAY emit mapping (NOT added to the bidirectional `TYPE_MAP`, so `to_kotlin_internal`
+  never has to ambiguously reverse a raw `java/util/List` to `List` vs `MutableList`). `ref_internal` (the
+  instanceof/checkcast/method-owner namer) now routes through `to_jvm_internal` instead of using the raw
+  `Ty::Obj` name (a latent leak fixed: it also now erases `kotlin/Any` etc.). `Ty::descriptor` already
+  routed through `to_jvm_internal`.
+- No-op today (nothing produces `kotlin/collections/*` Tys yet) so the box gate holds at **1102, 0 FAIL**;
+  this is the safe landing strip for phase 421 (flip `resolve_callable` to the `@Metadata` Kotlin types).
+  Unit test `jvm_class_map::tests::collection_types_erase_to_jvm_at_emit`.
+
 ### Phase 419 — `@Metadata` function return-type decoding (read-only/mutable foundation)  ✅
 - ROOT CAUSE found (with the maintainer): krusty erases `List`/`MutableList` (and `Map`/`MutableMap`, …)
   to `java/util/List` in the FRONT END, so it can't distinguish a read-only collection from a mutable one
