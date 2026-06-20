@@ -2461,6 +2461,9 @@ fun box(): String {
     var t = 0
     for (i in (0..3).reversed()) t = t * 10 + i
     if (t != 3210) return "f2: $t"
+    var u = 0
+    for (i in (4 downTo 1).reversed()) u = u * 10 + i
+    if (u != 1234) return "f3: $u"
     return "OK"
 }
 "#,
