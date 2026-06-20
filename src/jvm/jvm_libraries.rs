@@ -79,6 +79,12 @@ impl JvmLibraries {
             if matches.is_empty() {
                 continue;
             }
+            // krusty collapses `Byte`/`Short`/`Int` → `Ty::Int`, so numeric overloads differing only in a
+            // `Byte`/`Short` vs `Int` parameter (`until(Int,Byte)` vs `until(Int,Int)`) are
+            // indistinguishable here. Prefer the WIDEST (fewest narrowing params): kotlinc resolves an
+            // `Int` argument to the `Int` overload, and only that one carries the `MIN_VALUE`/`MAX_VALUE`
+            // overflow guard (`2 until Int.MIN_VALUE` must be empty, not wrap to `2..MAX_VALUE`).
+            matches.sort_by_key(|(c, _, _)| descriptor_narrowing(&c.descriptor));
             // Pick the candidate whose non-receiver parameters are at least as specific as every other's
             // (each parameter a subtype of the corresponding one). When two are incomparable, keep the
             // first — stable, and good enough for the stdlib's overload sets.
@@ -128,6 +134,35 @@ impl JvmLibraries {
         }
         None
     }
+}
+
+/// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
+/// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
+/// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
+/// must not count).
+fn descriptor_narrowing(desc: &str) -> usize {
+    let end = desc.find(')').unwrap_or(desc.len());
+    let params = desc.get(1..end).unwrap_or("");
+    let b = params.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < b.len() {
+        match b[i] {
+            b'L' => {
+                while i < b.len() && b[i] != b';' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'[' => i += 1,
+            b'B' | b'S' => {
+                n += 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    n
 }
 
 /// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
