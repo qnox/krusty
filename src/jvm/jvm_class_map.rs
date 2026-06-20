@@ -160,9 +160,15 @@ mod tests {
     fn collection_types_erase_to_jvm_at_emit() {
         // Read-only and mutable Kotlin collections both collapse to the single JVM interface here.
         assert_eq!(to_jvm_internal("kotlin/collections/List"), "java/util/List");
-        assert_eq!(to_jvm_internal("kotlin/collections/MutableList"), "java/util/List");
+        assert_eq!(
+            to_jvm_internal("kotlin/collections/MutableList"),
+            "java/util/List"
+        );
         assert_eq!(to_jvm_internal("kotlin/collections/Map"), "java/util/Map");
-        assert_eq!(to_jvm_internal("kotlin/collections/MutableMap"), "java/util/Map");
+        assert_eq!(
+            to_jvm_internal("kotlin/collections/MutableMap"),
+            "java/util/Map"
+        );
         assert_eq!(
             to_jvm_internal("kotlin/collections/MutableCollection"),
             "java/util/Collection"

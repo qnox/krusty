@@ -1,11 +1,16 @@
 # Git hooks via lefthook (https://lefthook.dev). Install: `just install-hooks` (runs `lefthook install`).
 #
-# Hooks shell out to the `just` recipes so lint/test logic has a single source of truth. They are
-# ADVISORY today — `just lint` surfaces fmt/clippy issues but fails only on hard errors, not the
-# existing fmt/warning debt. To make the gate enforcing once that debt is paid, point pre-commit at
-# `just lint-strict` instead of `just lint`.
+# Hooks shell out to the `just` recipes so lint/test logic has a single source of truth. The gate is
+# ENFORCING: `just lint` (fmt-check + clippy-baseline) returns non-zero on any drift, blocking the
+# commit/push.
 #
-# Bypass in an emergency: `git commit --no-verify` / `git push --no-verify`.
+# pre-commit alone is not enough: it does NOT run on commits replayed by `git rebase`/`cherry-pick`/
+# `--amend`, so unformatted code can reach a branch that way. `pre-push` runs once on the final
+# pushed state regardless of how the commits were made, so it catches the rebase path before code
+# leaves the machine. The cheap `lint` runs first so a drift failure is near-instant (no waiting on
+# the full test suite). Server-side CI (`fmt-check` in `just ci`) is the unbypassable backstop.
+#
+# Bypass in a genuine emergency only: `git commit --no-verify` / `git push --no-verify`.
 
 pre-commit:
   commands:
@@ -14,5 +19,9 @@ pre-commit:
 
 pre-push:
   commands:
+    lint:
+      priority: 1
+      run: just lint
     test:
+      priority: 2
       run: just test

@@ -7,7 +7,9 @@ use krusty::jvm::metadata::package_function_return_types;
 use std::path::PathBuf;
 
 fn stdlib() -> Option<PathBuf> {
-    let kc = std::env::var("KRUSTY_KOTLINC").ok().filter(|s| !s.is_empty())?;
+    let kc = std::env::var("KRUSTY_KOTLINC")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let jar = PathBuf::from(&kc)
         .parent()?
         .parent()?

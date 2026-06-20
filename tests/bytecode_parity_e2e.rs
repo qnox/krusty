@@ -498,7 +498,10 @@ fn data_class_equals_is_byte_identical_to_kotlinc() {
         .output()
         .unwrap();
     if !cc.status.success() {
-        eprintln!("skip (kotlinc failed): {}", String::from_utf8_lossy(&cc.stderr));
+        eprintln!(
+            "skip (kotlinc failed): {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
         let _ = fs::remove_dir_all(&dir);
         return;
     }
@@ -511,5 +514,8 @@ fn data_class_equals_is_byte_identical_to_kotlinc() {
     let kr = slice(&javap(&jh, &dir.join("D.class")));
     let kc = slice(&javap(&jh, &kdir.join("D.class")));
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(kr, kc, "data-class equals must be byte-identical to kotlinc");
+    assert_eq!(
+        kr, kc,
+        "data-class equals must be byte-identical to kotlinc"
+    );
 }
