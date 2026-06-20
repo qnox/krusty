@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 405 — multifile: conformance harness splits `// FILE:` blocks  ✅
+- The conformance harness now compiles a `// FILE: name.kt`-split test as ONE module (`compile_multifile`):
+  split on the markers, parse each block, collect GLOBAL signatures over all files, populate
+  `SymbolTable.fn_facades` (cross-file fn→facade, like the CLI driver), then check + lower + emit each
+  file and run `box()` against ALL emitted classes. `// MODULE:` (separate classpaths) stays skipped; a
+  file using an unmodeled cross-file construct (e.g. a cross-file *class* reference) makes lowering bail →
+  the test SKIPS (never miscompiles). This converts phase 404's cross-file-function codegen into real
+  corpus coverage. **Box conformance: 1076 → 1079 box()=OK, 0 FAIL** (the first multifile tests pass).
+- Modest today (only cross-file-*function*-only multifile tests pass); rises as cross-file classes /
+  properties land. Single-file path unchanged.
+
 ### Phase 404 — multifile: cross-file top-level function calls  ✅
 - A call to a top-level function defined in ANOTHER source file of the same compilation now lowers to a
   cross-facade `invokestatic` instead of bailing. The driver already runs global signatures + per-file

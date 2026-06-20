@@ -256,6 +256,107 @@ fn compile_source(
     Some(outputs)
 }
 
+/// Compile a `// FILE: name.kt`-split multi-file test as ONE module: parse each block, collect global
+/// signatures, populate the cross-file function→facade map (`SymbolTable.fn_facades`, like the CLI
+/// driver), then type-check + lower + emit each file, returning ALL classes. Returns `None` if any file
+/// uses something the IR backend can't lower (e.g. a cross-file *class* reference — only cross-file
+/// top-level functions are modeled so far), so the test SKIPS rather than miscompiles.
+fn compile_multifile(
+    src: &str,
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::ast::Decl;
+    // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut cur_name: Option<String> = None;
+    let mut cur = String::new();
+    for line in src.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
+            if let Some(n) = cur_name.take() {
+                blocks.push((n, std::mem::take(&mut cur)));
+            }
+            let fname = rest.trim();
+            let stem = fname
+                .strip_suffix(".kt")
+                .unwrap_or(fname)
+                .rsplit('/')
+                .next()
+                .unwrap_or(fname)
+                .to_string();
+            cur_name = Some(stem);
+        } else if cur_name.is_some() {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    if let Some(n) = cur_name.take() {
+        blocks.push((n, cur));
+    }
+    if blocks.len() < 2 {
+        return None; // not actually multi-file
+    }
+
+    let mut diags = DiagSink::new();
+    let files: Vec<_> = blocks
+        .iter()
+        .map(|(_, content)| {
+            let toks = lex(content, &mut diags);
+            parse(content, &toks, &mut diags)
+        })
+        .collect();
+    if diags.has_errors() {
+        return None;
+    }
+
+    let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    let cp = CP_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry(cp_paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
+            .clone()
+    });
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    // Cross-file map: each top-level (non-extension, non-inline) function → its file's facade.
+    for (i, file) in files.iter().enumerate() {
+        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
+        for &d in &file.decls {
+            if let Decl::Fun(f) = file.decl(d) {
+                if f.receiver.is_none() && !f.is_inline {
+                    syms.fn_facades.insert(f.name.clone(), facade.clone());
+                }
+            }
+        }
+    }
+
+    let mut all = Vec::new();
+    for (i, file) in files.iter().enumerate() {
+        let info = check_file(file, &syms, &mut diags);
+        if diags.has_errors() {
+            return None;
+        }
+        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
+        let mut ir = lower_file(file, &info, &syms)?;
+        if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
+            return None;
+        }
+        let out = ir_emit::emit_all(&ir, &facade, &*cp)?;
+        all.extend(out);
+    }
+    if all.is_empty() {
+        None
+    } else {
+        Some(all)
+    }
+}
+
 /// Find the class that declares `static box()Ljava/lang/String;`.
 fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
     for (name, bytes) in classes {
@@ -551,11 +652,9 @@ fn kotlin_codegen_box_conformance() {
                 let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = (|| {
-                    // Skip multi-file, multi-module, or no-box tests.
-                    if src.contains("// FILE:")
-                        || src.contains("// MODULE:")
-                        || !src.contains("fun box()")
-                    {
+                    // Skip multi-module (separate classpaths) and no-box tests. A `// FILE:` multi-file
+                    // test (single module) is compiled together via `compile_multifile` below.
+                    if src.contains("// MODULE:") || !src.contains("fun box()") {
                         return (file.clone(), TestResult::Skip);
                     }
                     // Skip tests that require invokedynamic lambdas or features not supported on JVM_IR K2.
@@ -590,11 +689,15 @@ fn kotlin_codegen_box_conformance() {
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     let t0 = std::time::Instant::now();
-                    let classes =
-                        match compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref()) {
-                            Some(c) => c,
-                            None => return (file.clone(), TestResult::Skip),
-                        };
+                    let compiled = if src.contains("// FILE:") {
+                        compile_multifile(&src, &compile_cp, jdk_modules.as_deref())
+                    } else {
+                        compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref())
+                    };
+                    let classes = match compiled {
+                        Some(c) => c,
+                        None => return (file.clone(), TestResult::Skip),
+                    };
                     t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     let box_class = match find_box_class(&classes) {
                         Some(c) => c,
