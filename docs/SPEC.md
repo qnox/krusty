@@ -385,6 +385,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   finallys). `emit_try` still inlines the finally on the normal-completion and exception paths. A `break`/
   `continue` escaping the `try`, or a `finally` that declares locals (its duplicated slots would clash
   across the inlined copies), is still skipped. `ReturnInTryFinally` in `tests/feature_box_e2e.rs`.
+  A `return` *inside* the `finally` itself (`try { return 0 } finally { return 1 }`, where the finally's
+  return overrides the try's) inlines only the finallys that **enclose** it, never itself: each finally
+  `i` is lowered with `try_finally_stack` truncated to `finallys[..i]`. Inlining a finally with itself
+  still on the stack used to re-inline it at its own `return` and recurse until the stack overflowed.
+  `finally_return_overrides_try_return` in `tests/finally_e2e.rs`; box corpus `try/finally6.kt`.
 - **`when (subject)` with `in`/`!in` range branches** (`when (x) { in 4..6 -> … }`): the parser builds
   the structural `Is`/`InRange` node for an `is`/`in`-range condition (same as the infix `is`/`in`
   operator); the checker and lowering treat that node as a complete boolean test of the subject, not a

@@ -3930,9 +3930,22 @@ impl<'a> Lower<'a> {
                         }
                         None => None,
                     };
-                    for f in finallys.iter().rev() {
-                        stmts.push(self.expr(*f)?);
+                    // Inline each finally (innermost first). A `return` *inside* a finally must run
+                    // only the finallys that enclose it — never itself — so lower finally `i` with the
+                    // stack truncated to its enclosers (`finallys[..i]`, outermost-first). Without this,
+                    // a finally whose body returns (e.g. `try { return 0 } finally { return 1 }`) would
+                    // re-inline itself at its own `return` and recurse forever.
+                    let saved = std::mem::take(&mut self.try_finally_stack);
+                    for i in (0..finallys.len()).rev() {
+                        self.try_finally_stack = finallys[..i].to_vec();
+                        let lowered = self.expr(finallys[i]);
+                        let Some(s) = lowered else {
+                            self.try_finally_stack = saved;
+                            return None;
+                        };
+                        stmts.push(s);
                     }
+                    self.try_finally_stack = saved;
                     let rv = ret_val.map(|tmp| self.ir.add_expr(IrExpr::GetValue(tmp)));
                     stmts.push(self.ir.add_expr(IrExpr::Return(rv)));
                     return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
