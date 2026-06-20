@@ -239,6 +239,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxes any matching `var` it declares (over-boxing an uncaptured same-named `var` is harmless — an
   extra indirection). An inlined scope function (`let`/`also`/`run`/`apply`) needs no box (its body is
   inlined), and a closure that writes a *field* (capturing `this`) is still skipped.
+- Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
+  secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
+  runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a
+  sibling `this(…)` runs only its body (the init steps run in the reached `super`-constructor). The
+  parenless base class (`class A : B { constructor(): super() }` — B is a concrete file class) is
+  recovered post-parse. **Field-initializer default-value elision:** kotlinc omits a field initializer
+  that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
+  constructor's virtual call already wrote survives; krusty does the same (test
+  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). Skipped (bail, never
+  miscompile): a secondary with a defaulted parameter (needs the synthetic `DefaultConstructorMarker`
+  overload), a value-class `super(…)` argument, and an ambiguous `this(…)` target.
 - Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
   impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
   closure. Only the simple primary-constructor positional case (the reference's arity matches the

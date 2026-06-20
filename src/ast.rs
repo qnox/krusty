@@ -429,6 +429,11 @@ pub struct ClassDecl {
     pub base_args: Vec<ExprId>,
     /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
     pub secondary_ctors: Vec<SecondaryCtor>,
+    /// `false` when the class declares NO primary constructor (`class A { constructor(...) }`): every
+    /// constructor is a secondary, and a `super(...)`/implicit-delegating one (not `this(...)`) runs the
+    /// field initializers + `init {}` blocks. `true` for an implicit/explicit primary (`class A`,
+    /// `class A()`, `class A(...)`), including a `class A() { constructor(...) : this(...) }`.
+    pub has_primary_ctor: bool,
     pub span: Span,
 }
 

@@ -199,143 +199,148 @@ fn emit_class(
     } else {
         c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
     };
-    let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + params_words);
-    // The superclass constructor's parameter types (empty for the erased top type — the front end
-    // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
-    let super_param_tys: Vec<Ty> =
-        if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
-            Vec::new()
-        } else {
-            ir.classes
-                .iter()
-                .find(|sc| sc.fq_name == c.superclass)
-                .map(|sc| {
-                    if sc.ctor_args.is_empty() {
-                        sc.fields[..sc.ctor_param_count as usize]
-                            .iter()
-                            .map(|(_, t)| ir_ty_to_jvm(t))
-                            .collect()
-                    } else {
-                        sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+    // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
+    // secondary constructor (below). Otherwise emit the primary `<init>` here.
+    if c.has_primary_ctor {
+        let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+        let mut ctor = CodeBuilder::new(1 + params_words);
+        // The superclass constructor's parameter types (empty for the erased top type — the front end
+        // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
+        let super_param_tys: Vec<Ty> =
+            if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
+                Vec::new()
+            } else {
+                ir.classes
+                    .iter()
+                    .find(|sc| sc.fq_name == c.superclass)
+                    .map(|sc| {
+                        if sc.ctor_args.is_empty() {
+                            sc.fields[..sc.ctor_param_count as usize]
+                                .iter()
+                                .map(|(_, t)| ir_ty_to_jvm(t))
+                                .collect()
+                        } else {
+                            sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+        let max_slot;
+        let mut init_diverges = false;
+        {
+            let mut e = Emitter {
+                ir,
+                cw: &mut cw,
+                bodies,
+                owner: c.fq_name.clone(),
+                facade: facade.to_string(),
+                slots: HashMap::new(),
+                next_slot: 1 + params_words,
+                ret: Ty::Unit,
+                loop_stack: Vec::new(),
+            };
+            e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
+            let mut s = 1u16;
+            for (vi, t) in param_tys.iter().enumerate() {
+                e.slots.insert(vi as u32 + 1, (s, *t));
+                s += slot_words(*t);
+            }
+            // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
+            // the very start of `<init>` — before the super() call.
+            let ctor_checks = c.ctor_param_checks.clone();
+            for (i, check) in ctor_checks.iter().enumerate() {
+                if let Some(name) = check {
+                    if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
+                        ctor.aload(slot);
+                        ctor.push_string(name, e.cw);
+                        let m = e.cw.methodref(
+                            "kotlin/jvm/internal/Intrinsics",
+                            "checkNotNullParameter",
+                            "(Ljava/lang/Object;Ljava/lang/String;)V",
+                        );
+                        ctor.invokestatic(m, 2, 0);
                     }
-                })
-                .unwrap_or_default()
-        };
-    let max_slot;
-    let mut init_diverges = false;
-    {
-        let mut e = Emitter {
-            ir,
-            cw: &mut cw,
-            bodies,
-            owner: c.fq_name.clone(),
-            facade: facade.to_string(),
-            slots: HashMap::new(),
-            next_slot: 1 + params_words,
-            ret: Ty::Unit,
-            loop_stack: Vec::new(),
-        };
-        e.slots.insert(0, (0, Ty::obj(&c.fq_name)));
-        let mut s = 1u16;
-        for (vi, t) in param_tys.iter().enumerate() {
-            e.slots.insert(vi as u32 + 1, (s, *t));
-            s += slot_words(*t);
-        }
-        // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
-        // the very start of `<init>` — before the super() call.
-        let ctor_checks = c.ctor_param_checks.clone();
-        for (i, check) in ctor_checks.iter().enumerate() {
-            if let Some(name) = check {
-                if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
-                    ctor.aload(slot);
-                    ctor.push_string(name, e.cw);
-                    let m = e.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNullParameter",
-                        "(Ljava/lang/Object;Ljava/lang/String;)V",
-                    );
-                    ctor.invokestatic(m, 2, 0);
                 }
             }
-        }
-        // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
-        let super_args = c.super_args.clone();
-        if super_args.iter().any(|&a| e.records_frame(a)) {
-            let temps = e.spill_to_temps(&super_args, &mut ctor);
-            ctor.aload(0);
-            for &(slot, t, _) in &temps {
-                load(t, slot, &mut ctor);
-            }
-            for &(_, _, key) in &temps {
-                e.slots.remove(&key);
-            }
-        } else {
-            ctor.aload(0);
-            for &a in &super_args {
-                e.emit_value(a, &mut ctor);
-            }
-        }
-        let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-        let super_init = e.cw.methodref(
-            &c.superclass,
-            "<init>",
-            &method_descriptor(&super_param_tys, Ty::Unit),
-        );
-        ctor.invokespecial(super_init, aw, 0);
-        // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
-        // stored to its field (the property fields are `fields[0..]` in declaration order among params);
-        // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
-        // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
-        let mut slot = 1u16;
-        let mut field_i = 0usize;
-        let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-            vec![true; param_tys.len()]
-        } else {
-            c.ctor_args.iter().map(|(_, f)| *f).collect()
-        };
-        for (i, t) in param_tys.iter().enumerate() {
-            if is_field.get(i).copied().unwrap_or(true) {
-                let name = &c.fields[field_i].0;
+            // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
+            let super_args = c.super_args.clone();
+            if super_args.iter().any(|&a| e.records_frame(a)) {
+                let temps = e.spill_to_temps(&super_args, &mut ctor);
                 ctor.aload(0);
-                load(*t, slot, &mut ctor);
-                let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
-                ctor.putfield(fref, slot_words(*t) as i32);
-                field_i += 1;
+                for &(slot, t, _) in &temps {
+                    load(t, slot, &mut ctor);
+                }
+                for &(_, _, key) in &temps {
+                    e.slots.remove(&key);
+                }
+            } else {
+                ctor.aload(0);
+                for &a in &super_args {
+                    e.emit_value(a, &mut ctor);
+                }
             }
-            slot += slot_words(*t);
+            let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+            let super_init = e.cw.methodref(
+                &c.superclass,
+                "<init>",
+                &method_descriptor(&super_param_tys, Ty::Unit),
+            );
+            ctor.invokespecial(super_init, aw, 0);
+            // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
+            // stored to its field (the property fields are `fields[0..]` in declaration order among params);
+            // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
+            // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
+            let mut slot = 1u16;
+            let mut field_i = 0usize;
+            let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                vec![true; param_tys.len()]
+            } else {
+                c.ctor_args.iter().map(|(_, f)| *f).collect()
+            };
+            for (i, t) in param_tys.iter().enumerate() {
+                if is_field.get(i).copied().unwrap_or(true) {
+                    let name = &c.fields[field_i].0;
+                    ctor.aload(0);
+                    load(*t, slot, &mut ctor);
+                    let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
+                    ctor.putfield(fref, slot_words(*t) as i32);
+                    field_i += 1;
+                }
+                slot += slot_words(*t);
+            }
+            if let Some(init_body) = c.init_body {
+                e.emit(init_body, &mut ctor);
+                init_diverges = e.diverges(init_body);
+            }
+            max_slot = e.next_slot;
         }
-        if let Some(init_body) = c.init_body {
-            e.emit(init_body, &mut ctor);
-            init_diverges = e.diverges(init_body);
+        // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
+        // would be dead code after `athrow` (which the verifier rejects without a frame).
+        if !init_diverges {
+            ctor.ret_void();
         }
-        max_slot = e.next_slot;
-    }
-    // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
-    // would be dead code after `athrow` (which the verifier rejects without a frame).
-    if !init_diverges {
-        ctor.ret_void();
-    }
-    ctor.ensure_locals(max_slot);
-    ctor.link();
-    // An `object`'s constructor is private; a `C$Companion`'s is package-private (so the outer class's
-    // `<clinit>` can call it without nestmate attributes); a normal class's is public.
-    let ctor_access = if c.is_object {
-        0x0002
-    } else if c.is_companion {
-        0x0000
-    } else {
-        0x0001
-    };
-    cw.add_method(
-        ctor_access,
-        "<init>",
-        &method_descriptor(&param_tys, Ty::Unit),
-        &ctor,
-    );
+        ctor.ensure_locals(max_slot);
+        ctor.link();
+        // An `object`'s constructor is private; a `C$Companion`'s is package-private (so the outer class's
+        // `<clinit>` can call it without nestmate attributes); a normal class's is public.
+        let ctor_access = if c.is_object {
+            0x0002
+        } else if c.is_companion {
+            0x0000
+        } else {
+            0x0001
+        };
+        cw.add_method(
+            ctor_access,
+            "<init>",
+            &method_descriptor(&param_tys, Ty::Unit),
+            &ctor,
+        );
+    } // end `if c.has_primary_ctor`
 
-    // Secondary constructors: each `<init>(p)` calls `this(delegate_args)` (the primary `<init>`) then
-    // runs its body. `this` is slot 0, parameters follow.
+    // Secondary constructors: each `<init>(p)` delegates (via `this(…)` to an own `<init>`, or via
+    // `super(…)` to the base `<init>`) then runs its body. A `super(…)`-reaching ctor's `body` already
+    // has the class init steps prepended (the lowering does that). `this` is slot 0, parameters follow.
     for sc in &c.secondary_ctors {
         let sc_param_tys: Vec<Ty> = sc.params.iter().map(ir_ty_to_jvm).collect();
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
@@ -360,8 +365,26 @@ fn emit_class(
                 e.slots.insert(vi as u32 + 1, (s, *t));
                 s += slot_words(*t);
             }
-            // `this(delegate_args)` — `invokespecial` the primary `<init>` (this is loaded first, so
-            // spill any branchy delegate argument to a temp before it).
+            // Delegation target: `this(…)` → an own `<init>(target_params)`; `super(…)` → the base
+            // `<init>(super_params)`. `this` is loaded first, so spill any branchy arg to a temp before.
+            use crate::ir::CtorDelegateTarget;
+            let (target_class, target_jvm_tys): (String, Vec<Ty>) = match &sc.delegate {
+                // `this(…)` targets an own `<init>`. In a class WITH a primary ctor that target IS the
+                // primary, whose live signature is `param_tys` (already value-class-rewritten) — use it
+                // rather than the lower-time `target_params` (which predates the value-class pass).
+                CtorDelegateTarget::This { target_params } => (
+                    c.fq_name.clone(),
+                    if c.has_primary_ctor {
+                        param_tys.clone()
+                    } else {
+                        target_params.iter().map(ir_ty_to_jvm).collect()
+                    },
+                ),
+                CtorDelegateTarget::Super { super_params } => (
+                    crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass).to_string(),
+                    super_params.iter().map(ir_ty_to_jvm).collect(),
+                ),
+            };
             let dargs = sc.delegate_args.clone();
             if dargs.iter().any(|&a| e.records_frame(a)) {
                 let temps = e.spill_to_temps(&dargs, &mut sctor);
@@ -378,13 +401,13 @@ fn emit_class(
                     e.emit_value(a, &mut sctor);
                 }
             }
-            let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-            let prim_init = e.cw.methodref(
-                &c.fq_name,
+            let aw: i32 = target_jvm_tys.iter().map(|t| slot_words(*t) as i32).sum();
+            let delegate_init = e.cw.methodref(
+                &target_class,
                 "<init>",
-                &method_descriptor(&param_tys, Ty::Unit),
+                &method_descriptor(&target_jvm_tys, Ty::Unit),
             );
-            sctor.invokespecial(prim_init, aw, 0);
+            sctor.invokespecial(delegate_init, aw, 0);
             if let Some(body) = sc.body {
                 e.emit(body, &mut sctor);
                 sec_diverges = e.diverges(body);
