@@ -1960,6 +1960,23 @@ fun box(): String {
 "#,
     ),
     (
+        // A generic value class wrapping a `List<T>` with a secondary constructor `(value: T)`. Two things:
+        // (1) the `List<T>` underlying resolves to `java/util/List` (not erased `Object`), so the primary
+        // `constructor-impl(List)` and the secondary `constructor-impl(T=Object)` are DISTINCT (no Duplicate
+        // method); (2) `ICs("abc")` (a String arg) selects the SECONDARY ctor, not the primary `List` one.
+        "ValueClassSecondaryConstructorGeneric",
+        r#"
+@JvmInline value class ICs<T>(val value: List<T>) {
+    constructor(value: T) : this(listOf(value))
+}
+fun box(): String {
+    if (ICs("abc").value.singleOrNull() != "abc") return "f1"
+    if (ICs(listOf("x", "y")).value.size != 2) return "f2"
+    return "OK"
+}
+"#,
+    ),
+    (
         "ValueClassComparableBridgeKeepsBoxedParam",
         r#"
 @JvmInline value class Fooc(val x: Int) : Comparable<Fooc> { override fun compareTo(other: Fooc): Int = 10 }

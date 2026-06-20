@@ -7264,11 +7264,34 @@ impl<'a> Lower<'a> {
                         // `Int` primary coerced). Compare the argument IR types to each secondary's.
                         let arg_irs: Vec<IrType> =
                             args.iter().map(|a| ty_to_ir(self.info.ty(*a))).collect();
-                        let typed_secondary = self.ir.classes[class as usize]
-                            .secondary_ctors
-                            .clone()
-                            .into_iter()
-                            .find(|sc| sc.params == arg_irs);
+                        let secs = self.ir.classes[class as usize].secondary_ctors.clone();
+                        // Whether the PRIMARY constructor can accept the args (each assignable to a field
+                        // type). When it can't (`IC("abc")`: a `String` isn't assignable to `List<T>`),
+                        // a secondary whose params accept the args is chosen instead of leniently coercing
+                        // into the primary — otherwise the call would target `constructor-impl(List)` with
+                        // a `String` and fail at runtime.
+                        let primary_accepts = arg_irs.len() == field_tys.len()
+                            && arg_irs
+                                .iter()
+                                .zip(&field_tys)
+                                .all(|(a, p)| ir_arg_assignable(a, p));
+                        let typed_secondary = secs
+                            .iter()
+                            .find(|sc| sc.params == arg_irs)
+                            .or_else(|| {
+                                (!primary_accepts)
+                                    .then(|| {
+                                        secs.iter().find(|sc| {
+                                            sc.params.len() == arg_irs.len()
+                                                && arg_irs
+                                                    .iter()
+                                                    .zip(&sc.params)
+                                                    .all(|(a, p)| ir_arg_assignable(a, p))
+                                        })
+                                    })
+                                    .flatten()
+                            })
+                            .cloned();
                         // The primary constructor (exact/defaulted positional match), else a secondary
                         // constructor selected by argument count.
                         if let Some(sc) = typed_secondary {
@@ -8353,6 +8376,16 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         .any(|&d| matches!(file.decl(d), Decl::Class(c) if c.name == r.name));
     if is_class {
         Ty::obj(&class_internal(file, &r.name))
+    } else if let Some(jvm) = crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&r.name) {
+        // A built-in collection/reference type (`List`, `Map`, `Comparable`, …) resolves to its JVM
+        // interface instead of erasing to `Object` — so e.g. a `List<T>` field keeps a `java/util/List`
+        // descriptor (distinct from a `T`-typed `Object`), which value-class member synthesis needs.
+        // `Any` keeps its Kotlin identity (`kotlin/Any`); the front end uses that, not `java/lang/Object`.
+        if jvm == "java/lang/Object" {
+            Ty::obj("kotlin/Any")
+        } else {
+            Ty::obj(jvm)
+        }
     } else {
         Ty::obj("kotlin/Any")
     }
@@ -8380,6 +8413,15 @@ fn ir_type_is_reference(t: &IrType) -> bool {
 /// Whether `t` is exactly `java/lang/Object` / `kotlin/Any` (the erased top type — no `checkcast` to it).
 fn ir_type_is_object(t: &IrType) -> bool {
     matches!(t, IrType::Class { fq_name, .. } if fq_name == "java/lang/Any" || fq_name == "kotlin/Any" || fq_name == "java/lang/Object")
+}
+
+/// Conservative "is `arg` assignable to `param`" for constructor-overload selection: an exact match,
+/// or any reference flowing into an erased `Object`/`Any` param (an erased generic type parameter).
+/// Deliberately strict otherwise (no class-hierarchy data here) — used only to tell whether the PRIMARY
+/// constructor can accept the args before falling back to a secondary (`IC("abc")`: a `String` is NOT
+/// assignable to the primary's `List<T>` param, but IS to the secondary's erased `T`).
+fn ir_arg_assignable(arg: &IrType, param: &IrType) -> bool {
+    arg == param || (ir_type_is_object(param) && ir_type_is_reference(arg))
 }
 
 /// Whether `e` contains a `return` (always exits the function), or a `break`/`continue` that targets a
