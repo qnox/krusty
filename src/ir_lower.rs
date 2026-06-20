@@ -1450,6 +1450,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         name: p.name.clone(),
                         ty: ir_ty,
                         init,
+                        is_var: p.is_var,
+                        is_const: p.is_const,
                     });
                 }
             }
