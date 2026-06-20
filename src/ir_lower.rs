@@ -4339,6 +4339,40 @@ impl<'a> Lower<'a> {
                 value,
             } => {
                 let rt = self.info.ty(receiver);
+                // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
+                // (the backing field is private). A cross-file `val` write bails.
+                if self.class_of(rt).is_none() {
+                    if let Ty::Obj(i, _) = &rt {
+                        if let Some((owner, pty, is_var, interface)) = self
+                            .syms
+                            .class_by_internal(i)
+                            .filter(|cs| cs.value_field.is_none())
+                            .and_then(|cs| {
+                                cs.props
+                                    .iter()
+                                    .find(|(n, _, _)| n == &name)
+                                    .map(|(_, t, v)| (i.to_string(), *t, *v, cs.is_interface))
+                            })
+                        {
+                            if !is_var {
+                                return None;
+                            }
+                            let r = self.expr(receiver)?;
+                            let v = self.lower_arg(value, &ty_to_ir(pty))?;
+                            return Some(self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::CrossFileVirtual {
+                                    owner,
+                                    name: setter_name(&name),
+                                    params: vec![ty_to_ir(pty)],
+                                    ret: crate::ir::IrType::Unit,
+                                    interface,
+                                },
+                                dispatch_receiver: Some(r),
+                                args: vec![v],
+                            }));
+                        }
+                    }
+                }
                 let owner_internal = self.class_of(rt)?.internal.clone();
                 // The backing field is private; a write from outside the declaring class goes through
                 // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
@@ -8437,6 +8471,42 @@ impl<'a> Lower<'a> {
                             index,
                             receiver: recv,
                             args: a.into_iter().map(Some).collect(),
+                        })
+                    } else if let Some((owner, sig_params, sig_ret, interface)) = match &rt {
+                        // An instance method on a class defined in ANOTHER file → `CrossFileVirtual`
+                        // (own methods only; inherited/defaulted/vararg cross-file calls bail).
+                        Ty::Obj(i, _) if self.class_of(rt).is_none() => self
+                            .syms
+                            .class_by_internal(i)
+                            .filter(|cs| cs.value_field.is_none())
+                            .and_then(|cs| {
+                                cs.methods
+                                    .get(&name)
+                                    .filter(|s| !s.vararg && s.required == s.params.len())
+                                    .map(|s| {
+                                        (i.to_string(), s.params.clone(), s.ret, cs.is_interface)
+                                    })
+                            }),
+                        _ => None,
+                    } {
+                        if args.len() != sig_params.len() {
+                            return None;
+                        }
+                        let recv = self.expr(receiver)?;
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&sig_params) {
+                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                        }
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::CrossFileVirtual {
+                                owner,
+                                name: name.clone(),
+                                params: sig_params.iter().map(|t| ty_to_ir(*t)).collect(),
+                                ret: ty_to_ir(sig_ret),
+                                interface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: a,
                         })
                     } else if name == "toString" && args.is_empty() {
                         // `x.toString()` → stdlib intrinsic, `String`.
