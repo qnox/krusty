@@ -380,10 +380,32 @@ fn emit_class(
                         target_params.iter().map(ir_ty_to_jvm).collect()
                     },
                 ),
-                CtorDelegateTarget::Super { super_params } => (
-                    crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass).to_string(),
-                    super_params.iter().map(ir_ty_to_jvm).collect(),
-                ),
+                // `super(…)` targets the base `<init>`, whose signature is read LIVE from the base
+                // class's (post-transform) ctor — mirrors the primary path, so any IR→IR pass that
+                // rewrote the base ctor's parameter types (e.g. value-class erasure) is reflected here.
+                CtorDelegateTarget::Super => {
+                    let owner =
+                        crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass).to_string();
+                    let tys: Vec<Ty> = if owner == "java/lang/Object" {
+                        Vec::new()
+                    } else {
+                        ir.classes
+                            .iter()
+                            .find(|sc| sc.fq_name == c.superclass)
+                            .map(|sc| {
+                                if sc.ctor_args.is_empty() {
+                                    sc.fields[..sc.ctor_param_count as usize]
+                                        .iter()
+                                        .map(|(_, t)| ir_ty_to_jvm(t))
+                                        .collect()
+                                } else {
+                                    sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                                }
+                            })
+                            .unwrap_or_default()
+                    };
+                    (owner, tys)
+                }
             };
             let dargs = sc.delegate_args.clone();
             if dargs.iter().any(|&a| e.records_frame(a)) {
