@@ -1627,39 +1627,33 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
         && p.init.is_some()
 }
 
-/// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
-/// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
-/// in the constructor body rather than at the declaration.
-/// Whether a lowered initializer value is the JVM default for its (primitive/reference) field type:
-/// `0`/`0L`/`0.0`/`0.0f`/`false`/`'\0'`/`null`, or such a zero literal under a primitive coercion
-/// (`0.toByte()`/`0.toChar()`). kotlinc elides a field initializer equal to the field's default —
-/// the JVM zero-initializes the field, so re-storing the default would clobber a value a base
-/// constructor's virtual call already wrote. Eliding is always semantically safe (no side effect).
-fn ir_value_is_jvm_default(ir: &IrFile, v: ExprId) -> bool {
-    match ir.expr(v) {
-        IrExpr::Const(c) => {
-            matches!(
-                c,
-                IrConst::Int(0)
-                    | IrConst::Long(0)
-                    | IrConst::Short(0)
-                    | IrConst::Byte(0)
-                    | IrConst::Boolean(false)
-                    | IrConst::Char('\0')
-                    | IrConst::Null
-            ) || matches!(c, IrConst::Float(f) if *f == 0.0)
-                || matches!(c, IrConst::Double(f) if *f == 0.0)
-        }
-        // `0.toByte()` / `0.toChar()` — a primitive coercion of a zero literal is still the default.
-        IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } => ir_value_is_jvm_default(ir, *arg),
+/// Whether a body-property initializer *AST expression* is the field's JVM default value:
+/// `0`/`0L`/`0.0`/`0.0f`/`false`/`'\0'`/`null`, or such a zero literal under a primitive conversion
+/// (`0.toByte()`/`0.toChar()`). kotlinc elides a field initializer equal to the field's default — the
+/// JVM zero-initializes the field, so re-storing the default would clobber a value a base constructor's
+/// virtual call already wrote. Decided on the AST (a default-value literal has no side effect to lose).
+fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
+    match file.expr(e) {
+        Expr::IntLit(0) | Expr::LongLit(0) | Expr::NullLit | Expr::BoolLit(false) => true,
+        Expr::DoubleLit(d) => *d == 0.0,
+        Expr::FloatLit(f) => *f == 0.0,
+        Expr::CharLit(c) => *c as u32 == 0,
+        // `0.toByte()` / `0.toChar()` — a primitive conversion of a zero literal is still the default.
+        Expr::Call { callee, args } if args.is_empty() => match file.expr(*callee) {
+            Expr::Member { receiver, name }
+                if crate::resolve::conversion_target(name).is_some() =>
+            {
+                ast_init_is_jvm_default(file, *receiver)
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
 
+/// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
+/// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
+/// in the constructor body rather than at the declaration.
 fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
     !p.is_var
         && p.receiver.is_none()
@@ -1819,6 +1813,12 @@ impl<'a> Lower<'a> {
                         .1
                         .clone();
                     let init_e = c.body_props[*i].init.unwrap();
+                    // kotlinc elides a field initializer that stores the field's JVM default value — a
+                    // base-class constructor's virtual call may have already written the field, and a
+                    // default-value store would clobber it (see `fieldInitializerOptimization`).
+                    if ast_init_is_jvm_default(self.afile, init_e) {
+                        continue;
+                    }
                     if matches!(
                         self.afile.expr(init_e),
                         Expr::When { .. }
@@ -1830,12 +1830,6 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let val = self.lower_arg(init_e, &field_ty)?;
-                    // kotlinc elides a field initializer that stores the field's JVM default value — a
-                    // base-class constructor's virtual call may have already written the field, and a
-                    // default-value store would clobber it (see `fieldInitializerOptimization`).
-                    if ir_value_is_jvm_default(&self.ir, val) {
-                        continue;
-                    }
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     stmts.push(self.ir.add_expr(IrExpr::SetField {
                         receiver: recv,
