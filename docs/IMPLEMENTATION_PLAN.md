@@ -2578,9 +2578,10 @@ bodies exist only as jar bytecode):
   `downTo` loop (no new IR, no value-class/range-iterator machinery). Only side-effect-free bounds (a
   literal or a name) are rewritten: kotlinc evaluates a reversed range's bounds in SOURCE order, so a
   call-bound `(logged()..logged()).reversed()` keeps the iterable path (skips) — guarded after the
-  `forInRangeLiteralReversed` evaluation-order test showed the swap. `until`-reversed (off-by-one) and the
-  value-form `(a downTo b)` (parses as an infix call, not `RangeTo`) are deferred. TDD: feature snippet
-  `ForInReversedLiteralRange`. Box gate 1076 OK, 0 FAIL (a capability step; the corpus `forInReversed`
+  `forInRangeLiteralReversed` evaluation-order test showed the swap. Both `(a..b)` (a `RangeTo`) and the
+  value-form `(a downTo b)` (which parses as the infix call `a.downTo(b)`) are handled → `b downTo a` /
+  `b..a`; `until`-reversed (off-by-one) is deferred. TDD: feature snippet `ForInReversedLiteralRange`
+  (`..`, `0..3`, and `downTo` forms). Box gate 1076 OK, 0 FAIL (a capability step; corpus `forInReversed`
   files carry other blockers, so +0 today, but the `.reversed()` blocker is now gone for them).
 
 ### Phase 401 — string templates → single `StringBuilder` (bytecode parity)  ✅

@@ -2644,34 +2644,49 @@ impl<'a> Parser<'a> {
                     } = self.file.expr(callee).clone()
                     {
                         if mname == "reversed" {
-                            if let Expr::RangeTo { lo, hi, kind } = self.file.expr(receiver).clone()
-                            {
-                                // Reversing swaps which bound is evaluated first, so only rewrite when
-                                // both bounds are side-effect-free (a literal or a name) — kotlinc
-                                // evaluates the bounds in SOURCE order even for a reversed range, so a
-                                // call-bound `(logged()..logged()).reversed()` keeps the iterable path.
-                                let simple = |p: &Self, id: ExprId| {
-                                    matches!(
-                                        p.file.expr(id),
-                                        Expr::IntLit(_)
-                                            | Expr::LongLit(_)
-                                            | Expr::UIntLit(_)
-                                            | Expr::ULongLit(_)
-                                            | Expr::CharLit(_)
-                                            | Expr::Name(_)
-                                    )
+                            // Reversing swaps which bound is evaluated first, so only rewrite when both
+                            // bounds are side-effect-free (a literal or a name) — kotlinc evaluates a
+                            // reversed range's bounds in SOURCE order, so a call-bound
+                            // `(logged()..logged()).reversed()` keeps the iterable path.
+                            let simple = |p: &Self, id: ExprId| {
+                                matches!(
+                                    p.file.expr(id),
+                                    Expr::IntLit(_)
+                                        | Expr::LongLit(_)
+                                        | Expr::UIntLit(_)
+                                        | Expr::ULongLit(_)
+                                        | Expr::CharLit(_)
+                                        | Expr::Name(_)
+                                )
+                            };
+                            // The reversed range as `(start, end, kind)`: a `..`/`downTo`/`until` literal
+                            // flips to the descending/ascending counted loop. `..` is `RangeTo`; the
+                            // value-form `downTo`/`until` parse as infix calls `a.downTo(b)`.
+                            let reversed: Option<(ExprId, ExprId, RangeKind)> =
+                                match self.file.expr(receiver).clone() {
+                                    Expr::RangeTo { lo, hi, kind } => match kind {
+                                        RangeKind::Through => Some((hi, lo, RangeKind::DownTo)),
+                                        RangeKind::DownTo => Some((hi, lo, RangeKind::Through)),
+                                        RangeKind::Until => None, // (hi-1) downTo lo — off-by-one
+                                    },
+                                    // `(a downTo b).reversed()` → `b..a`; `until`-reversed is off-by-one.
+                                    Expr::Call {
+                                        callee: ic,
+                                        args: ia,
+                                    } if ia.len() == 1 => match self.file.expr(ic).clone() {
+                                        Expr::Member {
+                                            receiver: a,
+                                            name: op,
+                                        } if op == "downTo" => Some((ia[0], a, RangeKind::Through)),
+                                        _ => None,
+                                    },
+                                    _ => None,
                                 };
-                                let rev = match kind {
-                                    RangeKind::Through => Some(RangeKind::DownTo),
-                                    RangeKind::DownTo => Some(RangeKind::Through),
-                                    RangeKind::Until => None, // (hi-1) downTo lo — off-by-one, skip
-                                };
-                                if let (Some(kind), true) =
-                                    (rev, simple(self, lo) && simple(self, hi))
-                                {
+                            if let Some((s, en, kind)) = reversed {
+                                if simple(self, s) && simple(self, en) {
                                     let range = ForRange {
-                                        start: hi,
-                                        end: lo,
+                                        start: s,
+                                        end: en,
                                         kind,
                                         step: None,
                                     };
