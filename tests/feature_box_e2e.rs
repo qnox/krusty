@@ -14,6 +14,12 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // `Char.MAX_VALUE`/`MIN_VALUE` companion constants keep their `Char` type when boxed (a vararg/generic
+    // position): `listOf(Char.MAX_VALUE, …)` is a `List<Char>` holding `Character`s, not `Integer`s.
+    (
+        "CharCompanionConst",
+        "fun box(): String {\n    val l = listOf(Char.MAX_VALUE, Char.MIN_VALUE)\n    if (l[0] != '\\uFFFF') return \"f0\"\n    if (l[1] != '\\u0000') return \"f1\"\n    return \"OK\"\n}\n",
+    ),
     // A user `plusAssign`/`minusAssign` operator: `target op= rhs` is an in-place CALL, legal even on a
     // `val` (member operator AND extension operator), not a reassignment.
     (

@@ -2572,6 +2572,18 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 417 — `Char.MAX_VALUE`/`MIN_VALUE` companion constants keep their `Char` type when boxed  ✅
+- A `Char` companion constant is read back from the classpath as an integer `ConstantValue`, and lowering
+  emitted it as `IrConst::Int` — so in a vararg/generic position (`listOf(Char.MAX_VALUE, …)`) it boxed to
+  `Integer`, not `Character` (the list printed `[65535, 0]` instead of `[￿,  ]`). The checker
+  already typed `Char.MAX_VALUE` as `Char`; only lowering lost it.
+- Fix: when the companion's owner is `Char`, emit `IrConst::Char` (`char::from_u32(v)`), so the constant
+  boxes to `Character` and equals the corresponding `Char` literal. `val c: Char = Char.MAX_VALUE` already
+  worked (a direct coercion); this fixes the boxed/collection case.
+- Box gate **1091, 0 FAIL** (no count change yet — the corpus files needing this also need the classpath
+  collection `+=` to compile, see roadmap memory). TDD: `feature_box_e2e::CharCompanionConst`. This is one of
+  the three pre-existing bugs that block landing collection `+=` (which is implemented and gives +111).
+
 ### Phase 416 — user `plusAssign`/`minusAssign`/… operators (`+=` on a `val`)  ✅
 - `target op= rhs` where `op=`'s receiver has a user-defined `plusAssign` (etc.) operator is an IN-PLACE
   CALL (`target.plusAssign(rhs)`), legal even on a `val` — NOT a reassignment. krusty's parser desugars

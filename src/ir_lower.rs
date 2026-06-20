@@ -6049,6 +6049,12 @@ impl<'a> Lower<'a> {
                     {
                         if let Some(lc) = self.syms.libraries.prim_companion_const(&rn, &name) {
                             let c = match lc {
+                                // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but
+                                // the constant's type is `Char` — emit a `Char` const so it boxes to
+                                // `Character` (not `Integer`) in a vararg/generic position.
+                                crate::libraries::LibConst::Int(v) if rn == "Char" => {
+                                    IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
+                                }
                                 crate::libraries::LibConst::Int(v) => IrConst::Int(v),
                                 crate::libraries::LibConst::Long(v) => IrConst::Long(v),
                                 crate::libraries::LibConst::Float(v) => IrConst::Float(v),
