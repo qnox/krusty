@@ -2527,6 +2527,10 @@ impl<'a> Emitter<'a> {
             | "java/lang/Long.hashCode"
             | "java/lang/Float.hashCode"
             | "java/lang/Boolean.hashCode"
+            | "java/lang/Integer.hashCode"
+            | "java/lang/Short.hashCode"
+            | "java/lang/Byte.hashCode"
+            | "java/lang/Character.hashCode"
             | "java/util/Objects.hashCode" => {
                 self.emit_value(args[0], code);
                 let (cls, d) = match fq {
@@ -2534,6 +2538,10 @@ impl<'a> Emitter<'a> {
                     "java/lang/Long.hashCode" => ("java/lang/Long", "(J)I"),
                     "java/lang/Float.hashCode" => ("java/lang/Float", "(F)I"),
                     "java/lang/Boolean.hashCode" => ("java/lang/Boolean", "(Z)I"),
+                    "java/lang/Integer.hashCode" => ("java/lang/Integer", "(I)I"),
+                    "java/lang/Short.hashCode" => ("java/lang/Short", "(S)I"),
+                    "java/lang/Byte.hashCode" => ("java/lang/Byte", "(B)I"),
+                    "java/lang/Character.hashCode" => ("java/lang/Character", "(C)I"),
                     _ => ("java/util/Objects", "(Ljava/lang/Object;)I"),
                 };
                 let aw = slot_words(self.value_ty(args[0])) as i32;

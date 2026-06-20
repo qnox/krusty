@@ -2572,6 +2572,25 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 412 — data-class `hashCode`: boxed-primitive hashes + `result` local (bytecode parity)  ✅
+- kotlinc hashes each primitive field through its boxed static `X.hashCode(prim)` (`Integer.hashCode(I)`,
+  `Byte.hashCode(B)`, `Short.hashCode(S)`, `Character.hashCode(C)`, plus the already-handled
+  Long/Float/Double/Boolean), and — for **≥2** fields — folds into a `result` LOCAL with an explicit
+  `istore`/`iload` round-trip per field (`result = h(f0); result = result*31 + h(fN); return result`).
+  An empty data class returns `0`; a single-field one returns `h(f0)` directly (no local). krusty built a
+  pure expression tree and passed raw ints for `Int`/`Short`/`Byte`/`Char` — both diverged.
+- Fix: `field_hash` routes those four primitives to the boxed `hashCode`; the hashCode synth emits the
+  `result`-local shape (`IrExpr::Variable` for the first field, `SetValue` for the rest) for ≥2 fields.
+  Added the four `hashCode` descriptors to the emitter's static-helper table.
+- **All-primitive** data-class `hashCode` is now **byte-identical** to kotlinc 2.4.0 (verified
+  differentially on an 8-field class). Box gate **1087 OK, 0 FAIL**. TDD:
+  `bytecode_parity_e2e::data_class_primitive_hashcode_is_byte_identical_to_kotlinc`.
+- Deferred (next phases): a **reference** field still hashes via `Objects.hashCode` (functionally correct)
+  rather than kotlinc's `field.hashCode()` for a non-null class / null-guarded ternary for a
+  nullable-or-type-param field (needs class-vs-interface + nullability discrimination). And the
+  data-class Object-overrides (`toString`/`hashCode`/`equals`) are emitted `public final`, but kotlinc
+  leaves them `public` (open, as Object-overrides) — `component`/`copy`/`getX` ARE `final` in both.
+
 ### Phase 411 — data-class `copy` null-checks non-null reference params (bytecode parity)  ✅
 - kotlinc guards each non-null reference `copy` parameter with `Intrinsics.checkNotNullParameter(p, "p")`
   at method entry — the same null-checks the constructor emits — and never a primitive one. krusty's
