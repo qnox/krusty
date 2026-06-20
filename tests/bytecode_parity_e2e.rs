@@ -316,6 +316,30 @@ fn data_class_object_overrides_are_not_final() {
     }
 }
 
+#[test]
+fn data_class_nonnull_string_hashes_via_string_hashcode() {
+    // A non-null `String` field hashes via `invokevirtual String.hashCode()` (kotlinc's shape); a
+    // nullable `String?` stays on the null-safe `Objects.hashCode`.
+    let Some((dir, jh)) = krusty_compile(
+        "dcstrhash",
+        "data class D(val s: String, val q: String?)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("D.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("String.hashCode"),
+        "non-null String field must hash via String.hashCode:\n{hc}"
+    );
+    assert!(
+        hc.contains("Objects.hashCode"),
+        "nullable String? field must stay on the null-safe Objects.hashCode:\n{hc}"
+    );
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]
