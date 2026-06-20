@@ -520,9 +520,9 @@ pub enum CtorDelegateTarget {
     /// secondary in a no-primary class). The class init body runs in the reached constructor, not here.
     This { target_params: Vec<IrType> },
     /// `super(args)` (or implicit) in a class with NO primary constructor → `invokespecial` the
-    /// superclass `<init>(super_params)`, then run the class init body (field initializers + `init {}`)
-    /// before this constructor's own `body`.
-    Super { super_params: Vec<IrType> },
+    /// superclass `<init>` (its signature is read live from the base class at emit time), then run the
+    /// class init body (field initializers + `init {}`) before this constructor's own `body`.
+    Super,
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

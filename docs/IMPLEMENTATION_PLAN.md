@@ -2582,12 +2582,16 @@ bodies exist only as jar bytecode):
 - **Field-initializer default-value elision** (kotlinc semantics): a body-property initializer that
   stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`) is dropped, so a value a
   base constructor's virtual call already wrote survives. SPEC §updated; test `secondary_ctor_noprimary_e2e`.
-- Bails (skip, never miscompile): a secondary with a defaulted parameter, a value-class `super(…)` arg,
-  an ambiguous `this(…)` target. Touched parser/resolve/ir_lower/ir_emit + `IrSecondaryCtor.delegate`
-  (`CtorDelegateTarget::{This,Super}`) and `has_primary_ctor` on `ClassDecl`/`IrClass`.
+- Bails (skip, never miscompile): a secondary with a defaulted parameter, an ambiguous `this(…)` target.
+  Touched parser/resolve/ir_lower/ir_emit + `IrSecondaryCtor.delegate` (`CtorDelegateTarget::{This,Super}`)
+  and `has_primary_ctor` on `ClassDecl`/`IrClass`.
+- **Architecture invariant kept:** `ir_lower` has NO knowledge of the JVM value-class transformation —
+  it lowers a no-primary class as a plain class. The delegation `<init>` *target signature* is read LIVE
+  from the (post-`value_classes`-pass) base/own class in `ir_emit`, so value-class erasure of a base ctor
+  is reflected automatically (the value-class `super(…)` cases now compile correctly instead of bailing).
 - `src/bin/survey.rs` upgraded to run the FULL pipeline against the real classpath (stdlib + JDK
   `lib/modules`) so skip-reason histograms match the conformance harness (was front-end-only, no stdlib).
-- Box conformance after this phase: **7351 scanned · 1074 box()=OK · 0 FAIL** (was 1059).
+- Box conformance after this phase: **7351 scanned · 1076 box()=OK · 0 FAIL** (was 1059).
 
 ---
 

@@ -1279,19 +1279,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if c.has_primary_ctor {
                                     return None; // a secondary in a primary class must delegate via this(…)
                                 }
-                                // A value-class `super(…)` argument must be unboxed to the base ctor's
-                                // mangled/underlying parameter — the value-class pass rewrites primary
-                                // `super_args` but not a secondary's delegate args yet, so bail.
-                                if args.iter().any(|&a| {
-                                    matches!(lo.info.ty(a), Ty::Obj(ref i, _)
-                                        if lo.ir.classes.iter().any(|cc| cc.is_value && &cc.fq_name == i))
-                                }) {
-                                    return None;
-                                }
                                 (
-                                    CtorDelegateTarget::Super {
-                                        super_params: super_param_tys.clone(),
-                                    },
+                                    CtorDelegateTarget::Super,
                                     args.clone(),
                                     super_param_tys.clone(),
                                     true,
@@ -1306,14 +1295,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if !super_param_tys.is_empty() {
                                     return None;
                                 }
-                                (
-                                    CtorDelegateTarget::Super {
-                                        super_params: vec![],
-                                    },
-                                    vec![],
-                                    vec![],
-                                    true,
-                                )
+                                (CtorDelegateTarget::Super, vec![], vec![], true)
                             }
                         };
                         if delegate_args.len() != target_tys.len() {
