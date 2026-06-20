@@ -1420,12 +1420,18 @@ fn repr(
             .get(*fid as usize)
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         IrExpr::GetValue(i) => slots.get(i).map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
-        // `e as X` yields a boxed `X` object (checkcast of an `Any`/supertype value).
+        // `e as X` yields a boxed `X` object (checkcast of an `Any`/supertype value) — EXCEPT a redundant
+        // cast over an already-unboxed `X` (a generic-erasure cast `(X)a` the front end inserts when the
+        // static type flows through a type parameter, e.g. reading a `Ag2<T>` field): that stays UNBOXED,
+        // so a following member call boxes it (`box-impl`) like any other unboxed receiver.
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::Cast | crate::ir::IrTypeOp::CastNonNull,
             type_operand: IrType::Class { fq_name, .. },
-            ..
-        } if under.contains_key(fq_name) => Repr::Boxed(fq_name.clone()),
+            arg,
+        } if under.contains_key(fq_name) => match repr(exprs, rets, fields, slots, under, *arg) {
+            Repr::Unboxed(x) if x == *fq_name => Repr::Unboxed(x),
+            _ => Repr::Boxed(fq_name.clone()),
+        },
         // A sole-field access coerces to the underlying type — its representation is that type's, NOT
         // the value class's (so `vc.field` reads as the underlying, e.g. an `Int`, not a `Meters`).
         IrExpr::TypeOp {

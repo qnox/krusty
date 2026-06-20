@@ -1883,6 +1883,14 @@ fun box(): String = Bh(Av("O")).shadowResult
 "#,
     ),
     (
+        "ValueClassGenericMemberCallInInitBlock",
+        r#"
+@JvmInline value class Ag2<T: String>(val value: T) { fun f() = value + "K" }
+class Bg2<T: String>(val a: Ag2<T>) { val gicResult: String; init { gicResult = a.f() } }
+fun box(): String = Bg2(Ag2("O")).gicResult
+"#,
+    ),
+    (
         "ValueClassInitBlockNotInBoxImpl",
         r#"
 @JvmInline value class Icb(val i: Int) { init { icbCounter += i } }
