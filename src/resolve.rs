@@ -6457,7 +6457,14 @@ impl<'a> Checker<'a> {
                 };
                 if let Some(step) = range.step {
                     let stp = self.expr(step);
-                    self.expect_assignable(elem, stp, self.span(step), "range step");
+                    // The progression `step` is always `Int` (`Long` for a `Long`/`ULong` progression) —
+                    // NOT the element type, so a `Char`/`Byte`/`Short` range steps by an `Int`.
+                    let step_ty = if matches!(elem, Ty::Long | Ty::ULong) {
+                        Ty::Long
+                    } else {
+                        Ty::Int
+                    };
+                    self.expect_assignable(step_ty, stp, self.span(step), "range step");
                 }
                 self.push_scope();
                 self.declare(&name, elem, true); // loop variable (mutated by the lowering)
