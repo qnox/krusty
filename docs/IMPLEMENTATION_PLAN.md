@@ -2572,6 +2572,14 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Drop-in finding — Kotlin `@Metadata` not emitted (Kotlin↔Kotlin interop gap)
+- Phase 398 made top-level properties **Java-consumable** (a real interop milestone — verified: `javac`
+  compiles + links against krusty's `getX`/`setX`). But a *Kotlin* consumer (real kotlinc) importing a
+  krusty-compiled declaration FAILS: kotlinc resolves Kotlin declarations from the `@Metadata` annotation
+  (a protobuf blob), which krusty does not emit. So krusty output is consumable by Java but NOT by kotlinc.
+  This is a major standalone feature required for full drop-in (every public declaration needs `@Metadata`).
+  Tracked; `top_level_property_e2e` part 2 skips on it (part 1 — the Java ABI — is asserted).
+
 ### Phase 399 — float/double compare `dcmpl`/`fcmpl` for `>`/`>=` (bytecode parity + NaN)  ✅
 - krusty used `dcmpg`/`fcmpg` for ALL float/double comparisons; kotlinc uses the `*l` variant for `>`
   and `>=` (NaN → -1) and the `*g` variant for `<`/`<=` (NaN → +1), so a NaN operand makes the
