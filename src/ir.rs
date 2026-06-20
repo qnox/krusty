@@ -613,6 +613,10 @@ pub struct IrFile {
     /// `FunId` → parameter names, for mapping a call's named/omitted arguments onto positions. Recorded
     /// only for functions that have defaults (where such mapping is needed).
     pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
+    /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
+    /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
+    /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
+    pub open_methods: std::collections::HashSet<u32>,
 }
 
 impl IrFile {

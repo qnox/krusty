@@ -2572,6 +2572,21 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 413 — data-class `Object`-overrides emitted non-`final` (bytecode parity)  ✅
+- kotlinc leaves a data class's `Object`-overrides (`toString`/`hashCode`/`equals`) `public` (open) even
+  in a final class — they override open `Object` members — but emits `component`/`copy`/`getX` as
+  `public final`. krusty marked EVERY instance method of a final class `final` (the class-final rule),
+  so the three overrides diverged.
+- Fix: added `IrFile.open_methods: HashSet<FunId>` (methods kotlinc keeps non-`final`); the data-class
+  synth inserts the `toString`/`hashCode`/`equals` fids; `emit_method` omits `ACC_FINAL` for a fid in
+  that set. SAFE direction — emitting non-`final` is always JVM-legal, and Kotlin forbids overriding a
+  non-open member anyway, so nothing regresses. Now byte-matches kotlinc's data-class member flags.
+- Box gate **1087 OK, 0 FAIL**. TDD: `bytecode_parity_e2e::data_class_object_overrides_are_not_final`
+  (asserts toString/hashCode/equals are NOT final, component/copy ARE).
+- (The general method-level `open`/`override` flag model — a user `override fun` of an open base, an
+  `open` member in an open class — is still approximated by the class-final rule; only divergent in
+  byte flags, never miscompiles. A future phase can generalize `open_methods` to cover it.)
+
 ### Phase 412 — data-class `hashCode`: boxed-primitive hashes + `result` local (bytecode parity)  ✅
 - kotlinc hashes each primitive field through its boxed static `X.hashCode(prim)` (`Integer.hashCode(I)`,
   `Byte.hashCode(B)`, `Short.hashCode(S)`, `Character.hashCode(C)`, plus the already-handled

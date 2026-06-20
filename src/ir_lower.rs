@@ -2756,15 +2756,11 @@ impl<'a> Lower<'a> {
                 stmts: vec![ret],
                 value: None,
             });
-            self.add_synth_method(
-                internal,
-                class_id,
-                "toString",
-                vec![],
-                Ty::String,
-                body,
-                true,
-            );
+            if let Some(fid) =
+                self.add_synth_method(internal, class_id, "toString", vec![], Ty::String, body, true)
+            {
+                self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
+            }
         }
 
         // hashCode(): kotlinc emits `return 0` for an empty data class, `return h(f0)` for a single field,
@@ -2821,7 +2817,11 @@ impl<'a> Lower<'a> {
                 stmts.push(self.ir.add_expr(IrExpr::Return(Some(getr))));
                 self.ir.add_expr(IrExpr::Block { stmts, value: None })
             };
-            self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true);
+            if let Some(fid) =
+                self.add_synth_method(internal, class_id, "hashCode", vec![], Ty::Int, body, true)
+            {
+                self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
+            }
         }
 
         // equals(other): `if (other !is T) return false; if (f1 != o.f1) return false; …; return true`.
@@ -2857,15 +2857,11 @@ impl<'a> Lower<'a> {
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(t))));
             let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
             let obj = ty_to_ir(Ty::obj("kotlin/Any"));
-            self.add_synth_method(
-                internal,
-                class_id,
-                "equals",
-                vec![obj],
-                Ty::Boolean,
-                body,
-                true,
-            );
+            if let Some(fid) =
+                self.add_synth_method(internal, class_id, "equals", vec![obj], Ty::Boolean, body, true)
+            {
+                self.ir.open_methods.insert(fid); // kotlinc keeps the Object-override open
+            }
         }
     }
 

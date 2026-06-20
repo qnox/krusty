@@ -1150,8 +1150,11 @@ fn emit_method(
     // overridden, so marking it is safe; in an open/extended class we conservatively leave it
     // non-`final` (a method-level `open`/`override` model would refine this).
     let access = if instance {
+        // kotlinc keeps an `Object`-override (a data class's toString/hashCode/equals) open even in a
+        // final class, so honor `open_methods`; otherwise a method of a final class is itself final.
         let final_class = !ir.classes.iter().any(|o| o.superclass == owner);
-        0x0001 | if final_class { 0x0010 } else { 0 }
+        let fin = final_class && !ir.open_methods.contains(&fid);
+        0x0001 | if fin { 0x0010 } else { 0 }
     } else {
         0x0019 // PUBLIC | STATIC | FINAL
     };
