@@ -2062,6 +2062,57 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
+            IrExpr::StringConcat(parts) => {
+                let parts = parts.clone();
+                if parts.len() == 1 {
+                    let p = parts[0];
+                    if matches!(self.ir.expr(p), IrExpr::Const(IrConst::String(_))) {
+                        // A lone string constant is already a `String`.
+                        self.emit_value(p, code);
+                    } else {
+                        // A single interpolation `"$x"` → `String.valueOf(x)` (kotlinc's form).
+                        let pty = self.value_ty(p);
+                        self.emit_value(p, code);
+                        let m = self
+                            .cw
+                            .methodref("java/lang/String", "valueOf", valueof_desc(pty));
+                        code.invokestatic(m, slot_words(pty) as i32, 1);
+                    }
+                } else {
+                    let sb = self.cw.class_ref("java/lang/StringBuilder");
+                    let init = self
+                        .cw
+                        .methodref("java/lang/StringBuilder", "<init>", "()V");
+                    // A branchy part (`"${when{…}}"`) records merge frames that would omit the
+                    // StringBuilder on the stack — spill every part to a temp first, then build.
+                    if parts.iter().any(|&p| self.records_frame(p)) {
+                        let temps = self.spill_to_temps(&parts, code);
+                        code.new_obj(sb);
+                        code.dup();
+                        code.invokespecial(init, 0, 0);
+                        for &(slot, t, _) in &temps {
+                            load(t, slot, code);
+                            self.append_top(t, code);
+                        }
+                        for &(_, _, key) in &temps {
+                            self.slots.remove(&key);
+                        }
+                    } else {
+                        code.new_obj(sb);
+                        code.dup();
+                        code.invokespecial(init, 0, 0);
+                        for &p in &parts {
+                            self.append_part(p, code);
+                        }
+                    }
+                    let ts = self.cw.methodref(
+                        "java/lang/StringBuilder",
+                        "toString",
+                        "()Ljava/lang/String;",
+                    );
+                    code.invokevirtual(ts, 0, 1);
+                }
+            }
             IrExpr::EnumEntry { class, index } => {
                 let c = &self.ir.classes[*class as usize];
                 let (entry, _) = c.enum_entries[*index as usize].clone();
@@ -2572,6 +2623,26 @@ impl<'a> Emitter<'a> {
         self.append_top(ty, code);
     }
 
+    /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
+    /// constant appends as a `char` (kotlinc emits `append(C)` with the char constant, not `append(String)`).
+    fn append_part(&mut self, p: u32, code: &mut CodeBuilder) {
+        let single_char = if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
+            if s.chars().count() == 1 {
+                s.chars().next()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(c) = single_char {
+            code.push_int(c as i32, self.cw);
+            self.append_top(Ty::Char, code);
+        } else {
+            self.append(p, code);
+        }
+    }
+
     /// Append a value already on the operand stack (of type `ty`) to a `StringBuilder` beneath it.
     fn append_top(&mut self, ty: Ty, code: &mut CodeBuilder) {
         let desc = match ty {
@@ -2595,6 +2666,10 @@ impl<'a> Emitter<'a> {
         use IrBinOp::*;
         match self.ir.expr(e) {
             IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. } => true,
+            // The multi-part `StringConcat` itself spills branchy parts internally, so as a whole it
+            // leaves only its `String` result — but a parent operand sequence still must treat it as
+            // frame-recording if any part does (it builds the StringBuilder mid-stack otherwise).
+            IrExpr::StringConcat(parts) => parts.iter().any(|&p| self.records_frame(p)),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_primitive())
                     // `===`/`!==` always emits a branch+merge frame — the `if_acmp*` path (references)
@@ -3464,6 +3539,7 @@ impl<'a> Emitter<'a> {
 
     fn value_ty(&self, e: u32) -> Ty {
         match self.ir.expr(e) {
+            IrExpr::StringConcat(_) => Ty::String,
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(_) => Ty::Boolean,
                 IrConst::Int(_) => Ty::Int,
@@ -3816,6 +3892,19 @@ fn swap_cmp(op: IrBinOp) -> IrBinOp {
         Gt => Lt,
         Ge => Le,
         o => o,
+    }
+}
+
+/// The `String.valueOf` overload descriptor for a single interpolated value's type (`"$x"`).
+fn valueof_desc(t: Ty) -> &'static str {
+    match t {
+        Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/String;",
+        Ty::Long => "(J)Ljava/lang/String;",
+        Ty::Float => "(F)Ljava/lang/String;",
+        Ty::Double => "(D)Ljava/lang/String;",
+        Ty::Boolean => "(Z)Ljava/lang/String;",
+        Ty::Char => "(C)Ljava/lang/String;",
+        _ => "(Ljava/lang/Object;)Ljava/lang/String;",
     }
 }
 

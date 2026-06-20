@@ -899,7 +899,11 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 ..
             }
             | IrExpr::InvokeFunction { args, .. }
-            | IrExpr::Vararg { elements: args, .. } = &ir.exprs[id as usize]
+            | IrExpr::Vararg { elements: args, .. }
+            // A value-class part of a string template flows into `StringBuilder.append(Object)` /
+            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`), exactly like an
+            // `External` `String.plus` arg did before templates lowered to `StringConcat`.
+            | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
             {
                 for a in args.clone() {
                     if let Repr::Unboxed(x) =
@@ -2515,6 +2519,7 @@ fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) 
             args.iter().for_each(|a| push(*a, out));
         }
         IrExpr::Vararg { elements, .. } => elements.iter().for_each(|e| push(*e, out)),
+        IrExpr::StringConcat(parts) => parts.iter().for_each(|p| push(*p, out)),
         IrExpr::Try {
             body,
             catches,

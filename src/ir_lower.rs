@@ -6851,39 +6851,36 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Template(parts) => {
-                let mut iter = parts.iter();
-                let mut acc = match iter.clone().next() {
-                    Some(TemplatePart::Str(s)) => {
-                        iter.next();
-                        self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
-                    }
-                    _ => self
-                        .ir
-                        .add_expr(IrExpr::Const(IrConst::String(String::new()))),
-                };
-                for part in iter {
-                    let rhs = match part {
+                // Build an ordered list of parts, dropping empty string-literal chunks (kotlinc does),
+                // and emit ONE `StringConcat` — the backend turns it into kotlinc's single-StringBuilder
+                // (or `String.valueOf` for a lone interpolation) shape, not a `String.plus` chain.
+                let mut ir_parts = Vec::new();
+                for part in parts {
+                    match part {
+                        TemplatePart::Str(s) if s.is_empty() => {}
                         TemplatePart::Str(s) => {
-                            self.ir.add_expr(IrExpr::Const(IrConst::String(s.clone())))
+                            ir_parts.push(self.ir.add_expr(IrExpr::Const(IrConst::String(s))))
                         }
                         TemplatePart::Expr(e) => {
-                            let v = self.expr(*e)?;
+                            let v = self.expr(e)?;
                             // An unsigned interpolated value prints in unsigned decimal.
-                            let ety = self.info.ty(*e);
-                            if ety.is_unsigned() {
+                            let ety = self.info.ty(e);
+                            let v = if ety.is_unsigned() {
                                 self.unsigned_to_string(v, ety)
                             } else {
                                 v
-                            }
+                            };
+                            ir_parts.push(v);
                         }
-                    };
-                    acc = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::External("kotlin/String.plus".to_string()),
-                        dispatch_receiver: Some(acc),
-                        args: vec![rhs],
-                    });
+                    }
                 }
-                acc
+                if ir_parts.is_empty() {
+                    ir_parts.push(
+                        self.ir
+                            .add_expr(IrExpr::Const(IrConst::String(String::new()))),
+                    );
+                }
+                self.ir.add_expr(IrExpr::StringConcat(ir_parts))
             }
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
