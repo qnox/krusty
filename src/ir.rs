@@ -174,6 +174,11 @@ pub enum IrExpr {
         lhs: ExprId,
         rhs: ExprId,
     },
+    /// A Kotlin string template `"a${x}b"` as an ordered list of parts (string constants + interpolated
+    /// values, with empty constant chunks dropped). The JVM backend emits it as kotlinc does: a single
+    /// part → `String.valueOf(part)`; multiple parts → one `StringBuilder` with a typed `append` per part
+    /// and a final `toString()` (vs the old `String.plus` chain, which made one StringBuilder per `+`).
+    StringConcat(Vec<ExprId>),
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField {
         receiver: ExprId,

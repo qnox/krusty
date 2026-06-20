@@ -2572,6 +2572,20 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 401 — string templates → single `StringBuilder` (bytecode parity)  ✅
+- krusty lowered a template `"a${x}b"` to a chain of `String.plus` calls — the backend emitted ONE
+  `StringBuilder` per `+` (4 nested StringBuilders for a 5-part template). New `IrExpr::StringConcat(parts)`:
+  the lowerer drops empty literal chunks and emits one node; the backend emits kotlinc's shape — a single
+  interpolation `"$x"` → `String.valueOf(x)` (typed overload); multiple parts → ONE `StringBuilder` with a
+  typed `append` per part (single-char string literal → `append(C)` with the char constant) + `toString`.
+- **Value-class encapsulation kept:** `ir_lower` has no value knowledge; `value_classes` boxes a value-class
+  `StringConcat` part (so `append(Object)`/`valueOf(Object)` calls the value class's `toString`), exactly as
+  it did for `String.plus` args — `collect_reachable` + the box-at-boundary set both learned `StringConcat`.
+  Verified byte-exact vs kotlinc on `"x=$a y=$b!"` (one SB, `append(C)` for `"!"`). Box gate 1076 OK, 0 FAIL.
+- **TDD:** new `tests/bytecode_parity_e2e.rs` — 8 tests asserting the exact codegen of phases 397–401
+  (`iinc`, compare-to-zero, `dcmpl`, fused `if_icmp`, single-StringBuilder + `append(C)` + `valueOf`,
+  top-level property ABI) PLUS a differential check that a counting loop is byte-identical to real kotlinc.
+
 ### Phase 400 — `iinc` + compare-to-zero (bytecode parity)  ✅
 - Two pervasive loop/branch codegen fixes found via `bytediff`:
   - **`iinc`**: `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k` now
