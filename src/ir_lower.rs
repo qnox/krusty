@@ -2676,6 +2676,12 @@ impl<'a> Lower<'a> {
                 body,
                 true,
             ) {
+                // `copy`'s parameters are the primary-ctor properties, so they take the SAME
+                // `checkNotNullParameter` guards kotlinc emits at the constructor — a non-null reference
+                // parameter is null-checked at `copy` entry. Reuse the class's precomputed ctor checks.
+                let mut checks = self.ir.classes[class_id as usize].ctor_param_checks.clone();
+                checks.resize(fields.len(), None);
+                self.ir.functions[copy_fid as usize].param_checks = checks;
                 // Each `copy` parameter defaults to the corresponding property of the receiver (the JVM
                 // backend realizes this as `copy$default`). The mask is one `int` (≤31 params).
                 if fields.len() <= 31 {
