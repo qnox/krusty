@@ -128,6 +128,11 @@ pub struct SymbolTable {
     /// function defined in ANOTHER file as a cross-facade `invokestatic` (`Callee::CrossFile`) instead
     /// of bailing. A function defined in the file being lowered is resolved locally first.
     pub fn_facades: HashMap<String, String>,
+    /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
+    /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
+    /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
+    /// single-file callers; a property in the file being lowered is resolved locally (its static) first.
+    pub prop_facades: HashMap<String, (String, Ty, bool)>,
 }
 
 impl Default for SymbolTable {
@@ -144,6 +149,7 @@ impl Default for SymbolTable {
             ext_props: HashMap::new(),
             class_names: HashMap::new(),
             fn_facades: HashMap::new(),
+            prop_facades: HashMap::new(),
         }
     }
 }

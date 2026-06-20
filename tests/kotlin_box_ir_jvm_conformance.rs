@@ -324,15 +324,29 @@ fn compile_multifile(
     if diags.has_errors() {
         return None;
     }
-    // Cross-file map: each top-level (non-extension, non-inline) function → its file's facade.
+    // Cross-file maps: each top-level (non-extension) function/property → its file's facade.
+    let mut fns: Vec<(String, String)> = Vec::new();
+    let mut props: Vec<(String, String)> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         for &d in &file.decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if f.receiver.is_none() && !f.is_inline {
-                    syms.fn_facades.insert(f.name.clone(), facade.clone());
+            match file.decl(d) {
+                Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                    fns.push((f.name.clone(), facade.clone()))
                 }
+                Decl::Property(p) if p.receiver.is_none() => {
+                    props.push((p.name.clone(), facade.clone()))
+                }
+                _ => {}
             }
+        }
+    }
+    for (name, facade) in fns {
+        syms.fn_facades.insert(name, facade);
+    }
+    for (name, facade) in props {
+        if let Some(&(ty, is_var)) = syms.props.get(&name) {
+            syms.prop_facades.insert(name, (facade, ty, is_var));
         }
     }
 

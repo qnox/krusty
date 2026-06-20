@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 406 — multifile: cross-file top-level property access  ✅
+- A read/write of a top-level property declared in ANOTHER file now lowers to the other facade's
+  accessor (`invokestatic <facade>.getX()` / `setX(v)` — the field is private since phase 398), instead
+  of bailing. Added `SymbolTable.prop_facades` (prop name → `(facade, type, is_var)`, driver/harness-
+  populated like `fn_facades`), reusing the backend-agnostic `Callee::CrossFile` for the accessor call.
+  ir_lower: a `Name` read missing local statics but in `prop_facades` → `getX` call; `Stmt::Assign` to a
+  cross-file `var` → `setX` call (a cross-file `val` write bails). Driver + `compile_multifile` populate
+  the map. **Box conformance: 1079 → 1084 box()=OK, 0 FAIL.**
+- TDD: `cli_dropin_e2e::cross_file_function_and_property` (function + property read + var write across
+  files, run to "OK"). Single-file path unchanged.
+
 ### Phase 405 — multifile: conformance harness splits `// FILE:` blocks  ✅
 - The conformance harness now compiles a `// FILE: name.kt`-split test as ONE module (`compile_multifile`):
   split on the markers, parse each block, collect GLOBAL signatures over all files, populate
