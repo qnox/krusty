@@ -2572,6 +2572,23 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 423 — `Unit` as a value + `Unit`-returning covariant-override bridge  ✅
+- `Unit` used as an expression (`foo(Unit)`, `val u = Unit`, `return Unit`) is the `kotlin/Unit` singleton,
+  not a type. krusty rejected the bare identifier ("unresolved reference 'Unit'"). Now the checker's
+  `Expr::Name` resolution has a final fallback (after locals/properties/objects, so any user `Unit` still
+  wins): `Unit` → `Ty::obj("kotlin/Unit")`; lowering emits the existing `IrExpr::UnitInstance`
+  (`getstatic kotlin/Unit.INSTANCE`). `value_ty(UnitInstance)` now reports `kotlin/Unit` (was the `Ty::Error`
+  default). `u.toString()` is "kotlin.Unit"; the singleton compares equal/identical to itself.
+- Exposed + fixed a latent bridge bug: a `Unit`-returning override of a reference-returning supertype
+  method (`B.foo(): Unit` over `A.foo(): Any`) emits a bridge `foo()Ljava/lang/Object;` that invokes the
+  void `foo()V` then `areturn` — with nothing on the stack (operand-stack underflow). `Unit` is not a
+  primitive, so the bridge's box path skipped it. `emit_bridges` now materializes `kotlin/Unit.INSTANCE`
+  after the void call when the concrete return is `Unit` and the erased return is a reference.
+- Box gate **1291, 0 FAIL** (+6, incl. `bridges/test18.kt`). TDD: `feature_box_e2e::UnitAsValue`.
+- Not covered (future): materializing `Unit` from a *void call used as a value* (`val x = foo()` where
+  `foo(): Unit`) — the void→value duality at arbitrary call sites; only the explicit `Unit` literal and the
+  override-bridge return are handled here.
+
 ### Phase 422 — Kotlin-type-aware collection `+=` (read-only/mutable), the way kotlinc does it  ✅
 - Goal: `coll += x` mutates in place for a mutable collection but reassigns (`coll = coll.plus(x)`) for a
   read-only one — decided exactly as kotlinc, with NO mutability predicate and NO hardcoded hierarchy, and

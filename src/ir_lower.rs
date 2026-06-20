@@ -5947,6 +5947,9 @@ impl<'a> Lower<'a> {
                         ty: class,
                         field: "INSTANCE",
                     })
+                } else if n == "Unit" {
+                    // The `Unit` singleton used as a value → `getstatic kotlin/Unit.INSTANCE`.
+                    self.ir.add_expr(IrExpr::UnitInstance)
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
