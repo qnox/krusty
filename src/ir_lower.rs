@@ -733,6 +733,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     concrete_ret: or,
                                     target_name: None,
                                     box_ret: None,
+                                    unbox_params: Vec::new(),
                                 });
                             }
                         }
@@ -808,6 +809,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                                 concrete_ret: ty_to_ir(own_ty),
                                                 target_name: None,
                                                 box_ret: None,
+                                                unbox_params: Vec::new(),
                                             },
                                         );
                                     }
@@ -846,6 +848,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                         concrete_ret: cr,
                                         target_name: None,
                                         box_ret: None,
+                                        unbox_params: Vec::new(),
                                     });
                                 }
                             }
@@ -878,6 +881,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                                 concrete_ret: cr,
                                                 target_name: None,
                                                 box_ret: None,
+                                                unbox_params: Vec::new(),
                                             },
                                         );
                                     }

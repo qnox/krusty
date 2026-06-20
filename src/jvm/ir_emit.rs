@@ -671,10 +671,18 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         let mut code = CodeBuilder::new(1 + pw);
         code.aload(0);
         let mut slot = 1u16;
-        for (et, ct) in ep.iter().zip(&cp) {
+        for (k, (et, ct)) in ep.iter().zip(&cp).enumerate() {
             load(*et, slot, &mut code);
             slot += slot_words(*et);
-            if et != ct {
+            // A boxed value-class param (a generic supertype method `f(Object,…)` delegating to a mangled
+            // concrete override taking the underlying): checkcast the incoming `Object` to the boxed `X`,
+            // then `unbox-impl` it to the underlying `ct` the target expects.
+            if let Some(Some(vc)) = b.unbox_params.get(k) {
+                let ci = cw.class_ref(vc);
+                code.checkcast(ci);
+                let m = cw.methodref(vc, "unbox-impl", &format!("(){}", ct.descriptor()));
+                code.invokevirtual(m, 0, slot_words(*ct) as i32);
+            } else if et != ct {
                 if et.is_reference() && ct.is_reference() {
                     let ci = cw.class_ref(&ref_internal(*ct));
                     code.checkcast(ci);
