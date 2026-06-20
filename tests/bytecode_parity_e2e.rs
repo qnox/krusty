@@ -203,6 +203,28 @@ fn single_interpolation_uses_string_valueof() {
     );
 }
 
+// ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
+
+#[test]
+fn safe_call_elvis_primitive_does_not_box() {
+    // `s?.length ?: -1` (primitive result) must null-check the receiver and read the primitive member
+    // directly (`ifnull` + `String.length`) — NOT box the member to Integer and unbox through the elvis.
+    let Some(d) = facade_disasm(
+        "scelvis",
+        "fun nn(s: String?): Int = s?.length ?: -1\nfun box(): String = if (nn(\"abc\") == 3 && nn(null) == -1) \"OK\" else \"f\"\n",
+    ) else {
+        return;
+    };
+    assert!(
+        !d.contains("Integer.valueOf"),
+        "`s?.length ?: -1` must not box the member to Integer:\n{d}"
+    );
+    assert!(
+        d.contains("ifnull") && d.contains("String.length"),
+        "expected a fused ifnull + primitive String.length:\n{d}"
+    );
+}
+
 // ---- Phase 398: top-level property field modifiers + accessors -------------------------------
 
 #[test]

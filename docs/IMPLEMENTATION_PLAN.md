@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 403 — safe-call + elvis primitive fusion (no boxing)  ✅
+- `recv?.<prop> ?: default` with a PRIMITIVE result no longer boxes. krusty lowered `s?.length` to a
+  boxed `Integer?` (the safe-call must be null-capable) and the elvis then unboxed it — `Integer.valueOf`
+  + `checkcast` + `intValue`. kotlinc instead null-checks the receiver and selects the unboxed member or
+  the default (`ifnull`/primitive path). New `Lower::lower_safe_prop_member` builds `(var, cond, member)`
+  for a no-arg safe property/length access (unboxed member); the `Elvis` arm uses it when the result is
+  primitive, emitting `when { recv != null -> member; else -> default }` with no boxing. Verified
+  `s?.length ?: -1` → `ifnull` + `String.length()`, no `Integer.valueOf`. Box gate 1076 OK, 0 FAIL.
+- **TDD:** `bytecode_parity_e2e::safe_call_elvis_primitive_does_not_box` (asserts no `Integer.valueOf`,
+  presence of fused `ifnull` + `String.length`) + runtime cases in the same test.
+
 ### Phase 402 — `for (i in (a..b).reversed())` over a literal range  ✅
 - Iterating a `.reversed()` *literal* `..`/`downTo` range — `for (i in (1..4).reversed())` — is rewritten
   in the parser to the reversed counted `ForRange` (`4 downTo 1`), so the checker/lowering see a normal

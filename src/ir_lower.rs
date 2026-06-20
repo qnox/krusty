@@ -4892,6 +4892,100 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Build the pieces of a safe property/length access `recv?.<name>` (NO call args) for fusion with a
+    /// surrounding `?:` over a PRIMITIVE result: returns `(var, cond, member)` where `var` binds the
+    /// receiver once, `cond` is `recv != null`, and `member` is the UNBOXED member value read on the
+    /// non-null receiver. Lets `s?.length ?: -1` compile to a `dup`/`ifnull` primitive select with no
+    /// boxing (kotlinc's form) instead of boxing the member then unboxing it through the elvis.
+    fn lower_safe_prop_member(
+        &mut self,
+        receiver: AstExprId,
+        name: &str,
+    ) -> Option<(u32, u32, u32)> {
+        let rty = self.info.ty(receiver);
+        if !rty.is_reference() {
+            return None;
+        }
+        let internal = if rty == Ty::String {
+            "java/lang/String".to_string()
+        } else {
+            rty.obj_internal()?.to_string()
+        };
+        let rv = self.expr(receiver)?;
+        let v = self.fresh_value();
+        let var = self.ir.add_expr(IrExpr::Variable {
+            index: v,
+            ty: mark_nullable(ty_to_ir(rty)),
+            init: Some(rv),
+        });
+        let get1 = self.ir.add_expr(IrExpr::GetValue(v));
+        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Ne,
+            lhs: get1,
+            rhs: nullc,
+        });
+        let recv2 = self.ir.add_expr(IrExpr::GetValue(v));
+        let is_iface = self
+            .syms
+            .libraries
+            .resolve_type(&internal)
+            .is_some_and(|t| t.is_interface);
+        let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
+            let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
+            if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                if let Some((mclass, mindex, _, _)) =
+                    self.resolve_method(&internal, &getter_name(name))
+                {
+                    self.ir.add_expr(IrExpr::MethodCall {
+                        class: mclass,
+                        index: mindex,
+                        receiver: recv2,
+                        args: vec![],
+                    })
+                } else {
+                    self.ir.add_expr(IrExpr::GetField {
+                        receiver: recv2,
+                        class: fclass,
+                        index: idx,
+                    })
+                }
+            } else {
+                self.ir.add_expr(IrExpr::GetField {
+                    receiver: recv2,
+                    class: fclass,
+                    index: idx,
+                })
+            }
+        } else if internal == "java/lang/String" && name == "length" {
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::External("kotlin/String.length".to_string()),
+                dispatch_receiver: Some(recv2),
+                args: vec![],
+            })
+        } else {
+            let mapped = crate::resolve::collection_mapped_accessor(name).map(|s| s.to_string());
+            let m = [Some(name.to_string()), Some(getter_name(name)), mapped]
+                .into_iter()
+                .flatten()
+                .find_map(|c| {
+                    crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[])
+                        .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                })?;
+            self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: internal.clone(),
+                    name: m.name,
+                    descriptor: m.descriptor,
+                    interface: is_iface,
+                },
+                dispatch_receiver: Some(recv2),
+                args: vec![],
+            })
+        };
+        Some((var, cond, member))
+    }
+
     fn expr(&mut self, e: AstExprId) -> Option<u32> {
         // Guard against a stack overflow on a pathologically deep expression (a stress test with
         // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
@@ -5220,6 +5314,38 @@ impl<'a> Lower<'a> {
             }
             // `a ?: b` → `{ val t = a; if (t != null) t else b }` (t bound once, so `a` runs once).
             Expr::Elvis { lhs, rhs } => {
+                let result_ty = self.info.ty(e);
+                // Fuse `recv?.prop ?: default` for a PRIMITIVE result: null-check the receiver and select
+                // the UNBOXED member or the default — no boxing of the member (kotlinc's `dup;ifnull`
+                // form). Only the no-arg property/length safe-access is fused here.
+                if result_ty.is_primitive() {
+                    if let Expr::SafeCall {
+                        receiver,
+                        name,
+                        args: None,
+                    } = self.afile.expr(lhs).clone()
+                    {
+                        if let Some((var, cond, member)) =
+                            self.lower_safe_prop_member(receiver, &name)
+                        {
+                            // The member is the natural primitive; convert to the elvis result type if it
+                            // differs (`s?.length ?: 0L` → `i2l`).
+                            let member = self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: member,
+                                type_operand: ty_to_ir(result_ty),
+                            });
+                            let rv = self.lower_arg(rhs, &ty_to_ir(result_ty))?;
+                            let when = self.ir.add_expr(IrExpr::When {
+                                branches: vec![(Some(cond), member), (None, rv)],
+                            });
+                            return Some(self.ir.add_expr(IrExpr::Block {
+                                stmts: vec![var],
+                                value: Some(when),
+                            }));
+                        }
+                    }
+                }
                 let lty = self.info.ty(lhs);
                 // A statically-null or non-reference lhs isn't a meaningful elvis (and would emit a
                 // bad-typed null compare) — bail. The common reference case is handled below.
