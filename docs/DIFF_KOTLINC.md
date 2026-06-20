@@ -28,3 +28,27 @@ cargo test --test diff_kotlinc --test diff_class_kotlinc -- --nocapture
 ```
 
 Result (this session): both pass — krusty ABI + execution match kotlinc on the supported subset.
+
+## Normalized bytecode diff (`src/bin/bytediff.rs`)
+
+The `box()=OK` conformance gate proves *runtime* correctness; this tool measures the project's harder
+goal — emitting the **same bytecode** kotlinc does. For each box-corpus file that BOTH compilers accept,
+it compares per-class disassembly (`javap -c -p`) after normalizing away what differs without changing
+semantics: the source-file banner, per-instruction bytecode offsets, and constant-pool index tokens
+(`#21`). Two classes that normalize equal have identical method signatures and identical instruction
+sequences (the resolved `// Method …` / `// String …` operands are kept).
+
+Opt-in and slow (one kotlinc JVM launch per file) — NOT part of the <60s test gate. Run on a sample:
+
+```sh
+export JAVA_HOME=<jdk>                                   # runs javap
+export KRUSTY_KOTLINC=$(just kotlinc "$(just max-version)")
+export KRUSTY_SURVEY_STDLIB=<kotlinc dist>/lib/kotlin-stdlib.jar
+export KRUSTY_SURVEY_JDK_MODULES=$JAVA_HOME/lib/modules
+cargo run --release --bin bytediff -- "$(just box-corpus "$(just max-version)")" 200 [--samples]
+```
+
+It prints `files compiled by both`, `classes compared`, `byte-identical (normalized)` + %, and
+`krusty-only classes` (a class krusty emits that kotlinc doesn't — a structural divergence). `--samples`
+prints the first diverging normalized line per differing class, to localize where codegen drifts. This is
+the instrument that drives the bytecode-equality goal: pick a divergence, fix the emitter, re-measure.
