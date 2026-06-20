@@ -258,6 +258,34 @@ fn data_class_member_order_matches_kotlin() {
     );
 }
 
+#[test]
+fn data_class_copy_null_checks_nonnull_reference_params() {
+    // kotlinc guards each non-null reference `copy` parameter with `checkNotNullParameter` at entry
+    // (the same null-checks the constructor emits), but never a primitive one. Mirror that.
+    let Some((dir, jh)) = krusty_compile(
+        "dccopynull",
+        "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("D.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Isolate the `copy(` method body (up to the next method declaration).
+    let copy = &text[text.find(" copy(").expect("copy method")..];
+    let copy = &copy[..copy.find("copy$default").unwrap_or(copy.len())];
+    assert!(
+        copy.contains("checkNotNullParameter")
+            && copy.contains("// String s"),
+        "copy must null-check its non-null String param `s`:\n{copy}"
+    );
+    // Exactly one guard — the `Int` param must NOT be checked.
+    assert_eq!(
+        copy.matches("checkNotNullParameter").count(),
+        1,
+        "copy must guard only the reference param, not the primitive `n`:\n{copy}"
+    );
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]

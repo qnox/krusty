@@ -2572,6 +2572,19 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 411 — data-class `copy` null-checks non-null reference params (bytecode parity)  ✅
+- kotlinc guards each non-null reference `copy` parameter with `Intrinsics.checkNotNullParameter(p, "p")`
+  at method entry — the same null-checks the constructor emits — and never a primitive one. krusty's
+  synthesized `copy` had empty `param_checks`. Since `copy`'s parameters ARE the primary-ctor properties,
+  it takes the SAME guards: in `synth_data_members` we copy the class's precomputed `ctor_param_checks`
+  (already correct re: nullability + type-params) onto the `copy` function (resized to the param count).
+- Verified byte-identical to kotlinc 2.4.0 (`javap -c`: `copy` of `data class D(val s: String, val n: Int)`
+  emits one `checkNotNullParameter` for `s`, none for `n`, then `new D`). Box gate **1087 OK, 0 FAIL**.
+  TDD: `bytecode_parity_e2e::data_class_copy_null_checks_nonnull_reference_params`.
+- Remaining data-class parity gaps (each a future phase): synth methods are `public` not `public final`
+  (only matters in open/abstract classes — final classes already correct); `hashCode` boxes an `Int`
+  field to `Objects.hashCode(Object)` + a temp local instead of `Integer.hashCode(I)` on the stack.
+
 ### Phase 410 — data-class member emission order (bytecode parity)  ✅
 - kotlinc emits data-class members as `componentN, copy, copy$default, toString, hashCode, equals`;
   krusty appended `copy`/`copy$default` LAST (after toString/hashCode/equals). Moved the `copy` synth
