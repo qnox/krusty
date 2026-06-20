@@ -2633,6 +2633,63 @@ impl<'a> Parser<'a> {
                     );
                 }
             }
+            // `for (i in (a..b).reversed())` / `(a downTo b).reversed()` → the reversed counted loop
+            // (`b downTo a` / `b..a`). Only a *literal* `..`/`downTo` range is rewritten here (step-1);
+            // a stepped or `until` reversal, or a stored progression, keeps the iterable path (skips).
+            if let Expr::Call { callee, args } = self.file.expr(rstart).clone() {
+                if args.is_empty() {
+                    if let Expr::Member {
+                        receiver,
+                        name: mname,
+                    } = self.file.expr(callee).clone()
+                    {
+                        if mname == "reversed" {
+                            if let Expr::RangeTo { lo, hi, kind } = self.file.expr(receiver).clone()
+                            {
+                                // Reversing swaps which bound is evaluated first, so only rewrite when
+                                // both bounds are side-effect-free (a literal or a name) — kotlinc
+                                // evaluates the bounds in SOURCE order even for a reversed range, so a
+                                // call-bound `(logged()..logged()).reversed()` keeps the iterable path.
+                                let simple = |p: &Self, id: ExprId| {
+                                    matches!(
+                                        p.file.expr(id),
+                                        Expr::IntLit(_)
+                                            | Expr::LongLit(_)
+                                            | Expr::UIntLit(_)
+                                            | Expr::ULongLit(_)
+                                            | Expr::CharLit(_)
+                                            | Expr::Name(_)
+                                    )
+                                };
+                                let rev = match kind {
+                                    RangeKind::Through => Some(RangeKind::DownTo),
+                                    RangeKind::DownTo => Some(RangeKind::Through),
+                                    RangeKind::Until => None, // (hi-1) downTo lo — off-by-one, skip
+                                };
+                                if let (Some(kind), true) =
+                                    (rev, simple(self, lo) && simple(self, hi))
+                                {
+                                    let range = ForRange {
+                                        start: hi,
+                                        end: lo,
+                                        kind,
+                                        step: None,
+                                    };
+                                    return self.finish_stmt(
+                                        Stmt::For {
+                                            name,
+                                            range,
+                                            body,
+                                            label,
+                                        },
+                                        start,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Otherwise iterate over `rstart` as a collection: `for (x in array)`.
             return self.finish_stmt(
                 Stmt::ForEach {

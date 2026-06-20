@@ -2572,6 +2572,17 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 402 — `for (i in (a..b).reversed())` over a literal range  ✅
+- Iterating a `.reversed()` *literal* `..`/`downTo` range — `for (i in (1..4).reversed())` — is rewritten
+  in the parser to the reversed counted `ForRange` (`4 downTo 1`), so the checker/lowering see a normal
+  `downTo` loop (no new IR, no value-class/range-iterator machinery). Only side-effect-free bounds (a
+  literal or a name) are rewritten: kotlinc evaluates a reversed range's bounds in SOURCE order, so a
+  call-bound `(logged()..logged()).reversed()` keeps the iterable path (skips) — guarded after the
+  `forInRangeLiteralReversed` evaluation-order test showed the swap. `until`-reversed (off-by-one) and the
+  value-form `(a downTo b)` (parses as an infix call, not `RangeTo`) are deferred. TDD: feature snippet
+  `ForInReversedLiteralRange`. Box gate 1076 OK, 0 FAIL (a capability step; the corpus `forInReversed`
+  files carry other blockers, so +0 today, but the `.reversed()` blocker is now gone for them).
+
 ### Phase 401 — string templates → single `StringBuilder` (bytecode parity)  ✅
 - krusty lowered a template `"a${x}b"` to a chain of `String.plus` calls — the backend emitted ONE
   `StringBuilder` per `+` (4 nested StringBuilders for a 5-part template). New `IrExpr::StringConcat(parts)`:
