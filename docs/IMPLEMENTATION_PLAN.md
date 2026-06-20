@@ -2572,6 +2572,21 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 414 — data-class `hashCode`: non-null `String` field via `String.hashCode` (bytecode parity)  ✅
+- kotlinc hashes a non-null reference field via `invokevirtual <type>.hashCode()` (so a non-null `String`
+  field is `s.hashCode()`); krusty routed ALL references through `Objects.hashCode` (functionally correct,
+  byte-divergent). Closed the most common case: a non-null `String` field now hashes via the existing
+  `kotlin/Any.hashCode` virtual callee (→ `invokevirtual java/lang/String.hashCode()I`). `field_hash` gains
+  a `nullable` flag (from the field's lowered `IrType`, via new `field_nullable`); a `String?` field stays
+  on the null-safe `Objects.hashCode`.
+- With phase 412 this makes a `data class D(val s: String, val n: Int)` `hashCode` **byte-identical** to
+  kotlinc 2.4.0 (verified differentially). Box gate **1087 OK, 0 FAIL**. TDD:
+  `bytecode_parity_e2e::data_class_nonnull_string_hashes_via_string_hashcode`.
+- Deferred: non-`String` non-null reference fields (user class → `invokevirtual C.hashCode`, but interface
+  / type-param / value-class fields must NOT use `invokevirtual` and need the class-vs-interface +
+  value-class discrimination); nullable non-`String` refs still use `Objects.hashCode` instead of kotlinc's
+  null-guarded ternary. Both stay functionally correct on the `Objects.hashCode` path.
+
 ### Phase 413 — data-class `Object`-overrides emitted non-`final` (bytecode parity)  ✅
 - kotlinc leaves a data class's `Object`-overrides (`toString`/`hashCode`/`equals`) `public` (open) even
   in a final class — they override open `Object` members — but emits `component`/`copy`/`getX` as

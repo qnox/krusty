@@ -2574,7 +2574,15 @@ impl<'a> Lower<'a> {
     /// The `Int` hash of a field value `v` of type `t` (Kotlin's per-field `.hashCode()`). A value-class
     /// field reads here as its erased underlying; the JVM value-class pass boxes it at the reference
     /// boundary (`Objects.hashCode`) so the value class's own `hashCode` runs.
-    fn field_hash(&mut self, v: u32, t: Ty) -> u32 {
+    /// Whether class `class_id`'s field `i` has a nullable reference type (its lowered `IrType` carries
+    /// the `?`), so `hashCode` keeps it on the null-safe `Objects.hashCode` path.
+    fn field_nullable(&self, class_id: ClassId, i: usize) -> bool {
+        matches!(
+            self.ir.classes[class_id as usize].fields[i].1,
+            IrType::Class { nullable: true, .. }
+        )
+    }
+    fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> u32 {
         match t {
             // kotlinc hashes each primitive field via its boxed type's static `hashCode(prim)` (so the
             // bytecode matches even though `Integer.hashCode(I)` is the identity on `int`).
@@ -2583,6 +2591,14 @@ impl<'a> Lower<'a> {
             Ty::Byte => self.static_call("java/lang/Byte.hashCode", vec![v]),
             Ty::Char => self.static_call("java/lang/Character.hashCode", vec![v]),
             Ty::Boolean => self.static_call("java/lang/Boolean.hashCode", vec![v]),
+            // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`),
+            // matching the bytecode. A nullable one stays on `Objects.hashCode` (which null-guards,
+            // returning 0 for `null`) — the null-guarded-ternary form is a future parity item.
+            Ty::String if !nullable => self.ir.add_expr(IrExpr::Call {
+                callee: Callee::External("kotlin/Any.hashCode".to_string()),
+                dispatch_receiver: Some(v),
+                args: vec![],
+            }),
             Ty::Long => self.static_call("java/lang/Long.hashCode", vec![v]),
             Ty::Double => self.static_call("java/lang/Double.hashCode", vec![v]),
             Ty::Float => self.static_call("java/lang/Float.hashCode", vec![v]),
@@ -2782,7 +2798,8 @@ impl<'a> Lower<'a> {
                 })
             } else if fields.len() == 1 {
                 let fv = self.this_field(class_id, 0);
-                let h = self.field_hash(fv, fields[0].1);
+                let n = self.field_nullable(class_id, 0);
+                let h = self.field_hash(fv, fields[0].1, n);
                 let ret = self.ir.add_expr(IrExpr::Return(Some(h)));
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![ret],
@@ -2793,7 +2810,8 @@ impl<'a> Lower<'a> {
                 const RV: u32 = 1;
                 let mut stmts = Vec::new();
                 let f0 = self.this_field(class_id, 0);
-                let h0 = self.field_hash(f0, fields[0].1);
+                let n0 = self.field_nullable(class_id, 0);
+                let h0 = self.field_hash(f0, fields[0].1, n0);
                 stmts.push(self.ir.add_expr(IrExpr::Variable {
                     index: RV,
                     ty: ty_to_ir(Ty::Int),
@@ -2801,7 +2819,8 @@ impl<'a> Lower<'a> {
                 }));
                 for (i, f) in fields.iter().enumerate().skip(1) {
                     let fv = self.this_field(class_id, i as u32);
-                    let h = self.field_hash(fv, f.1);
+                    let ni = self.field_nullable(class_id, i);
+                    let h = self.field_hash(fv, f.1, ni);
                     let prev = self.ir.add_expr(IrExpr::GetValue(RV));
                     let c31 = self.ir.add_expr(IrExpr::Const(IrConst::Int(31)));
                     let mul = self.ir.add_expr(IrExpr::PrimitiveBinOp {
