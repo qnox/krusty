@@ -286,6 +286,37 @@ fn data_class_copy_null_checks_nonnull_reference_params() {
     );
 }
 
+#[test]
+fn data_class_object_overrides_are_not_final() {
+    // kotlinc leaves a data class's Object-overrides (toString/hashCode/equals) `public` (open) even in
+    // a final class, but emits component/copy/getX as `public final`. Match that exactly.
+    let Some((dir, jh)) = krusty_compile(
+        "dcfinal",
+        "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let out = Command::new(format!("{jh}/bin/javap"))
+        .arg("-p")
+        .arg(dir.join("D.class"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let l = line.trim();
+        if l.contains(" toString(") || l.contains(" hashCode(") || l.contains(" equals(") {
+            assert!(
+                !l.contains("final"),
+                "Object-override must NOT be final (kotlinc keeps it open):\n{l}"
+            );
+        }
+        if l.contains(" component") || l.contains(" copy(") {
+            assert!(l.contains("final"), "component/copy must be final:\n{l}");
+        }
+    }
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]
