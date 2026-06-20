@@ -2581,7 +2581,9 @@ bodies exist only as jar bytecode):
     normalized via `swap_cmp`. Ubiquitous (loop bounds, guards).
 - Together these make a whole class of loops byte-identical: e.g. `forEachIntArray.kt` now matches
   kotlinc's `box()` instruction-for-instruction (verified by normalized `javap` diff). Box gate 1076 OK,
-  0 FAIL. (Aggregate `bytediff` % rising; the 8 array-foreach classes in the 60-file sample flip.)
+  0 FAIL. Aggregate `bytediff` on the 60-file sample: **30.3% → 32.6%** byte-identical (and the broader
+  loop/comparison shape now matches kotlinc everywhere these patterns occur, even where other divergences
+  keep a class from being fully identical).
 
 ### Drop-in finding — Kotlin `@Metadata` not emitted (Kotlin↔Kotlin interop gap)
 - Phase 398 made top-level properties **Java-consumable** (a real interop milestone — verified: `javac`
