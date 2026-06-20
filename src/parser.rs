@@ -15,7 +15,48 @@ pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
         diags,
     };
     p.parse_file();
+    fixup_parenless_base_classes(&mut p.file);
     p.file
+}
+
+/// A class with NO primary constructor names its base class WITHOUT parentheses (`class A : B { …
+/// constructor(): super(…) }`) — the base arguments come from each secondary `super(…)`, not a
+/// `: Base(args)` supertype entry. The parser can't tell a parenless class supertype from an interface
+/// syntactically, so it parks every parenless supertype in `supertypes`; here, with the whole file
+/// visible, we move a supertype that names a concrete file class into `base_class` for such classes.
+fn fixup_parenless_base_classes(file: &mut File) {
+    use crate::ast::{CtorDelegation, Decl};
+    let base_candidates: std::collections::HashSet<String> = file
+        .decl_arena
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Class(c) if !c.is_interface && !c.is_object && !c.is_enum => Some(c.name.clone()),
+            _ => None,
+        })
+        .collect();
+    for d in file.decl_arena.iter_mut() {
+        if let Decl::Class(c) = d {
+            if c.has_primary_ctor || c.base_class.is_some() {
+                continue;
+            }
+            let super_delegates = c.secondary_ctors.iter().any(|sc| {
+                matches!(
+                    sc.delegation,
+                    CtorDelegation::Super(_) | CtorDelegation::None
+                )
+            });
+            if !super_delegates {
+                continue;
+            }
+            if let Some(pos) = c
+                .supertypes
+                .iter()
+                .position(|s| base_candidates.contains(s))
+            {
+                c.base_class = Some(c.supertypes.remove(pos));
+            }
+        }
+    }
 }
 
 struct Parser<'a> {
@@ -827,6 +868,7 @@ impl<'a> Parser<'a> {
             base_class: None,
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -1093,8 +1135,24 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
+        // An explicit primary-constructor `constructor` keyword (`class A private constructor(...)`,
+        // possibly preceded by modifiers/annotations) marks a primary ctor even before the params.
+        if (self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())))
+            && self
+                .t
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == TokenKind::Ident && t.text(self.src) == "constructor")
+        {
+            self.skip_decl_prefix();
+        }
+        let header_ctor_kw = self.at(TokenKind::Ident) && self.text() == "constructor";
+        if header_ctor_kw {
+            self.bump();
+        }
         let mut props = Vec::new();
-        if self.eat(TokenKind::LParen) {
+        let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
+        if has_primary_ctor_parens {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::At)
@@ -1342,6 +1400,10 @@ impl<'a> Parser<'a> {
             delegations,
             base_class,
             base_args,
+            // A class has a primary constructor when it wrote one (parens / `constructor` keyword) OR
+            // declares no secondary constructors at all (then an implicit no-arg primary exists). Only a
+            // class with secondary ctors and no header ctor has NO primary.
+            has_primary_ctor: header_has_primary || secondary_ctors.is_empty(),
             secondary_ctors,
             span: Span::new(start.lo, end.hi),
         }
@@ -1536,6 +1598,7 @@ impl<'a> Parser<'a> {
             base_class: None,
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
         }
     }
@@ -1654,6 +1717,7 @@ impl<'a> Parser<'a> {
             base_class,
             base_args,
             secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
             span: Span::new(span.lo, end.hi),
         };
         let did = self.file.add_decl(Decl::Class(synth));
@@ -1773,6 +1837,7 @@ impl<'a> Parser<'a> {
             base_class: None,
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
         }
     }

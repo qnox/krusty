@@ -271,6 +271,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     )
                     .collect(),
                 secondary_ctors: vec![],
+                has_primary_ctor: c.has_primary_ctor,
             });
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
@@ -504,6 +505,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     companion_class: None,
                     field_final: vec![],
                     secondary_ctors: vec![],
+                    has_primary_ctor: true,
                 });
                 let csig = syms.classes.get(&c.name)?;
                 let mut cmethods = HashMap::new();
@@ -992,7 +994,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .and_then(|s| lo.classes.get(&s))
                 {
                     let sup_params = lo.ir.classes[sup.id as usize].ctor_param_count as usize;
-                    if sup_params > c.base_args.len() {
+                    // For a class with NO primary constructor the base arguments are supplied by each
+                    // secondary ctor's `super(…)` (validated in the secondary-ctor lowering), not by a
+                    // supertype-list `: Base(args)` — so this `base_args` arity check doesn't apply.
+                    if sup_params > c.base_args.len() && c.has_primary_ctor {
                         return None;
                     }
                     // An anonymous object extending a *parameterized* base class can reference the
@@ -1062,8 +1067,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.classes[class_id as usize].super_args = sargs;
                 }
                 // Constructor body: run body-property initializers and `init { … }` blocks in source
-                // order, with `this` = value 0 and the constructor params as values 1..=N.
-                if !c.init_order.is_empty() {
+                // order, with `this` = value 0 and the constructor params as values 1..=N. For a class
+                // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary
+                // constructor instead (lowered there, in that ctor's own value space) — skip here.
+                if !c.init_order.is_empty() && c.has_primary_ctor {
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
                     lo.scope.clear();
@@ -1173,11 +1180,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
                     lo.ir.classes[class_id as usize].init_body = Some(body);
                 }
-                // `<init>(p)` delegating to the primary. Only `this(…)` delegation is supported. For a
+                // Lower each secondary constructor to an extra `<init>(p)`. For a class WITH a primary
+                // ctor every secondary delegates to it via `this(…)`. For a class with NO primary ctor a
+                // secondary delegates either to a sibling (`this(…)`) or to `super(…)` (or implicitly);
+                // a `super(…)`-reaching ctor also runs the field initializers + `init {}` blocks. For a
                 // value class the JVM value-class pass turns these lowered `IrSecondaryCtor`s into static
-                // `constructor-impl` overloads (and the call site records `ctor_params`, routing
-                // `Sc("x")` → `constructor-impl(String)`).
+                // `constructor-impl` overloads.
                 if !c.secondary_ctors.is_empty() {
+                    use crate::ir::CtorDelegateTarget;
                     let class_id = lo.classes[&internal].id;
                     let primary_param_tys: Vec<IrType> = {
                         let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
@@ -1186,12 +1196,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|(_, t)| t.clone())
                             .collect()
                     };
+                    // The IR param types of every secondary ctor (for resolving a sibling `this(…)`).
+                    let sec_param_tys: Vec<Vec<IrType>> = c
+                        .secondary_ctors
+                        .iter()
+                        .map(|sc| {
+                            sc.params
+                                .iter()
+                                .map(|p| ty_to_ir(ty_of(file, &p.ty)))
+                                .collect()
+                        })
+                        .collect();
+                    let super_param_tys = lo.super_ctor_param_tys(&internal);
                     let mut secs = Vec::new();
                     for sc in &c.secondary_ctors {
-                        let delegate_args = match &sc.delegation {
-                            ast::CtorDelegation::This(args) => args.clone(),
-                            _ => return None, // `super(…)` / no delegation not modelled
-                        };
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = Some(internal.clone());
@@ -1199,34 +1217,134 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
                         let mut param_irs = Vec::new();
+                        // A secondary ctor with a defaulted parameter needs kotlinc's synthetic
+                        // `<init>(…, int mask, DefaultConstructorMarker)` overload, which krusty doesn't
+                        // emit — a call omitting the default would hit a missing `<init>`. Bail.
+                        if sc.params.iter().any(|p| p.default.is_some()) {
+                            return None;
+                        }
                         for p in &sc.params {
                             let pty = ty_of(file, &p.ty);
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, pty));
                             param_irs.push(ty_to_ir(pty));
                         }
-                        if delegate_args.len() != primary_param_tys.len() {
+                        // Resolve the delegation target + the parameter types its args must coerce to.
+                        let (delegate, delegate_args, target_tys, run_init): (
+                            CtorDelegateTarget,
+                            Vec<AstExprId>,
+                            Vec<IrType>,
+                            bool,
+                        ) = match &sc.delegation {
+                            ast::CtorDelegation::This(args) => {
+                                let target = if c.has_primary_ctor {
+                                    primary_param_tys.clone()
+                                } else {
+                                    // Pick the sibling secondary ctor this `this(…)` targets: prefer the
+                                    // one whose parameter types accept the arguments, else the unique
+                                    // same-arity ctor. (Ambiguity type-matching can't resolve bails.)
+                                    let arg_irs: Vec<IrType> =
+                                        args.iter().map(|a| ty_to_ir(lo.info.ty(*a))).collect();
+                                    let typed = sec_param_tys.iter().find(|p| {
+                                        p.len() == arg_irs.len()
+                                            && arg_irs
+                                                .iter()
+                                                .zip(p.iter())
+                                                .all(|(a, pp)| ir_arg_assignable(a, pp))
+                                    });
+                                    match typed {
+                                        Some(p) => p.clone(),
+                                        None => {
+                                            let same: Vec<&Vec<IrType>> = sec_param_tys
+                                                .iter()
+                                                .filter(|p| p.len() == args.len())
+                                                .collect();
+                                            if same.len() != 1 {
+                                                return None;
+                                            }
+                                            same[0].clone()
+                                        }
+                                    }
+                                };
+                                (
+                                    CtorDelegateTarget::This {
+                                        target_params: target.clone(),
+                                    },
+                                    args.clone(),
+                                    target,
+                                    false,
+                                )
+                            }
+                            ast::CtorDelegation::Super(args) => {
+                                if c.has_primary_ctor {
+                                    return None; // a secondary in a primary class must delegate via this(…)
+                                }
+                                // A value-class `super(…)` argument must be unboxed to the base ctor's
+                                // mangled/underlying parameter — the value-class pass rewrites primary
+                                // `super_args` but not a secondary's delegate args yet, so bail.
+                                if args.iter().any(|&a| {
+                                    matches!(lo.info.ty(a), Ty::Obj(ref i, _)
+                                        if lo.ir.classes.iter().any(|cc| cc.is_value && &cc.fq_name == i))
+                                }) {
+                                    return None;
+                                }
+                                (
+                                    CtorDelegateTarget::Super {
+                                        super_params: super_param_tys.clone(),
+                                    },
+                                    args.clone(),
+                                    super_param_tys.clone(),
+                                    true,
+                                )
+                            }
+                            ast::CtorDelegation::None => {
+                                if c.has_primary_ctor {
+                                    return None;
+                                }
+                                // Implicit `super()` — must be a no-arg base (Object, or a base ctor we
+                                // can't pass args to here). Bail if the base needs constructor arguments.
+                                if !super_param_tys.is_empty() {
+                                    return None;
+                                }
+                                (
+                                    CtorDelegateTarget::Super {
+                                        super_params: vec![],
+                                    },
+                                    vec![],
+                                    vec![],
+                                    true,
+                                )
+                            }
+                        };
+                        if delegate_args.len() != target_tys.len() {
                             return None;
                         }
                         let mut dargs = Vec::new();
-                        for (a, ft) in delegate_args.iter().zip(&primary_param_tys) {
+                        for (a, ft) in delegate_args.iter().zip(&target_tys) {
                             dargs.push(lo.lower_arg(*a, ft)?);
                         }
-                        let body = match sc.body {
-                            Some(b) => {
-                                let mut out = Vec::new();
-                                lo.append_body_stmts(b, &mut out)?;
-                                Some(lo.ir.add_expr(IrExpr::Block {
-                                    stmts: out,
-                                    value: None,
-                                }))
-                            }
-                            None => None,
+                        // A `super(…)`-reaching ctor runs the init steps (field initializers + `init {}`)
+                        // before its own body; a `this(…)` ctor runs only its body.
+                        let mut out = Vec::new();
+                        if run_init {
+                            out.extend(lo.lower_class_init_steps(c, class_id)?);
+                        }
+                        if let Some(b) = sc.body {
+                            lo.append_body_stmts(b, &mut out)?;
+                        }
+                        let body = if out.is_empty() {
+                            None
+                        } else {
+                            Some(lo.ir.add_expr(IrExpr::Block {
+                                stmts: out,
+                                value: None,
+                            }))
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             params: param_irs,
                             delegate_args: dargs,
                             body,
+                            delegate,
                         });
                     }
                     lo.ir.classes[class_id as usize].secondary_ctors = secs;
@@ -1292,6 +1410,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             companion_class: None,
                             field_final: vec![],
                             secondary_ctors: vec![],
+                            has_primary_ctor: true,
                         });
                         let mut mfids = Vec::new();
                         for bm in body {
@@ -1417,9 +1536,14 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
     // companion with properties (`val`/`const val`) is not yet.
     !c.is_object && !c.is_enum && !c.is_interface && c.companion_props.is_empty()
-        // Secondary constructors delegating to the primary (`constructor(p) : this(args)`) are
-        // emitted as extra `<init>` methods; `super(…)` delegation isn't supported.
-        && c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
+        // Secondary constructors: in a class WITH a primary ctor each must delegate to it (`this(…)`);
+        // a class with NO primary ctor admits `this(…)` (to a sibling), `super(…)`, or implicit
+        // delegation — each becomes its own `<init>` (see the secondary-ctor lowering).
+        && (if c.has_primary_ctor {
+            c.secondary_ctors.iter().all(|sc| matches!(sc.delegation, ast::CtorDelegation::This(_)))
+        } else {
+            true
+        })
         // A non-`val`/`var` primary-ctor parameter (`class C(x: Int) { val y = x }`) is an argument only
         // (no field), available in the constructor body — lowered via `ctor_args`. (Both property and
         // plain params are fine here.)
@@ -1506,6 +1630,36 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
 /// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
 /// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
 /// in the constructor body rather than at the declaration.
+/// Whether a lowered initializer value is the JVM default for its (primitive/reference) field type:
+/// `0`/`0L`/`0.0`/`0.0f`/`false`/`'\0'`/`null`, or such a zero literal under a primitive coercion
+/// (`0.toByte()`/`0.toChar()`). kotlinc elides a field initializer equal to the field's default —
+/// the JVM zero-initializes the field, so re-storing the default would clobber a value a base
+/// constructor's virtual call already wrote. Eliding is always semantically safe (no side effect).
+fn ir_value_is_jvm_default(ir: &IrFile, v: ExprId) -> bool {
+    match ir.expr(v) {
+        IrExpr::Const(c) => {
+            matches!(
+                c,
+                IrConst::Int(0)
+                    | IrConst::Long(0)
+                    | IrConst::Short(0)
+                    | IrConst::Byte(0)
+                    | IrConst::Boolean(false)
+                    | IrConst::Char('\0')
+                    | IrConst::Null
+            ) || matches!(c, IrConst::Float(f) if *f == 0.0)
+                || matches!(c, IrConst::Double(f) if *f == 0.0)
+        }
+        // `0.toByte()` / `0.toChar()` — a primitive coercion of a zero literal is still the default.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } => ir_value_is_jvm_default(ir, *arg),
+        _ => false,
+    }
+}
+
 fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
     !p.is_var
         && p.receiver.is_none()
@@ -1615,6 +1769,111 @@ impl<'a> Lower<'a> {
         let v = self.next_value;
         self.next_value += 1;
         v
+    }
+
+    /// The parameter types of a class's superclass constructor (`super(args)` targets these). Empty for
+    /// `java/lang/Object` or a base whose IR class isn't in this file (then we can't model the call).
+    fn super_ctor_param_tys(&self, internal: &str) -> Vec<IrType> {
+        self.classes[internal]
+            .super_internal
+            .clone()
+            .and_then(|s| self.classes.get(&s).map(|sup| sup.id))
+            .map(|sid| {
+                let sup = &self.ir.classes[sid as usize];
+                if sup.ctor_args.is_empty() {
+                    let n = sup.ctor_param_count as usize;
+                    sup.fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                } else {
+                    sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// Lower a class's body-property initializers + `init {}` blocks (source order) into IR effect
+    /// statements, assuming `this` (and any constructor params) are already in scope and value numbering
+    /// continues from `self.next_value`. Returns `None` on an unsupported initializer shape (a branchy
+    /// value initializer in a constructor). Used by both the primary `<init>` and each `super(...)`-
+    /// reaching secondary constructor of a no-primary class.
+    fn lower_class_init_steps(&mut self, c: &ast::ClassDecl, class_id: u32) -> Option<Vec<ExprId>> {
+        let ctor_count = self.ir.classes[class_id as usize].ctor_param_count;
+        let this_v = self
+            .scope
+            .iter()
+            .find(|(n, _, _)| n == "this")
+            .map(|(_, v, _)| *v)?;
+        let mut stmts = Vec::new();
+        for step in &c.init_order {
+            match step {
+                ast::ClassInit::PropInit(i) => {
+                    if !is_backing_field_prop(&c.body_props[*i]) || c.body_props[*i].init.is_none()
+                    {
+                        continue;
+                    }
+                    let body_offset = c.body_props[..*i]
+                        .iter()
+                        .filter(|p| is_backing_field_prop(p))
+                        .count();
+                    let field_idx = ctor_count + body_offset as u32;
+                    let field_ty = self.ir.classes[class_id as usize].fields[field_idx as usize]
+                        .1
+                        .clone();
+                    let init_e = c.body_props[*i].init.unwrap();
+                    if matches!(
+                        self.afile.expr(init_e),
+                        Expr::When { .. }
+                            | Expr::If { .. }
+                            | Expr::Elvis { .. }
+                            | Expr::Block { .. }
+                            | Expr::Try { .. }
+                    ) {
+                        return None;
+                    }
+                    let val = self.lower_arg(init_e, &field_ty)?;
+                    // kotlinc elides a field initializer that stores the field's JVM default value — a
+                    // base-class constructor's virtual call may have already written the field, and a
+                    // default-value store would clobber it (see `fieldInitializerOptimization`).
+                    if ir_value_is_jvm_default(&self.ir, val) {
+                        continue;
+                    }
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    stmts.push(self.ir.add_expr(IrExpr::SetField {
+                        receiver: recv,
+                        class: class_id,
+                        index: field_idx,
+                        value: val,
+                    }));
+                }
+                ast::ClassInit::Block(e) => {
+                    let Expr::Block {
+                        stmts: bs,
+                        trailing,
+                    } = self.afile.expr(*e).clone()
+                    else {
+                        return None;
+                    };
+                    for &s in &bs {
+                        let branchy = match self.afile.stmt(s) {
+                            Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } => {
+                                body_contains_branch(self.afile, *value)
+                            }
+                            Stmt::Local { init, .. } => body_contains_branch(self.afile, *init),
+                            _ => false,
+                        };
+                        if branchy {
+                            return None;
+                        }
+                    }
+                    for s in bs {
+                        stmts.push(self.stmt(s)?);
+                    }
+                    if let Some(t) = trailing {
+                        stmts.push(self.expr(t)?);
+                    }
+                }
+            }
+        }
+        Some(stmts)
     }
 
     // ---- Builder surface for the synthetic registry (`crate::synthetics`) ------------------------
@@ -2872,6 +3131,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             field_final: vec![],
             secondary_ctors: vec![],
+            has_primary_ctor: true,
         });
         if let Some(v) = recv_val {
             // `new <Synth>(receiver)` — the captured receiver is the constructor's `Object` argument.

@@ -2079,11 +2079,15 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.tparams.clear();
             }
             Decl::Class(cl) => {
-                // Secondary constructors (`constructor(p) : this(args) { body }`) delegating to the
-                // primary are supported; `super(…)` delegation isn't emitted, so reject those.
-                for sc in &cl.secondary_ctors {
-                    if !matches!(sc.delegation, CtorDelegation::This(_)) {
-                        c.diags.error(sc.span, "krusty: a secondary constructor must delegate to the primary (this(…))".to_string());
+                // In a class WITH a primary constructor every secondary must delegate to it (`this(…)`);
+                // `super(…)`/implicit delegation isn't emitted there, so reject it. A class with NO
+                // primary constructor admits `this(…)`/`super(…)`/implicit delegation (each becomes its
+                // own `<init>`).
+                if cl.has_primary_ctor {
+                    for sc in &cl.secondary_ctors {
+                        if !matches!(sc.delegation, CtorDelegation::This(_)) {
+                            c.diags.error(sc.span, "krusty: a secondary constructor must delegate to the primary (this(…))".to_string());
+                        }
                     }
                 }
                 // `@JvmInline value class` compiles UNBOXED (a value is its underlying type; `X.class`
@@ -2159,31 +2163,79 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     .get(&cl.name)
                     .map(|s| s.ctor_params.clone())
                     .unwrap_or_default();
+                // A *deferred* `val` (no initializer/getter/setter) is definitely-assigned once in a
+                // constructor body, so it is assignable WITHIN a secondary constructor (kotlinc allows
+                // it) — same relaxation the primary-ctor body uses below.
+                let sc_deferred_val: std::collections::HashSet<&str> = cl
+                    .body_props
+                    .iter()
+                    .filter(|bp| {
+                        !bp.is_var && bp.init.is_none() && bp.getter.is_none() && bp.ty.is_some()
+                    })
+                    .map(|bp| bp.name.as_str())
+                    .collect();
                 for sc in &cl.secondary_ctors {
                     c.push_scope();
                     for (n, t, is_var) in &props {
-                        c.declare(n, *t, *is_var);
+                        c.declare(n, *t, *is_var || sc_deferred_val.contains(n.as_str()));
                     }
                     for p in &sc.params {
                         let ty = c.resolve_ty(&p.ty);
                         c.declare(&p.name, ty, false);
                     }
-                    if let CtorDelegation::This(args) = &sc.delegation {
-                        let ats: Vec<Ty> = args.iter().map(|a| c.expr(*a)).collect();
-                        if ats.len() != primary_params.len() {
-                            c.diags.error(
-                                sc.span,
-                                format!(
-                                    "krusty: this(…) expects {} args, got {}",
-                                    primary_params.len(),
-                                    ats.len()
-                                ),
-                            );
-                        } else {
-                            for (i, (p, a)) in primary_params.iter().zip(&ats).enumerate() {
-                                c.expect_assignable(*p, *a, c.span(args[i]), "this() argument");
+                    match &sc.delegation {
+                        CtorDelegation::This(args) => {
+                            let ats: Vec<Ty> = args.iter().map(|a| c.expr(*a)).collect();
+                            if cl.has_primary_ctor {
+                                if ats.len() != primary_params.len() {
+                                    c.diags.error(
+                                        sc.span,
+                                        format!(
+                                            "krusty: this(…) expects {} args, got {}",
+                                            primary_params.len(),
+                                            ats.len()
+                                        ),
+                                    );
+                                } else {
+                                    for (i, (p, a)) in primary_params.iter().zip(&ats).enumerate() {
+                                        c.expect_assignable(
+                                            *p,
+                                            *a,
+                                            c.span(args[i]),
+                                            "this() argument",
+                                        );
+                                    }
+                                }
+                            } else {
+                                // No primary ctor: `this(…)` targets a sibling secondary. Best-effort
+                                // assignability check against the unique same-arity sibling (lowering bails
+                                // if the target is ambiguous), but never reject otherwise-valid code here.
+                                let sec_params: Vec<Vec<Ty>> = cl
+                                    .secondary_ctors
+                                    .iter()
+                                    .map(|s| s.params.iter().map(|p| c.resolve_ty(&p.ty)).collect())
+                                    .collect();
+                                let same: Vec<&Vec<Ty>> =
+                                    sec_params.iter().filter(|p| p.len() == ats.len()).collect();
+                                if same.len() == 1 {
+                                    for (i, (p, a)) in same[0].iter().zip(&ats).enumerate() {
+                                        c.expect_assignable(
+                                            *p,
+                                            *a,
+                                            c.span(args[i]),
+                                            "this() argument",
+                                        );
+                                    }
+                                }
                             }
                         }
+                        // `super(…)`/implicit: evaluate the arguments (records their types for lowering).
+                        CtorDelegation::Super(args) => {
+                            for a in args {
+                                c.expr(*a);
+                            }
+                        }
+                        CtorDelegation::None => {}
                     }
                     if let Some(body) = sc.body {
                         let prev = c.ret_ty;
@@ -5607,11 +5659,16 @@ impl<'a> Checker<'a> {
                                     None => false,
                                 }
                             });
-                        // The arguments don't match the primary — try a secondary constructor.
+                        // The arguments don't match the primary — try a secondary constructor. Prefer one
+                        // whose parameter TYPES accept the arguments (`A(123)` is the `Int` secondary, not
+                        // the same-arity `String` one); fall back to the first same-arity ctor.
                         if !ok_arity {
-                            if let Some(sparams) =
-                                cls.secondary_ctors.iter().find(|sp| sp.len() == got)
-                            {
+                            let chosen = cls
+                                .secondary_ctors
+                                .iter()
+                                .find(|sp| sp.len() == got && self.ctor_args_match(sp, &arg_tys))
+                                .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
+                            if let Some(sparams) = chosen {
                                 for (i, (p, a)) in sparams.iter().zip(&arg_tys).enumerate() {
                                     self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                                 }

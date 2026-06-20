@@ -1,25 +1,49 @@
 use krusty::diag::DiagSink;
+use krusty::ir_lower::lower_file;
+use krusty::jvm::classpath::Classpath;
+use krusty::jvm::ir_emit::emit_all;
+use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::jvm::names::file_class_name;
+use krusty::jvm::value_classes::lower_value_classes;
 use krusty::lexer::lex;
 use krusty::parser::parse;
-use krusty::resolve::{check_file, collect_signatures};
+use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
 
-fn first_error(src: &str) -> Option<String> {
+/// Run the FULL pipeline (lex→parse→sigs→check→lower→value-classes→emit) against the real
+/// classpath (stdlib + JDK `lib/modules`), so skip reasons match the conformance harness — not a
+/// stdlib-less front-end-only approximation. Returns the first error (with a stage prefix for the
+/// silent lower/emit bailouts that carry no diagnostic).
+fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let mut d = DiagSink::new();
     let toks = lex(src, &mut d);
     let files = vec![parse(src, &toks, &mut d)];
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }
-    let syms = collect_signatures(&files, &mut d);
+    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    let syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }
-    check_file(&files[0], &syms, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }
-    None
+    let facade = file_class_name(stem, files[0].package.as_deref());
+    let mut ir = match lower_file(&files[0], &info, &syms) {
+        Some(ir) => ir,
+        None => return Some("lower: lower_file bailed (unsupported IR construct)".into()),
+    };
+    if !lower_value_classes(&mut ir) {
+        return Some("lower: value-class shape not lowered".into());
+    }
+    match emit_all(&ir, &facade, &**cp) {
+        Some(o) if !o.is_empty() => None,
+        _ => Some("emit: emit_all bailed (unsupported codegen)".into()),
+    }
 }
 
 fn categorize(err: &str) -> String {
@@ -46,6 +70,9 @@ fn categorize(err: &str) -> String {
     }
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
+    }
+    if err.starts_with("lower:") || err.starts_with("emit:") {
+        return err[..err.len().min(70)].to_string();
     }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");
@@ -82,6 +109,21 @@ fn main() {
         None
     };
 
+    // Real classpath: stdlib jar (KRUSTY_SURVEY_STDLIB) + JDK lib/modules (KRUSTY_SURVEY_JDK_MODULES).
+    // Mirrors the conformance harness so WITH_STDLIB tests resolve `mutableListOf`/`ArrayList`/etc.
+    let mut cp_paths: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("KRUSTY_SURVEY_STDLIB") {
+        if !p.is_empty() {
+            cp_paths.push(PathBuf::from(p));
+        }
+    }
+    if let Ok(p) = std::env::var("KRUSTY_SURVEY_JDK_MODULES") {
+        if !p.is_empty() {
+            cp_paths.push(PathBuf::from(p));
+        }
+    }
+    let cp = Rc::new(Classpath::new(cp_paths));
+
     let mut errors: HashMap<String, Vec<String>> = HashMap::new();
     let mut scanned = 0u32;
     let mut compiled = 0u32;
@@ -89,6 +131,7 @@ fn main() {
     collect_kt(std::path::Path::new(&box_dir), &mut files);
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();
+        let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
         if src.contains("// FILE:") || src.contains("// MODULE:") {
             continue;
         }
@@ -105,7 +148,8 @@ fn main() {
             }
         }
         scanned += 1;
-        match first_error(&src) {
+        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
+        match first_error(&src, &cp, stem) {
             None => compiled += 1,
             Some(e) => {
                 let cat = categorize(&e);

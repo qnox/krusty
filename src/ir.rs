@@ -479,6 +479,10 @@ pub struct IrClass {
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
+    /// `false` for a class with NO primary constructor: the backend emits no primary `<init>`; every
+    /// `<init>` comes from `secondary_ctors` (a `Super`-delegating one carries the init body). `true`
+    /// for every other class (including synthesized/enum/object).
+    pub has_primary_ctor: bool,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
@@ -497,14 +501,28 @@ pub struct PropRef {
     pub bound: bool,
 }
 
-/// A secondary constructor delegating to the primary: `<init>(params)` evaluates `delegate_args`,
-/// calls `this(…)` (`invokespecial` the primary `<init>`), then runs `body`. `this` is value 0 and
-/// the parameters are values `1..=params.len()` in `delegate_args`/`body`.
+/// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target
+/// (`invokespecial`), then runs `body`. `this` is value 0 and the parameters are values
+/// `1..=params.len()` in `delegate_args`/`body`.
 #[derive(Clone, Debug)]
 pub struct IrSecondaryCtor {
     pub params: Vec<IrType>,
     pub delegate_args: Vec<ExprId>,
     pub body: Option<ExprId>,
+    /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
+    pub delegate: CtorDelegateTarget,
+}
+
+/// The delegation target of a secondary constructor.
+#[derive(Clone, Debug)]
+pub enum CtorDelegateTarget {
+    /// `this(args)` → `invokespecial` an own `<init>(target_params)` (the primary, or a sibling
+    /// secondary in a no-primary class). The class init body runs in the reached constructor, not here.
+    This { target_params: Vec<IrType> },
+    /// `super(args)` (or implicit) in a class with NO primary constructor → `invokespecial` the
+    /// superclass `<init>(super_params)`, then run the class init body (field initializers + `init {}`)
+    /// before this constructor's own `body`.
+    Super { super_params: Vec<IrType> },
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).
