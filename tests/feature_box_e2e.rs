@@ -22,11 +22,14 @@ const SNIPPETS: &[(&str, &str)] = &[
         "GenericInlineHof",
         r#"
 inline fun <T> twice(x: T, f: (T) -> T): T = f(f(x))
+inline fun <T, R> applyFn(x: T, f: (T) -> R): R = f(x)
 fun box(): String {
     val a = twice(1) { it + 10 }
     if (a != 21) return "f0: $a"
     val s = twice("x") { it + "!" }
     if (s != "x!!") return "f1: $s"
+    val b = applyFn("ab") { it.length }   // R bound by the lambda's return type (Int)
+    if (b != 2) return "f2: $b"
     return "OK"
 }
 "#,

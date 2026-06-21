@@ -4812,11 +4812,7 @@ impl<'a> Checker<'a> {
     /// types AND the call's specialized return type — both type-param-substituted. So `twice(1) { it+10 }`
     /// types `it` as `Int` and the call as `Int`, not the erased `Any`. `None` when no matching user
     /// function or it isn't generic. `partial[i]` is `Some(ty)` for a non-lambda arg, `None` for a lambda.
-    fn user_generic_call(
-        &mut self,
-        fname: &str,
-        partial: &[Option<Ty>],
-    ) -> Option<(Vec<Vec<Ty>>, Option<Ty>)> {
+    fn user_generic_call(&mut self, fname: &str, partial: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
         let f = self
             .file
             .decls
@@ -4869,12 +4865,61 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
-        // Specialized return: a declared type-param return (`: T`) becomes its bound concrete type.
-        let ret = f
-            .ret
+        Some(lam_pts)
+    }
+
+    /// The specialized return type of a user generic inline HOF, inferred from the FULL argument
+    /// types — value args AND lambda args (their parameter and **return** types). For
+    /// `applyFn<T, R>(x: T, f: (T) -> R): R`, `applyFn("ab") { it.length }` binds `T=String` from the
+    /// value arg and `R=Int` from the lambda's return type, so the call types as `Int` (not erased
+    /// `Any`). Must run AFTER the lambda args are typed (unlike [`user_generic_call`], which produces
+    /// the lambda parameter types and therefore runs before). `None` when no matching user inline
+    /// generic function, or its return type isn't a (now-bound) type parameter.
+    fn user_generic_return(&self, fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
+        let f = self
+            .file
+            .decls
+            .iter()
+            .find_map(|&d| match self.file.decl(d) {
+                Decl::Fun(f)
+                    if f.name == fname
+                        && f.receiver.is_none()
+                        && f.is_inline
+                        && !f.type_params.is_empty()
+                        && f.params.len() == arg_tys.len() =>
+                {
+                    Some(f)
+                }
+                _ => None,
+            })?;
+        let tparams: std::collections::HashSet<&str> =
+            f.type_params.iter().map(String::as_str).collect();
+        let mut binds: std::collections::HashMap<&str, Ty> = std::collections::HashMap::new();
+        for (i, p) in f.params.iter().enumerate() {
+            let at = &arg_tys[i];
+            if p.ty.fun_params.is_empty() {
+                // A plain value parameter typed as a bare type parameter (`x: T`).
+                if tparams.contains(p.ty.name.as_str()) {
+                    binds.entry(p.ty.name.as_str()).or_insert(*at);
+                }
+            } else if let Ty::Fun(fsig) = at {
+                // A function-typed parameter `(A) -> R`: bind `A` from the lambda's parameter types
+                // and `R` from its return type.
+                for (decl, actual) in p.ty.fun_params.iter().zip(&fsig.params) {
+                    if tparams.contains(decl.name.as_str()) {
+                        binds.entry(decl.name.as_str()).or_insert(*actual);
+                    }
+                }
+                if let Some(rret) = &p.ty.arg {
+                    if tparams.contains(rret.name.as_str()) {
+                        binds.entry(rret.name.as_str()).or_insert(fsig.ret);
+                    }
+                }
+            }
+        }
+        f.ret
             .as_ref()
-            .and_then(|r| binds.get(r.name.as_str()).copied());
-        Some((lam_pts, ret))
+            .and_then(|r| binds.get(r.name.as_str()).copied())
     }
 
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
@@ -5786,7 +5831,7 @@ impl<'a> Checker<'a> {
                 };
                 // A user generic inline HOF (`twice(1){…}`): bind its type params from the value args to
                 // recover the lambda parameter types and the specialized return type.
-                let user_generic: Option<(Vec<Vec<Ty>>, Option<Ty>)> = toplevel_partial
+                let user_generic: Option<Vec<Vec<Ty>>> = toplevel_partial
                     .as_ref()
                     .and_then(|partial| self.user_generic_call(&fname, partial));
                 let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_partial
@@ -5798,7 +5843,7 @@ impl<'a> Checker<'a> {
                             .libraries
                             .toplevel_lambda_param_types(&fname, partial)
                     })
-                    .or_else(|| user_generic.as_ref().map(|(pts, _)| pts.clone()));
+                    .or_else(|| user_generic.clone());
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -6091,9 +6136,12 @@ impl<'a> Checker<'a> {
                             sig.ret = inferred;
                         }
                         // A user generic call whose return is a type parameter (`twice(...): T`): use the
-                        // type bound from the arguments (`Int`) so the call's type isn't the erased `Any`.
-                        if let Some((_, Some(ret))) = &user_generic {
-                            sig.ret = *ret;
+                        // type bound from ALL arguments — value args and lambda parameter/return types
+                        // (`applyFn("ab"){ it.length }: R` → `Int`) — so the call isn't the erased `Any`.
+                        if user_generic.is_some() {
+                            if let Some(ret) = self.user_generic_return(&fname, &arg_tys) {
+                                sig.ret = ret;
+                            }
                         }
                         if sig.vararg {
                             // Fixed params (all but the last) match by position; remaining args must
