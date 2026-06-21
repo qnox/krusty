@@ -10,6 +10,13 @@ use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::method_descriptor;
 use crate::types::Ty;
 
+// Set when the emitter hits a `must_inline` (non-public `@InlineOnly`) call it cannot splice — e.g. a
+// branchy `require`/`check` on a non-empty operand stack. There is no legal `invokestatic` fallback for
+// such a callee, so the whole file is skipped (`emit_all` returns `None`) rather than miscompiled.
+thread_local! {
+    static INLINE_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
@@ -21,6 +28,7 @@ pub fn emit_all(
     if !jvm_can_emit(ir) {
         return None;
     }
+    INLINE_BAIL.with(|b| b.set(false));
     let mut out = Vec::new();
     // Facade: the static top-level functions (those with no dispatch receiver).
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
@@ -35,6 +43,9 @@ pub fn emit_all(
     // Each class.
     for c in &ir.classes {
         out.push((c.fq_name.clone(), emit_class(ir, c, facade, bodies)));
+    }
+    if INLINE_BAIL.with(|b| b.get()) {
+        return None; // an un-spliceable `must_inline` call — skip the file, never miscompile
     }
     Some(out)
 }
@@ -1489,7 +1500,14 @@ impl<'a> Emitter<'a> {
         if descriptor.contains("Lkotlin/jvm/functions/Function") {
             return false;
         }
-        let ret_words = slot_words(ty_from_descriptor_ret(descriptor)) as i32;
+        // A genuinely `void` (`)V`) method leaves NOTHING on the stack; `ty_from_descriptor_ret` maps
+        // `V` to `Unit` (a 1-word value), so guard it to 0 words — else the splice leaves the operand
+        // stack one slot too high (a later statement then splices on a non-empty baseline and bails).
+        let ret_words = if descriptor.ends_with(")V") {
+            0
+        } else {
+            slot_words(ty_from_descriptor_ret(descriptor)) as i32
+        };
         let top_local = base + body.max_locals;
         // Branchless single-exit body: append the spliced bytes, no frames needed.
         if let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw)
@@ -1963,15 +1981,27 @@ impl<'a> Emitter<'a> {
                     name,
                     descriptor,
                     inline,
+                    must_inline,
                 } => {
-                    let (owner, name, descriptor, inline) =
-                        (owner.clone(), name.clone(), descriptor.clone(), *inline);
+                    let (owner, name, descriptor, inline, must_inline) = (
+                        owner.clone(),
+                        name.clone(),
+                        descriptor.clone(),
+                        *inline,
+                        *must_inline,
+                    );
                     let args = args.clone();
                     // A cross-module `inline fun`: try to splice its compiled body here (the bytecode
                     // inliner). On any unsupported shape `try_inline_static` returns false and we emit the
                     // ordinary `invokestatic` — so an un-spliceable inline call is never miscompiled.
                     if inline && self.try_inline_static(&owner, &name, &descriptor, &args, code) {
                         return;
+                    }
+                    // A `must_inline` callee (non-public `@InlineOnly`) has no legal `invokestatic`: the
+                    // splice failed (e.g. a branchy body on a non-empty operand stack), so skip the file.
+                    if must_inline {
+                        INLINE_BAIL.with(|b| b.set(true));
+                        // Still emit a (discarded) call so the builder's stack height stays consistent.
                     }
                     self.emit_operands(&args, code);
                     let aw: i32 = args
@@ -3091,10 +3121,17 @@ impl<'a> Emitter<'a> {
             IrBinOp::Ne => code.if_icmpne(t),
             _ => unreachable!(),
         }
+        // The `if_icmp*` popped both operands — this is the height on BOTH merge paths (the `t`
+        // branch and the fall-through). The 0/1 booleans below each leave exactly one value, so the
+        // tracker must be reset to this height at `bind(t)`; otherwise the linear counter carries the
+        // fall-through's `push 0` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but
+        // it makes `stack_height()` over-report, which the branchy-inline baseline check relies on).
+        let merged = code.stack_height().max(0) as u16;
         code.push_int(0, self.cw);
         self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
         code.bind(t);
+        code.set_stack(merged);
         code.push_int(1, self.cw);
         code.bind(end);
     }

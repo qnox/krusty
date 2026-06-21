@@ -2572,6 +2572,28 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 429 — branchy splicing of non-public `@InlineOnly` preconditions (`require`/`check`)  ✅
+- `require(cond)` / `check(cond)` are NON-public (`@InlineOnly`) `inline fun`s with BRANCHY bodies
+  (`if (!cond) throw IllegalArgumentException("Failed requirement.")`). kotlinc emits no callable method,
+  so there is no legal `invokestatic` — they MUST be inlined. Previously `can_inline_call` accepted only
+  *branchless* bodies, so `resolve_callable` left them unresolved → the file skipped. Now the gate also
+  dry-runs `splice_branchy`, and the emitter (already wired for branchy splicing) relocates their
+  StackMapTable frames at the call site.
+- **Never-miscompile guard:** a non-public callee that the emitter can't splice (a branchy body on a
+  NON-empty operand stack needs an operand-stack prefix krusty can't yet supply) has no fallback. New
+  `LibraryCallable.must_inline` / `Callee::Static.must_inline` mark such calls; if the splice fails the
+  emitter sets a thread-local bail and `emit_all` returns `None` (skip the file) — never an
+  `IllegalAccessError` from an `invokestatic` on the private method.
+- **Bug found + fixed (operand-stack drift):** a materialized primitive comparison (`1 + 1 == 2` as a
+  *value*) left `CodeBuilder.cur_stack` one slot too high — `bind(t)` didn't reset the linear height to
+  the branch-point height, so the fall-through's `push 0` carried past the `goto`. Harmless for
+  `max_stack`, but it made `stack_height()` over-report, which the branchy-inline baseline check relies
+  on (a following statement then saw a phantom non-empty stack and bailed). Also: a `)V` (void) return is
+  now 0 words in the inline splice (was `Unit` = 1), so a spliced void body leaves the stack balanced.
+- Box gate **1303, 0 FAIL** (TDD `feature_box_e2e::RequireCheck`: `require`/`check` pass-through +
+  `IllegalArgumentException`/`IllegalStateException` thrown-and-caught, JVM `-Xverify:all`). Still not in:
+  the two-arg `require(cond) { lazyMessage }` lambda overload (branchy + lambda splice) — a follow-up.
+
 ### Phase 428 — user generic `inline fun` HOFs: bind a return-only type param from the lambda's return  ✅
 - The follow-up left open by phase 427: `applyFn<T, R>(x: T, f: (T) -> R): R` called `applyFn("ab") { it.length }`
   failed (`VerifyError: Bad type on operand stack … astore`). `R` is bound by neither a value arg nor a

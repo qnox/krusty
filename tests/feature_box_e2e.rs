@@ -156,6 +156,26 @@ fun box(): String {
 }
 "#,
     ),
+    // `require`/`check`: branchy, NON-public (`@InlineOnly`) `inline fun` from the stdlib. There is no
+    // callable method to invoke — kotlinc inlines the body (`if (!cond) throw IllegalXException(…)`), so
+    // krusty splices it via `splice_branchy` (StackMapTable relocate). A passing condition falls through;
+    // a failing one throws. Exercises branchy inline splicing of a non-public callee at statement level.
+    (
+        "RequireCheck",
+        r#"
+fun box(): String {
+    require(1 + 1 == 2)
+    check("a".length == 1)
+    var caught = false
+    try { require(false) } catch (e: IllegalArgumentException) { caught = true }
+    if (!caught) return "f0"
+    var c2 = false
+    try { check(false) } catch (e: IllegalStateException) { c2 = true }
+    if (!c2) return "f1"
+    return "OK"
+}
+"#,
+    ),
     // Function overloading: same name, different parameter signatures. A call selects the matching
     // overload by argument types (and arity); each overload emits as its own JVM method (same name,
     // different descriptor). Covers type-distinguished, arity-distinguished, and the ordering-sensitive

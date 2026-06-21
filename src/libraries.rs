@@ -63,6 +63,11 @@ pub struct LibraryCallable {
     /// element to that type before boxing (an integer literal in `listOf<Long>(3)` becomes a boxed
     /// `Long`, not `Integer`), since the JVM array element is erased to `Object`.
     pub vararg_elem: Option<Ty>,
+    /// True when the callee is NON-PUBLIC (an `@InlineOnly` precondition like `require`/`check`/`error`):
+    /// kotlinc emits no callable method, so the backend MUST splice its body — there is no legal
+    /// `invokestatic` fallback. If the emitter can't splice such a call (e.g. a branchy body on a
+    /// non-empty operand stack), it skips the whole file (never a miscompile / `IllegalAccessError`).
+    pub must_inline: bool,
 }
 
 /// The shape of a library type: enough for the front end to resolve member accesses against it
