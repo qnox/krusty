@@ -6737,6 +6737,57 @@ impl<'a> Lower<'a> {
                 ty,
                 negated,
             } => {
+                // A nullable reference target (`x is A?`): `null` IS an `A?`, but plain `instanceof`
+                // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
+                // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
+                if ty.nullable {
+                    // `ty_ref` returns `None` for any nullable type; resolve the non-null base reference.
+                    let mut base_ref = ty.clone();
+                    base_ref.nullable = false;
+                    if let Some(target) = self.ty_ref(&base_ref) {
+                        let arg = self.expr(operand)?;
+                        let v = self.fresh_value();
+                        // The temp only feeds `== null` and `instanceof`, so an `Object` slot always
+                        // holds it — a precise operand type (or `null`/`Nothing`) could be an invalid
+                        // local-variable type.
+                        let opnd_ty = ty_to_ir(Ty::obj("kotlin/Any"));
+                        let g1 = self.ir.add_expr(IrExpr::GetValue(v));
+                        let nullc = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: if negated {
+                                IrBinOp::RefNe
+                            } else {
+                                IrBinOp::RefEq
+                            },
+                            lhs: g1,
+                            rhs: nullc,
+                        });
+                        let g2 = self.ir.add_expr(IrExpr::GetValue(v));
+                        let inst = self.ir.add_expr(IrExpr::TypeOp {
+                            op: if negated {
+                                IrTypeOp::NotInstanceOf
+                            } else {
+                                IrTypeOp::InstanceOf
+                            },
+                            arg: g2,
+                            type_operand: ty_to_ir(target),
+                        });
+                        let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: if negated { IrBinOp::And } else { IrBinOp::Or },
+                            lhs: null_test,
+                            rhs: inst,
+                        });
+                        let temp = self.ir.add_expr(IrExpr::Variable {
+                            index: v,
+                            ty: opnd_ty,
+                            init: Some(arg),
+                        });
+                        return Some(self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![temp],
+                            value: Some(combined),
+                        }));
+                    }
+                }
                 let arg = self.expr(operand)?;
                 let op = if negated {
                     IrTypeOp::NotInstanceOf

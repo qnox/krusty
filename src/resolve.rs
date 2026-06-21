@@ -3625,7 +3625,11 @@ impl<'a> Checker<'a> {
                 let tt_known = tt.is_reference()
                     || (tt.is_primitive()
                         && !matches!(tt, Ty::Double | Ty::Float | Ty::UInt | Ty::ULong));
-                if !tt_known || ty.nullable || (!ot.is_reference() && ot != Ty::Error) {
+                // A nullable target is allowed only for a REFERENCE type (`x is A?` lowers to
+                // `x == null || x is A`); a nullable primitive (`x is Int?`) would mix box/unbox
+                // semantics krusty doesn't model here, so it stays rejected.
+                let bad_nullable = ty.nullable && !tt.is_reference();
+                if !tt_known || bad_nullable || (!ot.is_reference() && ot != Ty::Error) {
                     self.diags.error(
                         self.span(e),
                         "krusty: 'is' on this type is not supported".to_string(),

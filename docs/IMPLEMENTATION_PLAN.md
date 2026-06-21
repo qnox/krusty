@@ -2572,6 +2572,18 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 424 — `is`/`!is` with a nullable reference target (`x is A?`)  ✅
+- `x is A?` includes `null` (`null is A?` is true), but a bare `instanceof` is false for null, so krusty
+  rejected any nullable `is` target. Now a nullable REFERENCE target lowers to `x == null || x is A`
+  (and `x !is A?` to the De Morgan dual `x != null && x !is A`), binding the operand to a temp so it is
+  evaluated once. A nullable PRIMITIVE target (`x is Int?`) stays rejected (box/unbox semantics).
+- Checker (`Expr::Is`): the nullable rejection now only fires for a non-reference target. Lowering:
+  resolves the target as its non-null base (`ty_ref` returns `None` for any nullable type), builds the
+  `RefEq`/`InstanceOf` (or `RefNe`/`NotInstanceOf`) pair joined by `Or`/`And` over an `Object`-typed temp
+  (a precise operand type — or `null`/`Nothing` — would be an invalid local-variable type).
+- Box gate **1294, 0 FAIL** (+3, incl. `basics/check_type.kt`, `typeMapping/nullNothing.kt`). TDD:
+  `feature_box_e2e::IsNullableType`.
+
 ### Phase 423 — `Unit` as a value + `Unit`-returning covariant-override bridge  ✅
 - `Unit` used as an expression (`foo(Unit)`, `val u = Unit`, `return Unit`) is the `kotlin/Unit` singleton,
   not a type. krusty rejected the bare identifier ("unresolved reference 'Unit'"). Now the checker's
