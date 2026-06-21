@@ -118,6 +118,28 @@ fun box(): String {
 }
 "#,
     ),
+    // `is`/`!is` with a NULLABLE reference target (`x is A?`): `null` IS an `A?`, so it lowers to
+    // `x == null || x is A` (and `x !is A?` to `x != null && x !is A`), not a bare `instanceof` (which is
+    // false for null). The operand is evaluated once.
+    (
+        "IsNullableType",
+        r#"
+interface I
+class A : I
+class B
+fun box(): String {
+    val a: Any? = A()
+    if (a !is A?) return "f0"
+    val n: Any? = null
+    if (n !is A?) return "f1"
+    if (n !is I?) return "f2"
+    val b: Any? = B()
+    if (b is A?) return "f3"
+    if (a !is A) return "f4"
+    return "OK"
+}
+"#,
+    ),
     // The `Unit` singleton used as a VALUE (not a type) — `Unit`, `take(Unit)`, `val u = Unit` — is the
     // `kotlin/Unit` object, materialized as `getstatic kotlin/Unit.INSTANCE`. `toString()` is "kotlin.Unit"
     // and the singleton compares equal (and identical) to itself.
