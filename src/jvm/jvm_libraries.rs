@@ -155,6 +155,7 @@ impl JvmLibraries {
                 is_inline: self.cp.is_inline_method(&c.owner, &c.name),
                 default_call: false,
                 vararg_elem: None,
+                must_inline: false,
             });
         }
         None
@@ -829,11 +830,19 @@ impl LibrarySet for JvmLibraries {
                 // `ClassWriter`. This exercises constant-pool relocation, so an un-relocatable body
                 // (invokedynamic, a pool entry `relocate_const` rejects, …) fails the gate — never routed
                 // and then fallen back to an `invokestatic` on the private method (an `IllegalAccessError`).
-                crate::jvm::inline::is_call_spliceable(&body) && {
+                (crate::jvm::inline::is_call_spliceable(&body) && {
                     let mut dummy =
                         crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
                     crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy)
                         .is_some()
+                }) || {
+                    // A BRANCHY body (`require`/`check`: `if (!cond) throw …`) the emitter relocates via
+                    // `splice_branchy` (StackMapTable decode + relocate). Dry-run it so an un-relocatable
+                    // body stays unresolved. The emitter still needs an empty operand-stack baseline at
+                    // the call site; a non-empty one skips the file (`must_inline`), never miscompiles.
+                    let mut dummy =
+                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                    crate::jvm::inline::splice_branchy(&body, descriptor, 1, &mut dummy).is_some()
                 }
             })
     }
@@ -1035,6 +1044,7 @@ impl LibrarySet for JvmLibraries {
                         is_inline: self.cp.is_inline_method(&c.owner, &c.name),
                         default_call: true,
                         vararg_elem: None,
+                        must_inline: false,
                     });
                 }
             }
@@ -1074,6 +1084,7 @@ impl LibrarySet for JvmLibraries {
                         is_inline: true,
                         default_call: false,
                         vararg_elem: None,
+                        must_inline: true,
                     });
                 }
             }
@@ -1138,6 +1149,7 @@ impl LibrarySet for JvmLibraries {
                 is_inline: self.cp.is_inline_method(&c.owner, &c.name),
                 default_call: false,
                 vararg_elem,
+                must_inline: false,
             });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
@@ -1215,6 +1227,7 @@ impl LibrarySet for JvmLibraries {
                     is_inline: self.cp.is_inline_method(&c.owner, &c.name),
                     default_call: true,
                     vararg_elem: None,
+                    must_inline: false,
                 });
             }
         }

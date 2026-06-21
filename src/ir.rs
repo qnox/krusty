@@ -86,6 +86,10 @@ pub enum Callee {
         name: String,
         descriptor: String,
         inline: bool,
+        /// True when the callee is a NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`): there
+        /// is no legal `invokestatic` fallback, so the backend MUST splice the body. If it can't (a
+        /// branchy body on a non-empty operand stack), the whole file is skipped — never miscompiled.
+        must_inline: bool,
     },
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
