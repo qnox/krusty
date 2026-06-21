@@ -4807,6 +4807,76 @@ impl<'a> Checker<'a> {
     }
 
     /// Check a lambda expression with explicit parameter types (for type-directed inference).
+    /// For a call to a USER generic function (`inline fun <T> twice(x: T, f: (T)->T): T`): bind its type
+    /// parameters from the already-typed non-lambda arguments, then return each argument's lambda parameter
+    /// types AND the call's specialized return type — both type-param-substituted. So `twice(1) { it+10 }`
+    /// types `it` as `Int` and the call as `Int`, not the erased `Any`. `None` when no matching user
+    /// function or it isn't generic. `partial[i]` is `Some(ty)` for a non-lambda arg, `None` for a lambda.
+    fn user_generic_call(
+        &mut self,
+        fname: &str,
+        partial: &[Option<Ty>],
+    ) -> Option<(Vec<Vec<Ty>>, Option<Ty>)> {
+        let f = self
+            .file
+            .decls
+            .iter()
+            .find_map(|&d| match self.file.decl(d) {
+                Decl::Fun(f)
+                    if f.name == fname
+                        && f.receiver.is_none()
+                        && f.params.len() == partial.len() =>
+                {
+                    Some(f.clone())
+                }
+                _ => None,
+            })?;
+        // Only an INLINE function specializes its type params at the call site (the body is spliced with
+        // concrete types). A NON-inline generic function runs through the erased `Function1` — its lambda
+        // `it` is `Object` at runtime, so typing it concretely would mismatch (and break value-class args).
+        if !f.is_inline || f.type_params.is_empty() {
+            return None;
+        }
+        let tparams: std::collections::HashSet<&str> =
+            f.type_params.iter().map(String::as_str).collect();
+        let mut binds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        for (i, p) in f.params.iter().enumerate() {
+            if tparams.contains(p.ty.name.as_str()) {
+                if let Some(Some(at)) = partial.get(i) {
+                    binds.entry(p.ty.name.clone()).or_insert(*at);
+                }
+            }
+        }
+        if binds.is_empty() {
+            return None;
+        }
+        let lam_pts: Vec<Vec<Ty>> = f
+            .params
+            .iter()
+            .map(|p| {
+                if p.ty.fun_params.is_empty() {
+                    Vec::new()
+                } else {
+                    p.ty.fun_params
+                        .iter()
+                        .map(|fp| {
+                            binds
+                                .get(fp.name.as_str())
+                                .copied()
+                                .unwrap_or_else(|| self.resolve_ty(fp))
+                        })
+                        .collect()
+                }
+            })
+            .collect();
+        // Specialized return: a declared type-param return (`: T`) becomes its bound concrete type.
+        let ret = f
+            .ret
+            .as_ref()
+            .and_then(|r| binds.get(r.name.as_str()).copied());
+        Some((lam_pts, ret))
+    }
+
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
     /// type `String` instead of the default `Object`.
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
@@ -5691,8 +5761,9 @@ impl<'a> Checker<'a> {
                 // Non-lambda argument types, computed once here for a top-level lib fn with a lambda
                 // argument (to recover the lambda's parameter types from the fn's generic signature) and
                 // reused in the `arg_tys` loop below so they aren't re-typed (no duplicate diagnostics).
-                let toplevel_partial: Option<Vec<Option<Ty>>> = if known_sig.is_none()
-                    && self.lookup(&fname).is_none()
+                // Non-lambda argument types, computed once for ANY receiver-less call with a lambda argument
+                // (a user fn allowed too, so a user generic inline HOF reaches `user_generic_call`).
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if self.lookup(&fname).is_none()
                     && !array_init_lambda
                     && !repeat_lambda
                     && args
@@ -5713,12 +5784,21 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> =
-                    toplevel_partial.as_ref().and_then(|partial| {
+                // A user generic inline HOF (`twice(1){…}`): bind its type params from the value args to
+                // recover the lambda parameter types and the specialized return type.
+                let user_generic: Option<(Vec<Vec<Ty>>, Option<Ty>)> = toplevel_partial
+                    .as_ref()
+                    .and_then(|partial| self.user_generic_call(&fname, partial));
+                let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_partial
+                    .as_ref()
+                    // A library top-level function only when no user function shadows it.
+                    .filter(|_| known_sig.is_none())
+                    .and_then(|partial| {
                         self.syms
                             .libraries
                             .toplevel_lambda_param_types(&fname, partial)
-                    });
+                    })
+                    .or_else(|| user_generic.as_ref().map(|(pts, _)| pts.clone()));
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -6009,6 +6089,11 @@ impl<'a> Checker<'a> {
                         // signature defaulted to Unit (no explicit return type annotation).
                         if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
                             sig.ret = inferred;
+                        }
+                        // A user generic call whose return is a type parameter (`twice(...): T`): use the
+                        // type bound from the arguments (`Int`) so the call's type isn't the erased `Any`.
+                        if let Some((_, Some(ret))) = &user_generic {
+                            sig.ret = *ret;
                         }
                         if sig.vararg {
                             // Fixed params (all but the last) match by position; remaining args must

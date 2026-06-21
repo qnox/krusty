@@ -14,6 +14,23 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
+    // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
+    // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
+    // (no call). (A type param bound only by a lambda's RETURN, e.g. `<T,R> (T)->R`, is a separate follow-up.)
+    (
+        "GenericInlineHof",
+        r#"
+inline fun <T> twice(x: T, f: (T) -> T): T = f(f(x))
+fun box(): String {
+    val a = twice(1) { it + 10 }
+    if (a != 21) return "f0: $a"
+    val s = twice("x") { it + "!" }
+    if (s != "x!!") return "f1: $s"
+    return "OK"
+}
+"#,
+    ),
     // `Char.MAX_VALUE`/`MIN_VALUE` companion constants keep their `Char` type when boxed (a vararg/generic
     // position): `listOf(Char.MAX_VALUE, …)` is a `List<Char>` holding `Character`s, not `Integer`s.
     (
