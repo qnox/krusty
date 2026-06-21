@@ -2572,6 +2572,19 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 428 — user generic `inline fun` HOFs: bind a return-only type param from the lambda's return  ✅
+- The follow-up left open by phase 427: `applyFn<T, R>(x: T, f: (T) -> R): R` called `applyFn("ab") { it.length }`
+  failed (`VerifyError: Bad type on operand stack … astore`). `R` is bound by neither a value arg nor a
+  lambda *parameter* — only by the lambda's RETURN type (`it.length` → `Int`). The checker still typed the
+  call `Any`, so the `Int` result was `astore`d into a reference slot → verify mismatch.
+- New `user_generic_return(fname, arg_tys)` runs AFTER the lambda args are typed (unlike `user_generic_call`,
+  which produces the lambda parameter types and so must run before). It binds ALL type params from the full
+  argument types — value args, and for a function-typed parameter `(A) -> R` the actual `Ty::Fun` supplies
+  `A` (from `params`) and `R` (from `ret`) — then substitutes the declared return type. `user_generic_call`
+  now returns only the lambda parameter types; the call's specialized return comes from the new method.
+- Box gate **1303, 0 FAIL** (TDD `feature_box_e2e::GenericInlineHof` extended: `applyFn("ab"){it.length}`==2,
+  alongside the existing `twice` cases). `stringGeneric.kt` stays skipped (a non-inline generic, never FAIL).
+
 ### Phase 427 — user generic `inline fun` HOFs: specialize type params from value arguments  ✅
 - A user `inline fun <T> twice(x: T, f: (T) -> T): T = f(f(x))` called `twice(1) { it + 10 }` failed: the
   lambda's `it` typed as the erased `Any` (`it + 10` → "operator on Any and Int"), and even after that the
