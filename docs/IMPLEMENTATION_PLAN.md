@@ -2572,6 +2572,18 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 432 — merge `splice_branchy` into `splice_unified` (one splicer for branchy bodies)  ✅
+- First step of unifying the bytecode splicers: `splice_unified` with NO lambda arguments subsumes the
+  old `splice_branchy` (same `BranchySplice` result — relocated frames + join). Routed the emitter's
+  branchy path (`try_inline_static`) and the `can_inline_call` branchy dry-run through it, then DELETED
+  `splice_branchy` and its now-unused `param_vtypes` helper. `splice_unified`'s `param_vtypes_full`
+  (reference param → `Top`, guarded to lambda-only) replaces the primitive-only `param_vtypes`.
+- Box gate **1311, 0 FAIL** (unchanged — pure refactor, verified by the conformance test, not just the
+  OK-count print). Remaining splicers: `splice_branchless` (needs `splice_unified` to drop a trailing
+  return / skip the join frame for a fall-through body, to avoid extra `goto`/frame) and
+  `branchless_lambda_segments` (needs N-ary `FunctionN` lambda support in `splice_unified`; v1 is
+  `Function0`). Those two land next, then the splicer is truly one.
+
 ### Phase 431 — unified host+lambda inline splice: `require(cond) { lazyMessage }` / `check(cond) { … }`  ✅
 - The two-arg precondition overload: a BRANCHY host body (`if (!cond) throw IAE(lazyMessage())`) that
   invokes a lambda PARAMETER only on the failure branch. Neither `splice_branchy` (no lambda) nor

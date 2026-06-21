@@ -96,7 +96,7 @@ pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8
 /// Emit the facade's top-level properties as `public static` fields plus a `<clinit>` that runs
 /// their initializers in declaration order.
 /// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
-/// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_branchy` bails on them).
+/// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_unified` bails on them).
 fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
     use crate::jvm::inline::VType;
     match v {
@@ -1668,7 +1668,9 @@ impl<'a> Emitter<'a> {
         if code.stack_height() != 0 {
             return false;
         }
-        let Some(bs) = crate::jvm::inline::splice_branchy(&body, descriptor, base, self.cw) else {
+        // The unified splice with no lambda arguments subsumes the old `splice_branchy`.
+        let Some(bs) = crate::jvm::inline::splice_unified(&body, descriptor, base, &[], self.cw)
+        else {
             return false;
         };
         self.emit_operands(args, code);

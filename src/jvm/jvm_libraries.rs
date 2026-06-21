@@ -883,17 +883,11 @@ impl LibrarySet for JvmLibraries {
                     crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy)
                         .is_some()
                 }) || {
-                    // A BRANCHY body (`require`/`check`: `if (!cond) throw …`) the emitter relocates via
-                    // `splice_branchy` (StackMapTable decode + relocate). Dry-run it so an un-relocatable
-                    // body stays unresolved. The emitter still needs an empty operand-stack baseline at
-                    // the call site; a non-empty one skips the file (`must_inline`), never miscompiles.
-                    let mut dummy =
-                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                    crate::jvm::inline::splice_branchy(&body, descriptor, 1, &mut dummy).is_some()
-                } || {
-                    // A lambda-bearing host (`require(cond) { lazyMessage }`): dry-run the unified
-                    // host+lambda splice with the descriptor's `Function0` parameters as (empty-bodied)
-                    // lambda sites. Confirms the host shape relocates and each lambda invoke is found.
+                    // The unified splice handles a BRANCHY body (`require`/`check`: `if (!cond) throw …`,
+                    // no lambda) AND a lambda-bearing host (`require(cond) { lazyMessage }` — each
+                    // descriptor `Function0` parameter is a zero-arg lambda site). Dry-run it so an
+                    // un-relocatable body stays unresolved. The emitter still needs an empty operand-stack
+                    // baseline; a non-empty one skips the file (`must_inline`), never miscompiles.
                     let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
                         function0_param_indices(descriptor)
                             .into_iter()
@@ -902,14 +896,10 @@ impl LibrarySet for JvmLibraries {
                                 body: Vec::new(),
                             })
                             .collect();
-                    !lambdas.is_empty() && {
-                        let mut dummy =
-                            crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                        crate::jvm::inline::splice_unified(
-                            &body, descriptor, 1, &lambdas, &mut dummy,
-                        )
+                    let mut dummy =
+                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                    crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, &mut dummy)
                         .is_some()
-                    }
                 }
             })
     }
