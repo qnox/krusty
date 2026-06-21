@@ -1103,27 +1103,6 @@ fn shift_targets(insns: &mut [Insn], delta: usize) {
     }
 }
 
-/// The implicit frame-0 locals of a *static* method: one [`VType`] per parameter (`long`/`double` are
-/// a single entry). `None` if any parameter is a reference/array type — the frame-0 `Object` type
-/// isn't modeled yet, so such a body is not branchy-spliced (v1).
-fn param_vtypes(descriptor: &str) -> Option<Vec<VType>> {
-    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
-    let b = inner.as_bytes();
-    let mut i = 0;
-    let mut out = Vec::new();
-    while i < b.len() {
-        match b[i] {
-            b'I' | b'B' | b'S' | b'C' | b'Z' => out.push(VType::Int),
-            b'J' => out.push(VType::Long),
-            b'F' => out.push(VType::Float),
-            b'D' => out.push(VType::Double),
-            _ => return None,
-        }
-        i += 1;
-    }
-    Some(out)
-}
-
 /// The method's return value as a [`VType`] (`None` value ⇒ `void`), relocating a reference return's
 /// class into `cw`. The outer `None` is a parse error.
 fn ret_vtype(descriptor: &str, cw: &mut ClassWriter) -> Option<Option<VType>> {
@@ -1164,65 +1143,6 @@ pub struct BranchySplice {
     /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
     /// post-splice position (not a precomputed end offset, which could fall at `code.len()`).
     pub join_stack: Vec<VType>,
-}
-
-/// Splice a **branchy** inline body, relocating its `StackMapTable` frames. Restricted (v1) to a body
-/// with primitive parameters, no exception handlers, and no reified marker; the caller must have an
-/// empty operand-stack baseline (so the frames need no operand-stack prefix). `None` ⇒ fall back to a
-/// real call (never a miscompile).
-pub fn splice_branchy(
-    body: &MethodCode,
-    descriptor: &str,
-    base: u16,
-    cw: &mut ClassWriter,
-) -> Option<BranchySplice> {
-    if body.has_handlers || is_reified_inline(body) {
-        return None;
-    }
-    let stackmap = body.stackmap.as_ref()?;
-    let frame0 = param_vtypes(descriptor)?;
-    let ret = ret_vtype(descriptor, cw)?;
-    let decoded = decode_stackmap(stackmap, frame0)?;
-    let mut insns = disassemble(&body.code)?;
-    let old_off = old_offsets(&body.code)?;
-    // Each decoded frame's (index-stable) instruction index, before prepending the prologue.
-    let frame_idx: Vec<usize> = decoded
-        .iter()
-        .map(|f| old_off.iter().position(|&o| o == f.offset))
-        .collect::<Option<Vec<_>>>()?;
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
-    shift_locals(&mut insns, base)?;
-    redirect_returns(&mut insns); // returns → `goto end` (target = body insn count)
-    let params = param_store_ops(descriptor, base)?;
-    let prologue: Vec<Insn> = params
-        .iter()
-        .rev()
-        .map(|&(slot, op)| local_load_store(op, slot))
-        .collect();
-    let p = prologue.len();
-    shift_targets(&mut insns, p); // body targets move past the prologue
-    let mut final_insns = prologue;
-    final_insns.extend(insns);
-    let offs = insn_offsets(&final_insns);
-    let mut frames = Vec::with_capacity(decoded.len() + 1);
-    for (f, &idx) in decoded.iter().zip(&frame_idx) {
-        let locals = f
-            .locals
-            .iter()
-            .map(|v| relocate_vtype(v, &body.source_cp, cw))
-            .collect::<Option<Vec<_>>>()?;
-        let stack = f
-            .stack
-            .iter()
-            .map(|v| relocate_vtype(v, &body.source_cp, cw))
-            .collect::<Option<Vec<_>>>()?;
-        frames.push((offs[p + idx], locals, stack));
-    }
-    Some(BranchySplice {
-        bytes: assemble(&final_insns),
-        frames,
-        join_stack: ret.into_iter().collect(),
-    })
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1333,8 +1253,8 @@ fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
 /// THE unified inline splice. Relocates a (possibly branchy) host `inline fun` body into the caller,
 /// replacing each zero-arg lambda-parameter `Function0.invoke` site with that lambda's pre-built body.
 /// Subsumes the special cases: no lambdas + no branches → a single fall-through segment (like
-/// [`splice_branchless`]); branches + no lambdas → [`splice_branchy`]; one lambda + no branches →
-/// [`branchless_lambda_segments`]. The caller emits the non-lambda arguments first (empty operand-stack
+/// [`splice_branchless`]); branches + no lambdas (the former `splice_branchy`); one lambda + no branches
+/// (the former `branchless_lambda_segments`). The caller emits the non-lambda arguments first (empty
 /// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
 /// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
 pub fn splice_unified(
