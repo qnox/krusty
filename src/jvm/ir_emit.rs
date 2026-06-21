@@ -1643,23 +1643,25 @@ impl<'a> Emitter<'a> {
             slot_words(ty_from_descriptor_ret(descriptor)) as i32
         };
         let top_local = base + body.max_locals;
-        // Branchless single-exit body: append the spliced bytes, no frames needed.
-        if let Some(insns) = crate::jvm::inline::splice_branchless(&body, descriptor, base, self.cw)
-        {
+        // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
+        // paths). It drops a trailing return, so a pure branchless body reports `join_required == false`
+        // and is appended at ANY operand-stack height (mid-expression); a branchy body needs the join
+        // frame + an empty baseline.
+        let Some(bs) = crate::jvm::inline::splice_unified(&body, descriptor, base, &[], self.cw)
+        else {
+            return false;
+        };
+        let arg_words: i32 = args
+            .iter()
+            .map(|&a| slot_words(self.value_ty(a)) as i32)
+            .sum();
+        if !bs.join_required {
+            // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
+            // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
             self.emit_operands(args, code);
-            let arg_words: i32 = args
-                .iter()
-                .map(|&a| slot_words(self.value_ty(a)) as i32)
-                .sum();
-            // A DIVERGING body (ends in `athrow`, e.g. `error(msg)`) leaves NOTHING on the stack — the
-            // result type is `Nothing`, so the post-splice height is the baseline, not `baseline + ret`.
-            let diverges = matches!(
-                insns.last(),
-                Some(crate::jvm::inline::Insn::Plain { op: 0xbf, .. })
-            );
+            let diverges = bs.bytes.last() == Some(&0xbf);
             let ret_words = if diverges { 0 } else { ret_words };
-            let bytes = crate::jvm::inline::assemble(&insns);
-            code.splice_inline(&bytes, body.max_stack, top_local, arg_words, ret_words);
+            code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
             return true;
         }
         // Branchy body: relocate the callee's StackMapTable frames into the caller. Requires an empty
@@ -1668,16 +1670,7 @@ impl<'a> Emitter<'a> {
         if code.stack_height() != 0 {
             return false;
         }
-        // The unified splice with no lambda arguments subsumes the old `splice_branchy`.
-        let Some(bs) = crate::jvm::inline::splice_unified(&body, descriptor, base, &[], self.cw)
-        else {
-            return false;
-        };
         self.emit_operands(args, code);
-        let arg_words: i32 = args
-            .iter()
-            .map(|&a| slot_words(self.value_ty(a)) as i32)
-            .sum();
         let splice_start = code.bytes.len();
         let prefix = self.verif_locals_upto(base);
         for (rel, body_locals, stack) in &bs.frames {

@@ -872,35 +872,26 @@ impl LibrarySet for JvmLibraries {
         self.cp
             .method_code(owner, name, descriptor)
             .map_or(false, |body| {
-                // Structurally spliceable (branchless, single return, no lambda invoke) AND actually
-                // relocatable: dry-run the SAME `splice_branchless` the emitter uses, into a throwaway
-                // `ClassWriter`. This exercises constant-pool relocation, so an un-relocatable body
-                // (invokedynamic, a pool entry `relocate_const` rejects, …) fails the gate — never routed
-                // and then fallen back to an `invokestatic` on the private method (an `IllegalAccessError`).
-                (crate::jvm::inline::is_call_spliceable(&body) && {
-                    let mut dummy =
-                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                    crate::jvm::inline::splice_branchless(&body, descriptor, 1, &mut dummy)
-                        .is_some()
-                }) || {
-                    // The unified splice handles a BRANCHY body (`require`/`check`: `if (!cond) throw …`,
-                    // no lambda) AND a lambda-bearing host (`require(cond) { lazyMessage }` — each
-                    // descriptor `Function0` parameter is a zero-arg lambda site). Dry-run it so an
-                    // un-relocatable body stays unresolved. The emitter still needs an empty operand-stack
-                    // baseline; a non-empty one skips the file (`must_inline`), never miscompiles.
-                    let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                        function0_param_indices(descriptor)
-                            .into_iter()
-                            .map(|param_index| crate::jvm::inline::LambdaSplice {
-                                param_index,
-                                body: Vec::new(),
-                            })
-                            .collect();
-                    let mut dummy =
-                        crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                    crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, &mut dummy)
-                        .is_some()
-                }
+                // Dry-run the ONE splicer the emitter uses (`splice_unified`) into a throwaway
+                // `ClassWriter`, with each descriptor `Function0` parameter as a zero-arg lambda site.
+                // It covers branchless, branchy, and lambda-bearing hosts, and exercises constant-pool
+                // relocation — so an un-relocatable body (`invokedynamic`, a pool entry `relocate_const`
+                // rejects, …) fails the gate and stays unresolved rather than falling back to an
+                // `invokestatic` on a private method (an `IllegalAccessError`). A branchy body still needs
+                // an empty operand-stack baseline at the call site; a non-empty one skips the file
+                // (`must_inline`), never miscompiles.
+                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
+                    function0_param_indices(descriptor)
+                        .into_iter()
+                        .map(|param_index| crate::jvm::inline::LambdaSplice {
+                            param_index,
+                            body: Vec::new(),
+                        })
+                        .collect();
+                let mut dummy =
+                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, &mut dummy)
+                    .is_some()
             })
     }
 
