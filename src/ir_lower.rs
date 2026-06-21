@@ -5112,10 +5112,12 @@ impl<'a> Lower<'a> {
     /// in place — exactly what kotlinc's inliner does. Returns `None` (the file bails, never miscompiles)
     /// for anything outside the supported subset.
     fn lower_inline_fn_call(&mut self, fname: &str, args: &[AstExprId]) -> Option<u32> {
-        let f = self.top_fun_decl(fname)?;
-        // Subset: a plain top-level inline fn with no extension receiver, no reified/type params, and no
+        let f = self.top_fun_decl(fname)?.clone();
+        // Subset: a plain top-level inline fn with no extension receiver and no REIFIED type params, and no
         // default/vararg params. A `return` in the body would be a non-local return once inlined — bail.
-        if f.receiver.is_some() || !f.type_params.is_empty() {
+        // Non-reified generic type params are fine: the inline SPECIALIZES them from the actual argument
+        // types (a parameter/lambda declared `T` takes the call's concrete type, not the erased `Any`).
+        if f.receiver.is_some() || !f.reified_type_params.is_empty() {
             return None;
         }
         if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
@@ -5149,6 +5151,21 @@ impl<'a> Lower<'a> {
         if self.inline_active.iter().any(|n| n == fname) {
             return None;
         }
+        // Specialize non-reified type params from the actual arguments: a parameter declared `T` binds
+        // `T` to the call's concrete argument type, so the inlined body (and a lambda parameter typed `T`)
+        // uses e.g. `Int` rather than the erased `Any`. Empty for a non-generic inline fn (no change).
+        let tparams: std::collections::HashSet<&str> =
+            f.type_params.iter().map(String::as_str).collect();
+        let mut tbinds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        for (i, p) in f.params.iter().enumerate() {
+            if tparams.contains(p.ty.name.as_str())
+                && !matches!(self.afile.expr(args[i]), Expr::Lambda { .. })
+            {
+                tbinds
+                    .entry(p.ty.name.clone())
+                    .or_insert(self.info.ty(args[i]));
+            }
+        }
         let active_depth = self.inline_active.len();
         self.inline_active.push(fname.to_string());
         let depth = self.scope.len();
@@ -5174,21 +5191,41 @@ impl<'a> Lower<'a> {
                         self.inline_active.truncate(active_depth);
                         return None;
                     }
-                    self.inline_lambdas.push((
-                        pnames[i].clone(),
-                        params,
-                        lbody,
-                        fnsig.params.clone(),
-                    ));
+                    // The lambda's parameter types, with the inline fn's type params specialized
+                    // (`(T)->T` on a `twice(1){…}` call → `it: Int`, not the erased `Any` of `fnsig`).
+                    let lam_param_tys: Vec<Ty> = f.params[i]
+                        .ty
+                        .fun_params
+                        .iter()
+                        .map(|fp| {
+                            tbinds
+                                .get(fp.name.as_str())
+                                .copied()
+                                .unwrap_or_else(|| ty_of(self.afile, fp))
+                        })
+                        .collect();
+                    let lam_param_tys = if lam_param_tys.len() == fnsig.params.len() {
+                        lam_param_tys
+                    } else {
+                        fnsig.params.clone()
+                    };
+                    self.inline_lambdas
+                        .push((pnames[i].clone(), params, lbody, lam_param_tys));
                 } else {
                     self.scope.truncate(depth);
                     self.inline_lambdas.truncate(lam_depth);
                     return None;
                 }
             } else {
-                // A value parameter: evaluate once into a temp, visible by name in the body.
+                // A value parameter: evaluate once into a temp, visible by name in the body. A parameter
+                // declared as a type param uses the call's concrete argument type (specialized), not the
+                // erased `Any` — so the inlined body sees `Int` and avoids spurious boxing.
+                let spty = tbinds
+                    .get(f.params[i].ty.name.as_str())
+                    .copied()
+                    .unwrap_or(*pty);
                 let slot = self.fresh_value();
-                let val = match self.lower_arg(args[i], &ty_to_ir(*pty)) {
+                let val = match self.lower_arg(args[i], &ty_to_ir(spty)) {
                     Some(v) => v,
                     None => {
                         self.scope.truncate(depth);
@@ -5199,11 +5236,11 @@ impl<'a> Lower<'a> {
                 };
                 let var = self.ir.add_expr(IrExpr::Variable {
                     index: slot,
-                    ty: ty_to_ir(*pty),
+                    ty: ty_to_ir(spty),
                     init: Some(val),
                 });
                 stmts.push(var);
-                self.scope.push((pnames[i].clone(), slot, *pty));
+                self.scope.push((pnames[i].clone(), slot, spty));
             }
         }
         let body_val = self.expr(body);

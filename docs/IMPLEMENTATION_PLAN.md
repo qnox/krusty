@@ -2572,6 +2572,24 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 427 — user generic `inline fun` HOFs: specialize type params from value arguments  ✅
+- A user `inline fun <T> twice(x: T, f: (T) -> T): T = f(f(x))` called `twice(1) { it + 10 }` failed: the
+  lambda's `it` typed as the erased `Any` (`it + 10` → "operator on Any and Int"), and even after that the
+  call's return was `Any` (`Nothing`-vs-value mismatch → VerifyError). The IR inliner also bailed on any
+  generic inline fn. Now the inliner SPECIALIZES the (non-reified) type parameters from the call's VALUE
+  arguments — a parameter/lambda/return declared `T` takes the concrete argument type (`Int`/`String`).
+- Checker: `user_generic_call` finds the user FunDecl, binds its type params from the typed non-lambda
+  arguments, and reports the lambda parameter types AND the specialized return type. The receiver-less
+  lambda-typing guard is broadened to any user fn (so a generic inline HOF reaches it); the library
+  lambda-typing path stays gated on `known_sig.is_none()` so a user fn still shadows a library one. Only
+  `is_inline` generic functions specialize — a NON-inline generic fn runs through the erased `Function1`
+  (its lambda `it` is `Object` at runtime), so specializing it would mismatch and break value-class args.
+- Lowering (`lower_inline_fn_call`): the `!type_params.is_empty()` bail relaxes to `!reified_type_params`;
+  value-parameter slots and lambda-parameter types use the type-param→actual-arg bindings (`tbinds`), so
+  the spliced body sees `Int` and avoids spurious boxing.
+- Box gate **1303, 0 FAIL** (TDD `feature_box_e2e::GenericInlineHof`: `twice(1){it+10}`==21, `twice("x")
+  {it+"!"}`=="x!!"). Not yet: a type param bound only by a lambda's RETURN (`<T,R> (T)->R`) — a follow-up.
+
 ### Phase 426 — inline `@InlineOnly` diverging stdlib functions (`error`) via the splicer  ✅
 - `error(msg)` (= `throw IllegalStateException(msg.toString())`) is a real `@kotlin.internal.InlineOnly`
   stdlib function: kotlinc emits no callable method, so it MUST be inlined. It was unsupported (the call
