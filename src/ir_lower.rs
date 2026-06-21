@@ -595,7 +595,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.ext_fun_ids.insert((recv_desc, f.name.clone()), id);
             } else {
-                let sig = syms.funs.get(&f.name)?;
+                // This declaration's own overload (matched by erased parameter descriptors when the
+                // name is overloaded).
+                let sigs = syms.funs.get(&f.name)?;
+                let sig = if sigs.len() == 1 {
+                    &sigs[0]
+                } else {
+                    let want: String = f
+                        .params
+                        .iter()
+                        .map(|p| ty_of(file, &p.ty).descriptor())
+                        .collect();
+                    sigs.iter()
+                        .find(|s| crate::resolve::erased_params_key(s) == want)?
+                };
                 let params: Vec<IrType> = sig
                     .params
                     .iter()
@@ -630,7 +643,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: None,
                     param_checks,
                 });
-                lo.fun_ids.insert(f.name.clone(), id);
+                lo.fun_ids
+                    .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
             }
         }
     }
@@ -710,7 +724,22 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     (fid, syms.ext_funs.get(&(recv_desc, f.name.clone()))?)
                 } else {
-                    (lo.fun_ids[&f.name], syms.funs.get(&f.name)?)
+                    let sigs = syms.funs.get(&f.name)?;
+                    let sig = if sigs.len() == 1 {
+                        &sigs[0]
+                    } else {
+                        let want: String = f
+                            .params
+                            .iter()
+                            .map(|p| ty_of(file, &p.ty).descriptor())
+                            .collect();
+                        sigs.iter()
+                            .find(|s| crate::resolve::erased_params_key(s) == want)?
+                    };
+                    let fid = *lo
+                        .fun_ids
+                        .get(&(f.name.clone(), crate::resolve::erased_params_key(sig)))?;
+                    (fid, sig)
                 };
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
@@ -1695,7 +1724,9 @@ pub(crate) struct Lower<'a> {
     info: &'a TypeInfo,
     syms: &'a SymbolTable,
     ir: IrFile,
-    fun_ids: HashMap<String, u32>,
+    /// Top-level function ids keyed by (name, erased-parameter-descriptor) so overloads (same name,
+    /// different params) each map to their own compiled method.
+    fun_ids: HashMap<(String, String), u32>,
     /// Top-level extension functions, keyed by `(receiver type descriptor, name)` — separate from
     /// `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by receiver.
     ext_fun_ids: HashMap<(String, String), u32>,
@@ -3357,7 +3388,7 @@ impl<'a> Lower<'a> {
                     // a user-defined function or local of that name shadows it, exactly as in kotlinc.
                     return n == "emptyArray"
                         && self.lookup(n).is_none()
-                        && !self.fun_ids.contains_key(n);
+                        && !self.syms.funs.contains_key(n);
                 }
             }
         }
@@ -5083,7 +5114,19 @@ impl<'a> Lower<'a> {
         if body_has_return(self.afile, body) {
             return None;
         }
-        let sig = self.syms.funs.get(fname)?.clone();
+        let sigs = self.syms.funs.get(fname)?;
+        let sig = if sigs.len() == 1 {
+            sigs[0].clone()
+        } else {
+            let want: String = f
+                .params
+                .iter()
+                .map(|p| ty_of(self.afile, &p.ty).descriptor())
+                .collect();
+            sigs.iter()
+                .find(|s| crate::resolve::erased_params_key(s) == want)?
+                .clone()
+        };
         if sig.params.len() != args.len() || sig.params.len() != pnames.len() {
             return None;
         }
@@ -5759,7 +5802,7 @@ impl<'a> Lower<'a> {
                 // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
                 // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional
                 // case (the closure's arity matches the constructor's field params) is modeled.
-                if !self.fun_ids.contains_key(&name) {
+                if !self.syms.funs.contains_key(&name) {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
                     let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
@@ -5807,7 +5850,13 @@ impl<'a> Lower<'a> {
                         inline_body: None,
                     }));
                 }
-                let fid = *self.fun_ids.get(&name)?;
+                // `::foo` only resolves for a single-overload name (the checker enforces this), so the
+                // sole entry for this name is the target.
+                let fid = *self
+                    .fun_ids
+                    .iter()
+                    .find(|((n, _), _)| n == &name)
+                    .map(|(_, id)| id)?;
                 let ret = self.ir.functions[fid as usize].ret.clone();
                 // A generic referenced function erases its type parameters — not modeled.
                 if self.ir.functions[fid as usize].params.len() != arity {
@@ -7463,7 +7512,11 @@ impl<'a> Lower<'a> {
                     // value parameters to the evaluated arguments, register its lambda arguments, and
                     // lower its body so a lambda capturing a mutable local works (no closure).
                     if self.lookup(&fname).is_none()
-                        && self.syms.funs.get(&fname).map_or(false, |s| s.is_inline)
+                        && self
+                            .syms
+                            .funs
+                            .get(&fname)
+                            .map_or(false, |v| v.iter().any(|s| s.is_inline))
                     {
                         return self.lower_inline_fn_call(&fname, &args);
                     }
@@ -7473,7 +7526,7 @@ impl<'a> Lower<'a> {
                     if fname == "repeat"
                         && args.len() == 2
                         && self.lookup(&fname).is_none()
-                        && self.fun_ids.get(&fname).is_none()
+                        && !self.syms.funs.contains_key(&fname)
                     {
                         if let Expr::Lambda {
                             params,
@@ -7584,7 +7637,7 @@ impl<'a> Lower<'a> {
                     // `f(args)` where `f` is a field/property of the enclosing class (not a local value or
                     // a top-level function) — invoking a function value through a field isn't modeled;
                     // bail rather than miscompile (it would emit a bogus constructor call).
-                    if self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname) {
+                    if self.lookup(&fname).is_none() && !self.syms.funs.contains_key(&fname) {
                         if let Some(cur) = self.cur_class.clone() {
                             if self
                                 .classes
@@ -7619,7 +7672,7 @@ impl<'a> Lower<'a> {
                     // supplies their IR body directly. Honor user shadowing first: a user-defined `fun
                     // arrayOf` (or a local of that name) wins, exactly as in kotlinc.
                     let array_intrinsic_ok =
-                        self.lookup(&fname).is_none() && !self.fun_ids.contains_key(&fname);
+                        self.lookup(&fname).is_none() && !self.syms.funs.contains_key(&fname);
                     if array_intrinsic_ok {
                         if let Some(syn) = crate::synthetics::lookup(&fname) {
                             let call = crate::synthetics::SynthCall {
@@ -7631,11 +7684,29 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    if let Some(&fid) = self.fun_ids.get(&fname) {
+                    if let Some((sig, fid)) = {
+                        // Select the overload matching the argument types, then resolve its method id.
+                        // Only a function defined in THIS file (present in `fun_ids`) is handled here; a
+                        // cross-file function (in `funs` but not `fun_ids`) falls through to the facade
+                        // branch below.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.syms
+                            .funs
+                            .get(&fname)
+                            .and_then(|v| {
+                                crate::resolve::pick_overload(v, &arg_tys).map(|i| v[i].clone())
+                            })
+                            .and_then(|sig| {
+                                let key = crate::resolve::erased_params_key(&sig);
+                                self.fun_ids
+                                    .get(&(fname.clone(), key))
+                                    .copied()
+                                    .map(|fid| (sig, fid))
+                            })
+                    } {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
-                        if let Some(sig) = self.syms.funs.get(&fname).filter(|s| s.vararg).cloned()
-                        {
+                        if sig.vararg {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let fixed = params.len() - 1;
                             if args.len() < fixed {
@@ -7709,7 +7780,10 @@ impl<'a> Lower<'a> {
                         // A top-level function defined in ANOTHER file of this multi-file compilation →
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
                         // omitted defaults) is modeled here; anything else bails (skips the file).
-                        let sig = self.syms.funs.get(&fname).cloned()?;
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        let sig = self.syms.funs.get(&fname).and_then(|v| {
+                            crate::resolve::pick_overload(v, &arg_tys).map(|i| v[i].clone())
+                        })?;
                         if sig.vararg
                             || sig.required != sig.params.len()
                             || args.len() != sig.params.len()

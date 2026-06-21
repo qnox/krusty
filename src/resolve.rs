@@ -98,7 +98,11 @@ impl ClassSig {
 }
 
 pub struct SymbolTable {
-    pub funs: HashMap<String, Signature>,
+    /// Top-level functions by name. A name maps to ALL its overloads (Kotlin allows same-name functions
+    /// distinguished by parameter signature); a call selects one via [`pick_overload`]. Most names have
+    /// exactly one. Two overloads with the SAME erased parameter descriptors are a real JVM collision and
+    /// are rejected at collection.
+    pub funs: HashMap<String, Vec<Signature>>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
     /// Top-level properties (name → type, is_var), backed by static fields on the file facade.
@@ -245,6 +249,89 @@ impl SymbolTable {
 /// `throw RuntimeException("…")` resolves without an explicit import.
 
 /// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
+/// The erased JVM parameter descriptor of a signature (`(II)`-style, params only) — the key under which
+/// two overloads of the same name would collide on the JVM. Used both to reject true duplicates at
+/// collection and to find a selected overload's compiled method.
+pub fn erased_params_key(sig: &Signature) -> String {
+    sig.params.iter().map(|t| t.descriptor()).collect()
+}
+
+/// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
+/// passable where `p` is expected? Exact match, `Error`/`Nothing`/`null`→reference, numeric→numeric, and
+/// any value→reference (boxing/upcast) fit; a reference is NOT passable to a primitive. Intentionally
+/// permissive between two references (subtype isn't checked here) — it only needs to rank overloads, and
+/// the same function runs in the checker and the lowerer so they always agree on the choice.
+pub fn arg_assignable_simple(p: Ty, a: Ty) -> bool {
+    if p == a || a == Ty::Error || p == Ty::Error || a == Ty::Nothing {
+        return true;
+    }
+    if a == Ty::Null {
+        return p.is_reference();
+    }
+    if p.is_numeric() && a.is_numeric() {
+        return true;
+    }
+    // Any value (incl. a primitive, via boxing) is assignable to a reference; a reference is not
+    // assignable to a primitive.
+    p.is_reference()
+}
+
+/// Select the best-matching overload index among `sigs` for a call with the given argument types — the
+/// SAME logic the checker and the lowerer both run, so they always resolve a call to the same function.
+/// Filters by arity (respecting varargs and defaults), then scores by argument fit (exact match worth
+/// more than a loose fit); a candidate with any non-fitting argument is dropped. Falls back to the first
+/// arity-compatible candidate. `None` only if nothing matches the arity at all.
+pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
+    if sigs.len() == 1 {
+        return Some(0);
+    }
+    let arity_ok = |s: &Signature| {
+        if s.vararg {
+            arg_tys.len() + 1 >= s.params.len()
+        } else {
+            arg_tys.len() >= s.required && arg_tys.len() <= s.params.len()
+        }
+    };
+    let cands: Vec<usize> = (0..sigs.len()).filter(|&i| arity_ok(&sigs[i])).collect();
+    if cands.len() <= 1 {
+        return cands.first().copied();
+    }
+    // Soundness guard: krusty erases generics, so a generic value reads as `kotlin/Any`. If an argument
+    // is the erased `Any` at a position where the candidates' parameter types DIFFER, krusty cannot
+    // reproduce kotlinc's precise-type overload selection (kotlinc may see a concrete type there). Bail
+    // (`None`) so the call is left unresolved and the file is skipped rather than dispatched wrongly.
+    let any = Ty::obj("kotlin/Any");
+    for (i, &a) in arg_tys.iter().enumerate() {
+        if a == any {
+            let mut params_here = cands.iter().filter_map(|&c| sigs[c].params.get(i));
+            if let Some(first) = params_here.next() {
+                if params_here.any(|p| p != first) {
+                    return None;
+                }
+            }
+        }
+    }
+    let score = |s: &Signature| -> Option<usize> {
+        let mut sc = 0;
+        for (&p, &a) in s.params.iter().zip(arg_tys.iter()) {
+            if p == a {
+                sc += 2;
+            } else if arg_assignable_simple(p, a) {
+                sc += 1;
+            } else {
+                return None;
+            }
+        }
+        Some(sc)
+    };
+    let best = cands
+        .iter()
+        .filter_map(|&i| score(&sigs[i]).map(|sc| (sc, i)))
+        .max_by_key(|&(sc, _)| sc)
+        .map(|(_, i)| i);
+    best.or_else(|| cands.first().copied())
+}
+
 pub fn conversion_target(name: &str) -> Option<Ty> {
     Some(match name {
         "toInt" => Ty::Int,
@@ -574,8 +661,16 @@ pub fn collect_signatures_with_cp(
                             // nullability erasure — reject rather than silently pick one.
                             diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
                         }
-                    } else if table.funs.insert(f.name.clone(), sig).is_some() {
-                        diags.error(f.span, format!("conflicting declarations: {}", f.name));
+                    } else {
+                        // Overloading: keep ALL same-name functions, keyed by name. Only an EXACT
+                        // erased-parameter duplicate (same JVM descriptor) is a real conflict.
+                        let key = erased_params_key(&sig);
+                        let overloads = table.funs.entry(f.name.clone()).or_default();
+                        if overloads.iter().any(|s| erased_params_key(s) == key) {
+                            diags.error(f.span, format!("conflicting declarations: {}", f.name));
+                        } else {
+                            overloads.push(sig);
+                        }
                     }
                 }
                 Decl::Class(c) => {
@@ -2101,7 +2196,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
             }
         })
         .collect();
-    c.check_no_erased_clash(&top_funs);
+    c.check_no_erased_clash(&top_funs, true);
 
     for &d in &file.decls {
         match file.decl(d) {
@@ -2159,7 +2254,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 c.this_ty = syms.classes.get(&cl.name).map(|s| Ty::obj(&s.internal));
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
-                c.check_no_erased_clash(&methods);
+                c.check_no_erased_clash(&methods, false);
                 if let Some(internal) = syms.classes.get(&cl.name).map(|s| s.internal.clone()) {
                     c.check_no_bridge_needed(&internal, cl.span);
                     // A `data class` implementing an interface that declares `copy`/`componentN` would
@@ -2814,36 +2909,38 @@ impl<'a> Checker<'a> {
         // which the lowering synthesizes (boxing a primitive own type in the bridge as needed).
     }
 
-    /// Report (and thereby skip the file for) functions whose erased signatures collide.
-    fn check_no_erased_clash(&mut self, funs: &[&FunDecl]) {
-        // Two methods with the same name but DIFFERENT erased param-type signatures are
-        // unresolvable by krusty's per-name symbol table — call sites will use the wrong overload.
-        // Detect and skip rather than miscompile.
+    /// Report (and thereby skip the file for) functions whose signatures collide. An EXACT erased-signature
+    /// duplicate is always a JVM `ClassFormatError` and is rejected. When `allow_overload` is true
+    /// (top-level functions), same-name functions with DIFFERENT erased signatures are legal overloads,
+    /// dispatched at the call site by argument types ([`pick_overload`]). When false (class members), they
+    /// are rejected — member overloading needs erasure/bridge handling krusty doesn't model, so the file
+    /// is skipped rather than miscompiled.
+    fn check_no_erased_clash(&mut self, funs: &[&FunDecl], allow_overload: bool) {
         let mut by_name: HashMap<String, String> = HashMap::new(); // name → first erased key
         let mut seen: HashMap<String, Span> = HashMap::new();
         for f in funs {
+            // `erased_sig_key` includes the name and (for extensions) the receiver, so distinct names and
+            // same-named extensions on different receivers don't collide.
             let key = self.erased_sig_key(f);
             if seen.contains_key(&key) {
                 self.diags.error(
                     f.span,
                     format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
                 );
-            } else if f.receiver.is_some() {
-                // Extension functions dispatch by (receiver, name) via `ext_funs` — same-named
-                // extensions on different receivers don't clash; only an exact-signature dup (the
-                // `seen` check above) does.
             } else {
-                match by_name.entry(f.name.clone()) {
-                    std::collections::hash_map::Entry::Occupied(e) if e.get() != &key => {
-                        self.diags.error(
-                            f.span,
-                            format!("krusty: function '{}' has multiple overloads with different erased signatures (overload dispatch not supported)", f.name),
-                        );
+                if !allow_overload && f.receiver.is_none() {
+                    if let std::collections::hash_map::Entry::Occupied(e) =
+                        by_name.entry(f.name.clone())
+                    {
+                        if e.get() != &key {
+                            self.diags.error(
+                                f.span,
+                                format!("krusty: function '{}' has multiple overloads with different erased signatures (overload dispatch not supported)", f.name),
+                            );
+                        }
+                    } else {
+                        by_name.insert(f.name.clone(), key.clone());
                     }
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(key.clone());
-                    }
-                    _ => {}
                 }
                 seen.insert(key, f.span);
             }
@@ -3075,16 +3172,26 @@ impl<'a> Checker<'a> {
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
         } else {
-            // Use the collected signature's return type; for a companion method (not in `funs`) fall back
-            // to the declared return type.
-            self.ret_ty = match self.syms.funs.get(&f.name).map(|s| s.ret) {
-                Some(r) => r,
-                None => f
-                    .ret
-                    .as_ref()
-                    .map(|r| self.resolve_ty(r))
-                    .unwrap_or(Ty::Unit),
-            };
+            // Use this declaration's own collected overload's return type (matched by its erased
+            // parameter descriptors when the name is overloaded); for a companion method (not in `funs`)
+            // fall back to the declared return type.
+            let want: String = f
+                .params
+                .iter()
+                .map(|p| self.resolve_ty(&p.ty).descriptor())
+                .collect();
+            let own_ret = self.syms.funs.get(&f.name).and_then(|v| {
+                if v.len() == 1 {
+                    Some(v[0].ret)
+                } else {
+                    v.iter()
+                        .find(|s| erased_params_key(s) == want)
+                        .map(|s| s.ret)
+                }
+            });
+            self.ret_ty = own_ret
+                .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
+                .unwrap_or(Ty::Unit);
         }
         // For expression-body functions with no explicit return type, infer the return type from the
         // body expression and record it as an override (so codegen uses the right JVM descriptor).
@@ -4260,9 +4367,16 @@ impl<'a> Checker<'a> {
                     let arity = if bound { margs } else { margs + 1 };
                     return self.set(e, Ty::fun(vec![obj; arity as usize], ret));
                 }
-                // Top-level function reference `::foo` → `Fun(params, ret)` of that function.
+                // Top-level function reference `::foo` → `Fun(params, ret)` of that function. Only an
+                // UNAMBIGUOUS (single-overload) name resolves here; an overloaded `::foo` needs an
+                // expected function type to disambiguate, which krusty doesn't model.
                 if receiver.is_none() {
-                    if let Some(sig) = self.syms.funs.get(&name).cloned() {
+                    if let Some(sig) = self
+                        .syms
+                        .funs
+                        .get(&name)
+                        .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
+                    {
                         if !sig.vararg && sig.params.len() == sig.required {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -5549,7 +5663,14 @@ impl<'a> Checker<'a> {
                 // Type-directed lambda checking: if we know the target function's signature and a
                 // parameter is a function type with known inner param types, check lambda args with
                 // the correct `it` type instead of always using Object.
-                let known_sig = self.syms.funs.get(&fname).cloned();
+                // For lambda-argument pre-typing we need a single known signature; use it only when the
+                // name is unambiguous (one overload). An overloaded call's lambda `it` falls back to the
+                // erased type — a minor precision loss, not a miscompile.
+                let known_sig = self
+                    .syms
+                    .funs
+                    .get(&fname)
+                    .and_then(|v| (v.len() == 1).then(|| v[0].clone()));
                 // An array init constructor `IntArray(n) { i -> … }` / `Array(n) { i -> … }` types its
                 // lambda's parameter (the index) as `Int`.
                 let array_init_lambda = (Ty::primitive_array_element(&fname).is_some()
@@ -5876,9 +5997,14 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
-                match self.syms.funs.get(&fname) {
+                match self
+                    .syms
+                    .funs
+                    .get(&fname)
+                    .and_then(|v| pick_overload(v, &arg_tys).map(|i| v[i].clone()))
+                {
                     Some(sig) => {
-                        let mut sig = sig.clone();
+                        let mut sig = sig;
                         // Use the inferred return type from the checker's inference pass if the
                         // signature defaulted to Unit (no explicit return type annotation).
                         if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
