@@ -944,8 +944,13 @@ pub fn is_call_spliceable(body: &MethodCode) -> bool {
         .iter()
         .filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
         .count();
-    returns == 1
-        && matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op))
+    // Single-exit by a trailing `return` (drop it, fall through with the result), OR a DIVERGING body
+    // that ends in `athrow` with no return (a `Nothing` function like `error(msg)` =
+    // `throw IllegalStateException(msg.toString())`) — splice it whole; control never falls through.
+    let last_return =
+        matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op));
+    let last_athrow = matches!(insns.last(), Some(Insn::Plain { op: 0xbf, .. }));
+    (returns == 1 && last_return) || (returns == 0 && last_athrow)
 }
 
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
@@ -1268,20 +1273,25 @@ pub fn splice_branchless(
     if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
         return None;
     }
-    // Single exit: exactly one return opcode, and it is the last instruction.
+    // Single exit: exactly one return opcode as the last instruction (drop it, fall through with the
+    // result), OR a DIVERGING body ending in `athrow` with no return (a `Nothing` function like
+    // `error(msg)`) — keep the whole body; control never falls through, so nothing is left on the stack.
     let returns: Vec<usize> = insns
         .iter()
         .enumerate()
         .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
         .map(|(j, _)| j)
         .collect();
-    if returns.len() != 1 || returns[0] != insns.len() - 1 {
+    let diverges = returns.is_empty() && matches!(insns.last(), Some(Insn::Plain { op: 0xbf, .. }));
+    if !diverges && (returns.len() != 1 || returns[0] != insns.len() - 1) {
         return None;
     }
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
-    insns.pop(); // drop the trailing return: fall through with the result on the stack
-                 // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
+    if !diverges {
+        insns.pop(); // drop the trailing return: fall through with the result on the stack
+    }
+    // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
     let params = param_store_ops(descriptor, base)?;
     let mut out: Vec<Insn> = params
         .iter()

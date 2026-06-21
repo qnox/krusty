@@ -1038,6 +1038,45 @@ impl LibrarySet for JvmLibraries {
                     });
                 }
             }
+            // No public / `$default` match — try a NON-PUBLIC `@InlineOnly` top-level function
+            // (`error`/`require`/`check`/…): kotlinc emits no callable method for these, so they MUST be
+            // inlined. Return one as `is_inline` so the backend splices its real body; gated by
+            // `can_inline_call` (dry-runs the splice) so an un-spliceable body simply stays unresolved
+            // rather than falling back to an `invokestatic` on the private method.
+            if pick.is_none() {
+                for c in self.cp.find_top_level(name) {
+                    if c.public || !self.cp.is_inline_method(&c.owner, &c.name) {
+                        continue;
+                    }
+                    let (params, ret) = parse_method_desc(&c.descriptor);
+                    if params.len() != args.len()
+                        || !params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                    {
+                        continue;
+                    }
+                    if !self.can_inline_call(&c.owner, &c.name, &c.descriptor) {
+                        continue;
+                    }
+                    // A kotlin `Nothing` return compiles to a `java/lang/Void` JVM descriptor; type the
+                    // call `Nothing` so the backend treats it as diverging (no value, no post-call pop).
+                    let logical_ret = if c.descriptor.ends_with(")Ljava/lang/Void;") {
+                        Ty::Nothing
+                    } else {
+                        ret
+                    };
+                    return Some(LibraryCallable {
+                        owner: c.owner.clone(),
+                        name: c.name.clone(),
+                        params,
+                        ret: logical_ret,
+                        physical_ret: ret,
+                        descriptor: c.descriptor.clone(),
+                        is_inline: true,
+                        default_call: false,
+                        vararg_elem: None,
+                    });
+                }
+            }
             let (c, params, ret) = pick?;
             // A reified reflection intrinsic (`typeOf` → `KType`) is implemented by inlining + reified
             // substitution; called as a plain static it throws at runtime. krusty doesn't inline it —
