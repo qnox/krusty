@@ -176,6 +176,27 @@ fun box(): String {
 }
 "#,
     ),
+    // Two-arg `require(cond) { lazyMessage }` / `check(cond) { … }`: the BRANCHY host body invokes the
+    // message lambda only on failure. The unified splicer splices the branchy precondition body AND the
+    // lambda body at its `Function0.invoke` site together (kotlinc inlines both — no `Function0` is
+    // materialized). The lambda runs (captures + mutates an outer local) only when the condition fails.
+    (
+        "RequireCheckMsg",
+        r#"
+fun box(): String {
+    var pass = 0
+    require(true) { pass += 1; "unused" }
+    if (pass != 0) return "f0: $pass"     // lambda must NOT run when the condition holds
+    var ran = false
+    try { require(false) { ran = true; "boom" } } catch (e: IllegalArgumentException) { }
+    if (!ran) return "f1"                 // lambda MUST run when the condition fails
+    var ran2 = false
+    try { check(false) { ran2 = true; "nope" } } catch (e: IllegalStateException) { }
+    if (!ran2) return "f2"
+    return "OK"
+}
+"#,
+    ),
     // Function overloading: same name, different parameter signatures. A call selects the matching
     // overload by argument types (and arity); each overload emits as its own JVM method (same name,
     // different descriptor). Covers type-distinguished, arity-distinguished, and the ordering-sensitive

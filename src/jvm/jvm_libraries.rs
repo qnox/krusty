@@ -484,6 +484,53 @@ fn unbox_wrapper(t: Ty) -> Ty {
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
 /// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
 /// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
+/// Parameter indices whose descriptor type is `kotlin/jvm/functions/Function0` — the zero-arg lambda
+/// parameters the unified splicer can inline (`require`/`check`'s `lazyMessage: () -> Any`).
+fn function0_param_indices(descriptor: &str) -> Vec<usize> {
+    let Some(inner) = descriptor
+        .strip_prefix('(')
+        .and_then(|s| s.split(')').next())
+    else {
+        return Vec::new();
+    };
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut idx = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'L' => {
+                let start = i;
+                while i < b.len() && b[i] != b';' {
+                    i += 1;
+                }
+                if &inner[start + 1..i] == "kotlin/jvm/functions/Function0" {
+                    out.push(idx);
+                }
+                i += 1;
+                idx += 1;
+            }
+            b'[' => {
+                while i < b.len() && b[i] == b'[' {
+                    i += 1;
+                }
+                if i < b.len() && b[i] == b'L' {
+                    while i < b.len() && b[i] != b';' {
+                        i += 1;
+                    }
+                }
+                i += 1;
+                idx += 1;
+            }
+            _ => {
+                i += 1;
+                idx += 1;
+            }
+        }
+    }
+    out
+}
+
 fn arg_fits(p: &Ty, a: &Ty) -> bool {
     if p == a || *p == Ty::obj("kotlin/Any") {
         return true;
@@ -843,6 +890,26 @@ impl LibrarySet for JvmLibraries {
                     let mut dummy =
                         crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
                     crate::jvm::inline::splice_branchy(&body, descriptor, 1, &mut dummy).is_some()
+                } || {
+                    // A lambda-bearing host (`require(cond) { lazyMessage }`): dry-run the unified
+                    // host+lambda splice with the descriptor's `Function0` parameters as (empty-bodied)
+                    // lambda sites. Confirms the host shape relocates and each lambda invoke is found.
+                    let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
+                        function0_param_indices(descriptor)
+                            .into_iter()
+                            .map(|param_index| crate::jvm::inline::LambdaSplice {
+                                param_index,
+                                body: Vec::new(),
+                            })
+                            .collect();
+                    !lambdas.is_empty() && {
+                        let mut dummy =
+                            crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                        crate::jvm::inline::splice_unified(
+                            &body, descriptor, 1, &lambdas, &mut dummy,
+                        )
+                        .is_some()
+                    }
                 }
             })
     }
@@ -854,6 +921,13 @@ impl LibrarySet for JvmLibraries {
         args: &[Ty],
     ) -> Option<LibraryCallable> {
         self.extension_callable(name, receiver, args, &[], true)
+    }
+
+    fn toplevel_has_must_inline(&self, name: &str) -> bool {
+        self.cp
+            .find_top_level(name)
+            .iter()
+            .any(|c| !c.public && self.cp.is_inline_method(&c.owner, &c.name))
     }
 
     fn toplevel_lambda_param_types(
@@ -994,10 +1068,11 @@ impl LibrarySet for JvmLibraries {
             // Its descriptor is `(real…, int mask, Object marker)ret`; the call fills a prefix of the real
             // parameters and the backend defaults the rest. A trailing lambda interacts with defaulted
             // middle parameters in a way the prefix-fill doesn't model — leave those unresolved.
-            if pick.is_none() {
-                if args.last().map_or(false, |a| matches!(a, Ty::Fun(_))) {
-                    return None;
-                }
+            // A trailing lambda interacts with `$default`'s defaulted middle parameters in a way the
+            // prefix-fill doesn't model, so skip the `$default` attempt for it — but still fall through
+            // to the non-public `@InlineOnly` branch below (a `require(cond) { lazyMessage }` is spliced).
+            let trailing_lambda = args.last().map_or(false, |a| matches!(a, Ty::Fun(_)));
+            if pick.is_none() && !trailing_lambda {
                 let default_name = format!("{name}$default");
                 for c in self.cp.find_top_level(&default_name) {
                     if !c.public {
