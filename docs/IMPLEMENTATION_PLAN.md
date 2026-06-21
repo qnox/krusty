@@ -2572,6 +2572,25 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 425 — top-level function overloading  ✅
+- `fun f(Int)` / `fun f(String)` (same name, different parameter signatures) used to error as "conflicting
+  declarations" — krusty's symbol table was name-keyed (`funs: HashMap<String, Signature>`,
+  `fun_ids: HashMap<String, u32>`). Now a name holds ALL its overloads and a call selects one by argument
+  types; each overload emits as its own JVM method (same name, different descriptor).
+- `funs` is `HashMap<String, Vec<Signature>>`; `fun_ids` is keyed by `(name, erased-param-descriptor)`.
+  Collection keeps every same-name function, rejecting only an EXACT erased-parameter duplicate (a real
+  `ClassFormatError`). A shared `pick_overload(sigs, arg_tys)` — used identically by the checker and the
+  lowerer so they always agree — filters by arity (varargs/defaults aware) then scores by argument fit.
+- Soundness guards (skip rather than miscompile): (1) krusty erases generics, so a generic value reads as
+  `kotlin/Any`; if an argument is the erased `Any` where candidate parameter types DIFFER, `pick_overload`
+  returns `None` (kotlinc would select on the precise type krusty lost) and the call is left unresolved.
+  (2) Member (class-method) overloading stays rejected — it needs erasure/bridge handling krusty doesn't
+  model (`check_no_erased_clash(..., allow_overload=false)` for members, `true` for top-level). (3) A
+  cross-file function (in `funs` but not this file's `fun_ids`) falls through to the facade-call path.
+  `::foo` and lambda-arg pre-typing resolve only for an unambiguous (single-overload) name.
+- Box gate **1297, 0 FAIL** (+3). TDD: `feature_box_e2e::FunctionOverloading` (type- and arity-distinguished,
+  plus the ordering-sensitive `(Int,Any)` vs `(Any,Int)` case). Cross-file dropin e2e kept green.
+
 ### Phase 424 — `is`/`!is` with a nullable reference target (`x is A?`)  ✅
 - `x is A?` includes `null` (`null is A?` is true), but a bare `instanceof` is false for null, so krusty
   rejected any nullable `is` target. Now a nullable REFERENCE target lowers to `x == null || x is A`

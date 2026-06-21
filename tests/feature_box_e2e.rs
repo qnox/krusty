@@ -118,6 +118,28 @@ fun box(): String {
 }
 "#,
     ),
+    // Function overloading: same name, different parameter signatures. A call selects the matching
+    // overload by argument types (and arity); each overload emits as its own JVM method (same name,
+    // different descriptor). Covers type-distinguished, arity-distinguished, and the ordering-sensitive
+    // `(Int, Any)` vs `(Any, Int)` case.
+    (
+        "FunctionOverloading",
+        r#"
+fun f(x: Int): String = "int:$x"
+fun f(x: String): String = "str:$x"
+fun f(x: Int, y: Int): String = "two:${x + y}"
+fun g(x: Int, y: Any): String = "IA"
+fun g(x: Any, y: Int): String = "AI"
+fun box(): String {
+    if (f(1) != "int:1") return "f0"
+    if (f("a") != "str:a") return "f1"
+    if (f(2, 3) != "two:5") return "f2"
+    if (g(1, "x") != "IA") return "f3:${g(1, "x")}"
+    if (g("x", 1) != "AI") return "f4:${g("x", 1)}"
+    return "OK"
+}
+"#,
+    ),
     // `is`/`!is` with a NULLABLE reference target (`x is A?`): `null` IS an `A?`, so it lowers to
     // `x == null || x is A` (and `x !is A?` to `x != null && x !is A`), not a bare `instanceof` (which is
     // false for null). The operand is evaluated once.
