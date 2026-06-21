@@ -2572,6 +2572,19 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 433 — merge `splice_branchless` into `splice_unified` (the no-lambda splicer is now one fn)  ✅
+- `splice_unified` now DROPS a trailing return (fall through with the result) instead of `goto`-ing it to
+  the join, and reports `join_required`: `false` for a pure branchless body (no branches, single trailing
+  return) — which the emitter then appends at ANY operand-stack height (mid-expression), exactly like the
+  old `splice_branchless`; `true` for a branchy body (needs the join frame + an empty baseline). Added a
+  guard: a branchy body with no `StackMapTable` bails (can't synthesize the target frames).
+- The emitter's `try_inline_static` now calls `splice_unified` ONCE and branches on `join_required`;
+  `can_inline_call` is a single `splice_unified` dry-run. DELETED `splice_branchless` + `is_call_spliceable`
+  (its unit tests migrated to `splice_unified`). Remaining: `branchless_lambda_segments` (the `let`/`also`
+  receiver-lambda path — needs N-ary `FunctionN` support in `splice_unified`; v1 is `Function0`).
+- Box gate **1311, 0 FAIL** (pure refactor; conformance-test verified). Two splicers were three; now the
+  no-lambda + branchy + `Function0`-lambda cases are ONE `splice_unified`.
+
 ### Phase 432 — merge `splice_branchy` into `splice_unified` (one splicer for branchy bodies)  ✅
 - First step of unifying the bytecode splicers: `splice_unified` with NO lambda arguments subsumes the
   old `splice_branchy` (same `BranchySplice` result — relocated frames + join). Routed the emitter's

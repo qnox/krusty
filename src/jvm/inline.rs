@@ -923,36 +923,6 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
 /// entry `checkNotNullParameter` null-checks). Lets the front end route a call to the inliner ONLY
 /// when the emitter is guaranteed to splice it — required because an `@InlineOnly` callee has no
 /// runtime body to fall back to.
-/// Whether a NO-lambda `inline fun` body can be spliced at a call site (`String.uppercase()` →
-/// `toUpperCase(Locale.ROOT)`): branchless (all `Plain` insns, no handlers), no `FunctionN.invoke`
-/// (that's the lambda case), and a single trailing return. The splice relocates the body verbatim.
-pub fn is_call_spliceable(body: &MethodCode) -> bool {
-    if body.has_handlers {
-        return false;
-    }
-    let Some(mut insns) = disassemble(&body.code) else {
-        return false;
-    };
-    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
-        return false;
-    }
-    strip_param_null_checks(&mut insns, &body.source_cp);
-    if !function_invoke_sites(&insns, &body.source_cp).is_empty() {
-        return false; // a lambda-bearing body — use `is_lambda_spliceable`/the lambda route instead
-    }
-    let returns = insns
-        .iter()
-        .filter(|i| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
-        .count();
-    // Single-exit by a trailing `return` (drop it, fall through with the result), OR a DIVERGING body
-    // that ends in `athrow` with no return (a `Nothing` function like `error(msg)` =
-    // `throw IllegalStateException(msg.toString())`) — splice it whole; control never falls through.
-    let last_return =
-        matches!(insns.last(), Some(Insn::Plain { op, .. }) if (0xac..=0xb1).contains(op));
-    let last_athrow = matches!(insns.last(), Some(Insn::Plain { op: 0xbf, .. }));
-    (returns == 1 && last_return) || (returns == 0 && last_athrow)
-}
-
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
     if body.has_handlers {
         return false;
@@ -1143,6 +1113,11 @@ pub struct BranchySplice {
     /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
     /// post-splice position (not a precomputed end offset, which could fall at `code.len()`).
     pub join_stack: Vec<VType>,
+    /// Whether the splice actually needs the relocated frames + a join frame bound (so it requires an
+    /// empty operand-stack baseline). `false` for a pure BRANCHLESS body — no branches, the single
+    /// trailing return dropped to fall through — which the caller can then append at ANY stack height
+    /// (mid-expression), exactly like the former `splice_branchless`.
+    pub join_required: bool,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1366,12 +1341,43 @@ pub fn splice_unified(
             repl: lam.body.clone(),
         });
     }
-    edits.sort_by_key(|e| e.at);
-
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
-    redirect_returns(&mut insns); // returns → goto (target = old insns.len() = the join)
-                                  // Reject overlapping edits (shouldn't happen for the shapes above).
+    // Return handling: DROP a trailing return (fall through with the result on the stack), and redirect
+    // any earlier return to the join (`goto` past the body). A pure BRANCHLESS body — no branches, a
+    // single trailing return dropped — then needs NO frames/join, so the caller may splice it at ANY
+    // operand-stack height (mid-expression), exactly like the former `splice_branchless`. A branchy body
+    // (`require`'s `ifne`) or a non-trailing return needs the join frame ⇒ an empty baseline.
+    let host_has_branches = insns.iter().any(|i| !matches!(i, Insn::Plain { .. }));
+    // A branchy body needs a `StackMapTable` to relocate frames for its branch targets; without one we
+    // can't supply those frames (the emitter would leave a target frameless → `VerifyError`). Bail.
+    if host_has_branches && body.stackmap.is_none() {
+        return None;
+    }
+    let last_idx = insns.len().saturating_sub(1);
+    let join_pos = insns.len();
+    let mut made_goto = false;
+    for (i, insn) in insns.iter_mut().enumerate() {
+        if let Insn::Plain { op, .. } = insn {
+            if matches!(*op, 0xac..=0xb1) && i != last_idx {
+                *insn = Insn::Branch {
+                    op: 0xa7,
+                    target: join_pos,
+                };
+                made_goto = true;
+            }
+        }
+    }
+    if matches!(insns.last(), Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1)) {
+        edits.push(Edit {
+            at: last_idx,
+            len: 1,
+            repl: Vec::new(),
+        }); // drop the trailing return → fall through
+    }
+    let join_required = host_has_branches || made_goto || !host_frames.is_empty();
+    edits.sort_by_key(|e| e.at);
+    // Reject overlapping edits (shouldn't happen for the shapes above).
     for w in edits.windows(2) {
         if w[0].at + w[0].len > w[1].at {
             return None;
@@ -1487,6 +1493,7 @@ pub fn splice_unified(
         bytes: assemble(&final_insns),
         frames,
         join_stack: ret.into_iter().collect(),
+        join_required,
     })
 }
 
@@ -1517,62 +1524,12 @@ pub fn splice(
     Some(out)
 }
 
-/// Splice a **branchless, single-exit** inline body at a call site whose arguments are already on the
-/// stack. Unlike [`splice`], it *drops* the trailing return (leaving the computed value on the stack
-/// to fall through) instead of rewriting it to a `goto` — so the spliced region contains no branch
-/// target and needs no StackMapTable frame, which is what makes it safely emittable today. `None`
-/// (caller emits a normal `invokestatic`) if the body has any branch/switch, isn't single-exit, or
-/// uses a pool entry `relocate_insns` can't relocate (`invokedynamic`).
-pub fn splice_branchless(
-    body: &MethodCode,
-    descriptor: &str,
-    base: u16,
-    cw: &mut ClassWriter,
-) -> Option<Vec<Insn>> {
-    // A body with exception handlers needs handler-table relocation (not supported) — bail.
-    if body.has_handlers {
-        return None;
-    }
-    let mut insns = disassemble(&body.code)?;
-    // Branchless: every instruction is `Plain` (no `goto`/conditional/`switch` target).
-    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
-        return None;
-    }
-    // Single exit: exactly one return opcode as the last instruction (drop it, fall through with the
-    // result), OR a DIVERGING body ending in `athrow` with no return (a `Nothing` function like
-    // `error(msg)`) — keep the whole body; control never falls through, so nothing is left on the stack.
-    let returns: Vec<usize> = insns
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
-        .map(|(j, _)| j)
-        .collect();
-    let diverges = returns.is_empty() && matches!(insns.last(), Some(Insn::Plain { op: 0xbf, .. }));
-    if !diverges && (returns.len() != 1 || returns[0] != insns.len() - 1) {
-        return None;
-    }
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
-    shift_locals(&mut insns, base)?;
-    if !diverges {
-        insns.pop(); // drop the trailing return: fall through with the result on the stack
-    }
-    // Prologue: pop the arguments (top = last param) into the body's parameter slots (`base..`).
-    let params = param_store_ops(descriptor, base)?;
-    let mut out: Vec<Insn> = params
-        .iter()
-        .rev()
-        .map(|&(slot, op)| local_load_store(op, slot))
-        .collect();
-    out.extend(insns);
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn splice_branchless_drops_return_and_stores_args() {
+    fn splice_unified_branchless_drops_return_and_stores_args() {
         // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
         let body = MethodCode {
             max_stack: 2,
@@ -1583,10 +1540,12 @@ mod tests {
             has_handlers: false,
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let insns = splice_branchless(&body, "(I)I", 3, &mut cw).expect("branchless splice");
+        let bs = splice_unified(&body, "(I)I", 3, &[], &mut cw).expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
-        assert_eq!(assemble(&insns), vec![0x3e, 0x1d, 0x06, 0x68]);
+        assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
+        // A pure branchless body needs no join frame — appendable at any operand-stack height.
+        assert!(!bs.join_required);
     }
 
     #[test]
@@ -1697,8 +1656,9 @@ mod tests {
     }
 
     #[test]
-    fn splice_branchless_bails_on_branch() {
-        // `iload_0; ifeq +4; iconst_1; ireturn` — has a branch ⇒ not branchless.
+    fn splice_unified_bails_on_branch_without_stackmap() {
+        // `iload_0; ifeq +4; iconst_1; ireturn` — a branch but no `StackMapTable` ⇒ can't relocate the
+        // target frame, so the unified splice bails (the call falls back / the file skips).
         let body = MethodCode {
             max_stack: 1,
             max_locals: 1,
@@ -1708,7 +1668,7 @@ mod tests {
             has_handlers: false,
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        assert!(splice_branchless(&body, "(I)I", 1, &mut cw).is_none());
+        assert!(splice_unified(&body, "(I)I", 1, &[], &mut cw).is_none());
     }
 
     #[test]
