@@ -1499,6 +1499,13 @@ impl<'a> Emitter<'a> {
                 .iter()
                 .map(|&a| slot_words(self.value_ty(a)) as i32)
                 .sum();
+            // A DIVERGING body (ends in `athrow`, e.g. `error(msg)`) leaves NOTHING on the stack — the
+            // result type is `Nothing`, so the post-splice height is the baseline, not `baseline + ret`.
+            let diverges = matches!(
+                insns.last(),
+                Some(crate::jvm::inline::Insn::Plain { op: 0xbf, .. })
+            );
+            let ret_words = if diverges { 0 } else { ret_words };
             let bytes = crate::jvm::inline::assemble(&insns);
             code.splice_inline(&bytes, body.max_stack, top_local, arg_words, ret_words);
             return true;
@@ -3320,10 +3327,12 @@ impl<'a> Emitter<'a> {
                     let next = code.new_label();
                     self.emit_cond_branch(*c, next, false, code);
                     self.emit_value(*body, code);
-                    if is_stmt {
-                        discard(self.value_ty(*body), code);
-                    }
                     if !self.diverges(*body) {
+                        // A diverging branch (e.g. an inlined `error(...)`) left nothing and ended in
+                        // `athrow` — don't discard (nothing to pop) and don't jump to `end`.
+                        if is_stmt {
+                            discard(self.value_ty(*body), code);
+                        }
                         // Only a falling-through branch jumps to (and needs a frame at) `end`.
                         self.frame(end, result_stack.clone(), code);
                         code.goto(end);
@@ -3333,10 +3342,10 @@ impl<'a> Emitter<'a> {
                 }
                 None => {
                     self.emit_value(*body, code);
-                    if is_stmt {
-                        discard(self.value_ty(*body), code);
-                    }
                     if !self.diverges(*body) {
+                        if is_stmt {
+                            discard(self.value_ty(*body), code);
+                        }
                         end_reachable = true;
                     }
                     // The else is last — it falls through to `end` (no goto needed).
@@ -3520,6 +3529,9 @@ impl<'a> Emitter<'a> {
                 finally.map_or(false, |f| self.diverges(f))
                     || (self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body)))
             }
+            // A `Nothing`-typed call never returns — an inlined `error(...)`/`throw`-helper diverges via
+            // `athrow`, so the branch it ends doesn't fall through to the merge.
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. } => self.value_ty(e) == Ty::Nothing,
             _ => false,
         }
     }
@@ -3712,7 +3724,16 @@ impl<'a> Emitter<'a> {
                 Callee::External(fq) => intrinsic_ret(fq),
                 Callee::Static { descriptor, .. }
                 | Callee::Virtual { descriptor, .. }
-                | Callee::Special { descriptor, .. } => ty_from_descriptor_ret(descriptor),
+                | Callee::Special { descriptor, .. } => {
+                    // A kotlin `Nothing` return is a `java/lang/Void` JVM descriptor — report it as
+                    // `Nothing` so a diverging (inlined `error(...)`) call is treated as never returning
+                    // (no value, no dead epilogue after the spliced `athrow`).
+                    if descriptor.ends_with(")Ljava/lang/Void;") {
+                        Ty::Nothing
+                    } else {
+                        ty_from_descriptor_ret(descriptor)
+                    }
+                }
                 Callee::CrossFileVirtual { ret, .. } => ir_ty_to_jvm(ret),
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {

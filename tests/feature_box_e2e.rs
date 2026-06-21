@@ -118,6 +118,24 @@ fun box(): String {
 }
 "#,
     ),
+    // `error(msg)` is a real `@InlineOnly` stdlib function (`throw IllegalStateException(msg.toString())`)
+    // — discovered via `@Metadata` and SPLICED from its jar bytecode (no hardcoded body). Its body
+    // diverges (`athrow`), so this also exercises diverging-inline-call divergence handling in linear,
+    // `if`-branch, and `try` positions.
+    (
+        "ErrorInline",
+        r#"
+fun box(): String {
+    val a = try { error("boom") } catch (e: IllegalStateException) { "caught" }
+    if (a != "caught") return "f0: $a"
+    val s = "y"
+    if (s == "n") error("dead")          // diverging call in an if-branch (must not be taken)
+    val b = try { error("x") } catch (e: RuntimeException) { "rte" }   // ISE caught as supertype
+    if (b != "rte") return "f1: $b"
+    return "OK"
+}
+"#,
+    ),
     // Function overloading: same name, different parameter signatures. A call selects the matching
     // overload by argument types (and arity); each overload emits as its own JVM method (same name,
     // different descriptor). Covers type-distinguished, arity-distinguished, and the ordering-sensitive

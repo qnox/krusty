@@ -2572,6 +2572,26 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 426 — inline `@InlineOnly` diverging stdlib functions (`error`) via the splicer  ✅
+- `error(msg)` (= `throw IllegalStateException(msg.toString())`) is a real `@kotlin.internal.InlineOnly`
+  stdlib function: kotlinc emits no callable method, so it MUST be inlined. It was unsupported (the call
+  bailed) — NOT hardcoded. Now it is DISCOVERED from `@Metadata` (`is_inline`) and SPLICED from its real
+  jar bytecode, like any inline function — no reimplemented body.
+- Splicer: `splice_branchless`/`is_call_spliceable` now accept a DIVERGING branchless body — one ending in
+  `athrow` with no `return` (a `Nothing` function) — splicing it whole (control never falls through). The
+  splice leaves nothing on the stack, so `try_inline_static` uses `ret_words = 0` for a diverging body.
+- Resolution: `resolve_callable`, after no public/`$default` match, resolves a NON-public `@InlineOnly`
+  top-level function as `is_inline` (gated by `can_inline_call`, which dry-runs the splice — so an
+  un-spliceable body stays unresolved rather than falling back to an `invokestatic` on the private method).
+- Divergence in emit: a `Static`/`Virtual` call whose JVM return descriptor is `Ljava/lang/Void;` (kotlin
+  `Nothing`) reports `value_ty = Nothing`; `diverges()` treats a `Nothing`-typed call as non-falling-through;
+  `emit_when` skips the value-`discard`/merge-frame for a diverging branch. So an inlined `error(...)` works
+  in linear, `if`-branch, and `try` positions.
+- Also skip (sound) `inlineClasses/overrideReturnNothing`: a covariant override returning `Nothing` lowers
+  to a `java/lang/Void` bridge return that the bridge emitter can't `areturn` — `lower_file` bails the file.
+- Box gate **1303, 0 FAIL** (+6). TDD: `feature_box_e2e::ErrorInline`. Toward the goal (owner): a COMPLETE
+  splicer that inlines every inline function, eventually removing the `can_inline_call` feasibility gate.
+
 ### Phase 425 — top-level function overloading  ✅
 - `fun f(Int)` / `fun f(String)` (same name, different parameter signatures) used to error as "conflicting
   declarations" — krusty's symbol table was name-keyed (`funs: HashMap<String, Signature>`,

@@ -1528,6 +1528,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
         lo.lower_body(&f.body, &ret_ty, fid)?;
     }
+    // A covariant/generic override returning `Nothing` (always throws) needs a bridge krusty can't emit:
+    // the throwing concrete method leaves nothing to `areturn` as the erased reference return. Skip the
+    // file rather than emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
+    // A covariant/generic override returning `Nothing` (always throws) lowers its return to the JVM
+    // `java/lang/Void` repr; the bridge would `areturn` it as the erased reference return, which krusty's
+    // bridge emitter can't reconcile (the throwing concrete leaves nothing). Skip the file rather than
+    // emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
+    let nothing_bridge = lo.ir.classes.iter().any(|c| {
+        c.bridges.iter().any(|b| {
+            matches!(&b.concrete_ret, IrType::Class { fq_name, .. } if fq_name == "java/lang/Void")
+        })
+    });
+    if nothing_bridge {
+        return None;
+    }
     Some(lo.ir)
 }
 
