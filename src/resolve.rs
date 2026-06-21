@@ -4714,71 +4714,6 @@ impl<'a> Checker<'a> {
     /// Recognize stdlib precondition intrinsics: `require`/`check`/`assert(cond)` (→ `Unit`),
     /// `error(msg)` (→ `Nothing`), and `TODO()`/`TODO(msg)` (→ `Nothing`). Returns the result type,
     /// or `None` if `fname` isn't one of these.
-    fn check_precondition_intrinsic(
-        &mut self,
-        fname: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        span: Span,
-    ) -> Option<Ty> {
-        if self.syms.funs.contains_key(fname) {
-            return None; // a user-defined function of the same name takes precedence
-        }
-        match (fname, arg_tys) {
-            ("require" | "check" | "assert", [cond]) => {
-                self.expect_assignable(Ty::Boolean, *cond, self.span(args[0]), "condition");
-                Some(Ty::Unit)
-            }
-            ("error", [_]) => Some(Ty::Nothing),
-            ("TODO", [] | [_]) => {
-                // `TODO()` throws `kotlin.NotImplementedError`; require it to be resolvable from the
-                // classpath (stdlib), else emitting it would `NoClassDefFound` at runtime.
-                if !self.syms.class_names.contains_key("NotImplementedError") {
-                    self.diags.error(
-                        span,
-                        "krusty: 'TODO' requires the kotlin stdlib on the classpath".to_string(),
-                    );
-                    return Some(Ty::Error);
-                }
-                Some(Ty::Nothing)
-            }
-            // kotlin.test assertions. assertEquals(expected, actual[, msg]); assertTrue/assertFalse
-            // (cond[, msg]). All evaluate to Unit; an optional trailing message must be a String.
-            ("assertEquals", [a, b] | [a, b, _]) => {
-                // The two compared values must be a valid `==` pair (same numeric tower or both refs).
-                let comparable =
-                    Ty::promote(*a, *b).is_some() || (a.is_reference() && b.is_reference());
-                if !comparable {
-                    self.diags.error(
-                        span,
-                        format!("krusty: assertEquals on incomparable types {a:?} and {b:?}"),
-                    );
-                }
-                if let [_, _, msg] = arg_tys {
-                    self.expect_assignable(Ty::String, *msg, self.span(args[2]), "message");
-                }
-                Some(Ty::Unit)
-            }
-            ("assertTrue" | "assertFalse", [cond] | [cond, _]) => {
-                self.expect_assignable(Ty::Boolean, *cond, self.span(args[0]), "condition");
-                if let [_, msg] = arg_tys {
-                    self.expect_assignable(Ty::String, *msg, self.span(args[1]), "message");
-                }
-                Some(Ty::Unit)
-            }
-            (
-                "require" | "check" | "assert" | "error" | "TODO" | "assertEquals" | "assertTrue"
-                | "assertFalse",
-                _,
-            ) => {
-                self.diags
-                    .error(span, format!("krusty: unsupported form of '{fname}'"));
-                Some(Ty::Error)
-            }
-            _ => None,
-        }
-    }
-
     /// Type-check a `run`/`with`/`apply` lambda body with `recv` as its implicit receiver: `this` is
     /// `recv`, and the receiver's properties resolve unqualified. Returns the body's type.
     fn check_with_receiver(&mut self, recv: Ty, body: ExprId, span: Span) -> Ty {
@@ -5905,10 +5840,6 @@ impl<'a> Checker<'a> {
                             return t;
                         }
                     }
-                    if let Some(t) = self.check_precondition_intrinsic(&fname, args, &arg_tys, span)
-                    {
-                        return t;
-                    }
                     // Unqualified companion (static) method call inside a companion member.
                     if let Some(cls) = self.companion_of.clone() {
                         if let Some(sig) = self
@@ -7014,15 +6945,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn kotlin_test_assertions() {
-        ok("import kotlin.test.*\nfun box(): String { assertEquals(4, 2+2); assertTrue(1<2); assertFalse(2<1); return \"OK\" }");
-        ok("import kotlin.test.assertEquals\nfun box(): String { assertEquals(\"a\", \"a\", \"msg\"); return \"OK\" }");
-        err_contains(
-            "import kotlin.test.*\nfun box(): String { assertTrue(5); return \"OK\" }",
-            "Boolean was expected",
-        );
-    }
+    // NOTE: `require`/`check`/`error`/`TODO`/`assertEquals`/`assertTrue`/`assertFalse` are no longer
+    // hardcoded in the checker — they resolve generically from the classpath (a real stdlib / kotlin.test
+    // jar) and are validated by the box-conformance + `feature_box_e2e` suites, not here (these unit
+    // tests use `EmptyLibrarySet`, so a classpath-resolved call can't be typed).
 
     #[test]
     fn rejects_latent_miscompiles() {

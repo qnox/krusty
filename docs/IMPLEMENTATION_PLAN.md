@@ -2572,6 +2572,19 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 430 — delete the hardcoded precondition/intrinsic checker (`require`/`check`/`error`/`TODO`)  ✅
+- `check_precondition_intrinsic` name-matched `require`/`check`/`assert`/`error`/`TODO`/`assertEquals`/
+  `assertTrue`/`assertFalse` and hardcoded their return types + argument validation — a reimplementation
+  of stdlib signatures the project forbids. Deleted entirely. These are now resolved generically through
+  the library set from their real classpath descriptor (`(Boolean[, () -> Any]) -> Unit`,
+  `(Any) -> Nothing`, `() -> Nothing`, …) and spliced from compiled bytecode, like any other call.
+- A missing stdlib now simply leaves the call unresolved (it doesn't type-check) instead of needing the
+  bespoke `'TODO' requires the kotlin stdlib` presence check.
+- Box gate **1303 → 1307, 0 FAIL**: generic resolution covers strictly MORE forms than the hardcode did
+  (extra message/overload variants), so removing the special-case raised coverage. No regression for the
+  `kotlin.test` asserts. Open follow-up: two-arg `require(cond) { lazyMessage }` (a branchy host that
+  invokes a lambda parameter) needs the unified host+lambda splice.
+
 ### Phase 429 — branchy splicing of non-public `@InlineOnly` preconditions (`require`/`check`)  ✅
 - `require(cond)` / `check(cond)` are NON-public (`@InlineOnly`) `inline fun`s with BRANCHY bodies
   (`if (!cond) throw IllegalArgumentException("Failed requirement.")`). kotlinc emits no callable method,
