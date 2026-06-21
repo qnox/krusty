@@ -271,6 +271,14 @@ pub trait LibrarySet {
         None
     }
 
+    /// Whether a top-level function named `name` is a NON-public (`@InlineOnly`) inline function — one
+    /// that MUST be inlined (no callable method exists). A lambda argument to such a callee is always
+    /// inlined or the file is skipped, so the checker may treat a mutable capture as an inline (raw, not
+    /// `Ref`-boxed) capture safely. `false` for non-JVM platforms / no such candidate.
+    fn toplevel_has_must_inline(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Whether the platform can splice (truly inline) the lambda-taking `inline fun` `owner.name desc`
     /// at a call site — i.e. its compiled body is shaped for the lambda-argument splice. The front end
     /// routes a call to the inliner only when this is true, so an un-spliceable (e.g. `@InlineOnly`,

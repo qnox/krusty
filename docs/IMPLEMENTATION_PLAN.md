@@ -2572,6 +2572,34 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 431 — unified host+lambda inline splice: `require(cond) { lazyMessage }` / `check(cond) { … }`  ✅
+- The two-arg precondition overload: a BRANCHY host body (`if (!cond) throw IAE(lazyMessage())`) that
+  invokes a lambda PARAMETER only on the failure branch. Neither `splice_branchy` (no lambda) nor
+  `branchless_lambda_segments` (no branches) handled it. New `splice_unified` (jvm/inline.rs) is the merge:
+  it relocates a possibly-branchy host in the instruction domain and replaces each zero-arg
+  `Function0.invoke` site with that lambda's pre-built body, remapping branch targets and StackMapTable
+  frames over the edits (null-check strip + lambda insert) and dropping the spliced-away lambda slot
+  (dead → `Top`). `try_inline_unified` (jvm/ir_emit.rs) drives it: emits each lambda body to a scratch
+  builder (captures bound to caller slots → a mutable capture writes through), then splices.
+- Resolution: `can_inline_call` now also dry-runs `splice_unified` for a host with `Function0` params, so
+  `require`/`check`'s two-arg overload resolves (non-public `@InlineOnly`, `must_inline` → splice-or-skip).
+  The `$default` "trailing lambda" guard no longer blocks the non-public branch.
+- Two checker fixes this enabled: (1) a top-level `must_inline` callee's lambda is typed with mutation
+  allowed (an inline capture, not a `Ref`); (2) `stmt_refs_param` now counts an `Assign`/`+=` TARGET name,
+  so a WRITE-ONLY captured var (`require(false) { ran = true }`) is detected as a capture (was missed →
+  unresolved in the lambda body). v1: zero-arg (`Function0`) lambdas with branchless bodies.
+- Two regressions the change exposed, both FIXED (never-miscompile held by the conformance gate):
+  (a) `assert` is a codegen INTRINSIC (guarded by a synthetic `$assertionsDisabled` / `ASSERTIONS_MODE`,
+  arg ELIDED when disabled) — splicing its library body (`kotlin/_Assertions.ENABLED`) reproduces neither,
+  so `splice_unified` now refuses any `_Assertions`-referencing body (assert stays skipped, as before).
+  (b) `stmt_refs_param` counting an `Assign` target un-skipped `inlineClassValueCapturedInNonInlineLambda`,
+  which VerifyError'd: a `@JvmInline value class` var is UNBOXED, so a captured-and-written one must box
+  into its UNDERLYING type's `Ref` (`Z(Int)` → `Ref.IntRef`), not `Ref.ObjectRef` — fixed in `lower`.
+- Box gate **1307 → 1311, 0 FAIL** (TDD `feature_box_e2e::RequireCheckMsg`: lambda runs only on failure,
+  mutates an outer `var`, JVM `-Xverify:all`; plus the value-class capture test now passes). NEXT: route
+  `splice_branchless`/`splice_branchy`/`branchless_lambda_segments` through `splice_unified` and delete
+  them (finish the merge); N-ary lambdas.
+
 ### Phase 430 — delete the hardcoded precondition/intrinsic checker (`require`/`check`/`error`/`TODO`)  ✅
 - `check_precondition_intrinsic` name-matched `require`/`check`/`assert`/`error`/`TODO`/`assertEquals`/
   `assertTrue`/`assertFalse` and hardcoded their return types + argument validation — a reimplementation

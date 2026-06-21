@@ -2115,6 +2115,17 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The underlying type of a `@JvmInline value class` (`Z(val v: Int)` → `Int`), or `None` for an
+    /// ordinary type. A value-class value is represented unboxed as this type.
+    fn value_class_underlying(&self, t: Ty) -> Option<Ty> {
+        let internal = t.obj_internal()?;
+        self.syms
+            .classes
+            .get(internal)
+            .and_then(|c| c.value_field.as_ref())
+            .map(|(_, u)| *u)
+    }
+
     fn append_body_stmts(&mut self, body: AstExprId, out: &mut Vec<u32>) -> Option<()> {
         match self.afile.expr(body).clone() {
             Expr::Block { stmts, trailing } => {
@@ -4226,12 +4237,16 @@ impl<'a> Lower<'a> {
                 // the local holds the holder, reads/writes go through `element`, and the closure
                 // captures the shared holder (so its writes are visible here and vice versa).
                 if self.info.boxed_vars.contains(&name) {
-                    let elem = ty_to_ir(kty);
-                    let it = self.lower_arg(init, &elem)?;
+                    // A `@JvmInline value class` var is represented UNBOXED as its underlying type, so its
+                    // `Ref` holder + element must use that underlying type (`var z: Z(Int)` → `Ref.IntRef`,
+                    // not `Ref.ObjectRef` of an erased object — that mismatches the unboxed `int` value).
+                    let elem_ty = self.value_class_underlying(kty).unwrap_or(kty);
+                    let elem = ty_to_ir(elem_ty);
+                    let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();
-                    let holder_ty = Ty::obj(ref_holder_internal(kty));
+                    let holder_ty = Ty::obj(ref_holder_internal(elem_ty));
                     self.scope.push((name.clone(), holder, holder_ty));
-                    self.boxed_elem.insert(name.clone(), kty);
+                    self.boxed_elem.insert(name.clone(), elem_ty);
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });

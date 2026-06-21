@@ -1225,6 +1225,351 @@ pub fn splice_branchy(
     })
 }
 
+/// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
+pub struct LambdaSplice {
+    /// The host parameter index of this lambda (its position in the descriptor).
+    pub param_index: usize,
+    /// Pre-built lambda body (relocated into the target pool, locals absolute), leaving the lambda's
+    /// result boxed to `Object` on the stack — exactly what the replaced `invoke` produced. Branchless
+    /// (no frames) in v1.
+    pub body: Vec<Insn>,
+}
+
+/// Parse a descriptor's parameters into `(frame0 vtype, byte-of-descriptor advance)` — like
+/// [`param_vtypes`] but a reference/array parameter becomes `Top` (its real type is unmodeled; the
+/// caller must ensure every such parameter is a spliced-away lambda, whose slot is dead anyway).
+/// `long`/`double` stay one frame entry. Returns one entry per parameter, in order.
+fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
+    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'I' | b'B' | b'S' | b'C' | b'Z' => {
+                out.push(VType::Int);
+                i += 1;
+            }
+            b'J' => {
+                out.push(VType::Long);
+                i += 1;
+            }
+            b'D' => {
+                out.push(VType::Double);
+                i += 1;
+            }
+            b'F' => {
+                out.push(VType::Float);
+                i += 1;
+            }
+            b'L' => {
+                while *b.get(i)? != b';' {
+                    i += 1;
+                }
+                i += 1;
+                out.push(VType::Top); // reference param — must be a spliced-away lambda (dead slot)
+            }
+            b'[' => {
+                while *b.get(i)? == b'[' {
+                    i += 1;
+                }
+                if *b.get(i)? == b'L' {
+                    while *b.get(i)? != b';' {
+                        i += 1;
+                    }
+                }
+                i += 1;
+                out.push(VType::Top);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// The local slot of each parameter in the original (static) method — `long`/`double` take two. Used to
+/// locate a lambda parameter's `aload <slot>` before relocation/shifting.
+fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
+    let inner = descriptor.strip_prefix('(')?.split(')').next()?;
+    let b = inner.as_bytes();
+    let mut i = 0;
+    let mut slot = 0u16;
+    let mut out = Vec::new();
+    while i < b.len() {
+        out.push(slot);
+        match b[i] {
+            b'J' | b'D' => {
+                slot += 2;
+                i += 1;
+            }
+            b'L' => {
+                while *b.get(i)? != b';' {
+                    i += 1;
+                }
+                i += 1;
+                slot += 1;
+            }
+            b'[' => {
+                while *b.get(i)? == b'[' {
+                    i += 1;
+                }
+                if *b.get(i)? == b'L' {
+                    while *b.get(i)? != b';' {
+                        i += 1;
+                    }
+                }
+                i += 1;
+                slot += 1;
+            }
+            _ => {
+                slot += 1;
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// THE unified inline splice. Relocates a (possibly branchy) host `inline fun` body into the caller,
+/// replacing each zero-arg lambda-parameter `Function0.invoke` site with that lambda's pre-built body.
+/// Subsumes the special cases: no lambdas + no branches → a single fall-through segment (like
+/// [`splice_branchless`]); branches + no lambdas → [`splice_branchy`]; one lambda + no branches →
+/// [`branchless_lambda_segments`]. The caller emits the non-lambda arguments first (empty operand-stack
+/// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
+/// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
+pub fn splice_unified(
+    body: &MethodCode,
+    descriptor: &str,
+    base: u16,
+    lambdas: &[LambdaSplice],
+    cw: &mut ClassWriter,
+) -> Option<BranchySplice> {
+    if body.has_handlers || is_reified_inline(body) {
+        return None;
+    }
+    let ret = ret_vtype(descriptor, cw)?;
+    let offsets_of_param = param_offsets(descriptor)?;
+    let mut insns = disassemble(&body.code)?;
+    // `assert` is a codegen INTRINSIC, not a normal inline: kotlinc guards it on a synthetic per-class
+    // `$assertionsDisabled` field (or elides it per `-Xassertions`/`ASSERTIONS_MODE`), and when disabled
+    // does NOT even evaluate the argument. Splicing its library body (which reads `kotlin/_Assertions.
+    // ENABLED`) reproduces neither — refuse a body that READS such a field (this method, not the whole
+    // class pool, which `require`/`check` share with `assert`), leaving the call unresolved (skip).
+    if insns.iter().any(|i| {
+        let Insn::Plain { op: 0xb2, operands } = i else {
+            return false;
+        }; // getstatic
+        let Some(idx) = operands
+            .first()
+            .zip(operands.get(1))
+            .map(|(a, b)| (*a as u16) << 8 | *b as u16)
+        else {
+            return false;
+        };
+        matches!(body.source_cp.get(idx as usize), Some(C::Fieldref(ci, _))
+            if class_name(&body.source_cp, *ci).is_some_and(|n| n.contains("_Assertions")))
+    }) {
+        return None;
+    }
+    let old_off = old_offsets(&body.code)?;
+    // Decode the host frames against the ORIGINAL body, keyed by old instruction index. A reference
+    // parameter is `Top` in frame0 (its real type is unmodeled), so EVERY reference parameter must be a
+    // spliced-away lambda (a dead slot) — otherwise a frame that keeps it live would be wrong; bail.
+    let host_frames: Vec<(usize, Frame)> = match body.stackmap.as_ref() {
+        Some(sm) => {
+            let frame0 = param_vtypes_full(descriptor)?;
+            for (pi, v) in frame0.iter().enumerate() {
+                if *v == VType::Top && !lambdas.iter().any(|l| l.param_index == pi) {
+                    return None; // a non-lambda reference parameter — can't model its frame type
+                }
+            }
+            decode_stackmap(sm, frame0)?
+                .into_iter()
+                .map(|f| old_off.iter().position(|&o| o == f.offset).map(|i| (i, f)))
+                .collect::<Option<Vec<_>>>()?
+        }
+        None => Vec::new(),
+    };
+
+    // Collect edits over the host instruction list (resolved against the SOURCE pool, BEFORE relocation
+    // rewrites the indices), sorted by start index, non-overlapping:
+    //  • delete each entry `checkNotNullParameter`/`…ExpressionValue` triplet (aload/ldc/invokestatic);
+    //  • replace each lambda's `aload <slot>; invokeinterface Function0.invoke` with its body.
+    struct Edit {
+        at: usize,
+        len: usize,
+        repl: Vec<Insn>,
+    }
+    let mut edits: Vec<Edit> = Vec::new();
+    for (i, insn) in insns.iter().enumerate() {
+        if let Insn::Plain { op: 0xb8, operands } = insn {
+            if operands.len() == 2 {
+                let idx = (operands[0] as u16) << 8 | operands[1] as u16;
+                if let Some(("kotlin/jvm/internal/Intrinsics", n)) =
+                    methodref_target(&body.source_cp, idx)
+                {
+                    if (n == "checkNotNullParameter" || n == "checkNotNullExpressionValue")
+                        && i >= 2
+                    {
+                        edits.push(Edit {
+                            at: i - 2,
+                            len: 3,
+                            repl: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for lam in lambdas {
+        let orig_slot = *offsets_of_param.get(lam.param_index)?;
+        // The invoke must be immediately preceded by `aload <orig_slot>` (a zero-arg `Function0.invoke`).
+        let site = insns.iter().enumerate().find_map(|(i, insn)| {
+            let Insn::Plain { op: 0xb9, operands } = insn else {
+                return None;
+            };
+            let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+            let (cls, name) = methodref_target(&body.source_cp, idx)?;
+            if name == "invoke"
+                && cls.starts_with("kotlin/jvm/functions/Function")
+                && i >= 1
+                && is_aload_of(&insns[i - 1], orig_slot)
+            {
+                Some(i)
+            } else {
+                None
+            }
+        })?;
+        edits.push(Edit {
+            at: site - 1,
+            len: 2,
+            repl: lam.body.clone(),
+        });
+    }
+    edits.sort_by_key(|e| e.at);
+
+    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    shift_locals(&mut insns, base)?;
+    redirect_returns(&mut insns); // returns → goto (target = old insns.len() = the join)
+                                  // Reject overlapping edits (shouldn't happen for the shapes above).
+    for w in edits.windows(2) {
+        if w[0].at + w[0].len > w[1].at {
+            return None;
+        }
+    }
+
+    // Pass 1: old index → new index (consumed indices collapse to their replacement's start).
+    let mut old2new = vec![0usize; insns.len() + 1];
+    {
+        let mut pos = 0usize;
+        let mut i = 0usize;
+        let mut e = 0usize;
+        while i < insns.len() {
+            if e < edits.len() && edits[e].at == i {
+                for k in 0..edits[e].len {
+                    old2new[i + k] = pos;
+                }
+                pos += edits[e].repl.len();
+                i += edits[e].len;
+                e += 1;
+            } else {
+                old2new[i] = pos;
+                pos += 1;
+                i += 1;
+            }
+        }
+        old2new[insns.len()] = pos;
+    }
+    // Pass 2: build the merged list, remapping every host branch target through `old2new`. Replacement
+    // (lambda) instructions are branchless, so they carry no targets to remap.
+    let mut merged: Vec<Insn> = Vec::new();
+    {
+        let mut i = 0usize;
+        let mut e = 0usize;
+        while i < insns.len() {
+            if e < edits.len() && edits[e].at == i {
+                merged.extend(edits[e].repl.iter().cloned());
+                i += edits[e].len;
+                e += 1;
+            } else {
+                let mut insn = insns[i].clone();
+                match &mut insn {
+                    Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
+                        *target = old2new[*target]
+                    }
+                    Insn::TableSwitch {
+                        default, targets, ..
+                    } => {
+                        *default = old2new[*default];
+                        for t in targets {
+                            *t = old2new[*t];
+                        }
+                    }
+                    Insn::LookupSwitch { default, pairs } => {
+                        *default = old2new[*default];
+                        for (_, t) in pairs {
+                            *t = old2new[*t];
+                        }
+                    }
+                    Insn::Plain { .. } => {}
+                }
+                merged.push(insn);
+                i += 1;
+            }
+        }
+    }
+
+    // Prologue: store each NON-lambda argument (already on the stack, top = last) into its slot.
+    let stores = param_store_ops(descriptor, base)?;
+    let lambda_slots: std::collections::HashSet<u16> = lambdas
+        .iter()
+        .filter_map(|l| offsets_of_param.get(l.param_index).map(|o| base + o))
+        .collect();
+    let prologue: Vec<Insn> = stores
+        .iter()
+        .rev()
+        .filter(|(slot, _)| !lambda_slots.contains(slot))
+        .map(|&(slot, op)| local_load_store(op, slot))
+        .collect();
+    let p = prologue.len();
+    shift_targets(&mut merged, p);
+    let mut final_insns = prologue;
+    final_insns.extend(merged);
+    let offs = insn_offsets(&final_insns);
+
+    // Relocate the host frames: remap old index → new (+prologue), drop each spliced-away lambda slot
+    // (its local is now dead → `Top`), and relocate the verification types into `cw`.
+    let lambda_entry: std::collections::HashSet<usize> =
+        lambdas.iter().map(|l| l.param_index).collect();
+    let mut frames = Vec::with_capacity(host_frames.len() + 1);
+    for (old_idx, f) in &host_frames {
+        let new_idx = old2new[*old_idx] + p;
+        let locals = f
+            .locals
+            .iter()
+            .enumerate()
+            .map(|(k, v)| {
+                if lambda_entry.contains(&k) {
+                    Some(VType::Top) // the lambda param is spliced away — its slot is dead
+                } else {
+                    relocate_vtype(v, &body.source_cp, cw)
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let stack = f
+            .stack
+            .iter()
+            .map(|v| relocate_vtype(v, &body.source_cp, cw))
+            .collect::<Option<Vec<_>>>()?;
+        frames.push((offs[new_idx], locals, stack));
+    }
+    Some(BranchySplice {
+        bytes: assemble(&final_insns),
+        frames,
+        join_stack: ret.into_iter().collect(),
+    })
+}
+
 pub fn splice(
     body: &MethodCode,
     descriptor: &str,

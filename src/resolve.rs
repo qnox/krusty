@@ -1311,8 +1311,13 @@ pub fn expr_uses_name_pub(file: &File, e: ExprId, name: &str) -> bool {
 
 fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&str>) -> bool {
     match file.stmt(s) {
-        // `name++` references `name`; a local function is a separate scope (stop).
+        // `name++`/`name = …` reference `name` (a write-only capture still binds it); a local function
+        // is a separate scope (stop). The assigned `value` is still visited via the fall-through below
+        // for `Assign`, so a `name = name + 1` is covered too.
         Stmt::IncDec { name, .. } => names.contains(name.as_str()),
+        Stmt::Assign { name, value } => {
+            names.contains(name.as_str()) || expr_refs_param(file, *value, names)
+        }
         Stmt::LocalFun(_) => false,
         _ => file.any_child_stmt(s, &mut |c| expr_refs_param(file, c, names)),
     }
@@ -5779,6 +5784,15 @@ impl<'a> Checker<'a> {
                             .toplevel_lambda_param_types(&fname, partial)
                     })
                     .or_else(|| user_generic.clone());
+                // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
+                // argument (or the file is skipped), so a mutable capture is an inline capture — type the
+                // lambda body with mutation allowed (don't `Ref`-box the captured var).
+                let toplevel_must_inline = self.lookup(&fname).is_none()
+                    && !self.syms.funs.contains_key(&fname)
+                    && args
+                        .iter()
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                    && self.syms.libraries.toplevel_has_must_inline(&fname);
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -5800,6 +5814,22 @@ impl<'a> Checker<'a> {
                             {
                                 return self.check_lambda_with_types(a, &pts[i]);
                             }
+                        }
+                        // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):
+                        // type its body with mutation allowed (the lambda is spliced, so a mutable capture
+                        // is an inline capture, not a `Ref`). After the `repeat`/`pts` branches so those win.
+                        if toplevel_must_inline && matches!(self.file.expr(a), Expr::Lambda { .. })
+                        {
+                            let pt = toplevel_lambda_pts
+                                .as_ref()
+                                .and_then(|pts| pts.get(i))
+                                .cloned()
+                                .unwrap_or_default();
+                            let prev = self.allow_lambda_mutation;
+                            self.allow_lambda_mutation = true;
+                            let t = self.check_lambda_with_types(a, &pt);
+                            self.allow_lambda_mutation = prev;
+                            return t;
                         }
                         // Reuse the already-computed non-lambda argument type (avoid re-typing).
                         if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {

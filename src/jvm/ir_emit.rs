@@ -1447,6 +1447,135 @@ impl<'a> Emitter<'a> {
         true
     }
 
+    /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
+    /// BRANCHY host `inline fun` body, replacing each zero-arg lambda-parameter `Function0.invoke` site
+    /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
+    /// where the lambda runs only on a branch. v1: zero-arg (Function0) lambdas with branchless bodies,
+    /// at an empty operand-stack baseline. Returns `false` (caller falls back / skips) on any other shape.
+    fn try_inline_unified(
+        &mut self,
+        descriptor: &str,
+        args: &[u32],
+        body: &crate::jvm::classreader::MethodCode,
+        base: u16,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        // Branchy frames carry no operand-stack prefix → an empty baseline is required.
+        if code.stack_height() != 0 {
+            return false;
+        }
+        let Some(params) = parse_descriptor_params(descriptor) else {
+            return false;
+        };
+        if params.len() != args.len() {
+            return false;
+        }
+        let top_local = base + body.max_locals;
+        self.next_slot = self.next_slot.max(top_local);
+        // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack).
+        let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
+        for (i, &a) in args.iter().enumerate() {
+            let IrExpr::Lambda {
+                impl_fn,
+                arity,
+                captures,
+                inline_body,
+                ..
+            } = self.ir.expr(a).clone()
+            else {
+                continue;
+            };
+            let Some(inline_body) = inline_body else {
+                return false;
+            };
+            if arity != 0 {
+                return false; // v1: zero-arg (Function0) lambdas only
+            }
+            let impl_f = &self.ir.functions[impl_fn as usize];
+            if impl_f.params.len() != captures.len() {
+                return false; // arity 0 ⇒ all impl params are captures
+            }
+            let cap_tys: Vec<Ty> = impl_f.params.iter().map(ir_ty_to_jvm).collect();
+            let impl_ret = ir_ty_to_jvm(&impl_f.ret);
+            // Each capture binds to the caller's actual slot (a mutable capture writes through).
+            let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
+            for (k, &cap) in captures.iter().enumerate() {
+                let IrExpr::GetValue(v) = self.ir.expr(cap) else {
+                    return false;
+                };
+                let Some(&(slot, _)) = self.slots.get(v) else {
+                    return false;
+                };
+                cap_slots.push((slot, cap_tys[k]));
+            }
+            // Emit the lambda body into a scratch builder, then box its result to `Object` (matching the
+            // replaced `invoke`'s `Object` result). A branchy lambda body (frames) isn't modeled yet.
+            let mut scratch = CodeBuilder::new(self.next_slot);
+            self.emit_fn_body_inline(inline_body, &cap_slots, &mut scratch);
+            if impl_ret.is_primitive() {
+                box_prim_free(self.cw, &mut scratch, impl_ret);
+            }
+            if scratch.needs_stackmap {
+                return false; // v1: branchless lambda body
+            }
+            let Some(lam_insns) = crate::jvm::inline::disassemble(&scratch.bytes) else {
+                return false;
+            };
+            if code.max_locals < scratch.max_locals {
+                code.max_locals = scratch.max_locals;
+            }
+            self.next_slot = self.next_slot.max(scratch.max_locals);
+            lam_splices.push(crate::jvm::inline::LambdaSplice {
+                param_index: i,
+                body: lam_insns,
+            });
+        }
+        if lam_splices.is_empty() {
+            return false; // no lambda argument — not this path
+        }
+        let Some(bs) =
+            crate::jvm::inline::splice_unified(body, descriptor, base, &lam_splices, self.cw)
+        else {
+            return false;
+        };
+        // Emit each NON-lambda argument (the empty-baseline operands the host prologue stores).
+        let mut arg_words = 0i32;
+        for (i, &a) in args.iter().enumerate() {
+            if matches!(self.ir.expr(a), IrExpr::Lambda { .. }) {
+                continue;
+            }
+            self.emit_value(a, code);
+            let at = self.value_ty(a);
+            if params[i].is_reference() && at.is_primitive() {
+                box_prim_free(self.cw, code, at);
+            }
+            arg_words += slot_words(params[i]) as i32;
+        }
+        // Bind the relocated host frames (caller locals + body locals), then splice, then the join frame.
+        let splice_start = code.bytes.len();
+        let prefix = self.verif_locals_upto(base);
+        for (rel, body_locals, stack) in &bs.frames {
+            let mut locals = prefix.clone();
+            locals.extend(body_locals.iter().map(vtype_to_verif));
+            let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
+            let l = code.new_label();
+            code.bind_at(l, splice_start + rel);
+            code.add_frame_if_new(l, locals, st);
+        }
+        code.set_needs_stackmap();
+        let ret_words = if descriptor.ends_with(")V") {
+            0
+        } else {
+            slot_words(ty_from_descriptor_ret(descriptor)) as i32
+        };
+        code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+        let join = code.new_label();
+        code.bind(join);
+        let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
+        code.add_frame_if_new(join, prefix, join_stack);
+        true
+    }
+
     /// Append a pre-relocated, branchless instruction segment (from `branchless_lambda_segments`) as raw
     /// bytes, reserving `body_stack` of headroom and setting the resulting stack height to `result_slots`.
     fn append_segment(
@@ -1492,6 +1621,11 @@ impl<'a> Emitter<'a> {
             .enumerate()
             .find_map(|(i, &a)| matches!(self.ir.expr(a), IrExpr::Lambda { .. }).then_some((i, a)))
         {
+            // The unified host+lambda splice handles a BRANCHY host (`require(c){m}`); the older
+            // branchless segment splice handles the common `let`/`also`/… shape. Try unified first.
+            if self.try_inline_unified(descriptor, args, &body, base, code) {
+                return true;
+            }
             return self
                 .try_inline_lambda_call(descriptor, args, lam_idx, lam_expr, &body, base, code);
         }
