@@ -313,6 +313,13 @@ pub trait LibrarySet {
     ) -> Option<LibraryCallable> {
         None
     }
+
+    /// Whether ANY extension function named `name` on `receiver` (or a supertype) is `inline`. The lambda
+    /// argument of such a call is spliced at the call site, so a mutable variable it captures is an INLINE
+    /// capture (no closure) — the checker then must not `Ref`-box that variable. `false` for non-JVM.
+    fn extension_is_inline(&self, _receiver: Ty, _name: &str) -> bool {
+        false
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

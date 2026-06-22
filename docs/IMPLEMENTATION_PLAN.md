@@ -3654,6 +3654,20 @@ bodies exist only as jar bytecode):
      and fail verification. The splice uses `inline_body`; the dead method is skipped. A labeled `return@x`
      (local) stays emittable. TDD e2e `ScopeRun`. Gate **1343/0**.
 
+## Phase 470 — de-hardcode the `let`/`also` checker special-case  ✅
+- Removed the `matches!(name, "let" | "also")` hardcode in the member-call checker. `let`/`also` are ordinary
+  generic extension inline fns (`T.let((T) -> R): R`, `T.also((T) -> Unit): T`) — the same shape as `takeIf`,
+  which already types through the generic extension-resolution path. They now type that way too (the lambda's
+  `it` binds to the receiver type, the return recovered from the signature: `R` for `let`, the receiver for
+  `also`), no name match. (The lowerer `let`/`also` *fallback* desugar remains for the this-capturing-lambda
+  splice gap; the checker no longer name-matches them.)
+- Also replaced the `matches!(name, "forEach" | "forEachIndexed")` name-match deciding whether a mutable
+  variable captured by an extension lambda may be mutated (inline capture vs `Ref` box) with a generic
+  `LibrarySet::extension_is_inline(receiver, name)` query — ANY inline extension's lambda is spliced, so its
+  mutable captures are inline captures. De-hardcodes `forEach` AND fixes branchy `also` (`x.also { c = if … }`
+  mutates `c`; without mutation-allowed the `let`/`also` checker removal would have `Ref`-boxed `c` against the
+  inlined call → VerifyError). TDD e2e `ScopeFnsBranchy`. Gate **1343/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

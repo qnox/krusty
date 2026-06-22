@@ -5200,25 +5200,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Inlined scope functions `recv.let { … }` / `recv.also { … }`: bind the lambda's
-                // parameter (default `it`) to the receiver; `let` yields the body, `also` the receiver.
-                if matches!(name.as_str(), "let" | "also") && args.len() == 1 {
-                    if matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
-                        let rt = self.expr(receiver);
-                        // Type the lambda via the shared path so its `Ty::Fun` is RECORDED in `TypeInfo`
-                        // (the lowerer needs it to route the call to the bytecode inliner). Inlined ⇒ a
-                        // mutable capture is fine.
-                        let prev = self.allow_lambda_mutation;
-                        self.allow_lambda_mutation = true;
-                        let lam_ty = self.check_lambda_with_types(args[0], &[rt]);
-                        self.allow_lambda_mutation = prev;
-                        let bt = match lam_ty {
-                            Ty::Fun(s) => s.ret,
-                            _ => Ty::Unit,
-                        };
-                        return if name == "let" { bt } else { rt };
-                    }
-                }
                 // `recv.run { … }` / `recv.apply { … }`: the lambda body has `recv` as its implicit
                 // receiver (`this`); `run` yields the body, `apply` the receiver.
                 if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
@@ -5457,12 +5438,14 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
-                // `recv.forEach { … }` resolving to the stdlib library extension is inlined to a
-                // for-each loop by the backend, so a mutable capture in its lambda is fine (no closure).
-                // Permit it for this call only (the lowering must inline, or bail — never form a closure).
+                // A call to an INLINE extension (`forEach`/`let`/`also`/`apply`/… or any user/stdlib inline
+                // extension) is spliced at the call site, so a mutable variable its lambda captures is an
+                // inline capture (no closure) — permit mutation so the checker doesn't `Ref`-box it. Gated
+                // on the extension actually being inline (a non-inline lambda capture must still be boxed).
+                // Permit for this call only; the lowering must inline (or bail), never form a closure.
                 let prev_allow_mut = self.allow_lambda_mutation;
-                self.allow_lambda_mutation = matches!(name.as_str(), "forEach" | "forEachIndexed")
-                    && ext_lambda_pts.is_some();
+                self.allow_lambda_mutation =
+                    ext_lambda_pts.is_some() && self.syms.libraries.extension_is_inline(rt, &name);
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
