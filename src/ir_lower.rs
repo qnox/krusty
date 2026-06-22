@@ -56,6 +56,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         expr_depth: 0,
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
+        reified_subst: Vec::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -1786,6 +1787,10 @@ pub(crate) struct Lower<'a> {
     /// Names of `inline fun`s currently being expanded — a (self- or mutually-) recursive inline call
     /// would expand forever, so re-entering an active name bails (the file is skipped).
     inline_active: Vec<String>,
+    /// Active reified type-parameter bindings while expanding a `<reified T>` inline fn: `T` → the
+    /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
+    /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
+    reified_subst: Vec<std::collections::HashMap<String, ast::TypeRef>>,
 }
 
 impl<'a> Lower<'a> {
@@ -5135,17 +5140,36 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Substitute a reified type-parameter reference (`is T`/`as T`/`T::class` inside an expanded
+    /// `<reified T>` inline body) with the concrete type bound at the call site. Nullability is the
+    /// union of the reference's and the bound type's. Unchanged when no reified binding is active.
+    fn subst_type_ref(&self, tr: &ast::TypeRef) -> ast::TypeRef {
+        for frame in self.reified_subst.iter().rev() {
+            if let Some(bound) = frame.get(&tr.name) {
+                let mut out = bound.clone();
+                out.nullable = out.nullable || tr.nullable;
+                return out;
+            }
+        }
+        tr.clone()
+    }
+
     /// Expand a call to a user-defined `inline fun`: bind its value parameters to the (once-evaluated)
     /// arguments, register its lambda arguments for inlining at their invoke sites, then lower its body
     /// in place — exactly what kotlinc's inliner does. Returns `None` (the file bails, never miscompiles)
-    /// for anything outside the supported subset.
-    fn lower_inline_fn_call(&mut self, fname: &str, args: &[AstExprId]) -> Option<u32> {
+    /// for anything outside the supported subset. `call_id` is the call expression (for reified type args).
+    fn lower_inline_fn_call(
+        &mut self,
+        fname: &str,
+        args: &[AstExprId],
+        call_id: u32,
+    ) -> Option<u32> {
         let f = self.top_fun_decl(fname)?.clone();
-        // Subset: a plain top-level inline fn with no extension receiver and no REIFIED type params, and no
-        // default/vararg params. A `return` in the body would be a non-local return once inlined — bail.
-        // Non-reified generic type params are fine: the inline SPECIALIZES them from the actual argument
-        // types (a parameter/lambda declared `T` takes the call's concrete type, not the erased `Any`).
-        if f.receiver.is_some() || !f.reified_type_params.is_empty() {
+        // Subset: a plain top-level inline fn with no extension receiver, no default/vararg params. A
+        // `return` in the body would be a non-local return once inlined — bail. Non-reified generic type
+        // params are SPECIALIZED from the actual argument types; REIFIED type params are bound to the
+        // call's explicit type arguments and substituted into `is T`/`as T`/`T::class` in the body.
+        if f.receiver.is_some() {
             return None;
         }
         if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
@@ -5196,6 +5220,27 @@ impl<'a> Lower<'a> {
         }
         let active_depth = self.inline_active.len();
         self.inline_active.push(fname.to_string());
+        // Bind each reified type parameter to the call's explicit type argument (resolved through any
+        // enclosing reified binding, so nested reified inlines compose). A missing arg (e.g. a purely
+        // inferred reified type) bails — the file skips, never miscompiles.
+        let reif_depth = self.reified_subst.len();
+        if !f.reified_type_params.is_empty() {
+            let targs = self.afile.call_type_args.get(&call_id);
+            let mut map = std::collections::HashMap::new();
+            for (i, tp) in f.type_params.iter().enumerate() {
+                if f.reified_type_params.contains(tp) {
+                    let actual = match targs.and_then(|ts| ts.get(i)) {
+                        Some(a) => self.subst_type_ref(a),
+                        None => {
+                            self.inline_active.truncate(active_depth);
+                            return None;
+                        }
+                    };
+                    map.insert(tp.clone(), actual);
+                }
+            }
+            self.reified_subst.push(map);
+        }
         let depth = self.scope.len();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
@@ -5217,6 +5262,7 @@ impl<'a> Lower<'a> {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
                         self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
                         return None;
                     }
                     // The lambda's parameter types, with the inline fn's type params specialized
@@ -5259,6 +5305,7 @@ impl<'a> Lower<'a> {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
                         self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
                         return None;
                     }
                 };
@@ -5275,6 +5322,7 @@ impl<'a> Lower<'a> {
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
         self.inline_active.truncate(active_depth);
+        self.reified_subst.truncate(reif_depth);
         let body_val = body_val?;
         if stmts.is_empty() {
             Some(body_val)
@@ -6868,6 +6916,8 @@ impl<'a> Lower<'a> {
                 ty,
                 negated,
             } => {
+                // A reified type parameter (`x is T` in a `<reified T>` inline body) → the bound type.
+                let ty = self.subst_type_ref(&ty);
                 // A nullable reference target (`x is A?`): `null` IS an `A?`, but plain `instanceof`
                 // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
                 // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
@@ -7284,6 +7334,8 @@ impl<'a> Lower<'a> {
                 ty,
                 nullable,
             } => {
+                // A reified type parameter (`x as T` in a `<reified T>` inline body) → the bound type.
+                let ty = self.subst_type_ref(&ty);
                 // `x as? T` (safe cast): `{ val t = x; if (t is T) t as T else null }` — `instanceof`
                 // then `checkcast` on the non-null branch, `null` on a mismatch (never throws). The
                 // target must be a reference (a primitive `as? Int` yields the boxed `Int?` wrapper —
@@ -7602,7 +7654,7 @@ impl<'a> Lower<'a> {
                             .get(&fname)
                             .map_or(false, |v| v.iter().any(|s| s.is_inline))
                     {
-                        return self.lower_inline_fn_call(&fname, &args);
+                        return self.lower_inline_fn_call(&fname, &args, e.0);
                     }
                     // `repeat(count) { i -> body }` — the stdlib inline `repeat`, body
                     // `for (i in 0 until times) action(i)`. Inline to a counted loop (the lambda's

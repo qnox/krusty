@@ -3352,6 +3352,20 @@ bodies exist only as jar bytecode):
   (`inline fun pick() = consume { 42 }` → `getstatic …$pick$1.INSTANCE`, 0 invokedynamic in the class)
   and by an instrumented census: 0 INDY / 0 host-state bails across all 7351 corpus files.
 
+## Phase 444 — reified type parameters in inline functions (`is T` / `as T`)  ✅
+- The IR inliner (`lower_inline_fn_call`) previously bailed any `<reified T>` inline fn (file skipped).
+  Now it binds each reified type parameter to the call's explicit type argument (`call_type_args`,
+  resolved through any enclosing reified binding so nested reified inlines compose) and substitutes the
+  bound type into reified type operations in the expanded body. New `reified_subst` stack on `Lower` +
+  `subst_type_ref(&TypeRef)`; applied in the `Expr::Is` and `Expr::As` arms (so `x is T` → `instanceof
+  ActualType`, `x as T` → `checkcast ActualType`). A reified arg that isn't an explicit type argument
+  (purely inferred) still bails — never a miscompile.
+- TDD e2e `ReifiedInline`: `isT<String>`/`isT<Int>`/`isT<Number>`, `asT<String>`, and a reified type
+  used inside a nested inline-HOF lambda (`xs.count { it is T }`). Gate **1313/0** — no regression, no
+  miscompile (removing the bail exposed no unhandled reified op in the corpus).
+- NEXT for full reified: `T::class` (parses as `CallableRef{name:"class"}`), `arrayOfNulls<T>` /
+  `Array<T>(n){}`, `enumValues<T>()` — substitute the reified element/class type at those sites too.
+
 ---
 
 ### Working agreements
