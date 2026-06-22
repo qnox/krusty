@@ -1485,7 +1485,13 @@ impl<'a> Emitter<'a> {
         else {
             return false;
         };
-        let needs_frames = probe.join_required || lam_frames.iter().any(|f| !f.is_empty());
+        // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
+        // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
+        // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
+        // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
+        let needs_frames = probe.join_required
+            || !probe.frames.is_empty()
+            || lam_frames.iter().any(|f| !f.is_empty());
         if needs_frames && code.stack_height() != 0 {
             return false; // frames carry no stack prefix → need an empty baseline
         }
@@ -2966,11 +2972,40 @@ impl<'a> Emitter<'a> {
                     || self.records_frame(*lhs) || self.records_frame(*rhs)
             }
             IrExpr::Call {
+                callee,
                 dispatch_receiver,
                 args,
-                ..
             } => {
-                dispatch_receiver.map_or(false, |r| self.records_frame(r))
+                // An inline call whose SPLICED body records StackMapTable frames — a branchy lambda body,
+                // or a branchy host body (a loop HOF like `map`/`filter`, or an `@InlineOnly` `require`/
+                // `check`) — records frames at THIS position. So a parent operand sequence must spill the
+                // earlier operands to temps (keeping the splice at an empty baseline), exactly as for
+                // `when`/`try`. Without this, an inline HOF used as a non-first operand
+                // (`sb.append(xs.map { … }))`) would splice at a non-empty baseline and bail to a real call.
+                let splice_records = match callee {
+                    Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline,
+                        must_inline,
+                    } if *inline || *must_inline => {
+                        args.iter().any(|&a| {
+                            matches!(self.ir.expr(a),
+                                IrExpr::Lambda { inline_body: Some(b), .. } if self.records_frame(*b))
+                        }) || self
+                            .bodies
+                            .body(owner, name, descriptor)
+                            .and_then(|b| crate::jvm::inline::disassemble(&b.code))
+                            .is_some_and(|ins| {
+                                ins.iter()
+                                    .any(|i| !matches!(i, crate::jvm::inline::Insn::Plain { .. }))
+                            })
+                    }
+                    _ => false,
+                };
+                splice_records
+                    || dispatch_receiver.map_or(false, |r| self.records_frame(r))
                     || args.iter().any(|&a| self.records_frame(a))
             }
             IrExpr::MethodCall { receiver, args, .. } => {
