@@ -3561,6 +3561,18 @@ bodies exist only as jar bytecode):
   same inline `apply1`). Gate **1330/0** (no regression; corpus callable-ref files have other blockers, so the
   construct is fixed without moving the count).
 
+## Phase 461 — invoke a call result directly (`mk()()`) + named-arg eval-order guard  ✅ (+4 → 1334)
+- **`mk()()` / `getFn()(x)`:** the callee of a call can now be an arbitrary expression that evaluates to a
+  function value (not just a `Name`/`Member`). The callee-match catch-all lowers it to the `FunctionN` and
+  invokes via `FunctionN.invoke` (same path as a function-typed local `f(args)`). Works for a plain or an
+  inline producer. TDD e2e `InvokeCallResult`.
+- **Invariant guard (named-argument evaluation order):** the IIFE fix unblocked the `argumentOrder/*` tests,
+  exposing a pre-existing latent bug — `arg_into_params` lowers arguments in SLOT order, but Kotlin evaluates
+  in SOURCE order, so a reordering named call (`f(b = …(), a = …())`) ran side effects out of order. The
+  helper now detects a non-monotonic placement and skips when any reordered argument may have side effects
+  (proper source-order temp-spilling is future work); pure reordered args (const/name reads) are
+  order-independent and still proceed. Restores **1334/0** (was momentarily FAIL: 3).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

@@ -84,6 +84,23 @@ fun box(): String {
 }
 "#,
     ),
+    // Invoking the result of a call directly (`mk()()`, `mk()(x)`) — the callee is itself a call that
+    // returns a function value, invoked through `FunctionN.invoke`. Works for both a plain and an inline
+    // producer.
+    (
+        "InvokeCallResult",
+        r#"
+fun mk(): () -> Int = { 42 }
+inline fun mkI(): () -> Int = { 7 }
+fun add(): (Int) -> Int = { x: Int -> x + 1 }
+fun box(): String {
+    if (mk()() != 42) return "f0"
+    if (mkI()() != 7) return "f1"
+    if (add()(5) != 6) return "f2"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
