@@ -101,9 +101,7 @@ fn builtins_string_members_from_metadata() {
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
     let members = krusty::jvm::metadata::builtins_class_members(&bytes, "kotlin/String");
     let find = |name: &str| members.iter().find(|m| m.name == name);
-    // Functions carry full signatures in the builtins metadata: `get(Int): Char` (the `s[i]` operator),
-    // `plus(Any?): String`, `compareTo(String): Int`. (The single `length` PROPERTY message in this
-    // metadata version holds only flags — no name/type — so properties are resolved separately.)
+    // Functions: `get(Int): Char` (the `s[i]` operator), `plus(Any?): String`, `compareTo(String): Int`.
     let get = find("get").expect("String.get");
     assert_eq!(get.params, vec!["kotlin/Int".to_string()]);
     assert_eq!(get.ret, "kotlin/Char");
@@ -112,6 +110,8 @@ fn builtins_string_members_from_metadata() {
         find("compareTo").expect("String.compareTo").ret,
         "kotlin/Int"
     );
+    // The `length: Int` PROPERTY (Class.property = field 10) also resolves from builtins.
+    assert_eq!(find("length").expect("String.length").ret, "kotlin/Int");
 }
 
 /// The Classpath subtype helpers built on that hierarchy: `MutableList <: MutableCollection`, but the
