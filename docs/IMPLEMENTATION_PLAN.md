@@ -3453,6 +3453,19 @@ bodies exist only as jar bytecode):
 - TDD e2e `InlineExtension` extended with `String.withLen { it.length }` and `<T> T.alsoLen { it.length }`.
   Gate **1314/0**, parity 16/0.
 
+## Phase 451 — `arrayOfNulls<T>(n)` + primitive-element collection boxing  ✅ (+3 → 1317)
+- **`arrayOfNulls<T>(n): Array<T?>`** now resolves (checker `check_call`): the element is the explicit
+  reference type argument; codegen allocates `new T[n]` (`b_arr_nulls`, element from the phase-446
+  `synth_array_elem`). Composes with reified — `inline fun <reified T> nulls() = arrayOfNulls<T>(n)`.
+- **Cross-cutting fix (`ir_lower` classpath instance-call args):** `coll.add(0)` on a PRIMITIVE-element
+  collection (`ArrayList<Byte>`/`<Long>`/…) boxed the `Int` literal as `Integer`, but iterating the
+  element (`checkcast Byte`/`Long`) then threw `ClassCastException`. Now, when an arg flows into an
+  erased `Any`/`Object` parameter and the receiver's element type is a primitive that differs from the
+  arg's type, the arg is coerced to the element primitive (`i2b`/`i2l`/…) and boxed as THAT wrapper
+  (`Byte.valueOf`/`Long.valueOf`). Low blast radius (only fires for primitive-element collections with a
+  type-mismatched arg). Found via `continueInFor.kt`/`continueToLabelInFor.kt` (unblocked by arrayOfNulls).
+- TDD e2e `ArrayOfNullsAndPrimColl`. Gate **1317/0** (+3), parity 16/0.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

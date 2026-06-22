@@ -840,6 +840,34 @@ fun box(): String {
 }
 "#,
     ),
+    // `arrayOfNulls<T>(n)` (incl. reified) + primitive-element collection boxing: `ArrayList<Byte>().add(0)`
+    // must box the `Int` literal as the element wrapper (`Byte`/`Long`), not `Integer`, or iterating the
+    // element (`checkcast Byte`) throws.
+    (
+        "ArrayOfNullsAndPrimColl",
+        r#"
+inline fun <reified T> nulls(n: Int): Array<T?> = arrayOfNulls<T>(n)
+fun box(): String {
+    val a = arrayOfNulls<String>(3)
+    a[0] = "x"
+    if (a.size != 3 || a[0] != "x" || a[1] != null) return "f0"
+    val r = nulls<String>(2)
+    r[0] = "z"
+    if (r.size != 2 || r[0] != "z") return "f1"
+    val bs = ArrayList<Byte>()
+    bs.add(0); bs.add(0); bs.add(0)
+    var cb = 0
+    for (i in bs) cb++
+    if (cb != 3) return "f2"
+    val ls = ArrayList<Long>()
+    ls.add(0); ls.add(0)
+    var cl = 0L
+    for (i in ls) cl += i
+    if (cl != 0L) return "f3"
+    return "OK"
+}
+"#,
+    ),
     // Inline functions whose body has `return` (early/conditional/loop returns). The IR inliner wraps
     // the body in `do { … } while(false)` and rewrites each `return x` to `result = x; break@end`, so the
     // function return becomes a jump to the body's end — including a `return` out of a `for` loop.

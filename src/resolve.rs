@@ -5990,6 +5990,27 @@ impl<'a> Checker<'a> {
                     // user-defined function of the same name shadows them (as in kotlinc), so only treat
                     // the name as the intrinsic when it isn't a user-declared top-level function.
                     if !self.syms.funs.contains_key(&fname) {
+                        // `arrayOfNulls<T>(n): Array<T?>` — a reified intrinsic; the element is the
+                        // explicit type argument (a reference; a primitive would need a boxed `Integer[]`,
+                        // not modeled → fall through to skip). Codegen allocates `new T[n]` (`b_arr_nulls`).
+                        if fname == "arrayOfNulls" && args.len() == 1 {
+                            self.expect_assignable(
+                                Ty::Int,
+                                arg_tys[0],
+                                self.span(args[0]),
+                                "array size",
+                            );
+                            let elem = self
+                                .file
+                                .call_type_args
+                                .get(&call.0)
+                                .and_then(|ts| ts.first())
+                                .map(|r| self.resolve_ty(r))
+                                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                            if elem.is_reference() {
+                                return Ty::array(elem);
+                            }
+                        }
                         if let Some(t) = self.check_array_builtin(&fname, args, &arg_tys, span) {
                             return t;
                         }
