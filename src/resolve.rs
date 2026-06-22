@@ -5839,13 +5839,8 @@ impl<'a> Checker<'a> {
                     self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
                     return c.ret;
                 }
-                // A non-public (`@InlineOnly`) extension scope fn (`takeIf`/`takeUnless`/…): no callable
-                // method, but the backend SPLICES it. The lambda was already typed (via `ext_lambda_pts`);
-                // recover the (receiver-bound) logical return. Don't record an `ext_call` — it's inlined.
-                // (A NO-lambda `@InlineOnly` extension, e.g. `Char.isDigit()`, is NOT accepted here: many
-                // such bodies — unsigned conversions/ranges, the `let`/`apply` fallback with a non-literal
-                // function arg — splice to wrong values or an `IllegalAccessError`, so widening this gate
-                // miscompiles. A correct no-lambda splice needs precise return-type/value-class handling.)
+                // A non-public (`@InlineOnly`) extension the backend SPLICES (no callable method to call):
+                // a lambda-bearing scope fn (`takeIf`/`takeUnless`/…), recovering the receiver-bound return.
                 if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
                     if let Some(c) = self
                         .syms
@@ -5853,6 +5848,45 @@ impl<'a> Checker<'a> {
                         .resolve_scope_inline(&name, rt, &arg_tys)
                     {
                         return c.ret;
+                    }
+                }
+                // A NO-lambda `@InlineOnly` extension on a NON-UNSIGNED PRIMITIVE receiver returning a
+                // primitive/`String` — `Char.isDigit()`/`isLetter()`/`uppercaseChar()` (inline
+                // `Character.isDigit(this)`/`toUpperCase(this)`). Restricted to this shape because the
+                // generic no-lambda splice is value-correct only for these simple bodies: a function-typed
+                // parameter (`let`/`apply` fallback) → `IllegalAccessError`, and an unsigned/value-class or
+                // multi-step reference body (`StringBuilder.appendLine`) → wrong values. Gated further on
+                // `can_inline_call` (the body is actually spliceable), so the checker accepts only what the
+                // emitter splices correctly. No name match — the receiver/return SHAPE selects it.
+                if rt.is_primitive()
+                    && !rt.is_unsigned()
+                    && (arg_tys.is_empty()
+                        || arg_tys.iter().all(|a| a.is_primitive() && !a.is_unsigned()))
+                {
+                    if let Some(c) = self
+                        .syms
+                        .libraries
+                        .resolve_scope_inline(&name, rt, &arg_tys)
+                    {
+                        // The KOTLIN return must be a real primitive/`String` — not an unsigned type the
+                        // JVM signature erased to a signed primitive (`toUShort(): UShort` reads back as
+                        // `Short`), which would splice to a wrong value (krusty's `Ty` can't model it).
+                        let ret_ok = ((c.ret.is_primitive() && !c.ret.is_unsigned())
+                            || c.ret == Ty::String)
+                            && !self
+                                .syms
+                                .libraries
+                                .metadata_return_unsigned(&c.owner, &c.name);
+                        let no_fun = !c.descriptor.contains("Lkotlin/jvm/functions/Function");
+                        if ret_ok
+                            && no_fun
+                            && self
+                                .syms
+                                .libraries
+                                .can_inline_call(&c.owner, &c.name, &c.descriptor)
+                        {
+                            return c.ret;
+                        }
                     }
                 }
                 // User-defined extension function in this file (invokestatic on the file facade).

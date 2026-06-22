@@ -327,6 +327,15 @@ pub trait LibrarySet {
     fn toplevel_is_inline(&self, _name: &str) -> bool {
         false
     }
+
+    /// Whether the Kotlin return type of `owner.name` is an unsigned type (`UByte`/`UShort`/`UInt`/
+    /// `ULong`), from `@Metadata`. The JVM signature erases these to a signed primitive, so krusty's `Ty`
+    /// can't tell `Int.toUShort(): UShort` (the value `40000`) from a signed `Short` (`-25536`). Used to
+    /// REJECT an `@InlineOnly` extension with an unsigned result rather than splice it to a wrong value
+    /// (krusty's unsigned support is incomplete). `false` for non-JVM platforms / non-unsigned returns.
+    fn metadata_return_unsigned(&self, _owner: &str, _name: &str) -> bool {
+        false
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

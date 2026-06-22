@@ -291,6 +291,26 @@ fun box(): String {
 }
 "#,
     ),
+    // No-lambda stdlib `@InlineOnly` extensions on a primitive receiver — `Char.isDigit()`/`isLetter()`/
+    // `uppercaseChar()`/… inline their real body (`Character.isDigit(this)`/`toUpperCase(this)`). Accepted
+    // only for a non-unsigned primitive receiver + primitive/`String` return (an unsigned return like
+    // `toUShort(): UShort` is rejected — krusty can't model it, so it skips rather than miscompiling).
+    (
+        "PrimitiveInlineExtension",
+        r#"
+fun box(): String {
+    if (!'7'.isDigit()) return "f0"
+    if ('a'.isDigit()) return "f1"
+    if (!'a'.isLetter()) return "f2"
+    if (!' '.isWhitespace()) return "f3"
+    if ('a'.uppercaseChar() != 'A') return "f4"
+    if ('A'.lowercaseChar() != 'a') return "f5"
+    val up = "aBc".map { it.uppercaseChar() }.joinToString("")
+    if (up != "ABC") return "f6: $up"
+    return "OK"
+}
+"#,
+    ),
     // Safe-call scope functions `s?.let { it… }` / `?.run` / `?.also` / `?.apply` — the most idiomatic
     // null-handling form: when the receiver is non-null run the scope fn (binding `it`/`this`), else the
     // whole expression is `null`. The trailing lambda attaches to the safe call; `let`/`run` yield the

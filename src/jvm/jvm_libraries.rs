@@ -975,6 +975,13 @@ impl LibrarySet for JvmLibraries {
             .any(|c| self.cp.is_inline_method(&c.owner, &c.name))
     }
 
+    fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
+        matches!(
+            self.cp.metadata_return_type(owner, name).as_deref(),
+            Some("kotlin/UByte" | "kotlin/UShort" | "kotlin/UInt" | "kotlin/ULong")
+        )
+    }
+
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
         self.cp
             .find_top_level(name)
