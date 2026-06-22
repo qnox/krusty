@@ -3573,6 +3573,14 @@ bodies exist only as jar bytecode):
   (proper source-order temp-spilling is future work); pure reordered args (const/name reads) are
   order-independent and still proceed. Restores **1334/0** (was momentarily FAIL: 3).
 
+## Phase 462 — `inline fun` with a trailing `vararg`  ✅
+- The inline expander previously bailed on any `vararg` parameter. It now supports a trailing `vararg` on a
+  plain (non-extension) inline fn whose element isn't a type parameter or function type: the call's trailing
+  arguments are packed into a fresh array (`IrExpr::Vararg`) bound to the parameter — the same form the
+  non-inline call site emits — and the inlined body iterates it. Handles the empty-vararg, fixed+vararg, and
+  primitive/reference-element cases. TDD e2e `InlineVararg` (`sum(1,2,3)`, `sum()`, `join("-","a","b","c")`).
+  Gate **1334/0** (construct fixed; corpus inline-vararg files have other blockers, so the count holds).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

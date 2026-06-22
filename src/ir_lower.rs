@@ -5404,8 +5404,22 @@ impl<'a> Lower<'a> {
             (None, None) => None,
             _ => return None,
         };
-        if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
+        // Defaults aren't modeled. A `vararg` IS supported, but only as the LAST parameter of a plain
+        // (non-extension) inline fn whose element isn't a type parameter or a function type — the trailing
+        // arguments are packed into an array bound to that parameter (kotlinc's form).
+        if f.params.iter().any(|p| p.default.is_some()) {
             return None;
+        }
+        let vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        if f.params.iter().rev().skip(1).any(|p| p.is_vararg) {
+            return None; // a non-last vararg (only reachable with trailing named args) — bail
+        }
+        if vararg {
+            let vp = f.params.last().unwrap();
+            let is_tparam = f.type_params.iter().any(|tp| tp == &vp.ty.name);
+            if recv_ty.is_some() || is_tparam || !vp.ty.fun_params.is_empty() {
+                return None;
+            }
         }
         let body = match f.body {
             FunBody::Expr(e) | FunBody::Block(e) => e,
@@ -5451,7 +5465,21 @@ impl<'a> Lower<'a> {
             };
             (s.params.clone(), s.ret)
         };
-        if sig_params.len() != args.len() || sig_params.len() != pnames.len() {
+        if sig_params.len() != pnames.len() {
+            return None;
+        }
+        // Fixed (non-vararg) parameter count. A vararg call supplies `>= n_fixed` arguments (the rest pack
+        // into the trailing array); a non-vararg call must match exactly.
+        let n_fixed = if vararg {
+            sig_params.len() - 1
+        } else {
+            sig_params.len()
+        };
+        if vararg {
+            if args.len() < n_fixed {
+                return None;
+            }
+        } else if sig_params.len() != args.len() {
             return None;
         }
         // A (self- or mutually-) recursive inline call would expand forever — bail.
@@ -5464,7 +5492,7 @@ impl<'a> Lower<'a> {
         let tparams: std::collections::HashSet<&str> =
             f.type_params.iter().map(String::as_str).collect();
         let mut tbinds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
-        for (i, p) in f.params.iter().enumerate() {
+        for (i, p) in f.params.iter().enumerate().take(n_fixed) {
             if tparams.contains(p.ty.name.as_str())
                 && !matches!(self.afile.expr(args[i]), Expr::Lambda { .. })
             {
@@ -5530,6 +5558,55 @@ impl<'a> Lower<'a> {
             self.scope.push(("this".to_string(), slot, rt));
         }
         for (i, pty) in sig_params.iter().enumerate() {
+            // The trailing `vararg` parameter: pack the remaining arguments into a fresh array bound to it
+            // (a `kotlin/Array`/`IntArray`/… local), exactly as the non-inline call site does. The inlined
+            // body then iterates it normally.
+            if vararg && i == n_fixed {
+                let elem_ty = match pty.array_elem() {
+                    Some(t) => t,
+                    None => {
+                        self.scope.truncate(depth);
+                        self.inline_lambdas.truncate(lam_depth);
+                        self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
+                        return None;
+                    }
+                };
+                let elem_ir = ty_to_ir(elem_ty);
+                let mut elements = Vec::new();
+                for &arg in &args[n_fixed..] {
+                    if is_branchy(self.afile, arg) {
+                        self.scope.truncate(depth);
+                        self.inline_lambdas.truncate(lam_depth);
+                        self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
+                        return None;
+                    }
+                    match self.lower_arg(arg, &elem_ir) {
+                        Some(v) => elements.push(v),
+                        None => {
+                            self.scope.truncate(depth);
+                            self.inline_lambdas.truncate(lam_depth);
+                            self.inline_active.truncate(active_depth);
+                            self.reified_subst.truncate(reif_depth);
+                            return None;
+                        }
+                    }
+                }
+                let arr = self.ir.add_expr(IrExpr::Vararg {
+                    element_type: elem_ir,
+                    elements,
+                });
+                let slot = self.fresh_value();
+                let var = self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty: ty_to_ir(*pty),
+                    init: Some(arr),
+                });
+                stmts.push(var);
+                self.scope.push((pnames[i].clone(), slot, *pty));
+                continue;
+            }
             if let Ty::Fun(fnsig) = pty {
                 // A lambda parameter: require a literal lambda argument with no non-local return.
                 if let Expr::Lambda {
