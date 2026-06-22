@@ -276,6 +276,26 @@ fun box(): String {
 }
 "#,
     ),
+    // A non-local `return` from a lambda passed to a USER `inline fun` (the IR-inliner path). The bare
+    // `return` is non-local — it returns from `box`, not the inline fn — even when the inline fn has its
+    // own `return`.
+    (
+        "UserInlineNonLocalReturn",
+        r#"
+inline fun forEachI(xs: List<Int>, f: (Int) -> Unit) { for (x in xs) f(x) }
+inline fun firstOr(g: () -> Int): Int { val v = g(); return v }
+fun pick(xs: List<Int>): String {
+    forEachI(xs) { if (it == 3) return "found" }
+    return "none"
+}
+fun box(): String {
+    if (pick(listOf(1, 2, 3, 4)) != "found") return "f0"
+    if (pick(listOf(1, 2)) != "none") return "f1"
+    if (firstOr { 41 } != 41) return "f2"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

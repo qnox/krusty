@@ -5994,7 +5994,14 @@ impl<'a> Lower<'a> {
                 value: Some(unit),
             }));
         }
+        // A BARE `return` in the spliced lambda body is NON-LOCAL: it returns from the function enclosing
+        // the lambda literal, NOT from the inline fn whose call is being expanded. Clear the inline-return
+        // stack while lowering the body so such a `return` lowers to the real enclosing-function return
+        // (`cur_ret_ty`), not the inline fn's result-slot break. Restored after (the inline fn's own body,
+        // lowered elsewhere, keeps its frame).
+        let saved_inl_ret = std::mem::take(&mut self.inline_return);
         let body_val = self.expr(lam_body);
+        self.inline_return = saved_inl_ret;
         self.scope.truncate(depth);
         let body_val = body_val?;
         if stmts.is_empty() {
@@ -9935,13 +9942,17 @@ fn body_has_labeled_return(file: &ast::File, e: AstExprId, label: &str) -> bool 
     expr_has(file, e, label)
 }
 
-/// Does `e` contain a `return` the inline-lambda splicer can't model — a bare `return` (non-local) or a
-/// `return@other`? A `return@own_label` (a local return from the lambda being spliced) IS modeled, so it
-/// is not "disallowed". Nested lambdas are not descended into (their returns belong to their own scope).
+/// Does `e` contain a `return` the inline-lambda expander can't model — a `return@other` (labeled to some
+/// OTHER inline fn, not the one being expanded)? A BARE `return` (non-local to the enclosing function) IS
+/// modeled now: `lower_inline_lambda_invoke` clears the inline-return stack while lowering the body, so the
+/// bare `return` targets the real enclosing function's return. A `return@own_label` (local to this lambda)
+/// is also modeled (the `inline_lambda_ret` frame). Nested lambdas keep their own return scope.
 fn body_has_disallowed_return(file: &ast::File, e: AstExprId, own_label: &str) -> bool {
     fn stmt_bad(file: &ast::File, s: ast::StmtId, own: &str) -> bool {
         match file.stmt(s) {
-            Stmt::Return(_, label) => label.as_deref() != Some(own),
+            // `return@other` — labeled to a different inline fn — isn't modeled; bail. Bare / `return@own`
+            // are fine (handled by the real-return clear / the `inline_lambda_ret` frame respectively).
+            Stmt::Return(_, Some(l)) if l != own => true,
             _ => file.any_child_stmt(s, &mut |x| expr_bad(file, x, own)),
         }
     }
