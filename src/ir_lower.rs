@@ -5555,9 +5555,29 @@ impl<'a> Lower<'a> {
                     self.inline_lambdas
                         .push((pnames[i].clone(), params, lbody, lam_param_tys));
                 } else {
-                    self.scope.truncate(depth);
-                    self.inline_lambdas.truncate(lam_depth);
-                    return None;
+                    // A function-typed argument that is NOT a lambda literal — a callable reference
+                    // (`::g`, `obj::m`), or a function-valued variable. It can't be inline-expanded as a
+                    // body, so bind it as a function VALUE (a `FunctionN`): `f(v)` in the inlined body then
+                    // invokes it via `.invoke`. Semantically identical (kotlinc inlines the reference too;
+                    // the value form is box-OK and verifies) — no FunctionN-drop bookkeeping needed.
+                    let slot = self.fresh_value();
+                    let val = match self.lower_arg(args[i], &ty_to_ir(*pty)) {
+                        Some(v) => v,
+                        None => {
+                            self.scope.truncate(depth);
+                            self.inline_lambdas.truncate(lam_depth);
+                            self.inline_active.truncate(active_depth);
+                            self.reified_subst.truncate(reif_depth);
+                            return None;
+                        }
+                    };
+                    let var = self.ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty: ty_to_ir(*pty),
+                        init: Some(val),
+                    });
+                    stmts.push(var);
+                    self.scope.push((pnames[i].clone(), slot, *pty));
                 }
             } else {
                 // A value parameter: evaluate once into a temp, visible by name in the body. A parameter

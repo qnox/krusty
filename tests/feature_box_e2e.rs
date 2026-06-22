@@ -66,6 +66,24 @@ fun box(): String {
 }
 "#,
     ),
+    // A callable reference (`::g`, `obj::m`) passed to an INLINE higher-order fn: the reference can't be
+    // inline-expanded as a body, so it's bound as a FunctionN value and `f(v)` invokes it. (A lambda
+    // literal still inlines directly.)
+    (
+        "InlineCallableRef",
+        r#"
+fun g(x: Int): Int = x + 1
+class C { fun m(x: Int): Int = x * 2 }
+inline fun apply1(f: (Int) -> Int, v: Int): Int = f(v)
+fun box(): String {
+    if (apply1(::g, 5) != 6) return "f0"
+    val c = C()
+    if (apply1(c::m, 5) != 10) return "f1"
+    if (apply1({ it + 100 }, 5) != 105) return "f2"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
