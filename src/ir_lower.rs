@@ -2354,7 +2354,12 @@ impl<'a> Lower<'a> {
         if self.cur_class.is_some() {
             return None;
         }
-        // A `Nothing`-returning lambda (every path throws) isn't modeled — bail.
+        // A `Nothing`-returning lambda (its body always diverges — a `throw` or an unconditional non-local
+        // `return`, `f { return … }`) isn't modeled: when spliced into a LOOP host (`repeat`/`forEach`) the
+        // diverging body's `*return` leaves the host's post-invoke continuation (the loop back-edge / exit)
+        // unreachable with no relocatable stack-map frame — a VerifyError. Bail (the file SKIPS, never
+        // miscompiles) until the splicer relocates frames around a diverging spliced body. (See
+        // `inline/kt66017.kt`: `forEach { repeat(n) { return … } }`.)
         if sig.ret == Ty::Nothing {
             return None;
         }
