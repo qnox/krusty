@@ -3546,6 +3546,12 @@ bodies exist only as jar bytecode):
   now inlines and runs. TDD e2e `PrimOpMethod` (incl. an inline `combine`). Gate **1329/0** (no regression;
   the corpus files using this also have other blockers, so the count holds — the construct itself is fixed).
 
+## Phase 459 — vacuous safe call on a non-null primitive (`a?.plus(b)`)  ✅ (+1 → 1330)
+- A primitive receiver can never be null, so `a?.foo(b)` is an unnecessary safe call (kotlinc warns) ≡
+  `a.foo(b)`. `Expr::SafeCall` now folds an arithmetic operator-method call on a non-reference primitive
+  receiver to the plain primitive op via `lower_prim_op_method`, instead of bailing. Unblocks
+  `controlStructures/kt416.kt` (`var a = 10; a?.plus(10)`). TDD: extends `PrimOpMethod`. Gate **1330/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

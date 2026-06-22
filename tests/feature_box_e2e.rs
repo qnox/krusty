@@ -60,6 +60,8 @@ fun box(): String {
     if (17.div(5) != 3 || 17.rem(5) != 2) return "f3"
     if ('a'.plus(1) != 'b') return "f4"
     if (combine(3, 4) != 14) return "f5: ${combine(3, 4)}"
+    var a = 10
+    if (a?.plus(10) != 20) return "f6"   // vacuous safe call on a non-null primitive ≡ a.plus(10)
     return "OK"
 }
 "#,
