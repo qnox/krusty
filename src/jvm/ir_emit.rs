@@ -1168,6 +1168,12 @@ fn emit_method(
     instance: bool,
     bodies: &dyn MethodBodies,
 ) {
+    // An inline-only lambda impl (its body has a non-local `return`) is never a real callable method —
+    // it exists only to be spliced via its `inline_body`. Emitting it would produce an invalid, dead
+    // method (an `areturn` of the enclosing fn's type from the lambda's signature). Skip it.
+    if ir.inline_only_fns.contains(&fid) {
+        return;
+    }
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
@@ -1418,6 +1424,10 @@ impl<'a> Emitter<'a> {
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
         let mut lam_frames: Vec<ResolvedFrames> = Vec::new();
+        // The deepest operand stack any spliced lambda body reaches — the host's `max_stack` must cover it,
+        // since the body is inlined into the host (a deep lambda body, e.g. `123 != intArrayOf() as Any`,
+        // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
+        let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
             let IrExpr::Lambda {
                 impl_fn,
@@ -1493,6 +1503,7 @@ impl<'a> Emitter<'a> {
                 code.max_locals = scratch.max_locals;
             }
             self.next_slot = self.next_slot.max(scratch.max_locals);
+            lam_max_stack = lam_max_stack.max(scratch.max_stack);
             lam_frames.push(lam_fr);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
@@ -1538,9 +1549,11 @@ impl<'a> Emitter<'a> {
         }
         if !needs_frames {
             // Pure branchless host + lambda: append the bytes, no frames; works at any stack height.
+            // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
+            // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
             code.splice_inline(
                 &probe.bytes,
-                body.max_stack,
+                body.max_stack + lam_max_stack,
                 top_local,
                 arg_words,
                 ret_words,
@@ -1602,7 +1615,14 @@ impl<'a> Emitter<'a> {
             code.add_exception(ls, le, lh, catch_type);
         }
         code.set_needs_stackmap();
-        code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+        // Host stack must cover the host body PLUS the deepest spliced lambda body (safe upper bound).
+        code.splice_inline(
+            &bs.bytes,
+            body.max_stack + lam_max_stack,
+            top_local,
+            arg_words,
+            ret_words,
+        );
         if bs.join_required {
             let join = code.new_label();
             code.bind(join);

@@ -1175,12 +1175,31 @@ impl LibrarySet for JvmLibraries {
                     if !self.can_inline_call(&c.owner, &c.name, &c.descriptor) {
                         continue;
                     }
+                    // Recover the generic logical return (`run`/`with`'s `R` binds from the lambda's return
+                    // type) — the JVM descriptor erases it to `Object`. Without this the call types as a
+                    // reference and a primitive result (`run { 2 + 3 }: Int`) miscompiles (a boxed value in
+                    // a primitive slot). Mirrors the `$default` and extension paths.
+                    let recovered = c
+                        .signature
+                        .as_ref()
+                        .and_then(|sig| parse_method_gsig(sig))
+                        .map(|(formals, psigs, rsig)| {
+                            let mut binds = std::collections::HashMap::new();
+                            for (f, t) in formals.iter().zip(type_args) {
+                                binds.insert(f.clone(), *t);
+                            }
+                            for (ps, a) in psigs.iter().zip(args) {
+                                unify_gsig(ps, *a, &mut binds);
+                            }
+                            gsig_to_ty(&rsig, &binds)
+                        })
+                        .unwrap_or(ret);
                     // A kotlin `Nothing` return compiles to a `java/lang/Void` JVM descriptor; type the
                     // call `Nothing` so the backend treats it as diverging (no value, no post-call pop).
                     let logical_ret = if c.descriptor.ends_with(")Ljava/lang/Void;") {
                         Ty::Nothing
                     } else {
-                        ret
+                        recovered
                     };
                     return Some(LibraryCallable {
                         owner: c.owner.clone(),

@@ -2463,6 +2463,14 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        // A BARE `return` in a lambda body is a NON-LOCAL return (from the enclosing function) — valid only
+        // when the lambda is spliced inline, never as a standalone closure method (the `areturn` would carry
+        // the enclosing fn's return type, not the lambda's). Mark the impl method inline-only so the backend
+        // skips it (an invalid, dead method); the splice uses `inline_body`. A LABELED `return@x` is a LOCAL
+        // return from the lambda (a normal `return` in the closure method), so it stays emittable.
+        if body_has_bare_return(self.afile, body) {
+            self.ir.inline_only_fns.insert(fid);
+        }
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: fid,
             arity: arity as u8,
@@ -8610,6 +8618,11 @@ impl<'a> Lower<'a> {
                             .libraries
                             .resolve_callable(&fname, None, &arg_tys, &call_targs)
                     } {
+                        // For a spliced top-level `inline fun` (`run { 2 + 3 }`), the body returns the
+                        // ERASED `Object` (a generic `R`); coerce it to the logical type so a primitive
+                        // result unboxes instead of landing boxed in a primitive slot.
+                        let (call_inline, call_log, call_phys) =
+                            (c.is_inline, c.ret, c.physical_ret);
                         // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
                         // element to `Object`, so a wider literal would box as `Integer` and a later
                         // narrowing read (`map(::shortFoo)`) throws `ClassCastException`. kotlinc boxes
@@ -8719,7 +8732,7 @@ impl<'a> Lower<'a> {
                                 a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
                             }
                         }
-                        self.ir.add_expr(IrExpr::Call {
+                        let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
                                 owner: c.owner,
                                 name: c.name,
@@ -8729,7 +8742,14 @@ impl<'a> Lower<'a> {
                             },
                             dispatch_receiver: None,
                             args: a,
-                        })
+                        });
+                        // A spliced inline fn leaves its erased return on the stack — coerce to the logical
+                        // type (unbox/checkcast). A no-op when they match (the non-generic common case).
+                        if call_inline {
+                            self.coerce_erased(call, call_log, call_phys)
+                        } else {
+                            call
+                        }
                     } else if let Some((class, index, mfid, _)) = self
                         .cur_class
                         .clone()
@@ -9931,6 +9951,24 @@ fn name_used_as_value(file: &ast::File, e: AstExprId, name: &str) -> bool {
             file.any_child_stmt(s, &mut |c| name_used_as_value(file, c, name))
         }),
     }
+}
+
+/// Does `e` contain a BARE `return` (no label — a non-local return from the enclosing function), at ANY
+/// nesting depth INCLUDING inside nested lambdas? A bare return is non-local, so every lambda that
+/// (transitively) encloses it must be inlined — a nested lambda's bare return surfaces in the outer
+/// lambda's body once spliced, making the outer impl method invalid too. A labeled `return@x` (a local
+/// return) is excluded. (Kotlin forbids a bare return inside a non-inline lambda, so descending is sound.)
+fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
+    fn stmt_bare(file: &ast::File, s: ast::StmtId) -> bool {
+        match file.stmt(s) {
+            Stmt::Return(_, None) => true,
+            Stmt::Return(_, Some(_)) => false,
+            _ => file.any_child_stmt(s, &mut |x| body_has_bare_return(file, x)),
+        }
+    }
+    file.any_child_expr(e, &mut |x| body_has_bare_return(file, x), &mut |s| {
+        stmt_bare(file, s)
+    })
 }
 
 fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
