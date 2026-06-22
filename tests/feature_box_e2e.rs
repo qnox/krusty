@@ -296,6 +296,19 @@ fun box(): String {
 }
 "#,
     ),
+    // A default LAMBDA parameter (`g: (Int) -> Int = { it + 1 }`): the default lambda's `it` types from the
+    // declared function type, and an omitted argument uses it.
+    (
+        "DefaultLambdaParam",
+        r#"
+inline fun applyOr(x: Int, g: (Int) -> Int = { it + 1 }): Int = g(x)
+fun box(): String {
+    if (applyOr(5) != 6) return "f0"
+    if (applyOr(5) { it * 2 } != 10) return "f1"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
