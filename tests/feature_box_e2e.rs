@@ -785,6 +785,26 @@ fun box(): String {
 }
 "#,
     ),
+    // Inline functions with EXCEPTION HANDLERS (try/catch/finally): `synchronized` (monitorenter; try
+    // { block } finally { monitorexit }), `run`/`let` are handler-free, but `synchronized`/`runCatching`/
+    // `use` carry an exception table. The splicer relocates each entry's byte offsets + catch_type into
+    // the caller (handler frames are already StackMapTable targets) instead of bailing to a real call.
+    (
+        "InlineWithHandlers",
+        r#"
+fun box(): String {
+    val lock = Any()
+    val r = synchronized(lock) { 21 + 21 }
+    if (r != 42) return "f0: $r"
+    var acc = 0
+    synchronized(lock) {
+        for (i in 1..3) acc += i
+    }
+    if (acc != 6) return "f1: $acc"
+    return "OK"
+}
+"#,
+    ),
     // A frame-recording inline HOF call used as a NON-FIRST operand — i.e. at a NON-EMPTY caller operand
     // baseline (a dispatch receiver / earlier argument already on the stack). `records_frame` must report
     // the inline splice so the parent operand sequence spills the earlier operands to temps, letting the

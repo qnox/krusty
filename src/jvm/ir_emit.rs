@@ -1567,6 +1567,17 @@ impl<'a> Emitter<'a> {
                 code.add_frame_if_new(l, merged, st);
             }
         }
+        // Register the spliced body's relocated exception handlers (try/catch/finally from `use`/
+        // `synchronized`/`runCatching`). The handler frames are already bound above (each handler is a
+        // StackMapTable target in `bs.frames`); here we add the guarded-range entries to the caller's
+        // exception table via labels bound at the absolute spliced offsets.
+        for &(start, end, handler, catch_type) in &bs.handlers {
+            let (ls, le, lh) = (code.new_label(), code.new_label(), code.new_label());
+            code.bind_at(ls, start);
+            code.bind_at(le, end);
+            code.bind_at(lh, handler);
+            code.add_exception(ls, le, lh, catch_type);
+        }
         code.set_needs_stackmap();
         code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
         if bs.join_required {
