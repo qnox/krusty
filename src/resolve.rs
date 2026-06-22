@@ -1475,8 +1475,8 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
             index,
             value,
         } => v(*array) || v(*index) || v(*value),
-        Stmt::Return(Some(e)) => v(*e),
-        Stmt::Return(None) | Stmt::IncDec { .. } => false,
+        Stmt::Return(Some(e), _) => v(*e),
+        Stmt::Return(None, _) | Stmt::IncDec { .. } => false,
         // A statement's value is discarded — its (possibly `if`/`when`) tree stays in statement position.
         Stmt::Expr(e) => bc_complex_e(file, *e, false),
         Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
@@ -1587,8 +1587,8 @@ fn lambda_body_writes_outer(
                 index,
                 value,
             } => r(*array) || r(*index) || r(*value),
-            Stmt::Return(Some(e)) => r(*e),
-            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => false,
+            Stmt::Return(Some(e), _) => r(*e),
+            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => false,
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
                 r(*cond) || r(*body)
             }
@@ -1702,7 +1702,7 @@ fn collect_lambda_outer_writes(
                 ce(file, *index, outer, out);
                 ce(file, *value, outer, out);
             }
-            Stmt::Return(Some(e)) => ce(file, *e, outer, out),
+            Stmt::Return(Some(e), _) => ce(file, *e, outer, out),
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
                 ce(file, *cond, outer, out);
                 ce(file, *body, outer, out);
@@ -1720,7 +1720,7 @@ fn collect_lambda_outer_writes(
                 ce(file, *body, outer, out);
             }
             Stmt::Expr(e) => ce(file, *e, outer, out),
-            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalFun(_) => {}
+            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalFun(_) => {}
         }
     }
     ce(file, e, outer_names, out);
@@ -3068,7 +3068,7 @@ impl<'a> Checker<'a> {
                 } else if let Some(&last) = stmts.last() {
                     matches!(
                         self.file.stmt(last),
-                        Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_)
+                        Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_)
                     )
                 } else {
                     false
@@ -4307,7 +4307,7 @@ impl<'a> Checker<'a> {
                         if let Some(&last) = stmts.last() {
                             if matches!(
                                 self.file.stmt(last),
-                                Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_)
+                                Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_)
                             ) {
                                 Ty::Nothing
                             } else {
@@ -6876,7 +6876,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Return(e) => {
+            Stmt::Return(e, label) => {
+                // A labeled `return@lbl [expr]` is a *local* return from the lambda carrying `lbl`, not the
+                // enclosing function — its value flows to that lambda's call, so it isn't validated against
+                // the function's return type. Type-check the expression for its own errors and move on.
+                if label.is_some() {
+                    if let Some(ex) = e {
+                        self.expr(ex);
+                    }
+                    return;
+                }
                 let rt = self.ret_ty;
                 match e {
                     Some(ex) => {

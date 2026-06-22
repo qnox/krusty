@@ -186,6 +186,24 @@ fun box(): String {
 }
 "#,
     ),
+    // A labeled local return from an inline lambda (`return@foreachT`) — the canonical inline
+    // non-local-return form. In the spliced lambda it acts like `continue`: it ends the current
+    // invocation's body, not the enclosing function.
+    (
+        "InlineLabeledReturn",
+        r#"
+inline fun foreachT(xs: List<Int>, f: (Int) -> Unit) { for (x in xs) f(x) }
+fun box(): String {
+    var s = 0
+    foreachT(listOf(1, 2, 3)) { s += it; if (it == 2) return@foreachT }
+    if (s != 6) return "f0: $s"
+    var t = 0
+    foreachT(listOf(1, 2, 3, 4)) { if (it % 2 == 0) return@foreachT; t += it }
+    if (t != 4) return "f1: $t"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

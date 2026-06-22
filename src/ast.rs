@@ -232,7 +232,10 @@ pub enum Stmt {
         index: ExprId,
         value: ExprId,
     },
-    Return(Option<ExprId>),
+    /// `return [expr]` (no label → returns from the enclosing function) or `return@label [expr]`
+    /// (`Some(label)` → a *local* return from the lambda carrying that label — the common
+    /// `forEach { return@forEach }` form; for an inline-spliced lambda the label is the inline fn name).
+    Return(Option<ExprId>, Option<String>),
     /// `break` / `continue` — loop control. `Some(label)` targets the enclosing loop carrying that
     /// `label@` (`break@outer`); `None` targets the innermost loop.
     Break(Option<String>),
@@ -644,11 +647,13 @@ impl File {
     /// by [`any_child_expr`](Self::any_child_expr).) Companion to that method.
     pub fn any_child_stmt(&self, s: StmtId, fe: &mut impl FnMut(ExprId) -> bool) -> bool {
         match self.stmt(s) {
-            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None) | Stmt::IncDec { .. } => false,
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None, _) | Stmt::IncDec { .. } => {
+                false
+            }
             Stmt::Local { init, .. }
             | Stmt::Destructure { init, .. }
             | Stmt::Assign { value: init, .. }
-            | Stmt::Return(Some(init))
+            | Stmt::Return(Some(init), _)
             | Stmt::Expr(init) => fe(*init),
             Stmt::AssignMember {
                 receiver, value, ..
@@ -1057,8 +1062,11 @@ impl File {
                 "(continue{})",
                 l.as_ref().map(|s| format!("@{s}")).unwrap_or_default()
             )),
-            Stmt::Return(e) => {
+            Stmt::Return(e, label) => {
                 out.push_str("(return");
+                if let Some(l) = label {
+                    out.push_str(&format!("@{l}"));
+                }
                 if let Some(e) = e {
                     out.push(' ');
                     self.write_expr(*e, out);
