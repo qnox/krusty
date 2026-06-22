@@ -1542,12 +1542,23 @@ impl<'a> Emitter<'a> {
         }
         for (k, frames) in lam_frames.iter().enumerate() {
             let host_ctx = bs.lambda_host_locals.get(k).cloned().unwrap_or_default();
+            // The lambda body's frames were compiled against an EMPTY operand base; rebase each onto the
+            // host operand-stack prefix sitting below the lambda value (e.g. a `map` destination). Empty
+            // for `forEach`/`fold`/`takeIf`; `splice_unified` only returns `Some` here for a branchy body.
+            let op_prefix: Vec<VerifType> = bs
+                .lambda_stack_prefix
+                .get(k)
+                .and_then(|p| p.as_ref())
+                .map(|p| p.iter().map(vtype_to_verif).collect())
+                .unwrap_or_default();
             for (fb, locals, stack) in frames {
                 let off = bs.lambda_byte_starts[k] + fb;
                 let merged = self.merge_lambda_frame_locals(base, top_local, &host_ctx, locals);
+                let mut st = op_prefix.clone();
+                st.extend(stack.iter().cloned());
                 let l = code.new_label();
                 code.bind_at(l, off);
-                code.add_frame_if_new(l, merged, stack.clone());
+                code.add_frame_if_new(l, merged, st);
             }
         }
         code.set_needs_stackmap();

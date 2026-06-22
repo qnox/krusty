@@ -3280,6 +3280,26 @@ bodies exist only as jar bytecode):
   any_branchy_lambda`): public host → real call, never a miscompile.
 - Box conformance after this phase: **7351 scanned · 1313 box()=OK · 0 FAIL**.
 
+## Phase 440 — inline branchy-lambda loop hosts (operand-state simulation; the last inline bail)  ✅
+- Removes the last inliner bail: a loop host (`map`/`filter`/…) whose lambda body is BRANCHY now
+  splices too. The lambda body's own StackMapTable frames are compiled against an empty operand base,
+  but a loop host runs the lambda at a NON-EMPTY baseline — `map`/`filter` keep the destination
+  collection on the stack BELOW the lambda result, and the iterated element is stored to a host local
+  *after* the loop-head frame. So each lambda-body frame must be rebased onto the host's live state.
+- **`host_state_at` (a typed forward operand-stack simulator)** computes that state — the slot-indexed
+  locals AND the operand-stack prefix — just before each lambda's `aload`, seeded from the nearest
+  host frame and walked straight-line to the load. It models the standard opcodes; any UNMODELED
+  opcode, or an opaque `Top` surviving onto the operand prefix, returns `None` → the splice bails for
+  that (branchy) lambda and the host falls back to a real call. Never a miscompile.
+- `BranchySplice` gains `lambda_stack_prefix` (prepended to each lambda-body frame's stack) and
+  `lambda_host_locals` is now sourced from the simulated locals (the prior nearest-frame value was
+  stale — it lacked locals assigned later in the loop body, e.g. the element). `VType` is now `Copy`.
+- Tests: `feature_box_e2e` `MapBranchy` (map/filter/forEach/fold each with a branchy lambda body);
+  unit tests `host_state_at_computes_loop_prefix_and_locals`, `host_state_at_bails_on_surviving_opaque`,
+  `method_desc_effect_counts_args_and_return`, `collapse_slots_is_inverse_of_expand`.
+- Box conformance after this phase: **7351 scanned · 1313 box()=OK · 0 FAIL** (same count — these
+  cases were already correct via fallback; they now INLINE instead of calling the stdlib HOF).
+
 ---
 
 ### Working agreements

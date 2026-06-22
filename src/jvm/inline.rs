@@ -763,7 +763,7 @@ fn param_store_ops(descriptor: &str, base: u16) -> Option<Vec<(u16, u8)>> {
 /// (`invokedynamic`, byte-index `ldc` overflow), so the caller emits a real call instead.
 /// A JVM verification type (`verification_type_info`), as carried by a `StackMapTable` frame. Pool and
 /// bytecode-offset operands stay in the *source* class's terms until relocation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VType {
     Top,
     Int,
@@ -1044,7 +1044,7 @@ fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType
     Some(match v {
         VType::Object(idx) => VType::Object(relocate_const(src_cp, *idx, cw)?),
         VType::Uninit(_) | VType::UninitThis => return None,
-        other => other.clone(),
+        other => *other,
     })
 }
 
@@ -1076,6 +1076,13 @@ pub struct BranchySplice {
     /// iterator/accumulator are live there), not just the parameters — the context a branchy lambda
     /// body's own frames need. Empty (the params are the only locals) for a host with no `StackMapTable`.
     pub lambda_host_locals: Vec<Vec<VType>>,
+    /// The host OPERAND-STACK prefix sitting *below* each lambda's value when its body runs (parallel to
+    /// `lambdas`): what the host pushed before loading the lambda — e.g. the destination collection a
+    /// `map`/`filter` keeps under the lambda result, or empty for `forEach`/`fold`/`takeIf`. A branchy
+    /// lambda body's own frames are compiled against an empty base, so the caller must prepend this to
+    /// each of them. Computed by a typed forward simulation from the nearest host frame to the lambda
+    /// load; `None` for any lambda whose prefix couldn't be modeled (the caller then bails that splice).
+    pub lambda_stack_prefix: Vec<Option<Vec<VType>>>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1088,7 +1095,367 @@ pub struct LambdaSplice {
     pub body: Vec<Insn>,
 }
 
-/// Parse a descriptor's parameters into `(frame0 vtype, byte-of-descriptor advance)` — like
+/// A single field-type descriptor (`I`, `J`, `Lfoo/Bar;`, `[I`, …) → its operand-stack [`VType`].
+/// An object type is resolved to a `src_cp` `Class` index if one exists, else `Top` (opaque — fine
+/// for a value that is consumed before the prefix is read; a surviving `Top` makes the prefix invalid
+/// and the caller bails). `None` for an empty/`V` descriptor.
+fn field_desc_vtype(desc: &str, src_cp: &[C]) -> Option<VType> {
+    Some(match desc.as_bytes().first()? {
+        b'B' | b'C' | b'I' | b'S' | b'Z' => VType::Int,
+        b'J' => VType::Long,
+        b'F' => VType::Float,
+        b'D' => VType::Double,
+        b'L' => {
+            source_class_index(src_cp, &desc[1..desc.len() - 1]).map_or(VType::Top, VType::Object)
+        }
+        b'[' => source_class_index(src_cp, desc).map_or(VType::Top, VType::Object),
+        _ => return None,
+    })
+}
+
+/// The number of operand-stack entries the descriptor's parameter list pops (each `long`/`double`
+/// counts as ONE entry — matching the frame stack representation, not JVM words) and the return
+/// type's [`VType`] (`None` for `void`). `None` if the descriptor is malformed.
+fn method_desc_effect(desc: &str, src_cp: &[C]) -> Option<(usize, Option<VType>)> {
+    let close = desc.find(')')?;
+    let mut args = 0usize;
+    let mut b = desc[1..close].bytes().peekable();
+    while let Some(c) = b.next() {
+        match c {
+            b'[' => continue, // array dimension — keep scanning until the element type
+            b'L' => {
+                while b.next()? != b';' {}
+                args += 1;
+            }
+            b'B' | b'C' | b'I' | b'S' | b'Z' | b'F' | b'D' | b'J' => args += 1,
+            _ => return None,
+        }
+    }
+    let ret = &desc[close + 1..];
+    let rv = if ret == "V" {
+        None
+    } else {
+        Some(field_desc_vtype(ret, src_cp)?)
+    };
+    Some((args, rv))
+}
+
+/// Set local slot `idx` to `v`, growing the slot table with `Top`; a `long`/`double` also clobbers
+/// its second slot to `Top` (it occupies two slots).
+fn set_slot(slots: &mut Vec<VType>, idx: usize, v: VType) {
+    while slots.len() <= idx + 1 {
+        slots.push(VType::Top);
+    }
+    slots[idx] = v;
+    if matches!(v, VType::Long | VType::Double) {
+        slots[idx + 1] = VType::Top;
+    }
+}
+
+/// The host's live state — `(slot-indexed locals, operand stack)` — just before the lambda value is
+/// loaded at instruction `load_idx`. The operand stack is the prefix a branchy lambda body's frames
+/// must be rebased onto; the locals are the host context (loop iterator/element/accumulator) those
+/// frames need (the nearest StackMapTable frame is stale — locals assigned later in the loop body
+/// aren't in it). Seeds from the nearest host frame ≤ `load_idx` (or method entry: `frame0` locals,
+/// empty stack) and simulates forward over the straight-line region. Returns `None` for any opcode
+/// not modeled, or if an opaque `Top` survives onto the operand stack (caller then falls back).
+fn host_state_at(
+    insns: &[Insn],
+    load_idx: usize,
+    host_frames: &[(usize, Frame)],
+    frame0: &[VType],
+    src_cp: &[C],
+) -> Option<(Vec<VType>, Vec<VType>)> {
+    let (start, locals_collapsed, mut stack) = host_frames
+        .iter()
+        .filter(|(i, _)| *i <= load_idx)
+        .max_by_key(|(i, _)| *i)
+        .map(|(i, f)| (*i, f.locals.clone(), f.stack.clone()))
+        .unwrap_or((0, frame0.to_vec(), Vec::new()));
+    // Expand the collapsed locals to a slot-indexed table (a `long`/`double` occupies two slots).
+    let mut slots: Vec<VType> = Vec::new();
+    for v in &locals_collapsed {
+        slots.push(*v);
+        if matches!(v, VType::Long | VType::Double) {
+            slots.push(VType::Top);
+        }
+    }
+    let is_cat2 = |v: &VType| matches!(v, VType::Long | VType::Double);
+    for insn in &insns[start..load_idx] {
+        let (op, operands) = match insn {
+            Insn::Plain { op, operands } => (*op, operands.as_slice()),
+            // A branch/switch in the region: we follow the fall-through to `load_idx`, so only the
+            // operand it pops matters.
+            Insn::Branch { op, .. } | Insn::BranchW { op, .. } => (*op, [].as_slice()),
+            Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => {
+                stack.pop()?; // the switch key
+                continue;
+            }
+        };
+        match op {
+            0x00 => {}                                                    // nop
+            0x01 => stack.push(VType::Null),                              // aconst_null
+            0x02..=0x08 | 0x10 | 0x11 => stack.push(VType::Int),          // iconst_*/bipush/sipush
+            0x09 | 0x0a => stack.push(VType::Long),                       // lconst_*
+            0x0b..=0x0d => stack.push(VType::Float),                      // fconst_*
+            0x0e | 0x0f => stack.push(VType::Double),                     // dconst_*
+            0x12 | 0x13 => stack.push(ldc_vtype(operands, op, src_cp)?),  // ldc/ldc_w
+            0x14 => stack.push(ldc2_vtype(operands, src_cp)?),            // ldc2_w
+            0x15 | 0x1a..=0x1d => stack.push(VType::Int),                 // iload(_n)
+            0x16 | 0x1e..=0x21 => stack.push(VType::Long),                // lload(_n)
+            0x17 | 0x22..=0x25 => stack.push(VType::Float),               // fload(_n)
+            0x18 | 0x26..=0x29 => stack.push(VType::Double),              // dload(_n)
+            0x19 => stack.push(*slots.get(*operands.first()? as usize)?), // aload <byte>
+            0x2a..=0x2d => stack.push(*slots.get((op - 0x2a) as usize)?), // aload_0..3
+            0x2e | 0x30 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(if op == 0x2e { VType::Int } else { VType::Float });
+            } // iaload/faload
+            0x2f => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Long);
+            } // laload
+            0x31 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Double);
+            } // daload
+            0x32 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Top); // aaload — element type opaque (bails if it reaches the prefix)
+            }
+            0x33..=0x35 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Int);
+            } // baload/caload/saload
+            0x36..=0x3a => {
+                let v = stack.pop()?;
+                set_slot(&mut slots, *operands.first()? as usize, v);
+            } // istore/lstore/fstore/dstore/astore <byte>
+            0x3b..=0x4e => {
+                let v = stack.pop()?;
+                set_slot(&mut slots, ((op - 0x3b) % 4) as usize, v);
+            } // i/l/f/d/astore_0..3
+            0x4f..=0x56 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.pop()?;
+            } // all array stores — pop array,index,value
+            0x57 => {
+                stack.pop()?;
+            } // pop
+            0x58 => {
+                let t = stack.pop()?;
+                if !is_cat2(&t) {
+                    stack.pop()?;
+                }
+            } // pop2
+            0x59 => {
+                let t = *stack.last()?;
+                stack.push(t);
+            } // dup
+            0x5a => {
+                let a = stack.pop()?;
+                let b = stack.pop()?;
+                stack.push(a);
+                stack.push(b);
+                stack.push(a);
+            } // dup_x1
+            0x5f => {
+                let a = stack.pop()?;
+                let b = stack.pop()?;
+                stack.push(a);
+                stack.push(b);
+            } // swap
+            0x74..=0x77 => {} // ineg/lneg/fneg/dneg — pop1 push1, same type
+            0x60..=0x73 => {
+                // binary arithmetic: pop 2 operands (each one entry), push 1 of the same type
+                let t = *stack.last()?;
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(t);
+            }
+            0x78..=0x83 => {
+                // shifts (int shift amount) and l/i and/or/xor: pop 2 push 1
+                let t = *stack.get(stack.len().checked_sub(2)?)?;
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(t);
+            }
+            0x84 => {} // iinc — no stack effect
+            0x85..=0x93 => {
+                let f = stack.pop()?;
+                stack.push(num_convert(f, op)?);
+            } // i2l..i2s
+            0x94 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Int);
+            } // lcmp
+            0x95..=0x98 => {
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(VType::Int);
+            } // fcmp/dcmp
+            0x99..=0x9e | 0xc6 | 0xc7 => {
+                stack.pop()?;
+            } // ifeq..ifle, ifnull/ifnonnull — pop one
+            0x9f..=0xa6 => {
+                stack.pop()?;
+                stack.pop()?;
+            } // if_icmp*/if_acmp* — pop two
+            0xa7 | 0xc8 => {} // goto(_w)
+            0xb2 => stack.push(fieldref_vtype(operands, src_cp)?), // getstatic
+            0xb3 => {
+                stack.pop()?;
+            } // putstatic
+            0xb4 => {
+                stack.pop()?; // objectref
+                stack.push(fieldref_vtype(operands, src_cp)?);
+            } // getfield
+            0xb5 => {
+                stack.pop()?; // value
+                stack.pop()?; // objectref
+            } // putfield
+            0xb6 | 0xb7 | 0xb9 => {
+                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (args, ret) = methodref_desc_effect(src_cp, idx)?;
+                for _ in 0..args {
+                    stack.pop()?;
+                }
+                stack.pop()?; // receiver
+                if let Some(r) = ret {
+                    stack.push(r);
+                }
+            }
+            0xb8 => {
+                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (args, ret) = methodref_desc_effect(src_cp, idx)?;
+                for _ in 0..args {
+                    stack.pop()?;
+                }
+                if let Some(r) = ret {
+                    stack.push(r);
+                }
+            } // invokestatic — no receiver
+            0xbb => {
+                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                stack.push(VType::Object(idx)); // new — the Class index is the source pool entry
+            }
+            0xbc => {
+                stack.pop()?;
+                stack.push(VType::Top); // newarray — primitive array type opaque
+            }
+            0xbd => {
+                stack.pop()?;
+                stack.push(VType::Top); // anewarray
+            }
+            0xbe => {
+                stack.pop()?;
+                stack.push(VType::Int);
+            } // arraylength
+            0xc0 => {
+                stack.pop()?;
+                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                stack.push(VType::Object(idx));
+            } // checkcast — retype top to the named class
+            0xc1 => {
+                stack.pop()?;
+                stack.push(VType::Int);
+            } // instanceof
+            _ => return None, // an opcode we don't model — bail rather than guess the stack
+        }
+    }
+    // A surviving opaque `Top` can't be expressed as a valid operand-stack frame entry.
+    if stack.contains(&VType::Top) {
+        return None;
+    }
+    Some((slots, stack))
+}
+
+/// Collapse a slot-indexed local table to StackMapTable frame form (a `long`/`double` is one entry;
+/// its second slot — always `Top` in our tables — is dropped). The inverse of `expand_collapsed_locals`.
+fn collapse_slots(slots: &[VType]) -> Vec<VType> {
+    let mut out = Vec::with_capacity(slots.len());
+    let mut skip = false;
+    for v in slots {
+        if skip {
+            skip = false;
+            continue;
+        }
+        out.push(*v);
+        if matches!(v, VType::Long | VType::Double) {
+            skip = true;
+        }
+    }
+    out
+}
+
+fn ldc_vtype(operands: &[u8], op: u8, src_cp: &[C]) -> Option<VType> {
+    let idx = if op == 0x12 {
+        *operands.first()? as u16
+    } else {
+        (*operands.first()? as u16) << 8 | *operands.get(1)? as u16
+    };
+    Some(match src_cp.get(idx as usize)? {
+        C::Integer(_) => VType::Int,
+        C::Float(_) => VType::Float,
+        // The exact object type only matters if it survives onto the prefix (then a `Top` bails); a
+        // consumed `ldc` (e.g. the null-check message string) is fine as opaque `Top`.
+        C::String(_) => {
+            source_class_index(src_cp, "java/lang/String").map_or(VType::Top, VType::Object)
+        }
+        C::Class(_) => {
+            source_class_index(src_cp, "java/lang/Class").map_or(VType::Top, VType::Object)
+        }
+        _ => return None,
+    })
+}
+
+fn ldc2_vtype(operands: &[u8], src_cp: &[C]) -> Option<VType> {
+    let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+    Some(match src_cp.get(idx as usize)? {
+        C::Long(_) => VType::Long,
+        C::Double(_) => VType::Double,
+        _ => return None,
+    })
+}
+
+fn fieldref_vtype(operands: &[u8], src_cp: &[C]) -> Option<VType> {
+    let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+    match src_cp.get(idx as usize)? {
+        C::Fieldref(_, nt) => {
+            let (_, d) = name_and_type(src_cp, *nt)?;
+            field_desc_vtype(d, src_cp)
+        }
+        _ => None,
+    }
+}
+
+fn methodref_desc_effect(src_cp: &[C], idx: u16) -> Option<(usize, Option<VType>)> {
+    match src_cp.get(idx as usize)? {
+        C::Methodref(_, nt) | C::InterfaceMethodref(_, nt) => {
+            let (_, d) = name_and_type(src_cp, *nt)?;
+            method_desc_effect(d, src_cp)
+        }
+        _ => None,
+    }
+}
+
+fn num_convert(_from: VType, op: u8) -> Option<VType> {
+    Some(match op {
+        0x85 | 0x8c | 0x8f => VType::Long,              // i2l, f2l, d2l
+        0x86 | 0x89 | 0x90 => VType::Float,             // i2f, l2f, d2f
+        0x87 | 0x8a | 0x8d => VType::Double,            // i2d, l2d, f2d
+        0x88 | 0x8b | 0x8e | 0x91..=0x93 => VType::Int, // l2i, f2i, d2i, i2b, i2c, i2s
+        _ => return None,
+    })
+}
+
 /// The index of the `Class` constant in `src_cp` whose name is `name`, if any.
 fn source_class_index(src_cp: &[C], name: &str) -> Option<u16> {
     src_cp
@@ -1289,28 +1656,6 @@ pub fn splice_unified(
             }
         }
     }
-    // A lambda host with a LOOP (a backward branch) — `map`/`fold`/`forEach` build a collection, so the
-    // lambda is invoked at a NON-EMPTY operand baseline (the destination is on the stack for the later
-    // `.add`). A BRANCHLESS lambda body has no frames, so the baseline doesn't matter and it splices
-    // fully. A BRANCHY lambda body's own frames would need that operand-stack prefix (abstract-interpreted
-    // from the host stack at the invoke — not yet done), so bail THAT combination: a PUBLIC host falls
-    // back to a real call, a non-public one skips — never a miscompile.
-    let host_has_loop = insns.iter().enumerate().any(|(i, insn)| match insn {
-        Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
-        Insn::TableSwitch {
-            default, targets, ..
-        } => *default <= i || targets.iter().any(|t| *t <= i),
-        Insn::LookupSwitch { default, pairs } => {
-            *default <= i || pairs.iter().any(|(_, t)| *t <= i)
-        }
-        Insn::Plain { .. } => false,
-    });
-    let any_branchy_lambda = lambdas
-        .iter()
-        .any(|l| l.body.iter().any(|i| !matches!(i, Insn::Plain { .. })));
-    if host_has_loop && any_branchy_lambda {
-        return None;
-    }
     // The body must contain exactly one `FunctionN.invoke` per lambda argument — otherwise matching each
     // lambda to its invoke site (and which `aload` feeds it) is ambiguous, and a mis-paired splice calls
     // `.invoke` on the wrong object. Conservative: bail unless the counts line up (skips complex stdlib
@@ -1330,6 +1675,7 @@ pub fn splice_unified(
     let deleted: std::collections::HashSet<usize> =
         edits.iter().flat_map(|e| e.at..e.at + e.len).collect();
     let mut lambda_sites: Vec<usize> = Vec::with_capacity(lambdas.len()); // invoke index per lambda
+    let mut lambda_loads: Vec<usize> = Vec::with_capacity(lambdas.len()); // aload index per lambda
     for lam in lambdas {
         let orig_slot = *offsets_of_param.get(lam.param_index)?;
         // The lambda parameter is loaded exactly once (the receiver of its `FunctionN.invoke`); for an
@@ -1373,6 +1719,24 @@ pub fn splice_unified(
             repl: lam.body.clone(),
         }); // replace the invoke with the lambda body
         lambda_sites.push(site);
+        lambda_loads.push(load_idx);
+    }
+    // The host's live state (locals + operand-stack prefix) below each lambda, simulated on the ORIGINAL
+    // source-pool insns/frames (before relocation rewrites indices/pool refs). `None` per lambda whose
+    // state couldn't be modeled.
+    let prefix_frame0 = param_vtypes_full(descriptor, &body.source_cp).unwrap_or_default();
+    let host_states: Vec<Option<(Vec<VType>, Vec<VType>)>> = lambda_loads
+        .iter()
+        .map(|&li| host_state_at(&insns, li, &host_frames, &prefix_frame0, &body.source_cp))
+        .collect();
+    // A BRANCHY lambda body has its own frames, compiled against an empty operand base; they must be
+    // rebased onto the host state. If that state couldn't be modeled, bail (a BRANCHLESS body has no
+    // frames, so its unmodeled state is irrelevant). The caller then falls back to a real call.
+    for (k, lam) in lambdas.iter().enumerate() {
+        let branchy = lam.body.iter().any(|i| !matches!(i, Insn::Plain { .. }));
+        if branchy && host_states[k].is_none() {
+            return None;
+        }
     }
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
@@ -1580,15 +1944,17 @@ pub fn splice_unified(
             }
         })
         .collect();
-    let lambda_host_locals: Vec<Vec<VType>> = lambda_sites
-        .iter()
-        .map(|&site| {
-            host_frames
-                .iter()
-                .filter(|(old_idx, _)| *old_idx <= site)
-                .max_by_key(|(old_idx, _)| *old_idx)
-                .and_then(|(_, f)| {
-                    f.locals
+    // The host's live locals + operand-stack prefix at each lambda's invoke, from the forward simulation
+    // (`host_states`): the loop-body context a branchy lambda body's frames need. The locals are collapsed
+    // to frame form, the spliced-away lambda slot blanked to `Top`, and both relocated into `cw`. A `None`
+    // state only occurs for a BRANCHLESS lambda (its frames/prefix are unused) → the `param_ctx` filler.
+    let mut lambda_host_locals: Vec<Vec<VType>> = Vec::with_capacity(host_states.len());
+    let mut lambda_stack_prefix: Vec<Option<Vec<VType>>> = Vec::with_capacity(host_states.len());
+    for st in &host_states {
+        match st {
+            Some((slots, stack)) => {
+                lambda_host_locals.push(
+                    collapse_slots(slots)
                         .iter()
                         .enumerate()
                         .map(|(k, v)| {
@@ -1598,11 +1964,21 @@ pub fn splice_unified(
                                 relocate_vtype(v, &body.source_cp, cw)
                             }
                         })
-                        .collect::<Option<Vec<_>>>()
-                })
-                .unwrap_or_else(|| param_ctx.clone())
-        })
-        .collect();
+                        .collect::<Option<Vec<_>>>()?,
+                );
+                lambda_stack_prefix.push(
+                    stack
+                        .iter()
+                        .map(|v| relocate_vtype(v, &body.source_cp, cw))
+                        .collect::<Option<Vec<_>>>(),
+                );
+            }
+            None => {
+                lambda_host_locals.push(param_ctx.clone());
+                lambda_stack_prefix.push(None);
+            }
+        }
+    }
     Some(BranchySplice {
         bytes: assemble_at(&final_insns, start_offset),
         frames,
@@ -1610,6 +1986,7 @@ pub fn splice_unified(
         join_required,
         lambda_byte_starts,
         lambda_host_locals,
+        lambda_stack_prefix,
     })
 }
 
@@ -1706,6 +2083,134 @@ mod tests {
             },
         ];
         assert_eq!(function_invoke_sites(&insns, &cp), vec![3]);
+    }
+
+    #[test]
+    fn method_desc_effect_counts_args_and_return() {
+        let cp = vec![C::Other];
+        // (Object, int) -> boolean : 2 arg entries, Int return.
+        assert_eq!(
+            method_desc_effect("(Ljava/lang/Object;I)Z", &cp),
+            Some((2, Some(VType::Int)))
+        );
+        // (long, double) -> void : 2 arg entries (a cat-2 is ONE stack entry), no return.
+        assert_eq!(method_desc_effect("(JD)V", &cp), Some((2, None)));
+        // ([I, String) -> long : 2 arg entries, Long return.
+        assert_eq!(
+            method_desc_effect("([ILjava/lang/String;)J", &cp),
+            Some((2, Some(VType::Long)))
+        );
+        assert_eq!(method_desc_effect("()V", &cp), Some((0, None)));
+    }
+
+    #[test]
+    fn collapse_slots_is_inverse_of_expand() {
+        // [Object, <long>, Top(2nd half), Int] collapses to [Object, Long, Int]; a standalone `Top`
+        // (a genuinely uninitialized slot, not a cat-2 tail) is preserved.
+        let slots = vec![
+            VType::Object(5),
+            VType::Long,
+            VType::Top,
+            VType::Int,
+            VType::Top,
+        ];
+        assert_eq!(
+            collapse_slots(&slots),
+            vec![VType::Object(5), VType::Long, VType::Int, VType::Top]
+        );
+    }
+
+    #[test]
+    fn host_state_at_computes_loop_prefix_and_locals() {
+        // A `map`-shaped fragment: a loop-body frame establishes [dest:Collection in slot 4], then the
+        // body stores the iterated element to slot 7 and pushes the destination before loading the lambda.
+        // At the lambda load the operand-stack prefix is [Collection] and slot 7 is live as Integer.
+        let cp = vec![
+            C::Other,
+            C::Utf8("java/util/Collection".into()), // 1
+            C::Class(1),                            // 2
+            C::Utf8("java/lang/Integer".into()),    // 3
+            C::Class(3),                            // 4
+        ];
+        // frame at index 0: locals slot4 = Collection (others Top), empty stack.
+        let frame = Frame {
+            offset: 0,
+            locals: vec![
+                VType::Top,
+                VType::Top,
+                VType::Top,
+                VType::Top,
+                VType::Object(2),
+            ],
+            stack: vec![],
+        };
+        // insns: [0] astore_? no — model: aload? We seed at idx0 and walk to load_idx.
+        //   0: aconst_null            (stand-in element ref on stack)
+        //   1: astore 7               (element → slot 7; here typed Null, but checkcast retypes below)
+        //   2: aload 7                (push element)
+        //   3: checkcast Integer      (retype top to Integer)
+        //   4: astore 7               (element:Integer → slot 7)
+        //   5: aload 4                (push dest Collection)  ← prefix entry
+        //   6: <lambda load>          (load_idx = 6)
+        let insns = vec![
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            }, // aconst_null
+            Insn::Plain {
+                op: 0x3a,
+                operands: vec![7],
+            }, // astore 7
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![7],
+            }, // aload 7
+            Insn::Plain {
+                op: 0xc0,
+                operands: vec![0x00, 0x04],
+            }, // checkcast Integer
+            Insn::Plain {
+                op: 0x3a,
+                operands: vec![7],
+            }, // astore 7
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![4],
+            }, // aload 4 (dest)
+            Insn::Plain {
+                op: 0x19,
+                operands: vec![9],
+            }, // (the lambda load — index 6)
+        ];
+        let (slots, stack) = host_state_at(&insns, 6, &[(0, frame)], &[], &cp).expect("state");
+        assert_eq!(stack, vec![VType::Object(2)]); // prefix = [Collection]
+        assert_eq!(slots[7], VType::Object(4)); // element local retyped to Integer
+        assert_eq!(slots[4], VType::Object(2)); // dest local still Collection
+    }
+
+    #[test]
+    fn host_state_at_bails_on_surviving_opaque() {
+        // An `aaload` pushes an opaque element type; if it survives onto the prefix the state is unusable.
+        let cp = vec![C::Other];
+        let insns = vec![
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            }, // aconst_null (array)
+            Insn::Plain {
+                op: 0x03,
+                operands: vec![],
+            }, // iconst_0 (index)
+            Insn::Plain {
+                op: 0x32,
+                operands: vec![],
+            }, // aaload → Top on stack
+            Insn::Plain {
+                op: 0x00,
+                operands: vec![],
+            }, // nop (load_idx = 3, Top still on stack)
+        ];
+        assert_eq!(host_state_at(&insns, 3, &[], &[], &cp), None);
     }
 
     #[test]
