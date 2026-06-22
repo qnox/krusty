@@ -3305,7 +3305,19 @@ impl<'a> Checker<'a> {
         }
         match &f.body {
             FunBody::Expr(e) => {
-                let t = self.expr(*e);
+                // An expression-body lambda whose declared return type is a function type takes its
+                // parameter types from that return type — `fun mk(): (Int) -> Int = { it + 1 }` types `it`
+                // as `Int`, not the erased `Object` (the same as a typed local/HOF-argument lambda).
+                let t = match (
+                    self.ret_ty,
+                    matches!(self.file.expr(*e), Expr::Lambda { .. }),
+                ) {
+                    (Ty::Fun(s), true) => {
+                        let params = s.params.clone();
+                        self.check_lambda_with_types(*e, &params)
+                    }
+                    _ => self.expr(*e),
+                };
                 self.expect_assignable(self.ret_ty, t, self.span(*e), "function body");
             }
             FunBody::Block(e) => {
@@ -6835,7 +6847,15 @@ impl<'a> Checker<'a> {
                 let rt = self.ret_ty;
                 match e {
                     Some(ex) => {
-                        let t = self.expr(ex);
+                        // `return { it + 1 }` in a function returning a function type: the lambda's
+                        // parameter types come from the declared return type (as for an expression body).
+                        let t = match (rt, matches!(self.file.expr(ex), Expr::Lambda { .. })) {
+                            (Ty::Fun(s), true) => {
+                                let params = s.params.clone();
+                                self.check_lambda_with_types(ex, &params)
+                            }
+                            _ => self.expr(ex),
+                        };
                         self.expect_assignable(rt, t, self.span(ex), "return");
                     }
                     None => {
