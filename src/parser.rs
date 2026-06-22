@@ -2347,6 +2347,19 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwReturn => {
                 self.bump();
+                // `return@label` — a local return from the lambda carrying `label` (`return@forEach`).
+                let label = if self.at(TokenKind::At) {
+                    self.bump(); // '@'
+                    if self.at(TokenKind::Ident) {
+                        let l = self.text().to_string();
+                        self.bump();
+                        Some(l)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let e = if self.at(TokenKind::Newline)
                     || self.at(TokenKind::RBrace)
                     || self.at(TokenKind::Eof)
@@ -2355,7 +2368,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Some(self.parse_expr())
                 };
-                self.finish_stmt(Stmt::Return(e), start)
+                self.finish_stmt(Stmt::Return(e, label), start)
             }
             TokenKind::Ident if self.text() == "break" => {
                 self.bump();

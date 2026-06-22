@@ -3617,6 +3617,17 @@ bodies exist only as jar bytecode):
   in phase 465 — `cfg(g = { … })` and `h(y = 2)` now resolve (inline and non-inline alike). TDD e2e
   `DefaultBeforeRequired` + an extra `cfg(g = {…})` case in `InlineDefaultParam`. Gate **1335/0**.
 
+## Phase 467 — labeled local return from an inline lambda (`return@foreachT`)  ✅ (+1 → 1336)
+- `return@label` was a parse error; it's the canonical inline non-local-return form (`xs.forEach { return@forEach }`).
+  Now parsed (`Stmt::Return` carries an optional label), checked (a labeled return is a *local* return from
+  its lambda — type-checked but not validated against the enclosing fn's return type), and lowered: when an
+  inline lambda whose body contains `return@<inlineFn>` is spliced, its body is wrapped in a `while(true){…;break}`
+  labeled block and a `inline_lambda_ret` frame is registered, so `return@<inlineFn>` lowers to a `break` to
+  that label (acting as `continue` for the spliced loop). Modeled for `Unit`-result lambdas (the
+  `forEach`/`onEach` shape); a value-result labeled return bails. A `return@enclosingFn` (no matching frame)
+  falls through to the normal function return. New helpers `body_has_disallowed_return` /
+  `body_has_labeled_return`. TDD e2e `InlineLabeledReturn`. Gate **1336/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

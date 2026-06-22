@@ -58,6 +58,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         inline_active: Vec::new(),
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
+        inline_lambda_ret: Vec::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -1752,6 +1753,10 @@ fn setter_name(prop: &str) -> String {
     format!("set{}{}", c.next().unwrap().to_uppercase(), c.as_str())
 }
 
+/// One active inlined-lambda parameter: `(param name, lambda parameter names, lambda body, lambda
+/// parameter types, the inline fn's name — the implicit label for a `return@<fn>` local return)`.
+type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
@@ -1798,9 +1803,8 @@ pub(crate) struct Lower<'a> {
     /// bails (the file is skipped, never miscompiled or crashed).
     expr_depth: u32,
     /// Active inlined-lambda parameters while expanding an `inline fun` body, as a stack so nested
-    /// inline calls compose. Each entry is `(param name, lambda parameter names, lambda body, lambda
-    /// parameter types)`: a call `param(args)` in the inline body inlines the lambda body in place.
-    inline_lambdas: Vec<(String, Vec<String>, AstExprId, Vec<Ty>)>,
+    /// inline calls compose: a call `param(args)` in the inline body inlines the lambda body in place.
+    inline_lambdas: Vec<InlineLambda>,
     /// Names of `inline fun`s currently being expanded — a (self- or mutually-) recursive inline call
     /// would expand forever, so re-entering an active name bails (the file is skipped).
     inline_active: Vec<String>,
@@ -1814,6 +1818,11 @@ pub(crate) struct Lower<'a> {
     /// return into a jump to the body's end. Innermost (`.last()`) is the enclosing inline fn; lambda
     /// args with returns are pre-bailed, so a `return` always belongs to the innermost inline body.
     inline_return: Vec<(u32, String, IrType)>,
+    /// Active *labeled* lambda-return targets while splicing an inline lambda whose body contains a
+    /// `return@<label>` (a local return from that lambda). Each is `(label, result slot, end label,
+    /// return type)`: a `return@label x` lowers to `slot = x; break@end`, the spliced lambda body being
+    /// wrapped in a `do { … } while(false)`. The label is the inline fn name the lambda was passed to.
+    inline_lambda_ret: Vec<(String, u32, String, IrType)>,
 }
 
 impl<'a> Lower<'a> {
@@ -2148,7 +2157,7 @@ impl<'a> Lower<'a> {
     /// stackmap frame a (dead) branch target needs (`VerifyError: Expecting a stack map frame`).
     fn stmt_diverges(&self, s: crate::ast::StmtId) -> bool {
         match self.afile.stmt(s) {
-            Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) => true,
+            Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
             Stmt::Expr(e) => self.info.ty(*e) == Ty::Nothing,
             _ => false,
         }
@@ -4292,7 +4301,27 @@ impl<'a> Lower<'a> {
         }
         match self.afile.stmt(s).clone() {
             Stmt::Expr(e) => self.expr(e),
-            Stmt::Return(e) => {
+            Stmt::Return(e, ret_label) => {
+                // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
+                // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
+                // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
+                // normal function-return handling below (the label names the enclosing function).
+                if let Some(lbl) = &ret_label {
+                    if let Some((_, _, brk, _)) = self
+                        .inline_lambda_ret
+                        .iter()
+                        .rev()
+                        .find(|(l, ..)| l == lbl)
+                        .cloned()
+                    {
+                        let mut stmts = Vec::new();
+                        if let Some(e) = e {
+                            stmts.push(self.expr(e)?);
+                        }
+                        stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(brk) }));
+                        return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                    }
+                }
                 // Inside an expanded `inline fun` body: `return x` is not a real method return — it
                 // assigns the inline result slot and breaks to the body's end label (the `do…while(false)`
                 // wrapper). A `try { … } finally { … }` around the return is not yet combined with this
@@ -5688,7 +5717,12 @@ impl<'a> Lower<'a> {
                     } else {
                         params
                     };
-                    if body_has_return(self.afile, lbody) || params.len() != fnsig.params.len() {
+                    // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
+                    // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
+                    // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
+                    if body_has_disallowed_return(self.afile, lbody, fname)
+                        || params.len() != fnsig.params.len()
+                    {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
                         self.inline_active.truncate(active_depth);
@@ -5713,8 +5747,13 @@ impl<'a> Lower<'a> {
                     } else {
                         fnsig.params.clone()
                     };
-                    self.inline_lambdas
-                        .push((pnames[i].clone(), params, lbody, lam_param_tys));
+                    self.inline_lambdas.push((
+                        pnames[i].clone(),
+                        params,
+                        lbody,
+                        lam_param_tys,
+                        fname.to_string(),
+                    ));
                 } else {
                     // A function-typed argument that is NOT a lambda literal — a callable reference
                     // (`::g`, `obj::m`), or a function-valued variable. It can't be inline-expanded as a
@@ -5875,7 +5914,7 @@ impl<'a> Lower<'a> {
     /// Expand a call `param(args)` to an inlined lambda parameter: bind the lambda's parameters to the
     /// (evaluated) arguments, then lower its body in place. The body's value is the call's value.
     fn lower_inline_lambda_invoke(&mut self, idx: usize, args: &[AstExprId]) -> Option<u32> {
-        let (_, lam_params, lam_body, lam_param_tys) = self.inline_lambdas[idx].clone();
+        let (_, lam_params, lam_body, lam_param_tys, lam_label) = self.inline_lambdas[idx].clone();
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
             return None;
         }
@@ -5897,6 +5936,46 @@ impl<'a> Lower<'a> {
             });
             stmts.push(var);
             self.scope.push((pname.clone(), slot, *pty));
+        }
+        // A `return@<inlineFn>` in the lambda body is a LOCAL return from this lambda invocation. Wrap the
+        // spliced body in a `while(true){ … break }` labeled `brk` and register a frame so the labeled
+        // return lowers to `break@brk` — exactly the inline-fn return mechanism, one level in. Only a
+        // `Unit`-result lambda (the `forEach`/`onEach` shape) is modeled; a value-result labeled return
+        // (a `let { return@let v }`) is not yet — bail rather than miscompile.
+        if body_has_labeled_return(self.afile, lam_body, &lam_label) {
+            let lam_ret = self.info.ty(lam_body);
+            if lam_ret != Ty::Unit && lam_ret != Ty::Nothing {
+                self.scope.truncate(depth);
+                return None;
+            }
+            let brk = format!("$lamret${}", self.fresh_value());
+            self.inline_lambda_ret
+                .push((lam_label.clone(), 0, brk.clone(), IrType::Unit));
+            let body_val = self.expr(lam_body);
+            self.inline_lambda_ret.pop();
+            self.scope.truncate(depth);
+            let body_val = body_val?;
+            let brk_stmt = self.ir.add_expr(IrExpr::Break {
+                label: Some(brk.clone()),
+            });
+            let loop_body = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![body_val, brk_stmt],
+                value: None,
+            });
+            let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let loopw = self.ir.add_expr(IrExpr::While {
+                cond,
+                body: loop_body,
+                update: None,
+                post_test: false,
+                label: Some(brk),
+            });
+            stmts.push(loopw);
+            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            return Some(self.ir.add_expr(IrExpr::Block {
+                stmts,
+                value: Some(unit),
+            }));
         }
         let body_val = self.expr(lam_body);
         self.scope.truncate(depth);
@@ -9857,8 +9936,49 @@ fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
 }
 
 fn stmt_has_return(file: &ast::File, s: ast::StmtId) -> bool {
-    matches!(file.stmt(s), Stmt::Return(_))
+    matches!(file.stmt(s), Stmt::Return(..))
         || file.any_child_stmt(s, &mut |x| body_has_return(file, x))
+}
+
+/// Does `e` contain a `return@label` matching `label` (not descending into nested lambdas)?
+fn body_has_labeled_return(file: &ast::File, e: AstExprId, label: &str) -> bool {
+    fn stmt_has(file: &ast::File, s: ast::StmtId, lbl: &str) -> bool {
+        match file.stmt(s) {
+            Stmt::Return(_, l) => l.as_deref() == Some(lbl),
+            _ => file.any_child_stmt(s, &mut |x| expr_has(file, x, lbl)),
+        }
+    }
+    fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
+        if matches!(file.expr(e), Expr::Lambda { .. }) {
+            return false;
+        }
+        file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
+            stmt_has(file, s, lbl)
+        })
+    }
+    expr_has(file, e, label)
+}
+
+/// Does `e` contain a `return` the inline-lambda splicer can't model — a bare `return` (non-local) or a
+/// `return@other`? A `return@own_label` (a local return from the lambda being spliced) IS modeled, so it
+/// is not "disallowed". Nested lambdas are not descended into (their returns belong to their own scope).
+fn body_has_disallowed_return(file: &ast::File, e: AstExprId, own_label: &str) -> bool {
+    fn stmt_bad(file: &ast::File, s: ast::StmtId, own: &str) -> bool {
+        match file.stmt(s) {
+            Stmt::Return(_, label) => label.as_deref() != Some(own),
+            _ => file.any_child_stmt(s, &mut |x| expr_bad(file, x, own)),
+        }
+    }
+    fn expr_bad(file: &ast::File, e: AstExprId, own: &str) -> bool {
+        // A nested lambda has its own return scope — don't descend into it.
+        if matches!(file.expr(e), Expr::Lambda { .. }) {
+            return false;
+        }
+        file.any_child_expr(e, &mut |x| expr_bad(file, x, own), &mut |s| {
+            stmt_bad(file, s, own)
+        })
+    }
+    expr_bad(file, e, own_label)
 }
 
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
@@ -10174,7 +10294,7 @@ fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
     }
     fn st(file: &ast::File, s: crate::ast::StmtId, ld: u32, wr: bool) -> bool {
         match file.stmt(s) {
-            Stmt::Return(_) => wr,
+            Stmt::Return(..) => wr,
             Stmt::Break(_) | Stmt::Continue(_) => ld == 0,
             Stmt::Expr(e)
             | Stmt::Local { init: e, .. }
