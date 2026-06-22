@@ -2354,13 +2354,13 @@ impl<'a> Lower<'a> {
         if self.cur_class.is_some() {
             return None;
         }
-        // A `Nothing`-returning lambda (its body always diverges — a `throw` or an unconditional non-local
-        // `return`, `f { return … }`) isn't modeled: when spliced into a LOOP host (`repeat`/`forEach`) the
-        // diverging body's `*return` leaves the host's post-invoke continuation (the loop back-edge / exit)
-        // unreachable with no relocatable stack-map frame — a VerifyError. Bail (the file SKIPS, never
-        // miscompiles) until the splicer relocates frames around a diverging spliced body. (See
-        // `inline/kt66017.kt`: `forEach { repeat(n) { return … } }`.)
-        if sig.ret == Ty::Nothing {
+        // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
+        // is handled by the diverging path below: it only ever splices (the impl method is marked
+        // inline-only and not emitted), so its `return` becomes the enclosing fn's return, and the splicer
+        // synthesizes the stack-map frame the host's now-unreachable post-invoke continuation needs. But a
+        // Nothing lambda WITHOUT a bare return (a `throw`, or only a `return@label` — which can materialize
+        // as a real closure) isn't modeled that way — bail (skip, never miscompile) as before.
+        if sig.ret == Ty::Nothing && !body_has_bare_return(self.afile, body) {
             return None;
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda.

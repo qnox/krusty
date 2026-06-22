@@ -255,6 +255,27 @@ fun box(): String {
 }
 "#,
     ),
+    // A non-local `return` through a spliced loop host (`repeat`/`forEach`) — including the unconditional
+    // (diverging-body) form. The splicer relocates the stack-map frame the host's now-unreachable
+    // post-invoke continuation needs.
+    (
+        "InlineNonLocalReturnThroughLoop",
+        r#"
+fun first(): String {
+    repeat(5) { return "OK" }
+    return "Fail"
+}
+fun firstEven(xs: List<Int>): Int {
+    xs.forEach { if (it % 2 == 0) return it }
+    return -1
+}
+fun box(): String {
+    if (first() != "OK") return "f0"
+    if (firstEven(listOf(1, 3, 4, 5)) != 4) return "f1"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
