@@ -2572,6 +2572,22 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 438 — loop-host lambda-frame context infrastructure; isolate the operand-baseline frontier  ✅
+- `splice_unified` now reports `lambda_host_locals`: the host's LIVE body locals at each lambda's invoke
+  (the loop-body frame for a loop host — iterator/accumulator — not just the parameters), falling back to
+  the parameters when no host frame precedes the invoke (`takeIf`). `merge_lambda_frame_locals` uses this
+  as the host context for a spliced lambda body's frames, so a branchy lambda body inside a loop gets the
+  correct live-local context.
+- This isolated the LAST blocker for loop-host inlining: `map`/`fold`/`forEach` build a collection, so the
+  lambda is invoked at a NON-EMPTY operand baseline (the destination sits on the stack for the later
+  `.add`) — the lambda body's own frames need that operand-stack PREFIX, which requires abstract-
+  interpreting the host's operand stack at the invoke (a further subsystem). Until then, a lambda host
+  with a loop bails: a PUBLIC one (`map`/`fold`/`forEach`) falls back to a real call, a non-public one
+  skips — never a miscompile.
+- Box gate **1313, 0 FAIL** (unchanged; `feature_box_e2e::TakeIf` green). Empty-operand-baseline hosts
+  (`takeIf`/`takeUnless`/`require`/`check`/`let`/`also`/`run`/`apply`) inline fully, branchy host and
+  branchy lambda body included. Loop hosts (non-empty baseline) are the remaining inline frontier.
+
 ### Phase 436 — inline branchy-lambda hosts (`takeIf`/`takeUnless`): full host + lambda-body frame relocation  ✅
 - `splice_unified` now relocates a BRANCHY lambda BODY's own `StackMapTable` frames (a comparison
   predicate `{ it.length == 2 }` materializes to branches), not just the host's. The emitter
