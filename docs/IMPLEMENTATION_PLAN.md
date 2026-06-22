@@ -3695,6 +3695,15 @@ bodies exist only as jar bytecode):
 - Recovers the phase-471 `repeat` `−1` (`inline/kt66017.kt`, `forEach { repeat(n){ return } }`) **plus one more**
   diverging-non-local-return case. TDD e2e `InlineNonLocalReturnThroughLoop`. Gate **1344/0**.
 
+## Phase 473 — non-local return from a lambda to a USER inline fn (IR inliner)  ✅
+- The IR inliner (`lower_inline_fn_call`) bailed on a BARE non-local `return` in an inline lambda body
+  (`body_has_disallowed_return`). It's now modeled: `lower_inline_lambda_invoke` clears the `inline_return`
+  stack while lowering the spliced lambda body, so a bare `return` lowers to the REAL enclosing-function
+  return (`cur_ret_ty`) rather than the inline fn's result-slot break — correct non-local-return semantics,
+  even when the inline fn has its own `return`. Only `return@other` (labeled to a different inline fn) still
+  bails. TDD e2e `UserInlineNonLocalReturn` (`forEachI(xs) { if (it==3) return … }`). Gate **1344/0** (no
+  corpus delta — the corpus uses stdlib forms — but the construct now works, no regression/miscompile).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
