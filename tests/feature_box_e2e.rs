@@ -291,6 +291,31 @@ fun box(): String {
 }
 "#,
     ),
+    // Safe-call scope functions `s?.let { it… }` / `?.run` / `?.also` / `?.apply` — the most idiomatic
+    // null-handling form: when the receiver is non-null run the scope fn (binding `it`/`this`), else the
+    // whole expression is `null`. The trailing lambda attaches to the safe call; `let`/`run` yield the
+    // body (nullable), `also`/`apply` yield the receiver.
+    (
+        "SafeCallScopeFn",
+        r#"
+class B(var v: Int)
+fun box(): String {
+    val s: String? = "ab"
+    val z: String? = null
+    if ((s?.let { it.length } ?: 0) != 2) return "f0"
+    if ((z?.let { it.length } ?: 9) != 9) return "f1"          // null receiver → 9
+    if ((s?.run { length } ?: 0) != 2) return "f2"
+    if ((s?.let { it + "!" } ?: "x") != "ab!") return "f3"
+    if ((z?.let { it + "!" } ?: "x") != "x") return "f4"       // null receiver → "x"
+    val b: B? = B(1)
+    b?.also { it.v = 5 }
+    if (b!!.v != 5) return "f5: ${b.v}"
+    val r = B(1).apply { v = 7 }
+    if (r.v != 7) return "f6: ${r.v}"
+    return "OK"
+}
+"#,
+    ),
     // `with(receiver) { … }` — the stdlib 2-arg receiver-lambda scope function: the first argument is
     // the lambda body's implicit `this`. Driven by the checker's recorded receiver-lambda decision (the
     // same generic path as `x.run`/`x.apply`), over a builtin / classpath / user receiver, with member

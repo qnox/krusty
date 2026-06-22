@@ -4352,6 +4352,81 @@ impl<'a> Lower<'a> {
         Some(result)
     }
 
+    /// Inline a scope function over an ALREADY-LOWERED receiver value (`recv_val`) — the shared core for
+    /// a safe-call scope fn (`s?.let { … }`). Binds `recv_val` to a fresh slot named `pname` (`it` for
+    /// `let`/`also`, `this` for `run`/`apply` — which also clears `cur_class`), lowers the body, and
+    /// yields the body value or the receiver (`returns_receiver`). Returns the inlined block value.
+    fn lower_scope_inline_on(
+        &mut self,
+        recv_val: u32,
+        rty: Ty,
+        pname: &str,
+        body: AstExprId,
+        returns_receiver: bool,
+    ) -> Option<u32> {
+        let depth = self.scope.len();
+        let p_slot = self.fresh_value();
+        let saved_cur = self.cur_class.clone();
+        if pname == "this" {
+            self.cur_class = None;
+        }
+        self.scope.push((pname.to_string(), p_slot, rty));
+        let var_p = self.ir.add_expr(IrExpr::Variable {
+            index: p_slot,
+            ty: ty_to_ir(rty),
+            init: Some(recv_val),
+        });
+        let body_val = self.expr(body);
+        self.scope.truncate(depth);
+        self.cur_class = saved_cur;
+        let body_val = body_val?;
+        Some(if returns_receiver {
+            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![var_p, body_val],
+                value: Some(recv_read),
+            })
+        } else {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![var_p],
+                value: Some(body_val),
+            })
+        })
+    }
+
+    /// The non-null-branch value of a safe-call scope function (`s?.let`/`?.run`/`?.also`/`?.apply`):
+    /// inline the scope fn with `recv_val` (the non-null receiver) bound. `None` when `name`/args aren't
+    /// a recognized lambda-bearing scope call (the caller falls back to the member-access path).
+    fn lower_safe_scope_member(
+        &mut self,
+        recv_val: u32,
+        rty: Ty,
+        name: &str,
+        args: &Option<Vec<AstExprId>>,
+    ) -> Option<u32> {
+        let a = args.as_ref()?;
+        if a.len() != 1 {
+            return None;
+        }
+        let Expr::Lambda { params, body } = self.afile.expr(a[0]).clone() else {
+            return None;
+        };
+        let (pname, returns_receiver) = match name {
+            "let" => (
+                params.first().cloned().unwrap_or_else(|| "it".to_string()),
+                false,
+            ),
+            "also" => (
+                params.first().cloned().unwrap_or_else(|| "it".to_string()),
+                true,
+            ),
+            "run" if params.is_empty() => ("this".to_string(), false),
+            "apply" if params.is_empty() => ("this".to_string(), true),
+            _ => return None,
+        };
+        self.lower_scope_inline_on(recv_val, rty, &pname, body, returns_receiver)
+    }
+
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -6557,63 +6632,80 @@ impl<'a> Lower<'a> {
                     .libraries
                     .resolve_type(&internal)
                     .map_or(false, |t| t.is_interface);
-                let member = match args {
-                    Some(args) => {
-                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name)
-                        {
-                            let params = self.ir.functions[fid as usize].params.clone();
-                            if args.len() != params.len() {
-                                return None;
+                // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
+                // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
+                // whole `s?.…` yield `null` when `s` is null.
+                let member = if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args)
+                {
+                    m
+                } else {
+                    match args {
+                        Some(args) => {
+                            if let Some((class, index, fid, _)) =
+                                self.resolve_method(&internal, &name)
+                            {
+                                let params = self.ir.functions[fid as usize].params.clone();
+                                if args.len() != params.len() {
+                                    return None;
+                                }
+                                let mut a = Vec::new();
+                                for (arg, pt) in args.iter().zip(&params) {
+                                    a.push(self.lower_arg(*arg, pt)?);
+                                }
+                                self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: recv2,
+                                    args: a.into_iter().map(Some).collect(),
+                                })
+                            } else {
+                                // A classpath instance method (`s?.substring(1)`).
+                                let arg_tys: Vec<Ty> =
+                                    args.iter().map(|&a| self.info.ty(a)).collect();
+                                let m = crate::libraries::resolve_instance(
+                                    &*self.syms.libraries,
+                                    &internal,
+                                    &name,
+                                    &arg_tys,
+                                )?;
+                                let mut a = Vec::new();
+                                for (arg, pt) in args.iter().zip(&m.params) {
+                                    a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                                }
+                                self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Virtual {
+                                        owner: internal.clone(),
+                                        name: m.name,
+                                        descriptor: m.descriptor,
+                                        interface: is_iface,
+                                    },
+                                    dispatch_receiver: Some(recv2),
+                                    args: a,
+                                })
                             }
-                            let mut a = Vec::new();
-                            for (arg, pt) in args.iter().zip(&params) {
-                                a.push(self.lower_arg(*arg, pt)?);
-                            }
-                            self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: recv2,
-                                args: a.into_iter().map(Some).collect(),
-                            })
-                        } else {
-                            // A classpath instance method (`s?.substring(1)`).
-                            let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                            let m = crate::libraries::resolve_instance(
-                                &*self.syms.libraries,
-                                &internal,
-                                &name,
-                                &arg_tys,
-                            )?;
-                            let mut a = Vec::new();
-                            for (arg, pt) in args.iter().zip(&m.params) {
-                                a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                            }
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.clone(),
-                                    name: m.name,
-                                    descriptor: m.descriptor,
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(recv2),
-                                args: a,
-                            })
                         }
-                    }
-                    None => {
-                        if let Some((fclass, idx, _)) = self.resolve_field(&internal, &name) {
-                            let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
-                            // External read → `getX()` (the backing field is private); internal → field.
-                            if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                                if let Some((mclass, mindex, _, _)) =
-                                    self.resolve_method(&internal, &getter_name(&name))
-                                {
-                                    self.ir.add_expr(IrExpr::MethodCall {
-                                        class: mclass,
-                                        index: mindex,
-                                        receiver: recv2,
-                                        args: vec![],
-                                    })
+                        None => {
+                            if let Some((fclass, idx, _)) = self.resolve_field(&internal, &name) {
+                                let owner_internal =
+                                    self.ir.classes[fclass as usize].fq_name.clone();
+                                // External read → `getX()` (the backing field is private); internal → field.
+                                if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+                                    if let Some((mclass, mindex, _, _)) =
+                                        self.resolve_method(&internal, &getter_name(&name))
+                                    {
+                                        self.ir.add_expr(IrExpr::MethodCall {
+                                            class: mclass,
+                                            index: mindex,
+                                            receiver: recv2,
+                                            args: vec![],
+                                        })
+                                    } else {
+                                        self.ir.add_expr(IrExpr::GetField {
+                                            receiver: recv2,
+                                            class: fclass,
+                                            index: idx,
+                                        })
+                                    }
                                 } else {
                                     self.ir.add_expr(IrExpr::GetField {
                                         receiver: recv2,
@@ -6621,45 +6713,39 @@ impl<'a> Lower<'a> {
                                         index: idx,
                                     })
                                 }
+                            } else if internal == "java/lang/String" && name == "length" {
+                                self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::External("kotlin/String.length".to_string()),
+                                    dispatch_receiver: Some(recv2),
+                                    args: vec![],
+                                })
                             } else {
-                                self.ir.add_expr(IrExpr::GetField {
-                                    receiver: recv2,
-                                    class: fclass,
-                                    index: idx,
+                                // A classpath property (`list?.size`) — a zero-arg accessor.
+                                let mapped = crate::resolve::collection_mapped_accessor(&name)
+                                    .map(|s| s.to_string());
+                                let m = [Some(name.clone()), Some(getter_name(&name)), mapped]
+                                    .into_iter()
+                                    .flatten()
+                                    .find_map(|c| {
+                                        crate::libraries::resolve_instance(
+                                            &*self.syms.libraries,
+                                            &internal,
+                                            &c,
+                                            &[],
+                                        )
+                                        .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                                    })?;
+                                self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Virtual {
+                                        owner: internal.clone(),
+                                        name: m.name,
+                                        descriptor: m.descriptor,
+                                        interface: is_iface,
+                                    },
+                                    dispatch_receiver: Some(recv2),
+                                    args: vec![],
                                 })
                             }
-                        } else if internal == "java/lang/String" && name == "length" {
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::External("kotlin/String.length".to_string()),
-                                dispatch_receiver: Some(recv2),
-                                args: vec![],
-                            })
-                        } else {
-                            // A classpath property (`list?.size`) — a zero-arg accessor.
-                            let mapped = crate::resolve::collection_mapped_accessor(&name)
-                                .map(|s| s.to_string());
-                            let m = [Some(name.clone()), Some(getter_name(&name)), mapped]
-                                .into_iter()
-                                .flatten()
-                                .find_map(|c| {
-                                    crate::libraries::resolve_instance(
-                                        &*self.syms.libraries,
-                                        &internal,
-                                        &c,
-                                        &[],
-                                    )
-                                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                                })?;
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.clone(),
-                                    name: m.name,
-                                    descriptor: m.descriptor,
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(recv2),
-                                args: vec![],
-                            })
                         }
                     }
                 };
