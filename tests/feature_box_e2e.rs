@@ -101,6 +101,25 @@ fun box(): String {
 }
 "#,
     ),
+    // An `inline fun` with a trailing `vararg`: the call's trailing arguments are packed into an array
+    // bound to the parameter, and the inlined body iterates it (incl. the empty-vararg and fixed+vararg
+    // forms).
+    (
+        "InlineVararg",
+        r#"
+inline fun sum(vararg xs: Int): Int { var s = 0; for (x in xs) s += x; return s }
+inline fun join(sep: String, vararg xs: String): String {
+    var s = ""; for (x in xs) s += sep + x; return s
+}
+fun box(): String {
+    if (sum(1, 2, 3) != 6) return "f0"
+    if (sum() != 0) return "f1"
+    if (join("-", "a", "b", "c") != "-a-b-c") return "f2"
+    if (join("/") != "") return "f3"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
