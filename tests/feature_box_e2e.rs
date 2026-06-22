@@ -788,6 +788,27 @@ fun box(): String {
     // `takeIf`/`takeUnless`: BRANCHY host (returns receiver or null per the inlined predicate) with a
     // `Function1` predicate whose body is a COMPARISON — i.e. a branchy lambda body. Exercises the
     // universal splicer's full frame relocation: the host's StackMapTable frames AND the lambda body's own.
+    // A LOOP host (`map`/`filter` builds a collection) whose lambda body is BRANCHY (a comparison/`if`):
+    // `map` keeps the destination collection on the operand stack BELOW the lambda result, so the lambda
+    // body's own StackMapTable frames must be rebased onto that `[Collection]` prefix (computed by the
+    // splicer's forward operand-stack simulation). `forEach`/`fold` exercise the EMPTY-prefix branchy case.
+    (
+        "MapBranchy",
+        r#"
+fun box(): String {
+    val m = listOf(-1, 2, -3).map { if (it > 0) it else -it }
+    if (m != listOf(1, 2, 3)) return "f0: $m"
+    val f = listOf(1, 2, 3, 4).filter { it % 2 == 0 }
+    if (f != listOf(2, 4)) return "f1: $f"
+    var s = 0
+    listOf(1, 2, 3, 4).forEach { if (it % 2 == 0) s += it }
+    if (s != 6) return "f2: $s"
+    val t = listOf(1, 2, 3).fold(0) { acc, x -> if (x > 1) acc + x else acc }
+    if (t != 5) return "f3: $t"
+    return "OK"
+}
+"#,
+    ),
     (
         "TakeIf",
         r#"
