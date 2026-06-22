@@ -5605,6 +5605,15 @@ impl<'a> Lower<'a> {
                     .or_insert(self.info.ty(args[i]));
             }
         }
+        // A generic-RECEIVER extension (`<T> T.foo`): bind the type parameter to the SPECIALIZED receiver
+        // type, so a lambda parameter typed by it (`f: (T) -> …`) specializes too. Without this the lambda
+        // param slot is typed the erased `Object` while the checker recorded the concrete type in its
+        // frames — an inconsistent-frame `VerifyError` (`<T> T.alsoLog { … }` capturing a variable).
+        if let (Some(rt), Some(recv_ref)) = (recv_ty, &f.receiver) {
+            if tparams.contains(recv_ref.name.as_str()) {
+                tbinds.entry(recv_ref.name.clone()).or_insert(rt);
+            }
+        }
         let active_depth = self.inline_active.len();
         self.inline_active.push(call_id);
         // Bind each reified type parameter to the call's explicit type argument (resolved through any

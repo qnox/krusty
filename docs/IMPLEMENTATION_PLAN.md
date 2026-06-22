@@ -3714,6 +3714,18 @@ bodies exist only as jar bytecode):
   pre-existing frame bug, gate-green/uncovered by the corpus; non-generic ext + plain inline + mutable capture
   all verify. Tracked separately from this session's work.)
 
+## Phase 475 — generic-receiver extension inline: specialize the lambda param from the receiver  ✅
+- A generic-receiver extension inline fn (`inline fun <T> T.applyIt(f: (T) -> R)`) inlined its lambda with the
+  parameter typed by the erased `Object`, not the actual receiver type — so `it.length` (a `String` member)
+  failed to resolve and other uses risked an erased-frame mismatch. `lower_inline_fn_call` now binds the type
+  parameter to the SPECIALIZED receiver type (`tbinds[receiverTypeParam] = recv_ty`), so a lambda parameter
+  typed by it specializes (`it: String`), matching the checker. TDD e2e `GenericReceiverExtInline`
+  (`"abc".applyIt { it.length }`, `list.applyIt { it.size }`). Gate **1344/0**.
+- (Still latent — documented: a generic-receiver ext inline whose lambda also CAPTURES a variable
+  (`<T> T.alsoLog { capture }`) hits a deeper multi-slot erasure-frame `VerifyError` — the receiver-`this`
+  slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
+  the box corpus.)
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
