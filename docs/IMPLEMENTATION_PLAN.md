@@ -3726,6 +3726,22 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 482 — no-lambda `@InlineOnly` extensions on a primitive receiver (`Char.isDigit()` etc.)  ✅
+- `'a'.isDigit()`/`isLetter()`/`uppercaseChar()`/… bailed (`unresolved method on Char`): they're no-lambda
+  `@InlineOnly` extensions, which the checker only accepted for *lambda* args (`takeIf`). The checker now also
+  accepts a no-lambda `@InlineOnly` extension, but TIGHTLY scoped so the generic splice stays value-correct:
+  a **non-unsigned primitive receiver**, **primitive/`String` return**, **no function-type parameter**, and
+  `can_inline_call` (the body actually splices). No name match — the receiver/return SHAPE selects it.
+- A broad widen first miscompiled 13 corpus cases (committed as a documented anti-pattern in a249c98); the
+  failure modes were: a function-typed param (`let`/`apply` fallback with a non-literal arg → private-method
+  `IllegalAccessError`), a multi-step reference body (`StringBuilder.appendLine` → wrong value), and an
+  unsigned return. The shape gate excludes the first two; the last needed `LibrarySet::metadata_return_unsigned`
+  (reads the Kotlin return class from `@Metadata`) — `Int.toUShort(): UShort` erases to a signed `Short` in the
+  JVM signature, so `Ty` alone can't tell `40000` from `-25536`; such an extension is now skipped (a clean
+  bail, not a miscompile — krusty's unsigned support is incomplete).
+- TDD e2e `PrimitiveInlineExtension` (`isDigit`/`isLetter`/`isWhitespace`/`uppercaseChar`/`lowercaseChar`,
+  `"aBc".map { it.uppercaseChar() }`). Gate **1352/0** (+5 corpus cases).
+
 ## Phase 481 — safe-call stdlib EXTENSION calls + chains (`s?.uppercase()?.length`)  ✅
 - The safe-call lowerer resolved only members (`resolve_method`/`resolve_instance`); a stdlib extension via a
   safe call (`s?.uppercase()`) bailed, which also broke any chain through it (`s?.uppercase()?.length`). The
