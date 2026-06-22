@@ -4093,6 +4093,14 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                    // A bare name resolved against the implicit receiver (`this`) of arbitrary type —
+                    // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
+                    // general member read so builtin/library members (`String.length`) resolve too.
+                    if let Some(rt) = self.this_ty {
+                        if let Some(ty) = self.try_member_read(rt, &n, self.span(e)) {
+                            return self.set(e, ty);
+                        }
+                    }
                     if let Some(&(ty, _)) = self.syms.props.get(&n) {
                         ty // top-level property
                     } else if n == "Unit" {
@@ -4789,29 +4797,79 @@ impl<'a> Checker<'a> {
     /// or `None` if `fname` isn't one of these.
     /// Type-check a `run`/`with`/`apply` lambda body with `recv` as its implicit receiver: `this` is
     /// `recv`, and the receiver's properties resolve unqualified. Returns the body's type.
-    fn check_with_receiver(&mut self, recv: Ty, body: ExprId, span: Span) -> Ty {
-        let Ty::Obj(internal, _) = recv else {
-            if recv != Ty::Error {
-                self.diags.error(
-                    span,
-                    "krusty: run/with/apply receiver must be a class instance".to_string(),
-                );
-            }
+    fn check_with_receiver(&mut self, recv: Ty, body: ExprId, _span: Span) -> Ty {
+        if recv == Ty::Error {
             return Ty::Error;
-        };
+        }
         let prev_this = self.this_ty;
         self.this_ty = Some(recv);
         self.push_scope();
-        // The receiver's properties are visible unqualified inside the body.
-        if let Some(cs) = self.syms.class_by_internal(internal) {
-            for (n, t, is_var) in cs.props.clone() {
-                self.declare(&n, t, is_var);
+        // A user class receiver's own properties are visible unqualified inside the body; for builtin
+        // and library receivers (`String`, `StringBuilder`, …) a bare member resolves through the
+        // implicit-`this` member probe in the `Expr::Name`/call arms instead.
+        if let Ty::Obj(internal, _) = recv {
+            if let Some(cs) = self.syms.class_by_internal(internal) {
+                for (n, t, is_var) in cs.props.clone() {
+                    self.declare(&n, t, is_var);
+                }
             }
         }
         let bt = self.expr(body);
         self.pop_scope();
         self.this_ty = prev_this;
         bt
+    }
+
+    /// Resolve an UNQUALIFIED call `name(args)` as a member of the implicit receiver `rt` (`this`) —
+    /// the body of a receiver lambda (`StringBuilder().apply { append("x") }` → `this.append("x")`).
+    /// Mirrors the qualified `recv.name(args)` member-call typing for builtin/library/user receivers.
+    /// Returns `Some(ret)` when it resolves, `None` to let the caller keep searching. Checks arguments.
+    fn this_member_call_ret(
+        &mut self,
+        rt: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+        args: &[ExprId],
+    ) -> Option<Ty> {
+        if let ("toString", []) = (name, arg_tys) {
+            return Some(Ty::String);
+        }
+        if rt == Ty::String {
+            if let Some(ret) = self
+                .syms
+                .libraries
+                .builtin_member_ret("kotlin/String", name, arg_tys)
+                .or_else(|| resolve_string_instance(name, arg_tys))
+            {
+                return Some(ret);
+            }
+        }
+        if rt == Ty::obj("java/lang/StringBuilder") {
+            if let Some(ret) = resolve_stringbuilder_instance(name, arg_tys) {
+                return Some(ret);
+            }
+        }
+        if let Ty::Obj(internal, _) = rt {
+            if let Some(sig) = self.lookup_method(internal, name) {
+                if sig.params.len() == arg_tys.len() {
+                    for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
+                        self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                    }
+                    return Some(sig.ret);
+                }
+            }
+            if let Some(m) =
+                crate::libraries::resolve_instance(&*self.syms.libraries, internal, name, arg_tys)
+            {
+                return Some(
+                    self.syms
+                        .libraries
+                        .member_return(rt, name, arg_tys)
+                        .unwrap_or(m.ret),
+                );
+            }
+        }
+        None
     }
 
     /// Check a lambda expression with explicit parameter types (for type-directed inference).
@@ -5077,6 +5135,19 @@ impl<'a> Checker<'a> {
             format!("unresolved member '{name}' on '{}'", rt.name()),
         );
         Ty::Error
+    }
+
+    /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
+    /// `None` otherwise (rolling back any error [`check_member`] would have reported). Used to resolve a
+    /// bare name `length` inside a receiver-lambda body (`this`-relative) for an arbitrary receiver type.
+    fn try_member_read(&mut self, rt: Ty, name: &str, span: Span) -> Option<Ty> {
+        let n = self.diags.diags.len();
+        let t = self.check_member(rt, name, span);
+        if self.diags.diags.len() > n || t == Ty::Error {
+            self.diags.diags.truncate(n);
+            return None;
+        }
+        Some(t)
     }
 
     fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
@@ -6215,6 +6286,15 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                             return sig.ret;
+                        }
+                    }
+                }
+                // Unqualified call to a member of the implicit receiver of a builtin/library type — a
+                // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).
+                if !self.syms.funs.contains_key(&fname) {
+                    if let Some(rt) = self.this_ty {
+                        if let Some(ret) = self.this_member_call_ret(rt, &fname, &arg_tys, args) {
+                            return ret;
                         }
                     }
                 }

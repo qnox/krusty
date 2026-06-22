@@ -302,6 +302,11 @@ pub struct TypeRef {
     /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
     /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
     pub fun_params: Vec<TypeRef>,
+    /// For a receiver function type `Recv.(A) -> R`: `true`, and `fun_params[0]` is the receiver
+    /// `Recv`. The receiver folds in as the first `FunctionN` parameter (matching Kotlin's lowering),
+    /// but the front end keeps this marker so a lambda passed to such a param binds `fun_params[0]`
+    /// as the implicit `this` receiver (member access, and an arity-short `f()` supplies it).
+    pub fun_has_receiver: bool,
 }
 
 #[derive(Clone, Debug)]

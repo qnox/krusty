@@ -480,6 +480,7 @@ impl<'a> Parser<'a> {
                     targs: vec![],
                     span,
                     fun_params: vec![],
+                    fun_has_receiver: false,
                 };
                 (Some(recv), self.ident_or_error("property name"))
             } else {
@@ -999,6 +1000,7 @@ impl<'a> Parser<'a> {
                     targs: vec![],
                     span,
                     fun_params: vec![],
+                    fun_has_receiver: false,
                 };
                 let fun_name = if self.at(TokenKind::Ident) {
                     let n = self.text().to_string();
@@ -1880,6 +1882,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
+                    fun_has_receiver: false,
                 }
             } else {
                 // Parenthesized type (rare) — just return error; krusty doesn't support tuple types.
@@ -1891,6 +1894,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_has_receiver: false,
                 }
             }
         } else if self.at(TokenKind::Ident) {
@@ -1924,6 +1928,7 @@ impl<'a> Parser<'a> {
                         targs: Vec::new(),
                         span,
                         fun_params: Vec::new(),
+                        fun_has_receiver: false,
                     }
                 } else {
                     self.parse_type()
@@ -1942,6 +1947,7 @@ impl<'a> Parser<'a> {
                 targs,
                 span,
                 fun_params: Vec::new(),
+                fun_has_receiver: false,
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -1983,6 +1989,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
+                    fun_has_receiver: true,
                 };
             }
             base
@@ -1995,6 +2002,7 @@ impl<'a> Parser<'a> {
                 targs: Vec::new(),
                 span,
                 fun_params: Vec::new(),
+                fun_has_receiver: false,
             }
         }
     }
@@ -2027,6 +2035,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_has_receiver: false,
                 });
             } else {
                 args.push(self.parse_type());

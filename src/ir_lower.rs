@@ -4106,6 +4106,79 @@ impl<'a> Lower<'a> {
         self.coerce_erased(read, lt, pty)
     }
 
+    /// Lower a zero-arg member READ `recv.name` on a builtin/library/another-file receiver — the shared
+    /// path behind a qualified `recv.name` and a receiver-lambda's implicit `this.name`. The member is
+    /// resolved generically through the library/stdlib classpath reader by its own name, its `getX()`
+    /// accessor form, or a collection-mapped name (no per-member hardcode — `String.length` resolves as
+    /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
+    /// value. Returns `None` when the type exposes no such member.
+    fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
+        // A property on a class defined in ANOTHER file → its public `getX()` accessor (the backing
+        // field is private). Resolved from the sibling class's `ClassSig`.
+        if let Ty::Obj(i, _) = rt {
+            if self.class_of(rt).is_none() {
+                if let Some((owner, ret_ty, is_iface)) = self
+                    .syms
+                    .class_by_internal(i)
+                    .filter(|cs| cs.value_field.is_none())
+                    .and_then(|cs| {
+                        cs.props
+                            .iter()
+                            .find(|(n, _, _)| n == name)
+                            .map(|(_, t, _)| (i.to_string(), *t, cs.is_interface))
+                    })
+                {
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::CrossFileVirtual {
+                            owner,
+                            name: getter_name(name),
+                            params: vec![],
+                            ret: ty_to_ir(ret_ty),
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: vec![],
+                    }));
+                }
+            }
+        }
+        // A Kotlin property is a zero-arg accessor on the JVM. Resolve it from the stdlib/classpath
+        // reader by the property's own name (`size()`), its `getX()` form, or a collection-mapped name —
+        // a `String` receiver reads its `java.lang.String` members.
+        let internal = match rt {
+            Ty::String => "java/lang/String".to_string(),
+            Ty::Obj(i, _) => i.to_string(),
+            _ => return None,
+        };
+        let mapped = crate::resolve::collection_mapped_accessor(name).map(|s| s.to_string());
+        let (m, is_iface) = [Some(name.to_string()), Some(getter_name(name)), mapped]
+            .into_iter()
+            .flatten()
+            .find_map(|cand| {
+                crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &cand, &[])
+                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                    .map(|m| {
+                        let is_iface = self
+                            .syms
+                            .libraries
+                            .resolve_type(&internal)
+                            .map_or(false, |t| t.is_interface);
+                        (m, is_iface)
+                    })
+            })?;
+        let read = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: internal,
+                name: m.name.clone(),
+                descriptor: m.descriptor,
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(recv),
+            args: vec![],
+        });
+        Some(self.coerce_generic_read(read, e, m.ret))
+    }
+
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -6852,55 +6925,34 @@ impl<'a> Lower<'a> {
                             })
                         }
                     } else {
-                        // An extension-function receiver: `fun A.f() = n` reads `this.n` from OUTSIDE
-                        // class A, so go through the property getter (the backing field is private) for a
-                        // user class, the field directly when one resolves, else a classpath accessor.
-                        let internal = this_ty.obj_internal()?.to_string();
-                        if let Some((class, index, _, _)) =
-                            self.resolve_method(&internal, &getter_name(&n))
-                        {
-                            self.ir.add_expr(IrExpr::MethodCall {
-                                class,
-                                index,
-                                receiver: recv,
-                                args: vec![],
-                            })
-                        } else if let Some((fclass, idx, _)) = self.resolve_field(&internal, &n) {
-                            self.ir.add_expr(IrExpr::GetField {
-                                receiver: recv,
-                                class: fclass,
-                                index: idx,
-                            })
+                        // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
+                        // `recv.run { n }`) reads `this.n` from OUTSIDE class A — through the property
+                        // getter (the backing field is private) for a user class, the field directly when
+                        // one resolves, else the shared builtin/library member read (`String.length`, a
+                        // collection accessor, …) — the same path a qualified `this.n` read takes.
+                        let internal = this_ty.obj_internal();
+                        if let Some(internal) = internal {
+                            if let Some((class, index, _, _)) =
+                                self.resolve_method(internal, &getter_name(&n))
+                            {
+                                self.ir.add_expr(IrExpr::MethodCall {
+                                    class,
+                                    index,
+                                    receiver: recv,
+                                    args: vec![],
+                                })
+                            } else if let Some((fclass, idx, _)) = self.resolve_field(internal, &n)
+                            {
+                                self.ir.add_expr(IrExpr::GetField {
+                                    receiver: recv,
+                                    class: fclass,
+                                    index: idx,
+                                })
+                            } else {
+                                self.lower_member_read_on(recv, this_ty, &n, e)?
+                            }
                         } else {
-                            let is_iface = self
-                                .syms
-                                .libraries
-                                .resolve_type(&internal)
-                                .map_or(false, |t| t.is_interface);
-                            let mapped = crate::resolve::collection_mapped_accessor(&n)
-                                .map(|s| s.to_string());
-                            let m = [Some(n.clone()), Some(getter_name(&n)), mapped]
-                                .into_iter()
-                                .flatten()
-                                .find_map(|c| {
-                                    crate::libraries::resolve_instance(
-                                        &*self.syms.libraries,
-                                        &internal,
-                                        &c,
-                                        &[],
-                                    )
-                                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                                })?;
-                            self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: internal.clone(),
-                                    name: m.name,
-                                    descriptor: m.descriptor,
-                                    interface: is_iface,
-                                },
-                                dispatch_receiver: Some(recv),
-                                args: vec![],
-                            })
+                            self.lower_member_read_on(recv, this_ty, &n, e)?
                         }
                     };
                     // Smart-cast narrowing: a nullable-primitive *field* read narrowed to its primitive
@@ -7103,98 +7155,25 @@ impl<'a> Lower<'a> {
                     } else {
                         return None;
                     }
-                } else if rt == Ty::String && name == "length" {
-                    // `s.length` → stdlib intrinsic (0-arg), `Int`. The receiver may be a smart-cast
-                    // variable whose slot is wider than `String` (`Any` narrowed by `is`) — checkcast it.
+                } else {
+                    // A property read on a builtin/library/another-file receiver (`s.length`,
+                    // `list.size`, a sibling class's `getX()`): resolved generically through the shared
+                    // member-read helper (no per-member name hardcode). The receiver may be smart-cast to
+                    // a narrower reference type than its slot (`Any` narrowed by `is String`) — checkcast.
                     let recv = self.expr(receiver)?;
-                    let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
-                        if self.lookup(n).map_or(false, |(_, t)| t != Ty::String));
-                    let recv = if needs_cast {
+                    let recv = if rt.is_reference()
+                        && matches!(self.afile.expr(receiver), Expr::Name(n)
+                            if self.lookup(n).map_or(false, |(_, t)| t != rt))
+                    {
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::Cast,
                             arg: recv,
-                            type_operand: ty_to_ir(Ty::String),
+                            type_operand: ty_to_ir(rt),
                         })
                     } else {
                         recv
                     };
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::External("kotlin/String.length".to_string()),
-                        dispatch_receiver: Some(recv),
-                        args: vec![],
-                    })
-                } else if let Some((owner, ret_ty, is_iface)) = match &rt {
-                    // A property read on a class defined in ANOTHER file → its `getX()` accessor (the
-                    // backing field is private). Resolved from the sibling class's `ClassSig`.
-                    Ty::Obj(i, _) if self.class_of(rt).is_none() => self
-                        .syms
-                        .class_by_internal(i)
-                        .filter(|cs| cs.value_field.is_none())
-                        .and_then(|cs| {
-                            cs.props
-                                .iter()
-                                .find(|(n, _, _)| n == &name)
-                                .map(|(_, t, _)| (i.to_string(), *t, cs.is_interface))
-                        }),
-                    _ => None,
-                } {
-                    let recv = self.expr(receiver)?;
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::CrossFileVirtual {
-                            owner,
-                            name: getter_name(&name),
-                            params: vec![],
-                            ret: ty_to_ir(ret_ty),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: vec![],
-                    })
-                } else if let Some((internal, m, is_iface)) = {
-                    // A property read on a library type (`list.size`): a Kotlin property is realized as a
-                    // zero-arg accessor on the JVM. Try the property's own name (`size()` — collections
-                    // map `size` straight to the JVM method) and the `getX()` accessor form.
-                    if let Ty::Obj(i, _) = rt {
-                        let mapped = crate::resolve::collection_mapped_accessor(&name)
-                            .map(|s| s.to_string());
-                        [Some(name.clone()), Some(getter_name(&name)), mapped]
-                            .into_iter()
-                            .flatten()
-                            .find_map(|cand| {
-                                crate::libraries::resolve_instance(
-                                    &*self.syms.libraries,
-                                    i,
-                                    &cand,
-                                    &[],
-                                )
-                                .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
-                                .map(|m| {
-                                    let is_iface = self
-                                        .syms
-                                        .libraries
-                                        .resolve_type(i)
-                                        .map_or(false, |t| t.is_interface);
-                                    (i.to_string(), m, is_iface)
-                                })
-                            })
-                    } else {
-                        None
-                    }
-                } {
-                    let recv = self.expr(receiver)?;
-                    let read = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal,
-                            name: m.name.clone(),
-                            descriptor: m.descriptor,
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: vec![],
-                    });
-                    self.coerce_generic_read(read, e, m.ret)
-                } else {
-                    return None;
+                    self.lower_member_read_on(recv, rt, &name, e)?
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
@@ -8771,6 +8750,56 @@ impl<'a> Lower<'a> {
                             receiver: recv,
                             args: a.into_iter().map(Some).collect(),
                         })
+                    } else if let Some((owner, m, is_iface)) = {
+                        // A bare instance-method call on an external builtin/library `this` receiver — an
+                        // inlined receiver lambda (`sb.apply { append(x) }` → `this.append(x)`, `"ab".run
+                        // { uppercase() }`). Resolved generically through the classpath reader, exactly
+                        // like the qualified `recv.m(args)` path (no hardcoded member list).
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.lookup("this")
+                            .map(|(_, t)| t)
+                            .and_then(|t| match t {
+                                Ty::String => Some("java/lang/String".to_string()),
+                                Ty::Obj(i, _) => Some(i.to_string()),
+                                _ => None,
+                            })
+                            .and_then(|internal| {
+                                crate::libraries::resolve_instance(
+                                    &*self.syms.libraries,
+                                    &internal,
+                                    &fname,
+                                    &arg_tys,
+                                )
+                                .map(|m| {
+                                    let is_iface = self
+                                        .syms
+                                        .libraries
+                                        .resolve_type(&internal)
+                                        .map_or(false, |ty| ty.is_interface);
+                                    (internal, m, is_iface)
+                                })
+                            })
+                    } {
+                        let (this_v, _) = self.lookup("this")?;
+                        if m.params.len() != args.len() {
+                            return None;
+                        }
+                        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                        let mut a = Vec::new();
+                        for (arg, pt) in args.iter().zip(&m.params) {
+                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                        }
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner,
+                                name: m.name.clone(),
+                                descriptor: m.descriptor,
+                                interface: is_iface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: a,
+                        });
+                        self.coerce_generic_read(call, e, m.ret)
                     } else if let Some(internal) = self
                         .info
                         .ty(e)
@@ -9191,15 +9220,9 @@ impl<'a> Lower<'a> {
                         } = self.afile.expr(args[0]).clone()
                         {
                             let rty = self.info.ty(receiver);
-                            // A receiver lambda needs the receiver's user class for `this`-member access.
-                            let recv_class = if is_recv_lambda {
-                                match rty.obj_internal().filter(|i| self.classes.contains_key(*i)) {
-                                    Some(i) => Some(i.to_string()),
-                                    None => return None,
-                                }
-                            } else {
-                                None
-                            };
+                            // A receiver lambda binds the receiver as `this`; member access in the body
+                            // resolves against its type through the implicit-`this` paths (own class
+                            // field/getter, or a builtin/library accessor for `String`/collections/…).
                             let recv = self.expr(receiver)?;
                             let depth = self.scope.len();
                             let p_slot = self.fresh_value();
@@ -9210,9 +9233,7 @@ impl<'a> Lower<'a> {
                             };
                             // An inlined receiver lambda runs in the *caller's* method, so the receiver's
                             // members are accessed externally (getter/setter), never as the enclosing
-                            // class's own private fields — clear `cur_class` for the body. (`recv_class`
-                            // having resolved confirms the receiver is a reachable user class.)
-                            let _ = &recv_class;
+                            // class's own private fields — clear `cur_class` for the body.
                             let saved_cur = self.cur_class.clone();
                             if is_recv_lambda {
                                 self.cur_class = None;
