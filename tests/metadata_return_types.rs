@@ -85,6 +85,35 @@ fn builtins_supertypes_decode_collection_hierarchy() {
     );
 }
 
+/// `String`'s members read straight from `kotlin/kotlin.kotlin_builtins` (no hardcoded member table):
+/// the `get(Int): Char` operator, `length: Int`, `plus(Any?): String`, `compareTo(String): Int`.
+#[test]
+fn builtins_string_members_from_metadata() {
+    let Some(jar) = stdlib() else {
+        eprintln!("skip: set KRUSTY_KOTLINC");
+        return;
+    };
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+    let mut entry = zip
+        .by_name("kotlin/kotlin.kotlin_builtins")
+        .expect("kotlin.kotlin_builtins in stdlib jar");
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+    let members = krusty::jvm::metadata::builtins_class_members(&bytes, "kotlin/String");
+    let find = |name: &str| members.iter().find(|m| m.name == name);
+    // Functions carry full signatures in the builtins metadata: `get(Int): Char` (the `s[i]` operator),
+    // `plus(Any?): String`, `compareTo(String): Int`. (The single `length` PROPERTY message in this
+    // metadata version holds only flags — no name/type — so properties are resolved separately.)
+    let get = find("get").expect("String.get");
+    assert_eq!(get.params, vec!["kotlin/Int".to_string()]);
+    assert_eq!(get.ret, "kotlin/Char");
+    assert_eq!(find("plus").expect("String.plus").ret, "kotlin/String");
+    assert_eq!(
+        find("compareTo").expect("String.compareTo").ret,
+        "kotlin/Int"
+    );
+}
+
 /// The Classpath subtype helpers built on that hierarchy: `MutableList <: MutableCollection`, but the
 /// read-only `List` is NOT — which is exactly what makes `MutableCollection.plusAssign` apply to a
 /// `MutableList` receiver and not to a `List`. A non-builtin name (`ArrayList`) is not in the hierarchy.
