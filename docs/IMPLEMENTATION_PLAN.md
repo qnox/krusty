@@ -3597,6 +3597,17 @@ bodies exist only as jar bytecode):
   distinguish a callee use from a value use. A purely-invoked lambda still splices unchanged. TDD e2e
   `InlineLambdaForwarded` (`b{…}=a(f)+1` inline→inline, `c{…}=callIt(f)*2` inline→normal). Gate **1335/0**.
 
+## Phase 465 — `inline fun` with default-value parameters  ✅
+- The inline expander bailed on any default parameter. It now fills an omitted parameter with its default
+  expression (an inline fn substitutes the default directly — no `$default` method): the expander builds an
+  effective per-parameter argument list (named arguments placed at their declared position, gaps filled from
+  `param.default`), then binds each as before (a default lambda still splices; a default value temp-binds).
+  Default + vararg combined is bailed (rare). TDD e2e `InlineDefaultParam` (`f(5)`, `f(5,1)`, `cfg(10){4}`,
+  `pick(b=9)`). Gate **1335/0**.
+- Known limitation (pre-existing, non-inline too): a *required* parameter that follows a *defaulted* one is
+  mis-validated by the checker's trailing-`required`-count model (`map_call_args`) — `cfg(g = {…})` reports
+  `x` as required. Tracked for a follow-up that records per-parameter defaults.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

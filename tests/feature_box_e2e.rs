@@ -154,6 +154,24 @@ fun box(): String {
 }
 "#,
     ),
+    // An `inline fun` with default-value parameters: an omitted parameter is filled with its default
+    // expression (inline fns substitute the default directly — no `$default` method). Covers a trailing
+    // default, a trailing lambda after a default, and named-argument omission.
+    (
+        "InlineDefaultParam",
+        r#"
+inline fun f(a: Int, b: Int = 10): Int = a + b
+inline fun cfg(x: Int = 3, g: () -> Int): Int = x + g()
+inline fun pick(a: Int = 1, b: Int = 2, c: Int = 3): Int = a * 100 + b * 10 + c
+fun box(): String {
+    if (f(5) != 15) return "f0"
+    if (f(5, 1) != 6) return "f1"
+    if (cfg(10) { 4 } != 14) return "f2"
+    if (pick(b = 9) != 193) return "f3"   // a=1, b=9, c=3 → 100 + 90 + 3
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
