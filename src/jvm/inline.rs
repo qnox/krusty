@@ -1291,22 +1291,24 @@ pub fn splice_unified(
     }
     // A lambda host with a LOOP (a backward branch) — `map`/`fold`/`forEach` build a collection, so the
     // lambda is invoked at a NON-EMPTY operand baseline (the destination is on the stack for the later
-    // `.add`); the lambda body's own frames would need that operand-stack prefix, which requires
-    // abstract-interpreting the host's stack at the invoke (not yet done). Bail so a PUBLIC such host
-    // falls back to a real call and a non-public one skips — never a miscompile. Empty-baseline hosts
-    // (`takeIf`/`takeUnless`/`require`/`let`/`also`) splice fully, branchy lambda body and all.
-    if !lambdas.is_empty()
-        && insns.iter().enumerate().any(|(i, insn)| match insn {
-            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
-            Insn::TableSwitch {
-                default, targets, ..
-            } => *default <= i || targets.iter().any(|t| *t <= i),
-            Insn::LookupSwitch { default, pairs } => {
-                *default <= i || pairs.iter().any(|(_, t)| *t <= i)
-            }
-            Insn::Plain { .. } => false,
-        })
-    {
+    // `.add`). A BRANCHLESS lambda body has no frames, so the baseline doesn't matter and it splices
+    // fully. A BRANCHY lambda body's own frames would need that operand-stack prefix (abstract-interpreted
+    // from the host stack at the invoke — not yet done), so bail THAT combination: a PUBLIC host falls
+    // back to a real call, a non-public one skips — never a miscompile.
+    let host_has_loop = insns.iter().enumerate().any(|(i, insn)| match insn {
+        Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
+        Insn::TableSwitch {
+            default, targets, ..
+        } => *default <= i || targets.iter().any(|t| *t <= i),
+        Insn::LookupSwitch { default, pairs } => {
+            *default <= i || pairs.iter().any(|(_, t)| *t <= i)
+        }
+        Insn::Plain { .. } => false,
+    });
+    let any_branchy_lambda = lambdas
+        .iter()
+        .any(|l| l.body.iter().any(|i| !matches!(i, Insn::Plain { .. })));
+    if host_has_loop && any_branchy_lambda {
         return None;
     }
     // The body must contain exactly one `FunctionN.invoke` per lambda argument — otherwise matching each
@@ -1539,9 +1541,17 @@ pub fn splice_unified(
                 }
             })
             .collect::<Option<Vec<_>>>()?;
+        // The spliced-away lambda's `aload` is deleted, so its FunctionN value no longer sits on
+        // the operand stack at any host frame between the load and the (now replaced) invoke; drop
+        // it from the frame stack so the relocated frame matches the post-splice operand stack.
         let stack = f
             .stack
             .iter()
+            .filter(|v| {
+                !matches!(v, VType::Object(idx)
+                    if class_name(&body.source_cp, *idx)
+                        .is_some_and(|n| n.starts_with("kotlin/jvm/functions/Function")))
+            })
             .map(|v| relocate_vtype(v, &body.source_cp, cw))
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));

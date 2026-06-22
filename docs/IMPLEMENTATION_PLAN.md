@@ -3262,6 +3262,24 @@ bodies exist only as jar bytecode):
   `lib/modules`) so skip-reason histograms match the conformance harness (was front-end-only, no stdlib).
 - Box conformance after this phase: **7351 scanned · 1076 box()=OK · 0 FAIL** (was 1059).
 
+## Phase 439 — inline branchless-lambda loop hosts (map/forEach/fold/mapIndexed)  ✅
+- The unified bytecode splicer now inlines loop-shaped library HOFs (`map`/`forEach`/`fold`/
+  `mapIndexed`/…) whose lambda body is **branchless** — previously these fell back to a real
+  `invokestatic CollectionsKt.*` call. `extension_callable` marks non-public callees `must_inline`
+  and `try_route_lambda_inline` honors it, so a loop host with a straight-line lambda splices its
+  body into the iterator loop (verified via `javap`: no `invokestatic CollectionsKt.map`).
+- **Frame fix (root cause of the `mapIndexed` "Inconsistent stackmap frames" `VerifyError`):** a
+  loop host pushes the destination/accumulator *and the lambda* onto the operand stack, so a host
+  frame at a branch target *between* the lambda `aload` and its `invoke` (e.g. `mapIndexed`'s
+  index-overflow `ifge`) lists the lambda's `FunctionN` on its frame stack. Splicing deletes that
+  `aload`, so the relocated frame must drop the now-dead `FunctionN` operand-stack entry. Done in
+  `splice_unified`'s host-frame stack relocation. Test `feature_box_e2e` (`MapIndexed`, `LoopInline`).
+- **Remaining frontier (next phase):** a loop host with a *branchy* lambda body still bails to a
+  real call — the spliced lambda's own frames need the host operand-stack prefix prepended (the
+  dest/acc below the lambda result), not yet threaded. Precisely guarded (`host_has_loop &&
+  any_branchy_lambda`): public host → real call, never a miscompile.
+- Box conformance after this phase: **7351 scanned · 1313 box()=OK · 0 FAIL**.
+
 ---
 
 ### Working agreements
