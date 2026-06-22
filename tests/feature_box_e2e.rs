@@ -785,6 +785,27 @@ fun box(): String {
 }
 "#,
     ),
+    // REIFIED type parameters on inline functions: `is T`/`as T`/`T::class` are specialized to the call's
+    // actual type argument when the inline body is expanded (kotlinc's reified inlining). A same-module
+    // inline fn `<reified T>` is expanded by the IR inliner with T bound to the call type argument.
+    (
+        "ReifiedInline",
+        r#"
+inline fun <reified T> isT(x: Any): Boolean = x is T
+inline fun <reified T> asT(x: Any): T = x as T
+inline fun <reified T> countOf(xs: List<Any>): Int = xs.count { it is T }
+fun box(): String {
+    if (!isT<String>("hi")) return "f0"
+    if (isT<Int>("hi")) return "f1"
+    if (!isT<Number>(42)) return "f2"
+    val s: String = asT<String>("hello")
+    if (s != "hello") return "f3: $s"
+    val c = countOf<String>(listOf("a", 1, "b", 2, "c"))
+    if (c != 3) return "f4: $c"
+    return "OK"
+}
+"#,
+    ),
     // Inline functions with EXCEPTION HANDLERS (try/catch/finally): `synchronized` (monitorenter; try
     // { block } finally { monitorexit }), `run`/`let` are handler-free, but `synchronized`/`runCatching`/
     // `use` carry an exception table. The splicer relocates each entry's byte offsets + catch_type into
