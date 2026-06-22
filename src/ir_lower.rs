@@ -5973,6 +5973,18 @@ impl<'a> Lower<'a> {
             } => {
                 let rty = self.info.ty(receiver);
                 let result_ty = self.info.ty(e);
+                // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
+                // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
+                // the plain primitive op — `var a = 10; a?.plus(10)` works like `a.plus(10)`.
+                if !rty.is_reference() {
+                    if let Some(args) = &args {
+                        if args.len() == 1 {
+                            if let Some(r) = self.lower_prim_op_method(receiver, &name, args[0]) {
+                                return Some(r);
+                            }
+                        }
+                    }
+                }
                 // Only reference receiver + reference result are modeled (a nullable-primitive result
                 // would need boxing the member value, which the checker rejects anyway).
                 if !rty.is_reference() || !result_ty.is_reference() {
