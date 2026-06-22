@@ -3366,6 +3366,18 @@ bodies exist only as jar bytecode):
 - NEXT for full reified: `T::class` (parses as `CallableRef{name:"class"}`), `arrayOfNulls<T>` /
   `Array<T>(n){}`, `enumValues<T>()` — substitute the reified element/class type at those sites too.
 
+## Phase 445 — reified type params in ALL type positions (centralize subst in `ty_ref`)  ✅
+- Moves reified substitution into `ty_ref` (the central `TypeRef`→`Ty` resolver), so a reified `T`
+  resolves to the bound concrete type in EVERY type position inside an expanded `<reified T>` inline
+  body — `Array<T>`, `val x: T`, a `T` return type, a type argument — not just `is`/`as` (the `Is`/`As`
+  arms keep their own subst for nullable handling; double-subst is idempotent). Recurses at most once
+  (the bound type is already concrete). `reified_subst` is empty outside inline bodies, so `ty_ref` is
+  unchanged there. Gate **1313/0** — no regression.
+- Remaining reified work (each a distinct feature, not a splice bail): `T::class`/`enumValues<T>` need a
+  `KClass`/reflection subsystem (unsupported even for a concrete `Foo::class`); reified array CREATION
+  (`arrayOfNulls<T>`/`Array<T>(n){}`) needs the element type threaded through the array-builder path;
+  and reified EXTENSION/member inline fns share the general `receiver.is_some()` inline limitation.
+
 ---
 
 ### Working agreements

@@ -3935,6 +3935,15 @@ impl<'a> Lower<'a> {
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
+        // A reified type parameter (inside an expanded `<reified T>` inline body) resolves to the type
+        // bound at the call site — `Array<T>`, `val x: T`, a return `T`, etc. all specialize. The bound
+        // type is already concrete (built through `subst_type_ref`), so this recurses at most once.
+        if !self.reified_subst.is_empty() {
+            let s = self.subst_type_ref(r);
+            if s.name != r.name {
+                return self.ty_ref(&s);
+            }
+        }
         if r.nullable {
             return None;
         }
