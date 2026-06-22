@@ -484,9 +484,9 @@ fn unbox_wrapper(t: Ty) -> Ty {
 /// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
 /// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
 /// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
-/// Parameter indices whose descriptor type is `kotlin/jvm/functions/Function0` — the zero-arg lambda
-/// parameters the unified splicer can inline (`require`/`check`'s `lazyMessage: () -> Any`).
-fn function0_param_indices(descriptor: &str) -> Vec<usize> {
+/// Parameter indices whose descriptor type is a `kotlin/jvm/functions/FunctionN` — the lambda parameters
+/// the unified splicer inlines (`require`'s `lazyMessage: () -> Any`, `let`'s `block: (T) -> R`, …).
+fn function_param_indices(descriptor: &str) -> Vec<usize> {
     let Some(inner) = descriptor
         .strip_prefix('(')
         .and_then(|s| s.split(')').next())
@@ -504,7 +504,7 @@ fn function0_param_indices(descriptor: &str) -> Vec<usize> {
                 while i < b.len() && b[i] != b';' {
                     i += 1;
                 }
-                if &inner[start + 1..i] == "kotlin/jvm/functions/Function0" {
+                if inner[start + 1..i].starts_with("kotlin/jvm/functions/Function") {
                     out.push(idx);
                 }
                 i += 1;
@@ -861,6 +861,10 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        // Conservative: only a branchless single-invoke lambda host (`let`/`also`/`run`/`apply`) — proven
+        // spliceable. A branchy lambda host (`takeIf`/`takeUnless`) routes through `splice_unified` too,
+        // but enabling EVERY classpath lambda host here surfaces splicer bugs on complex stdlib HOFs
+        // (mis-paired `invoke`s, loop frames), so it stays gated until `splice_unified` is robust for them.
         self.cp
             .method_code(owner, name, descriptor)
             .map_or(false, |body| {
@@ -881,7 +885,7 @@ impl LibrarySet for JvmLibraries {
                 // an empty operand-stack baseline at the call site; a non-empty one skips the file
                 // (`must_inline`), never miscompiles.
                 let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                    function0_param_indices(descriptor)
+                    function_param_indices(descriptor)
                         .into_iter()
                         .map(|param_index| crate::jvm::inline::LambdaSplice {
                             param_index,

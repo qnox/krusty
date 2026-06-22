@@ -2572,6 +2572,23 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 435 — splicer hardening toward complete inline support (branchy-lambda hosts)  ✅
+- Toward inlining branchy-lambda hosts (`takeIf`/`takeUnless`): attempted relaxing the `can_inline_lambda`
+  gate to a `splice_unified` dry-run so any classpath lambda host routes through the one splicer. The
+  conformance gate caught that `splice_unified` is NOT yet robust for arbitrary hosts — 3 complex stdlib
+  HOFs miscompiled (`capturedLoopVar`: a `Function0.invoke` left on an `ArrayList`; `kt20844`/
+  `typeAliasAsBareType`: `VerifyError`) and a non-lambda reference param mis-spliced. A structural dry-run
+  can't prove frame/operand correctness, so the relaxation was reverted to preserve never-miscompile.
+- KEPT (defensive, so a future relaxation is safer): `splice_unified` now bails a lambda host with a LOOP
+  (backward branch) or with an invoke-count ≠ lambda-count (ambiguous pairing); `try_inline_unified`
+  rejects a branchy lambda BODY via `CodeBuilder::has_frames()` (the `needs_stackmap` flag missed
+  `emit_compare`'s frames); scope fns (`let`/`also`) lower with `must_inline: true` (non-public — a failed
+  splice skips, never an `IllegalAccessError`). Box gate **1311, 0 FAIL** (unchanged).
+- REMAINING for complete inline support: make `splice_unified` relocate a branchy lambda body's frames
+  (a materialized comparison predicate) and handle loop hosts + non-lambda reference params correctly;
+  then the gate can safely open to `takeIf`/`takeUnless`/`mapIndexed`/… Also: primitive-receiver `takeIf`
+  needs `T?` (`Int?`) nullability.
+
 ### Phase 434 — universal splicer: N-ary lambdas; one `splice_unified` for every inline shape  ✅
 - Final merge step. `splice_unified` now handles N-ary (`FunctionN`) lambdas, not just `Function0`: a
   lambda's `aload` is no longer required adjacent to its `invoke` (the argument expressions sit between),

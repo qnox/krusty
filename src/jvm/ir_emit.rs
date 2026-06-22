@@ -1412,8 +1412,8 @@ impl<'a> Emitter<'a> {
             if impl_ret.is_primitive() {
                 box_prim_free(self.cw, &mut scratch, impl_ret);
             }
-            if scratch.needs_stackmap {
-                return false; // v1: branchless lambda body
+            if scratch.needs_stackmap || scratch.has_frames() {
+                return false; // a branchy lambda body — its internal frames aren't relocated yet
             }
             let Some(lam_insns) = crate::jvm::inline::disassemble(&scratch.bytes) else {
                 return false;

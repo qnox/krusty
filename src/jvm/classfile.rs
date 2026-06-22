@@ -592,6 +592,12 @@ impl CodeBuilder {
         self.needs_stackmap = true;
     }
 
+    /// Whether any StackMapTable frame has been recorded (the body has a branch target). Used to reject
+    /// splicing a branchy lambda body, whose internal frames the host splice doesn't yet relocate.
+    pub fn has_frames(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
     /// Record the frame at `label` (given locals + stack) if not already recorded.
     /// First registration wins — early callers capture the "outer" scope before inner vars appear.
     /// `stack` is the operand-stack verification types at this label (empty in most cases).
