@@ -258,6 +258,25 @@ fun box(): String {
     if (c.v != 3) return "f3: ${c.v}"
     val r = 5.run { this + 1 }                         // primitive receiver via explicit `this`
     if (r != 6) return "f4: $r"
+    val up = "ab".run { uppercase() }                  // bare stdlib EXTENSION call on `this`
+    if (up != "AB") return "f5: $up"
+    val tr = "  hi  ".run { trim() }                   // another stdlib extension on `this`
+    if (tr != "hi") return "f6: $tr"
+    return "OK"
+}
+"#,
+    ),
+    // A bare call to a stdlib EXTENSION (`uppercase`/`reversed`) through an extension function's own
+    // implicit `this` receiver — `this.uppercase()` written unqualified, resolved through the same
+    // extension-call path as a qualified receiver call (no per-function hardcode).
+    (
+        "ExtensionFnBodyBareExtCall",
+        r#"
+fun String.shout(): String = uppercase()
+fun String.echo(): String = this.shout() + "!" + reversed()
+fun box(): String {
+    if ("ab".shout() != "AB") return "f0: ${"ab".shout()}"
+    if ("ab".echo() != "AB!ba") return "f1: ${"ab".echo()}"
     return "OK"
 }
 "#,
