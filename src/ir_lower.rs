@@ -5608,11 +5608,21 @@ impl<'a> Lower<'a> {
                 continue;
             }
             if let Ty::Fun(fnsig) = pty {
-                // A lambda parameter: require a literal lambda argument with no non-local return.
-                if let Expr::Lambda {
-                    params,
-                    body: lbody,
-                } = self.afile.expr(args[i]).clone()
+                // A lambda parameter is inline-SPLICED (its body expanded at each invoke site) only when it
+                // is a literal lambda AND used solely as a callee (`f(args)`) in the body. If the parameter
+                // is also used as a VALUE — passed to another call (`a(f)`), stored, or returned — it must
+                // be materialized as a `FunctionN` instead (the value-binding branch below); a callable-ref
+                // argument is never a body to splice.
+                let arg_expr = self.afile.expr(args[i]).clone();
+                let splice = matches!(arg_expr, Expr::Lambda { .. })
+                    && !name_used_as_value(self.afile, body, &pnames[i]);
+                if let (
+                    true,
+                    Expr::Lambda {
+                        params,
+                        body: lbody,
+                    },
+                ) = (splice, arg_expr)
                 {
                     // A single-parameter lambda may name its parameter implicitly as `it`.
                     let params = if params.is_empty() && fnsig.params.len() == 1 {
@@ -9765,6 +9775,23 @@ impl<'a> Lower<'a> {
 /// (`Intrinsics.areEqual`) and plain calls are not.
 /// Does the expression (or any nested statement/expression) contain a `return`? Inlining a body or
 /// lambda that returns non-locally isn't modeled, so such an `inline fun` is bailed (file skipped).
+/// Whether `name` is referenced as a VALUE within `e` — anywhere except as the direct callee of a call.
+/// An inline lambda parameter used only as `f(args)` can be spliced in place; one used as a value (passed
+/// to another function, stored, or returned) must be materialized as a `FunctionN` instead.
+fn name_used_as_value(file: &ast::File, e: AstExprId, name: &str) -> bool {
+    match file.expr(e) {
+        Expr::Name(n) => n == name,
+        Expr::Call { callee, args } => {
+            let callee_is_target = matches!(file.expr(*callee), Expr::Name(n) if n == name);
+            (!callee_is_target && name_used_as_value(file, *callee, name))
+                || args.iter().any(|&a| name_used_as_value(file, a, name))
+        }
+        _ => file.any_child_expr(e, &mut |c| name_used_as_value(file, c, name), &mut |s| {
+            file.any_child_stmt(s, &mut |c| name_used_as_value(file, c, name))
+        }),
+    }
+}
+
 fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
     file.any_child_expr(e, &mut |x| body_has_return(file, x), &mut |s| {
         stmt_has_return(file, s)
