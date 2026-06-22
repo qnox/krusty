@@ -1422,10 +1422,11 @@ impl<'a> Emitter<'a> {
                 cap_slots.push((slot, cap_tys[k]));
             }
             // Build the lambda body into a scratch builder. The host left the lambda's `arity` arguments
-            // on the stack (as `Object`, the erased `FunctionN.invoke` parameters); unbox each to its
-            // typed parameter and store it (top = last). A reference value keeps its precise verification
-            // type through the store, so no checkcast is needed. Then run the body, then box the result to
-            // `Object` (matching the replaced `invoke`'s `Object` result).
+            // on the stack (as `Object`, the erased `FunctionN.invoke` parameters); unbox a primitive
+            // parameter, or `checkcast` a specific reference parameter to its type (the erased `Object`
+            // arg — e.g. `iterator.next()` in `map` — must be narrowed to `String` before `it.uppercase()`),
+            // then store it (top = last). Then run the body, then box the result to `Object` (matching the
+            // replaced `invoke`'s `Object` result).
             let mut scratch = CodeBuilder::new(self.next_slot);
             scratch.set_stack(arity as u16);
             let mut param_slots: Vec<(u16, Ty)> = cap_slots;
@@ -1434,6 +1435,12 @@ impl<'a> Emitter<'a> {
                 let jt = lam_tys[j];
                 if jt.is_primitive() {
                     unbox_prim(self.cw, &mut scratch, jt);
+                } else if let Some(internal) = jt
+                    .obj_internal()
+                    .filter(|n| *n != "java/lang/Object" && *n != "kotlin/Any")
+                {
+                    let ci = self.cw.class_ref(internal);
+                    scratch.checkcast(ci); // narrow the erased `Object` arg to the parameter's type
                 }
                 let slot = self.next_slot;
                 self.next_slot += slot_words(jt);
