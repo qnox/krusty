@@ -3628,6 +3628,15 @@ bodies exist only as jar bytecode):
   falls through to the normal function return. New helpers `body_has_disallowed_return` /
   `body_has_labeled_return`. TDD e2e `InlineLabeledReturn`. Gate **1336/0**.
 
+## Phase 468 — nested inline calls of the same fn (`a { a { 5 } }`)  ✅
+- The inline recursion guard keyed on the fn NAME, so it bailed on legitimate source-level *nesting* of the
+  same inline fn (`a { a { 5 } }`), not just genuine recursion. It now keys on the **call-site expression
+  id**: a genuinely recursive call re-enters the *same* site (the `rec(n-1)` in `rec`'s own body) → bail;
+  nesting uses *distinct* sites → allowed. (`inline_active` changed from `Vec<String>` to `Vec<u32>`.) Genuine
+  recursion still skips cleanly — without the prior conservative name-bail this would expand until the same
+  site recurs, so the call-id check catches it at depth 2 (no compiler stack overflow). TDD e2e `InlineNested`
+  (`a{a{5}}`, 3-deep, a nested-in-a-local). Gate **1336/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
