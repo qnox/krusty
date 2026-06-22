@@ -183,9 +183,20 @@ pub struct MethodCode {
     /// header), or `None` if the method has none (a branchless body needs no frames). Required to
     /// splice a *branchy* body: its frames are relocated into the caller.
     pub stackmap: Option<Vec<u8>>,
-    /// True if the body has a non-empty exception table — splicing must relocate the handlers (not yet
-    /// supported), so such a body is not spliced.
-    pub has_handlers: bool,
+    /// The body's exception table (`try`/`catch`/`finally` ranges). Splicing relocates each entry's
+    /// byte offsets and `catch_type` into the caller. Empty for a body with no handlers.
+    pub handlers: Vec<ExcEntry>,
+}
+
+/// One `Code` exception-table entry: a `[start_pc, end_pc)` guarded range, its `handler_pc`, and the
+/// caught class (`catch_type` is a constant-pool `Class` index in the *source* pool, or 0 = catch-all
+/// / `finally`). All offsets are byte offsets into the method's `code`.
+#[derive(Clone, Copy, Debug)]
+pub struct ExcEntry {
+    pub start_pc: u16,
+    pub end_pc: u16,
+    pub handler_pc: u16,
+    pub catch_type: u16,
 }
 
 /// Lazily read one method's `Code` (bytecode body) from class `bytes`, without parsing every other
@@ -237,8 +248,16 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                 let code_len = r.u4().ok()? as usize;
                 let code = r.take(code_len).ok()?.to_vec();
                 let exc_len = r.u2().ok()?;
-                r.take(exc_len as usize * 8).ok()?; // each entry is 4 × u2
-                                                    // Code-attribute attributes: find `StackMapTable` (the verifier frames).
+                let mut handlers = Vec::with_capacity(exc_len as usize);
+                for _ in 0..exc_len {
+                    handlers.push(ExcEntry {
+                        start_pc: r.u2().ok()?,
+                        end_pc: r.u2().ok()?,
+                        handler_pc: r.u2().ok()?,
+                        catch_type: r.u2().ok()?,
+                    });
+                }
+                // Code-attribute attributes: find `StackMapTable` (the verifier frames).
                 let nca = r.u2().ok()?;
                 let mut stackmap = None;
                 for _ in 0..nca {
@@ -255,7 +274,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                     code,
                     source_cp: cp,
                     stackmap,
-                    has_handlers: exc_len > 0,
+                    handlers,
                 });
             }
             r.take(attr_len).ok()?;

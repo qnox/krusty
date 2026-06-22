@@ -657,7 +657,10 @@ pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) ->
             continue;
         };
         if *op == 0xba {
-            return None; // invokedynamic
+            // invokedynamic — unrelocatable without bootstrap-method handling. UNREACHABLE for an inline
+            // body: kotlinc compiles lambdas inside `inline` functions as anonymous-class singletons
+            // (`getstatic …$N.INSTANCE`), never `invokedynamic`, precisely so the inliner can copy them.
+            return None;
         }
         // `off` is relative to the opcode; in `operands` (opcode stripped) it is `off - 1`.
         let o = off - 1;
@@ -932,7 +935,7 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
 /// a call to [`splice_unified`] ONLY when this holds — required because an `@InlineOnly` callee has no
 /// runtime body to fall back to.
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
-    if body.has_handlers {
+    if !body.handlers.is_empty() {
         return false;
     }
     let Some(mut insns) = disassemble(&body.code) else {
@@ -1083,6 +1086,11 @@ pub struct BranchySplice {
     /// each of them. Computed by a typed forward simulation from the nearest host frame to the lambda
     /// load; `None` for any lambda whose prefix couldn't be modeled (the caller then bails that splice).
     pub lambda_stack_prefix: Vec<Option<Vec<VType>>>,
+    /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
+    /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
+    /// catch-all/`finally`). The handler frames themselves are already in `frames` (a handler is a
+    /// StackMapTable target). Empty for a body with no handlers.
+    pub handlers: Vec<(usize, usize, usize, u16)>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1650,7 +1658,7 @@ pub fn splice_unified(
     start_offset: usize,
     cw: &mut ClassWriter,
 ) -> Option<BranchySplice> {
-    if body.has_handlers || is_reified_inline(body) {
+    if is_reified_inline(body) {
         return None;
     }
     let ret = ret_vtype(descriptor, cw)?;
@@ -1991,6 +1999,27 @@ pub fn splice_unified(
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));
     }
+    // Relocate the exception table: each entry's `start`/`end`/`handler` are byte offsets into the
+    // ORIGINAL code — map each to its instruction index (`old_off`), through `old2new` (+ prologue `p`)
+    // to the spliced instruction, then to its absolute byte offset (`offs`). `catch_type` is re-interned
+    // into `cw` (0 = catch-all/`finally`). The handler's own frame is already in `frames` (it is a
+    // StackMapTable target). `end` may equal the code length — `old_off` includes that boundary.
+    let byte_to_abs = |bp: u16| -> Option<usize> {
+        let old_idx = old_off.iter().position(|&o| o == bp as usize)?;
+        offs.get(old2new[old_idx] + p).copied()
+    };
+    let mut handlers = Vec::with_capacity(body.handlers.len());
+    for h in &body.handlers {
+        let start = byte_to_abs(h.start_pc)?;
+        let end = byte_to_abs(h.end_pc)?;
+        let handler = byte_to_abs(h.handler_pc)?;
+        let catch_type = if h.catch_type == 0 {
+            0
+        } else {
+            relocate_const(&body.source_cp, h.catch_type, cw)?
+        };
+        handlers.push((start, end, handler, catch_type));
+    }
     // Byte offset where each lambda's spliced body begins (= its replaced invoke's new position): the
     // caller binds that lambda body's own (branchy) frames relative to this.
     let lambda_byte_starts: Vec<usize> = lambda_sites
@@ -2058,6 +2087,7 @@ pub fn splice_unified(
         lambda_byte_starts,
         lambda_host_locals,
         lambda_stack_prefix,
+        handlers,
     })
 }
 
@@ -2101,7 +2131,7 @@ mod tests {
             code: vec![0x1a, 0x06, 0x68, 0xac],
             source_cp: vec![C::Other],
             stackmap: None,
-            has_handlers: false,
+            handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw).expect("branchless splice");
@@ -2390,7 +2420,7 @@ mod tests {
             code: vec![0x1a, 0x99, 0x00, 0x04, 0x04, 0xac],
             source_cp: vec![C::Other],
             stackmap: None,
-            has_handlers: false,
+            handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         assert!(splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).is_none());
@@ -2479,7 +2509,7 @@ mod tests {
             code: vec![0x04, 0xac],
             source_cp: vec![C::Other],
             stackmap: None,
-            has_handlers: false,
+            handlers: vec![],
         };
         assert!(!is_reified_inline(&body));
     }
@@ -2493,7 +2523,7 @@ mod tests {
             code: vec![0x1a, 0xac],
             source_cp: vec![C::Other],
             stackmap: None,
-            has_handlers: false,
+            handlers: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();

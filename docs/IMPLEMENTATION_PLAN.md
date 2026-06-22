@@ -3334,6 +3334,24 @@ bodies exist only as jar bytecode):
 - Inline support is now bail-free for every shape the splicer can represent; the only remaining `None`
   returns are hard soundness boundaries (unrelocatable `invokedynamic`, untypeable operand-prefix slot).
 
+## Phase 443 — relocate exception handlers (inline `synchronized`/`use`/`runCatching`)  ✅
+- Closes the `has_handlers` splice bail (3 reachable corpus cases, confirmed by instrumented census).
+  `MethodCode` now carries the full exception table (`Vec<ExcEntry>` — `start_pc`/`end_pc`/`handler_pc`/
+  `catch_type`) instead of a `has_handlers: bool`. `splice_unified` relocates each entry: byte offsets
+  are mapped through `old_off` → `old2new` (+ prologue) → `offs` to absolute spliced offsets, and
+  `catch_type` is re-interned into `cw` (0 = catch-all/`finally`). The handler *frames* need no extra
+  work — a handler is a StackMapTable target, so it's already relocated by the host-frame pass.
+- `BranchySplice.handlers` carries the relocated `(start, end, handler, catch_type)`; `try_inline_unified`
+  binds them into the caller's exception table via `bind_at` labels + `add_exception`.
+- **Verified via javap:** `synchronized(lock) { … }` now inlines `monitorenter`/`monitorexit` with the
+  relocated exception table (`14-25 → 40 any`, `70-112 → 128 any`) — no fallback `invokestatic`. TDD e2e
+  `InlineWithHandlers` (two `synchronized` blocks incl. a loop body). Gate **1313/0**, parity 16/0.
+- **INDY boundary proven VACUOUS** (the user asked to verify against kotlinc): kotlinc compiles lambdas
+  inside `inline` functions as anonymous-class singletons (`getstatic …$N.INSTANCE`), NEVER
+  `invokedynamic` — precisely so the inliner can copy them cross-module. Confirmed by compiling a probe
+  (`inline fun pick() = consume { 42 }` → `getstatic …$pick$1.INSTANCE`, 0 invokedynamic in the class)
+  and by an instrumented census: 0 INDY / 0 host-state bails across all 7351 corpus files.
+
 ---
 
 ### Working agreements
