@@ -3165,6 +3165,12 @@ impl<'a> Lower<'a> {
             .unwrap_or_default();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
         let mut pos = 0;
+        // The slot each SOURCE-order argument lands in. Kotlin evaluates arguments in source order; this
+        // helper lowers them in slot order, so a named-argument call that REORDERS evaluation
+        // (`f(b = …, a = …)`) would run side effects out of order. Detect a non-monotonic placement and,
+        // if any reordered argument may have side effects, skip (proper source-order temp-spilling isn't
+        // modeled yet) — pure reordered arguments (const/name reads) are order-independent and proceed.
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
             match names.get(i).and_then(|o| o.as_ref()) {
                 None => {
@@ -3172,6 +3178,7 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     slot[pos] = Some(arg);
+                    arg_slot.push(pos);
                     pos += 1;
                 }
                 Some(nm) => {
@@ -3180,8 +3187,17 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     slot[idx] = Some(arg);
+                    arg_slot.push(idx);
                 }
             }
+        }
+        let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
+        if reordered
+            && args.iter().any(|&a| {
+                !is_const_literal(self.afile, a) && !matches!(self.afile.expr(a), Expr::Name(_))
+            })
+        {
+            return None;
         }
         let mut a = Vec::new();
         for (k, pt) in ir_params.iter().enumerate() {
@@ -9640,7 +9656,27 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                 }
-                _ => return None,
+                // The callee is an arbitrary expression that evaluates to a function value — an
+                // immediately-invoked call result (`mk()()`), an indexed/selected function, etc. Lower it
+                // to the `FunctionN` and invoke it through `FunctionN.invoke` (same path as a function-typed
+                // local `f(args)`).
+                _ => {
+                    if let Ty::Fun(sig) = self.info.ty(callee) {
+                        if sig.params.len() == args.len() {
+                            let func = self.expr(callee)?;
+                            let mut a = Vec::new();
+                            for arg in &args {
+                                a.push(self.expr(*arg)?);
+                            }
+                            return Some(self.ir.add_expr(IrExpr::InvokeFunction {
+                                func,
+                                args: a,
+                                ret: ty_to_ir(sig.ret),
+                            }));
+                        }
+                    }
+                    return None;
+                }
             },
         })
     }
