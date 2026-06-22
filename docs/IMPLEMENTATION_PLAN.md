@@ -3704,6 +3704,16 @@ bodies exist only as jar bytecode):
   bails. TDD e2e `UserInlineNonLocalReturn` (`forEachI(xs) { if (it==3) return … }`). Gate **1344/0** (no
   corpus delta — the corpus uses stdlib forms — but the construct now works, no regression/miscompile).
 
+## Phase 474 — default LAMBDA parameter typed from its function type  ✅
+- A parameter default that is a lambda for a function-typed parameter (`g: (Int) -> Int = { it + 1 }`) was
+  checked with no expected type, so its `it` typed as the erased `Object` → `it + 1` errored. The default-arg
+  check (`check_fun_body`'s default loop) now routes a lambda default through `check_lambda_with_types` with
+  the parameter's declared lambda parameter types (`p.ty.fun_params`), as typed local / HOF-argument lambdas
+  already are. TDD e2e `DefaultLambdaParam`. Gate **1344/0**.
+- (Noted while probing: a GENERIC extension inline fn with a capturing lambda — `<T> T.alsoLog { … }` — has a
+  pre-existing frame bug, gate-green/uncovered by the corpus; non-generic ext + plain inline + mutable capture
+  all verify. Tracked separately from this session's work.)
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

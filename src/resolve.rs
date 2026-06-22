@@ -3237,7 +3237,18 @@ impl<'a> Checker<'a> {
         for p in &f.params {
             if let Some(dx) = p.default {
                 let pty = self.resolve_ty(&p.ty);
-                let dty = self.expr(dx);
+                // A default that is a LAMBDA for a function-typed parameter (`g: (Int) -> Int = { it + 1 }`)
+                // takes its parameter types from the declared function type, so `it`/named params type
+                // concretely (not the erased `Object`) — as for a typed local / HOF argument lambda.
+                let dty = if matches!(self.file.expr(dx), Expr::Lambda { .. })
+                    && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
+                {
+                    let lam_pts: Vec<Ty> =
+                        p.ty.fun_params.iter().map(|r| self.resolve_ty(r)).collect();
+                    self.check_lambda_with_types(dx, &lam_pts)
+                } else {
+                    self.expr(dx)
+                };
                 self.expect_assignable(pty, dty, self.span(dx), "default argument");
             }
         }
