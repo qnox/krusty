@@ -3726,6 +3726,32 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 476 — receiver lambdas (`run`/`apply`) over ANY receiver + de-hardcode `String.length`  ✅
+- A receiver lambda's `this` is the receiver, so a bare member in the body resolves against it. Previously
+  this only worked for a USER-class receiver (`check_with_receiver` rejected anything else with "must be a
+  class instance", and the lowerer bailed when the receiver wasn't a reachable user class). Generalized to
+  ANY receiver type — a builtin (`String`), a library type (`List`), a classpath class (`StringBuilder`):
+  - **Checker**: `check_with_receiver` drops the `Ty::Obj`-only gate (binds `this_ty` for any receiver); the
+    bare-name READ arm gains a `try_member_read` fallback (a non-erroring `check_member` probe via a diag
+    snapshot/truncate) so `length` resolves as `this.length`; a new `this_member_call_ret` resolves an
+    unqualified CALL (`append(x)`/`uppercase()`) as a member of `this_ty` (builtin/library/user), mirroring
+    the qualified `recv.m(args)` typing.
+  - **Lowerer**: the receiver-lambda path no longer requires a user-class receiver; a new
+    `lower_member_read_on` resolves a bare `this.name` READ generically through the classpath reader (so
+    `String.length` lowers as `java/lang/String.length()` — the same generic `resolve_instance` path as
+    `uppercase()`, NOT a hardcoded `name == "length"`); and a new branch resolves a bare `this.m(args)` CALL
+    on a builtin/library receiver via `resolve_instance`. The qualified `Member`-read arm was refactored to
+    route through `lower_member_read_on` too, so the old hardcoded `String.length`/cross-file/library tail is
+    one shared generic helper.
+  - AST: `TypeRef.fun_has_receiver` marks a receiver function type `Recv.(A)->R` (the receiver still folds
+    in as `fun_params[0]`; the flag records it for future receiver-lambda type-directed inference).
+- TDD e2e `ReceiverLambdaAnyReceiver` (`"ab".run { length }`, `listOf(1,2,3).run { size }`,
+  `StringBuilder().apply { append("O"); append("K") }`, `C(1).apply { bump(); bump() }`, `5.run { this+1 }`)
+  — all run OK under `-Xverify:all`. Gate **1346/0** (picked up 2 corpus cases).
+- (Still open: a bare stdlib-EXTENSION call through the implicit `this` — `"ab".run { uppercase() }` —
+  bails cleanly; `uppercase` is `StringsKt.uppercase` (an extension), not a `java.lang.String` member, so it
+  needs the extension-resolution path, not `resolve_instance`. Never miscompiles.)
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

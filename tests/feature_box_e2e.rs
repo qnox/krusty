@@ -239,6 +239,29 @@ fun box(): String {
 }
 "#,
     ),
+    // Receiver lambdas (`run`/`apply`) over an ARBITRARY receiver type — a builtin (`String`), a library
+    // type (`List`), a classpath class (`StringBuilder`), and a user class. The lambda's `this` is the
+    // receiver, so a bare member (`length`/`size`) and a bare method call (`append`/`bump`) resolve
+    // against it through the generic implicit-`this` member resolution (no per-member/-function hardcode).
+    (
+        "ReceiverLambdaAnyReceiver",
+        r#"
+class C(var v: Int) { fun bump() { v += 1 } }
+fun box(): String {
+    val n = "ab".run { length }                       // String receiver, bare property read
+    if (n != 2) return "f0: $n"
+    val sz = listOf(1, 2, 3).run { size }             // library receiver, bare accessor
+    if (sz != 3) return "f1: $sz"
+    val sb = StringBuilder().apply { append("O"); append("K") }   // classpath receiver, bare method call
+    if (sb.toString() != "OK") return "f2: $sb"
+    val c = C(1).apply { bump(); bump() }             // user receiver, bare method call
+    if (c.v != 3) return "f3: ${c.v}"
+    val r = 5.run { this + 1 }                         // primitive receiver via explicit `this`
+    if (r != 6) return "f4: $r"
+    return "OK"
+}
+"#,
+    ),
     // `repeat(n) { i -> … }` — the stdlib top-level `inline fun`, spliced from its real loop body via the
     // generic route (no name-match desugar). The index `i` is `Int`; a mutable capture works (inline).
     (
