@@ -2572,6 +2572,24 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 434 — universal splicer: N-ary lambdas; one `splice_unified` for every inline shape  ✅
+- Final merge step. `splice_unified` now handles N-ary (`FunctionN`) lambdas, not just `Function0`: a
+  lambda's `aload` is no longer required adjacent to its `invoke` (the argument expressions sit between),
+  so it locates the single lambda-object load (ignoring the entry null-check's load) and the
+  `FunctionN.invoke` after it, then DELETES the load and REPLACES the invoke with the lambda body. The
+  emitter (`try_inline_unified`) builds that body to consume the on-stack `Object` arguments — unbox each
+  to its typed parameter and store it (a reference keeps its precise verification type, no checkcast),
+  run the body, box the result. Branches on `join_required`: a branchless host (`let`/`also`/`run`/
+  `apply`) splices at ANY operand-stack height (mid-expression); a branchy host needs an empty baseline.
+- `let`/`also` are now routed through `splice_unified` (with `must_inline: true`, since they're non-public
+  `@InlineOnly` — a failed splice skips the file, never an `IllegalAccessError`). DELETED the last special
+  splicers + their dead helpers: `branchless_lambda_segments`, `try_inline_lambda_call`, `append_segment`.
+  Only `splice` (reified-type substitution, a distinct `reifiedOperationMarker` concern) remains separate.
+- Box gate **1311, 0 FAIL** (pure refactor; conformance-verified, `ScopeFns`/`ScopeFnsBranchy`/
+  `RequireCheckMsg` e2e green). The bytecode splicer is now ONE function. NEXT (complete inline support):
+  relax the `is_lambda_spliceable`/`can_inline_call` gates to a `splice_unified` dry-run so branchy-lambda
+  hosts (`takeIf`/`takeUnless`) inline too, then retire the gates.
+
 ### Phase 433 — merge `splice_branchless` into `splice_unified` (the no-lambda splicer is now one fn)  ✅
 - `splice_unified` now DROPS a trailing return (fall through with the result) instead of `goto`-ing it to
   the join, and reports `join_required`: `false` for a pure branchless body (no branches, single trailing

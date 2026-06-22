@@ -3067,7 +3067,10 @@ impl<'a> Lower<'a> {
                 name: c.name,
                 descriptor: c.descriptor,
                 inline: true,
-                must_inline: false,
+                // A scope fn (`let`/`also`/…) is non-public `@InlineOnly` — no callable method exists, so
+                // if the splice ever fails the file must be SKIPPED, never fall back to an `invokestatic`
+                // on the private method (an `IllegalAccessError`).
+                must_inline: true,
             },
             dispatch_receiver: None,
             args: vec![recv, lam],
