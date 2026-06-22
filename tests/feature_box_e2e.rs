@@ -47,6 +47,23 @@ fun box(): String {
 }
 "#,
     ),
+    // Arithmetic operator members called by their METHOD name on a primitive (`a.plus(b)` ≡ `a + b`) —
+    // including inside an inline fn body, so an inlined call that uses operator-method syntax works.
+    (
+        "PrimOpMethod",
+        r#"
+inline fun combine(a: Int, b: Int): Int = a.plus(b).times(2)
+fun box(): String {
+    if (10.plus(10) != 20) return "f0"
+    if (3.times(4) != 12) return "f1"
+    if (1L.plus(2) != 3L) return "f2"
+    if (17.div(5) != 3 || 17.rem(5) != 2) return "f3"
+    if ('a'.plus(1) != 'b') return "f4"
+    if (combine(3, 4) != 14) return "f5: ${combine(3, 4)}"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

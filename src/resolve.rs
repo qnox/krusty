@@ -5620,6 +5620,19 @@ impl<'a> Checker<'a> {
                             return rt;
                         }
                     }
+                    // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
+                    // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
+                    // `check_binary` types with the correct `Char`/`Int` operand rules.
+                    if rt == Ty::Char && !user_ext {
+                        let bin = match name.as_str() {
+                            "plus" => Some(BinOp::Add),
+                            "minus" => Some(BinOp::Sub),
+                            _ => None,
+                        };
+                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
+                            return self.check_binary(op, rt, *at, span);
+                        }
+                    }
                     self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
                     return Ty::Error;
                 }

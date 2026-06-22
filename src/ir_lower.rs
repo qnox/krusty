@@ -3216,6 +3216,106 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
+    /// An arithmetic operator member of a primitive numeric type called by its METHOD name
+    /// (`a.plus(b)`, `a.times(b)`, … — valid Kotlin, identical to `a + b`). The checker already typed it;
+    /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
+    /// the unsigned `div`/`rem` intrinsics). Returns `None` for a name/receiver this doesn't model.
+    fn lower_prim_op_method(&mut self, recv: AstExprId, name: &str, arg: AstExprId) -> Option<u32> {
+        let op = match name {
+            "plus" => BinOp::Add,
+            "minus" => BinOp::Sub,
+            "times" => BinOp::Mul,
+            "div" => BinOp::Div,
+            "rem" => BinOp::Rem,
+            _ => return None,
+        };
+        let (lt, rt) = (self.info.ty(recv), self.info.ty(arg));
+        if !lt.is_primitive() || !rt.is_primitive() || lt == Ty::Boolean || rt == Ty::Boolean {
+            return None;
+        }
+        // Unsigned `div`/`rem` need the JDK unsigned intrinsics (signed `+`/`-`/`*` share opcodes).
+        if lt.is_unsigned() && matches!(op, BinOp::Div | BinOp::Rem) {
+            let is_uint = lt == Ty::UInt;
+            let owner = if is_uint {
+                "java/lang/Integer"
+            } else {
+                "java/lang/Long"
+            };
+            let prim = if is_uint { "I" } else { "J" };
+            let l = self.expr(recv)?;
+            let r = self.expr(arg)?;
+            let mname = if op == BinOp::Div {
+                "divideUnsigned"
+            } else {
+                "remainderUnsigned"
+            };
+            return Some(self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: owner.to_string(),
+                    name: mname.to_string(),
+                    descriptor: format!("({prim}{prim}){prim}"),
+                    inline: false,
+                    must_inline: false,
+                },
+                dispatch_receiver: None,
+                args: vec![l, r],
+            }));
+        }
+        let irop = bin_to_ir(op)?;
+        let mut l = self.expr(recv)?;
+        let mut r = self.expr(arg)?;
+        // `Char` arithmetic (`'a'.plus(1)`): operate on ints (no promotion between Char/Int), then
+        // truncate back to `Char` if the result is a `Char` — mirrors the `Expr::Binary` Char path.
+        if lt == Ty::Char
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && (rt == Ty::Int || rt == Ty::Char)
+        {
+            let int_ir = ty_to_ir(Ty::Int);
+            l = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: l,
+                type_operand: int_ir.clone(),
+            });
+            if rt == Ty::Char {
+                r = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: r,
+                    type_operand: int_ir,
+                });
+            }
+            let raw = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: irop,
+                lhs: l,
+                rhs: r,
+            });
+            return Some(raw);
+        }
+        // Mixed numeric operands (`1L.plus(2)`): promote both to the common type before the op.
+        if lt != rt {
+            let p = Ty::promote(lt, rt)?;
+            let pir = ty_to_ir(p);
+            if lt != p {
+                l = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: l,
+                    type_operand: pir.clone(),
+                });
+            }
+            if rt != p {
+                r = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: r,
+                    type_operand: pir,
+                });
+            }
+        }
+        Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: irop,
+            lhs: l,
+            rhs: r,
+        }))
+    }
+
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
     /// field index within that class, and its type.
     fn resolve_field(&self, internal: &str, name: &str) -> Option<(ClassId, u32, Ty)> {
@@ -8653,6 +8753,13 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(this),
                             args: a,
                         }));
+                    }
+                    // An arithmetic operator member called by name on a primitive numeric receiver
+                    // (`a.plus(b)` ≡ `a + b`) → the same `PrimitiveBinOp` lowering as the operator form.
+                    if args.len() == 1 && self.info.ty(receiver).is_primitive() {
+                        if let Some(r) = self.lower_prim_op_method(receiver, &name, args[0]) {
+                            return Some(r);
+                        }
                     }
                     // Array `isEmpty()`/`isNotEmpty()`/`count()` (stdlib extensions) → the `arraylength`
                     // intrinsic: `size == 0` / `size != 0` / `size`.
