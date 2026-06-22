@@ -1658,6 +1658,10 @@ pub fn splice_unified(
     start_offset: usize,
     cw: &mut ClassWriter,
 ) -> Option<BranchySplice> {
+    // A `reifiedOperationMarker` body needs its reified type substituted (`substitute_reified`), which
+    // requires the call's reified type arguments — a separate concern from frame/operand-stack splicing
+    // and orthogonal to this path (the IR inliner skips reified fns; reified intrinsics like `emptyArray`
+    // go through the synthetics registry). Unreached by the lambda/host splicer (0 corpus occurrences).
     if is_reified_inline(body) {
         return None;
     }
