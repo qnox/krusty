@@ -113,8 +113,10 @@ fn main() {
     // Mirrors the conformance harness so WITH_STDLIB tests resolve `mutableListOf`/`ArrayList`/etc.
     let mut cp_paths: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("KRUSTY_SURVEY_STDLIB") {
-        if !p.is_empty() {
-            cp_paths.push(PathBuf::from(p));
+        // `:`-separated so the survey can mirror the gate's full classpath (stdlib + kotlin-test +
+        // annotations), not just the stdlib jar — else `kotlin.test.*` shows up as a false blocker.
+        for part in p.split(':').filter(|s| !s.is_empty()) {
+            cp_paths.push(PathBuf::from(part));
         }
     }
     if let Ok(p) = std::env::var("KRUSTY_SURVEY_JDK_MODULES") {

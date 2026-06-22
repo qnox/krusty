@@ -758,6 +758,22 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if let Some(super_int) = lo.classes[&internal].super_internal.clone() {
                     for m in &c.methods {
                         if let Some((_, _, base_fid, _)) = lo.resolve_method(&super_int, &m.name) {
+                            // A param/return typed by a class type-param that carries a *class* upper
+                            // bound (`class D<T : Foo> : Base<T>() { override fun bar(x: T) }`): kotlinc
+                            // erases the override to the bound (`bar(Foo)`) and synthesizes a `bar(Object)`
+                            // bridge that `checkcast`s to `Foo` — that cast is observable (it throws CCE on
+                            // an out-of-bound arg passed through the erased supertype). krusty erases the
+                            // type-param to `Object` instead, so it would emit neither the bound descriptor
+                            // nor the casting bridge — a miscompile. Skip until bound-aware erasure exists.
+                            let bound_tp = |r: &crate::ast::TypeRef| {
+                                r.fun_params.is_empty()
+                                    && c.type_param_bounds.iter().any(|(n, _)| *n == r.name)
+                            };
+                            if m.params.iter().any(|p| bound_tp(&p.ty))
+                                || m.ret.as_ref().is_some_and(bound_tp)
+                            {
+                                return None;
+                            }
                             let own_fid = lo.classes[&internal].methods[&m.name].1;
                             let bp = lo.ir.functions[base_fid as usize].params.clone();
                             let br = lo.ir.functions[base_fid as usize].ret.clone();
@@ -4250,9 +4266,24 @@ impl<'a> Lower<'a> {
                 if init_ty == Ty::Nothing {
                     return Some(self.expr(init)?);
                 }
-                // `Unit` as a stored value (the `kotlin.Unit` singleton) isn't modeled yet — bail.
+                // `Unit` as a stored value: kotlinc runs the initializer for effect, then binds the
+                // `kotlin.Unit` singleton to the slot (a `kotlin/Unit` reference). `val u = f()` where
+                // `f(): Unit` → run `f()`, then store `GETSTATIC kotlin/Unit.INSTANCE`.
                 if init_ty == Ty::Unit {
-                    return None;
+                    let unit_ty = Ty::obj("kotlin/Unit");
+                    let side = self.expr(init)?;
+                    let unit_val = self.ir.add_expr(IrExpr::UnitInstance);
+                    let seq = self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![side],
+                        value: Some(unit_val),
+                    });
+                    let v = self.fresh_value();
+                    self.scope.push((name.clone(), v, unit_ty));
+                    return Some(self.ir.add_expr(IrExpr::Variable {
+                        index: v,
+                        ty: ty_to_ir(unit_ty),
+                        init: Some(seq),
+                    }));
                 }
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred

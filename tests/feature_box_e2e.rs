@@ -14,6 +14,21 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // A `Unit`-valued local: `val u = f()` where `f(): Unit`. kotlinc runs the initializer for effect
+    // then binds the `kotlin.Unit` singleton — `u` is a `kotlin/Unit` reference, so `u.toString()` and
+    // string interpolation yield "kotlin.Unit".
+    (
+        "UnitAsValue",
+        r#"
+fun myPrintln(a: Any): Unit {}
+fun box(): String {
+    val u = myPrintln("First")
+    if (u.toString() != "kotlin.Unit") return "f0: $u"
+    if ("$u" != "kotlin.Unit") return "f1: $u"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

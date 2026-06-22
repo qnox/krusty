@@ -3493,6 +3493,40 @@ bodies exist only as jar bytecode):
 - Parser added + tested; not yet wired into resolution (behavior unchanged, gate **1320/0**). Wiring the
   class-member half (incl. the `get` operator) into String resolution is the next step.
 
+## Phase 454 — wire builtin members into resolution (de-hardcode String class members)  ✅
+- Generic, type-agnostic member resolution: `LibrarySet::builtin_member_ret(internal, name, args)` (impl
+  `Classpath::builtin_member_ret`) reads ANY builtin type's member return from its `.kotlin_builtins`
+  (`String`, `CharArray`, `CharSequence`, … — String is not special). Property return-type fixed: a
+  `Class.property` is field **10** and `Property.return_type_id` is field **9** (field 7 is the property's
+  receiver) — so `length: Int` now decodes.
+- `resolve.rs` String-member call sites and the `Expr::Index` arm route through
+  `builtin_member_ret("kotlin/String", …)` first, falling back to the (now extension-only)
+  `resolve_string_instance`. The curated String CLASS members (`length`/`get`/`charAt`) were removed —
+  they come from builtins; only `StringsKt` extensions remain in the table. Gate **1320/0**.
+
+## Phase 455 — unify builtins parsing (collection hierarchy + members, one parser/cache)  ✅
+- `collection_supers` was a second `.kotlin_builtins` reader/cache duplicating the member parser's walk.
+  Unified: `metadata::parse_builtins(data) -> HashMap<String, BuiltinClass{supertypes, members}>` does ONE
+  walk yielding every `Class`'s supertypes AND members. `builtins_supertypes` is now a thin view over it.
+- `Classpath` replaces the `collection_supers` + `builtin_members` fields with a single builtins-file cache
+  (`path -> Rc<HashMap<String, BuiltinClass>>`); `is_kotlin_collection`/`kotlin_subtype`/`builtin_member_ret`
+  all derive from it. Removed `parse_builtin_class` + the `CollectionSupers` alias. Gate **1320/0**.
+
+## Phase 456 — `Unit` as a stored value (`val u = f()` where `f(): Unit`)  ✅ (+6 → 1326)
+- `Stmt::Local` with a `Unit`-typed initializer no longer bails. kotlinc runs the initializer for effect
+  then binds the `kotlin.Unit` singleton; the lowerer now emits `Block { stmts: [init], value: UnitInstance }`
+  into a `kotlin/Unit`-typed slot — so `u.toString()`/`"$u"` yield "kotlin.Unit". TDD e2e `UnitAsValue`.
+- **Survey tooling:** `KRUSTY_SURVEY_STDLIB` is now `:`-separated so the survey mirrors the gate's full
+  classpath (stdlib + kotlin-test + annotations); otherwise `kotlin.test.*` shows as a false blocker
+  (the assertEquals/assertFailsWith buckets vanish, survey-compiled jumps to ~1324, matching the gate).
+- **Invariant fix (bound-aware erasure skip):** the `Unit` change unblocked `bridges/test23.kt`, exposing
+  a separate gap — a class override whose param/return is a class type-param with a *class* upper bound
+  (`class D<T : Foo> : Base<T>() { override fun bar(x: T) }`). kotlinc erases the override to the bound
+  (`bar(Foo)`) and synthesizes a `bar(Object)` bridge that `checkcast`s to `Foo` (observable: CCE on an
+  out-of-bound arg through the erased supertype). krusty erases the type-param to `Object`, emitting
+  neither — a miscompile. The lowerer now SKIPS such an override (a principled skip, like the existing
+  bound-distinct-overload rejection) until bound-aware erasure exists. Gate **1326/0**, no over-skip.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
