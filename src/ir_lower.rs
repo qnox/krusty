@@ -9325,11 +9325,40 @@ impl<'a> Lower<'a> {
                             })
                     } {
                         let recv = self.expr(receiver)?;
+                        // The receiver's PRIMITIVE element type (`ArrayList<Byte>` → `Byte`,
+                        // `ArrayList<Long>` → `Long`). `coll.add(0)` must box the value as THAT wrapper
+                        // (`Byte`/`Long`/…), not the literal's own `Integer` — else iterating the element
+                        // (`checkcast Byte`/`Long`) throws `ClassCastException`. Coerced only when the
+                        // argument's primitive type actually differs from the element (below).
+                        let elem_prim = if let Ty::Obj(_, targs) = &rt {
+                            targs.first().copied().filter(|t| t.is_primitive())
+                        } else {
+                            None
+                        };
                         // Coerce each argument to the resolved parameter type so a primitive flowing into
                         // an erased `Any` parameter (`List<Int>.add(E)` → `add(Object)`) autoboxes.
                         let mut a = Vec::new();
                         for (i, &arg) in args.iter().enumerate() {
                             match mparams.get(i) {
+                                Some(p)
+                                    if matches!(
+                                        p.obj_internal(),
+                                        Some("kotlin/Any") | Some("java/lang/Object")
+                                    ) && elem_prim.is_some_and(|e| {
+                                        let a = self.info.ty(arg);
+                                        a.is_primitive() && a != e
+                                    }) =>
+                                {
+                                    // Coerce to the element primitive (i2b/i2l/…), then box as THAT
+                                    // wrapper for the erased `Object` parameter.
+                                    let e = elem_prim.unwrap();
+                                    let v = self.lower_arg(arg, &ty_to_ir(e))?;
+                                    a.push(self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: v,
+                                        type_operand: ty_to_ir(*p),
+                                    }));
+                                }
                                 Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
                                 None => a.push(self.expr(arg)?),
                             }
