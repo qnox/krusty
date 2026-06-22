@@ -1805,9 +1805,11 @@ pub(crate) struct Lower<'a> {
     /// Active inlined-lambda parameters while expanding an `inline fun` body, as a stack so nested
     /// inline calls compose: a call `param(args)` in the inline body inlines the lambda body in place.
     inline_lambdas: Vec<InlineLambda>,
-    /// Names of `inline fun`s currently being expanded — a (self- or mutually-) recursive inline call
-    /// would expand forever, so re-entering an active name bails (the file is skipped).
-    inline_active: Vec<String>,
+    /// Call-site expression ids currently being inline-expanded. A genuinely recursive inline call
+    /// re-enters the SAME call site (the `rec(n-1)` in `rec`'s own body), which would expand forever —
+    /// so re-entering an active call id bails (the file skips). Source-level NESTING (`a { a { 5 } }`)
+    /// uses DISTINCT call sites, so it is allowed. (kotlinc rejects only genuine recursion.)
+    inline_active: Vec<u32>,
     /// Active reified type-parameter bindings while expanding a `<reified T>` inline fn: `T` → the
     /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
     /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
@@ -5569,8 +5571,10 @@ impl<'a> Lower<'a> {
             }
             args
         };
-        // A (self- or mutually-) recursive inline call would expand forever — bail.
-        if self.inline_active.iter().any(|n| n == fname) {
+        // A genuinely recursive inline call re-enters the SAME call site, expanding without bound — bail
+        // (skip). Source-level NESTING of the same fn (`a { a { 5 } }`) uses DISTINCT call sites, so it is
+        // allowed. (kotlinc rejects only genuine recursion.)
+        if self.inline_active.contains(&call_id) {
             return None;
         }
         // Specialize non-reified type params from the actual arguments: a parameter declared `T` binds
@@ -5589,7 +5593,7 @@ impl<'a> Lower<'a> {
             }
         }
         let active_depth = self.inline_active.len();
-        self.inline_active.push(fname.to_string());
+        self.inline_active.push(call_id);
         // Bind each reified type parameter to the call's explicit type argument (resolved through any
         // enclosing reified binding, so nested reified inlines compose). A missing arg (e.g. a purely
         // inferred reified type) bails — the file skips, never miscompiles.

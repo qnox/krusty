@@ -204,6 +204,22 @@ fun box(): String {
 }
 "#,
     ),
+    // Source-level NESTING of the same inline fn (`a { a { 5 } }`) — distinct call sites, finite, legal.
+    // The recursion guard keys on the call site (not the fn name), so nesting is allowed while genuine
+    // recursion (which re-enters the same site) still skips.
+    (
+        "InlineNested",
+        r#"
+inline fun a(f: () -> Int): Int = f()
+fun box(): String {
+    if (a { a { 5 } } != 5) return "f0"
+    if (a { a { a { 7 } } } != 7) return "f1"
+    val r = a { val x = a { 5 }; x + 1 }
+    if (r != 6) return "f2: $r"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
