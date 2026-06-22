@@ -4315,6 +4315,43 @@ impl<'a> Lower<'a> {
         self.lower_ext_call_on(recv, this_ty, name, args, e)
     }
 
+    /// Inline a receiver-lambda scope call the checker resolved (`x.run { … }`, `x.apply { … }`,
+    /// `with(x) { … }`): evaluate the receiver into a fresh slot bound as `this`, lower the lambda body
+    /// against it, then yield the body value (`run`/`with`) or the receiver (`apply`/`also`). The
+    /// receiver lambda runs in the caller, so `cur_class` is cleared — its members are reached through
+    /// the implicit-`this` paths (member/getter/extension), never the enclosing class's private fields.
+    fn lower_receiver_lambda(&mut self, rl: crate::resolve::ReceiverLambda) -> Option<u32> {
+        let rty = self.info.ty(rl.receiver);
+        let recv = self.expr(rl.receiver)?;
+        let depth = self.scope.len();
+        let p_slot = self.fresh_value();
+        let saved_cur = self.cur_class.clone();
+        self.cur_class = None;
+        self.scope.push(("this".to_string(), p_slot, rty));
+        let var_p = self.ir.add_expr(IrExpr::Variable {
+            index: p_slot,
+            ty: ty_to_ir(rty),
+            init: Some(recv),
+        });
+        let body_val = self.expr(rl.body);
+        self.scope.truncate(depth);
+        self.cur_class = saved_cur;
+        let body_val = body_val?;
+        let result = if rl.returns_receiver {
+            let recv_read = self.ir.add_expr(IrExpr::GetValue(p_slot));
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![var_p, body_val],
+                value: Some(recv_read),
+            })
+        } else {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![var_p],
+                value: Some(body_val),
+            })
+        };
+        Some(result)
+    }
+
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -8390,6 +8427,13 @@ impl<'a> Lower<'a> {
                     );
                 }
                 self.ir.add_expr(IrExpr::StringConcat(ir_parts))
+            }
+            // A receiver-lambda scope function the checker resolved (`x.run { … }`, `with(x) { … }`):
+            // inline it generically — bind `this` to the receiver, lower the body — driven by the
+            // checker's recorded decision, NOT a backend name-match.
+            Expr::Call { .. } if self.info.receiver_lambdas.contains_key(&e) => {
+                let rl = self.info.receiver_lambdas[&e];
+                self.lower_receiver_lambda(rl)?
             }
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
