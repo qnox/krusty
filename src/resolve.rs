@@ -5602,6 +5602,61 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                 }
+                // A user GENERIC-receiver extension `<T> T.foo()` — its receiver erases to `kotlin/Any`,
+                // so it's keyed under the `Any` descriptor and matches ANY actual receiver. Specialize the
+                // return: a return naming the receiver type param (`T`) → the actual receiver type `rt`;
+                // one naming a value-param type param → that argument's type; else the declared return.
+                if rt.descriptor() != Ty::obj("kotlin/Any").descriptor() {
+                    let any_desc = Ty::obj("kotlin/Any").descriptor();
+                    if let Some(sig) = self
+                        .syms
+                        .ext_funs
+                        .get(&(any_desc.clone(), name.clone()))
+                        .cloned()
+                    {
+                        if sig.params.len() == arg_tys.len() {
+                            if let Some(decl) =
+                                self.file
+                                    .decls
+                                    .iter()
+                                    .find_map(|&d| match self.file.decl(d) {
+                                        // Only INLINE generic-receiver extensions are handled here (the body
+                                        // is spliced with `this` specialized to the actual type). A NON-inline
+                                        // generic extension needs erased-`Object` boxing at the real call,
+                                        // which this path doesn't model — leave it unresolved (skip).
+                                        Decl::Fun(fd)
+                                            if fd.name == name
+                                                && fd.is_inline
+                                                && fd.receiver.as_ref().is_some_and(|r| {
+                                                    fd.type_params.iter().any(|tp| tp == &r.name)
+                                                }) =>
+                                        {
+                                            Some(fd.clone())
+                                        }
+                                        _ => None,
+                                    })
+                            {
+                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                                }
+                                let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
+                                let ret = match &decl.ret {
+                                    Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
+                                    Some(r) => decl
+                                        .params
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .find(|(p, _)| p.ty.name == r.name)
+                                        .map(|(_, a)| *a)
+                                        .unwrap_or(sig.ret),
+                                    None => Ty::Unit,
+                                };
+                                // Inline only (the body is spliced — no `ext_call` to emit).
+                                return ret;
+                            }
+                        }
+                    }
+                }
                 // `hashCode`/`toString`/`equals` are inherited from `Object` by every reference type.
                 // (Function/lambda receivers excluded: their identity semantics need lambda-singleton
                 // codegen krusty doesn't do yet — skip rather than miscompile a `.hashCode()` on one.)

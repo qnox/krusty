@@ -3424,6 +3424,23 @@ bodies exist only as jar bytecode):
 
 ---
 
+## Phase 449 — generic-receiver `inline fun` extensions (`<T> T.foo()`)  ✅
+- A user `inline fun <T> T.foo()` now inlines. The receiver type param erases to `kotlin/Any`, so the
+  extension is keyed in `ext_funs` under the `Any` descriptor; the checker's method-call resolution now
+  falls back to that key for ANY receiver (when no exact match), specializing the return type — a return
+  naming the receiver type param → the actual receiver type, one naming a value-param type param → that
+  argument's type. Restricted to `inline` decls (a non-inline generic extension needs erased-`Object`
+  boxing at the real call, which this path doesn't model — left unresolved/skip, no regression).
+- The lowerer's `lower_inline_fn_call` specializes the generic receiver to the actual type (`recv_ty` via
+  `self.recv_ty`), derives the value-param/return signature from the decl when `ext_funs` lacks an entry,
+  and binds `this`.
+- **Cross-cutting compiler fix (`ir_lower` Name lowering):** a smart-cast "narrowing" to `kotlin/Any` is a
+  no-op WIDENING to the top type, never a real narrowing — it arose when an inline expansion specialized a
+  slot to a more concrete type than the checker's erased `info.ty` (a generic inline param/`this`), and
+  the spurious `checkcast Object` it emitted erased the value (`VerifyError: Bad return type`). Now
+  skipped. (Found+fixed via `boxing14.kt` triage: also confirmed the checker fallback must be `inline`-only.)
+- TDD e2e `InlineExtension` extended with `<T> T.echo()` on `String` and `Int`. Gate **1314/0**, parity 16/0.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

@@ -819,11 +819,17 @@ fun box(): String {
 inline fun Int.doubled(): Int = this * 2
 inline fun String.shout(): String = this + "!"
 inline fun Int.clampPos(): Int { if (this < 0) return 0; return this }
+inline fun <T> T.echo(): T = this
 fun box(): String {
     if (5.doubled() != 10) return "f0: ${5.doubled()}"
     if ("hi".shout() != "hi!") return "f1"
     if ((-3).clampPos() != 0) return "f2"
     if (7.clampPos() != 7) return "f3"
+    // Generic-receiver extension: `<T> T.echo()` binds the receiver as `this`, specialized to the
+    // actual type — `String` here, not the erased `Any`.
+    val s: String = "ok".echo()
+    if (s != "ok") return "f4: $s"
+    if (42.echo() != 42) return "f5"
     return "OK"
 }
 "#,

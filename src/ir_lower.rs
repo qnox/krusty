@@ -5241,15 +5241,21 @@ impl<'a> Lower<'a> {
             return None;
         }
         // The extension receiver type (`inline fun String.foo()` → `String`), or `None` for a plain fn.
-        let recv_ty = match &f.receiver {
-            Some(r) => {
-                let t = ty_of(self.afile, r);
+        // A GENERIC receiver (`<T> T.foo()`) is specialized to the ACTUAL receiver's type at the call site.
+        let recv_ty = match (&f.receiver, recv) {
+            (Some(r), Some(ra)) => {
+                let t = if f.type_params.iter().any(|tp| tp == &r.name) {
+                    self.recv_ty(ra)
+                } else {
+                    ty_of(self.afile, r)
+                };
                 if t == Ty::Error {
                     return None;
                 }
                 Some(t)
             }
-            None => None,
+            (None, None) => None,
+            _ => return None,
         };
         if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
             return None;
@@ -5267,16 +5273,24 @@ impl<'a> Lower<'a> {
         // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
         // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
         let body_diverges = self.info.ty(body) == Ty::Nothing;
-        let sig = if let Some(rt) = &recv_ty {
-            // An extension fn is keyed in `ext_funs` by `(receiver descriptor, name)`; its `params` are the
-            // value params only (the receiver is bound separately as `this`).
-            self.syms
+        // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(receiver
+        // descriptor, name)` with value params only; a GENERIC extension isn't registered there (its
+        // receiver erased to `Any`), so derive from the decl.
+        let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(rt) = &recv_ty {
+            if let Some(s) = self
+                .syms
                 .ext_funs
-                .get(&(rt.descriptor(), fname.to_string()))?
-                .clone()
+                .get(&(rt.descriptor(), fname.to_string()))
+            {
+                (s.params.clone(), s.ret)
+            } else {
+                let ps = f.params.iter().map(|p| ty_of(self.afile, &p.ty)).collect();
+                let r = f.ret.as_ref().map_or(Ty::Unit, |t| ty_of(self.afile, t));
+                (ps, r)
+            }
         } else {
             let sigs = self.syms.funs.get(fname)?;
-            if sigs.len() == 1 {
+            let s = if sigs.len() == 1 {
                 sigs[0].clone()
             } else {
                 let want: String = f
@@ -5287,9 +5301,10 @@ impl<'a> Lower<'a> {
                 sigs.iter()
                     .find(|s| crate::resolve::erased_params_key(s) == want)?
                     .clone()
-            }
+            };
+            (s.params.clone(), s.ret)
         };
-        if sig.params.len() != args.len() || sig.params.len() != pnames.len() {
+        if sig_params.len() != args.len() || sig_params.len() != pnames.len() {
             return None;
         }
         // A (self- or mutually-) recursive inline call would expand forever — bail.
@@ -5367,7 +5382,7 @@ impl<'a> Lower<'a> {
             }));
             self.scope.push(("this".to_string(), slot, rt));
         }
-        for (i, pty) in sig.params.iter().enumerate() {
+        for (i, pty) in sig_params.iter().enumerate() {
             if let Ty::Fun(fnsig) = pty {
                 // A lambda parameter: require a literal lambda argument with no non-local return.
                 if let Expr::Lambda {
@@ -5444,7 +5459,7 @@ impl<'a> Lower<'a> {
         // For a body with `return`s, set up the inline-return target (result slot + end label) so a
         // `return x` lowers to `result = x; break@end`; the body is then wrapped in `do { … } while(false)`
         // labeled `end`. A `Unit` return type needs no result slot (a `return` is a bare `break`).
-        let ret_ty = ty_to_ir(sig.ret);
+        let ret_ty = ty_to_ir(sig_ret);
         let target = if has_return {
             let slot = self.fresh_value();
             let label = format!("$inl${slot}");
@@ -6289,6 +6304,12 @@ impl<'a> Lower<'a> {
                         } else if narrowed.is_reference()
                             && slot_ty.is_reference()
                             && !matches!(narrowed, Ty::Null)
+                            // A "narrowing" to `kotlin/Any` is a no-op WIDENING to the top type — never a
+                            // real smart-cast. It arises when an inline expansion specializes a slot to a
+                            // more concrete type than the checker's erased `info.ty` (a generic inline
+                            // parameter/`this` bound to the actual argument type); the spurious
+                            // `checkcast Object` it would emit erases the value and breaks verification.
+                            && narrowed.obj_internal() != Some("kotlin/Any")
                         {
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::Cast,
@@ -8877,7 +8898,9 @@ impl<'a> Lower<'a> {
                         let is_inline_ext = self.afile.decls.iter().any(|&d| {
                             matches!(self.afile.decl(d), Decl::Fun(f)
                                 if f.name == name && f.is_inline
-                                && f.receiver.as_ref().is_some_and(|r| ty_of(self.afile, r).descriptor() == recv_desc))
+                                && f.receiver.as_ref().is_some_and(|r|
+                                    f.type_params.iter().any(|tp| tp == &r.name)
+                                    || ty_of(self.afile, r).descriptor() == recv_desc))
                         });
                         if is_inline_ext {
                             if let Some(r) =
