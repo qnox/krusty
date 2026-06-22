@@ -309,6 +309,21 @@ fun box(): String {
 }
 "#,
     ),
+    // A generic-RECEIVER extension inline fn (`<T> T.applyIt(f: (T) -> R)`): the lambda's `it` specializes
+    // to the actual receiver type, so `it.length` (a `String` member) resolves — not the erased `Object`.
+    (
+        "GenericReceiverExtInline",
+        r#"
+inline fun <T> T.applyIt(f: (T) -> Int): Int = f(this)
+fun box(): String {
+    val n = "abc".applyIt { it.length }
+    if (n != 3) return "f0: $n"
+    val m = listOf(1, 2, 3, 4).applyIt { it.size }
+    if (m != 4) return "f1: $m"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
