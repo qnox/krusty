@@ -378,6 +378,9 @@ pub fn qualified_path(file: &File, e: ExprId) -> Option<String> {
 pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
     Some(match (method, arg_tys) {
         ("length", []) => Ty::Int,
+        // `s[i]` desugars to the `get(Int): Char` operator (`charAt` is its explicit form). Kotlin's
+        // `String.get` has no `java.lang.String` backing method — the backend lowers it to `charAt`.
+        ("get", [Ty::Int]) | ("charAt", [Ty::Int]) => Ty::Char,
         ("isEmpty", []) | ("isBlank", []) => Ty::Boolean,
         ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => Ty::String,
         ("indexOf", [Ty::String]) | ("indexOf", [Ty::Char]) => Ty::Int,
@@ -3633,6 +3636,13 @@ impl<'a> Checker<'a> {
                 if let Some(elem) = at.array_elem() {
                     self.expect_assignable(Ty::Int, it, self.span(index), "array index");
                     return self.set(e, elem);
+                }
+                // `str[i]` is the `String.get(Int): Char` operator (resolved through the curated Kotlin
+                // String-member table, like any other String member — not a bare special-case).
+                if at == Ty::String {
+                    if let Some(ret) = resolve_string_instance("get", &[it]) {
+                        return self.set(e, ret);
+                    }
                 }
                 // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
                 // `Map.get(K)`); the index type is checked against the member's parameter.

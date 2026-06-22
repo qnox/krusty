@@ -840,6 +840,22 @@ fun box(): String {
 }
 "#,
     ),
+    // String indexing `s[i]` → `charAt(i): Char` (java.lang.String has no `get` member), including
+    // `this[0]` inside an inline extension on `String`.
+    (
+        "StringIndex",
+        r#"
+inline fun String.firstChar(): Char = this[0]
+fun box(): String {
+    if ("hello"[1] != 'e') return "f0"
+    if ("hi".firstChar() != 'h') return "f1"
+    var s = ""
+    for (i in 0 until "abc".length) s += "abc"[i]
+    if (s != "abc") return "f2: $s"
+    return "OK"
+}
+"#,
+    ),
     // `arrayOfNulls<T>(n)` (incl. reified) + primitive-element collection boxing: `ArrayList<Byte>().add(0)`
     // must box the `Int` literal as the element wrapper (`Byte`/`Long`), not `Integer`, or iterating the
     // element (`checkcast Byte`) throws.
