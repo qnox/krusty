@@ -1925,9 +1925,20 @@ impl<'a> Lower<'a> {
         is_branchy(self.afile, e)
     }
 
-    /// The checker-inferred element type of an array-typed call result (`arrayOf(…)` → its `Array<T>`
-    /// element), used by bodies whose element isn't fixed by the call name.
+    /// The element type of an array-creating call (`arrayOf`/`arrayOfNulls<T>`/`Array<T>(n){}`/
+    /// `emptyArray<T>()`). Prefers the call's explicit type argument resolved through `ty_ref` — so a
+    /// reified `T` inside an expanded `<reified T>` inline body specializes the element (`new String[]`,
+    /// not the erased `Object[]`); falls back to the checker-inferred `Array<T>` element otherwise.
     pub(crate) fn synth_array_elem(&self, call: AstExprId) -> Option<Ty> {
+        if let Some(t) = self
+            .afile
+            .call_type_args
+            .get(&call.0)
+            .and_then(|ts| ts.first())
+            .and_then(|tr| self.ty_ref(tr))
+        {
+            return Some(t);
+        }
         self.info.ty(call).array_elem()
     }
 

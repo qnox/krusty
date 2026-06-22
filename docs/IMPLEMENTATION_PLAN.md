@@ -3378,6 +3378,18 @@ bodies exist only as jar bytecode):
   (`arrayOfNulls<T>`/`Array<T>(n){}`) needs the element type threaded through the array-builder path;
   and reified EXTENSION/member inline fns share the general `receiver.is_some()` inline limitation.
 
+## Phase 446 — reified array creation `Array<T>(n){…}` + trailing-lambda type-arg parser fix  ✅
+- **Parser fix:** the trailing-lambda postfix branch rebuilt the call expr but dropped its explicit type
+  arguments — both `f<T>(args){…}` (consumed into the pre-rebuild call's `call_type_args`) and `f<T>{…}`
+  (unconsumed `pending_targs`). Now carries both onto the rebuilt call. This was a long-standing bug
+  (noted for `assertFailsWith<T>{}` etc.); fixing it makes `<T>` survive on any call with a trailing
+  lambda.
+- **Reified array element:** `synth_array_elem` now prefers the call's explicit type argument resolved
+  through `ty_ref` (reified-aware), so `Array<T>(n){…}` inside a `<reified T>` inline body allocates a
+  real `new String[]` (`anewarray java/lang/String`) rather than the erased `Object[]`. javap-verified.
+- TDD e2e `ReifiedInline` extended with `pair<String>(...)` → `Array<String>`. Gate **1313/0** — the
+  parser fix touches every trailing-lambda call with no regression.
+
 ---
 
 ### Working agreements

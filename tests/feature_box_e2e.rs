@@ -794,6 +794,7 @@ fun box(): String {
 inline fun <reified T> isT(x: Any): Boolean = x is T
 inline fun <reified T> asT(x: Any): T = x as T
 inline fun <reified T> countOf(xs: List<Any>): Int = xs.count { it is T }
+inline fun <reified T> pair(a: T, b: T): Array<T> = Array<T>(2) { if (it == 0) a else b }
 fun box(): String {
     if (!isT<String>("hi")) return "f0"
     if (isT<Int>("hi")) return "f1"
@@ -802,6 +803,9 @@ fun box(): String {
     if (s != "hello") return "f3: $s"
     val c = countOf<String>(listOf("a", 1, "b", 2, "c"))
     if (c != 3) return "f4: $c"
+    // Reified array element: `Array<T>(n){…}` allocates `new T[]` (a real String[]), not Object[].
+    val arr: Array<String> = pair<String>("p", "q")
+    if (arr.size != 2 || arr[0] != "p" || arr[1] != "q") return "f5"
     return "OK"
 }
 "#,
