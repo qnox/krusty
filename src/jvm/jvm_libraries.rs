@@ -46,6 +46,16 @@ impl JvmLibraries {
                 if !c.public && !allow_non_public {
                     continue;
                 }
+                // A non-public candidate matched via the ERASED `Object` key must have a type-variable
+                // receiver (`T.takeIf`) — a concrete value-class receiver (`Result.map`, erased to
+                // `Object`) must not match an unrelated receiver this way. (A concrete non-value-class
+                // receiver keys under its own descriptor, so this only affects the `Object` key.)
+                if !c.public
+                    && recv_desc == "Ljava/lang/Object;"
+                    && !nonpublic_ext_receiver_is_typevar(c.signature.as_deref())
+                {
+                    continue;
+                }
                 // Kotlin-receiver applicability: the candidate matched on the JVM-erased lookup key, but
                 // the read-only/mutable distinction survives only in Kotlin types. When the receiver is a
                 // Kotlin collection type, consult this name's `@Metadata` receiver types: among those that
@@ -252,6 +262,16 @@ enum GSig {
     Class(String, Vec<GSig>),
     Arr(Box<GSig>),
     Prim(Ty),
+}
+
+/// Whether a non-public (`@InlineOnly`) extension's generic-signature RECEIVER is a type variable
+/// (`<T> T.takeIf(…)`) — the scope-fn family that applies to ANY receiver. A concrete-class receiver
+/// (a value class like `Result.map`, erased to `Object`) would otherwise wrongly match an unrelated
+/// receiver through the erased lookup key, so only a type-variable receiver may match this way.
+fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
+    signature
+        .and_then(parse_method_gsig)
+        .is_some_and(|(_, psigs, _)| matches!(psigs.first(), Some(GSig::Var(_))))
 }
 
 /// Parse one type signature off the front of `s`, returning `(node, rest)`.
@@ -861,14 +881,25 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        // Conservative: only a branchless single-invoke lambda host (`let`/`also`/`run`/`apply`) — proven
-        // spliceable. A branchy lambda host (`takeIf`/`takeUnless`) routes through `splice_unified` too,
-        // but enabling EVERY classpath lambda host here surfaces splicer bugs on complex stdlib HOFs
-        // (mis-paired `invoke`s, loop frames), so it stays gated until `splice_unified` is robust for them.
+        // Dry-run the ONE splicer with each `FunctionN` parameter as a lambda site — branchless
+        // (`let`/`also`) AND branchy (`takeIf`/`takeUnless`) hosts; `splice_unified` relocates host AND
+        // lambda-body frames, so what it accepts here it emits correctly (else it returns `None` and the
+        // call falls back / the file skips — never a miscompile).
         self.cp
             .method_code(owner, name, descriptor)
             .map_or(false, |body| {
-                crate::jvm::inline::is_lambda_spliceable(&body)
+                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
+                    function_param_indices(descriptor)
+                        .into_iter()
+                        .map(|param_index| crate::jvm::inline::LambdaSplice {
+                            param_index,
+                            body: Vec::new(),
+                        })
+                        .collect();
+                let mut dummy =
+                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
+                    .is_some()
             })
     }
 
@@ -894,7 +925,7 @@ impl LibrarySet for JvmLibraries {
                         .collect();
                 let mut dummy =
                     crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, &mut dummy)
+                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
                     .is_some()
             })
     }
@@ -963,36 +994,47 @@ impl LibrarySet for JvmLibraries {
         // argument; bind its type variables from the receiver and the already-typed non-lambda
         // arguments, then report each lambda argument's element-typed parameters (`Function1<? super
         // T, …>` on `List<Int>` → `[Int]`; `fold(0) { acc, x -> }` binds the accumulator from `0`).
-        for recv_desc in supertype_descriptors(&self.cp, recv) {
-            for c in self.cp.find_extensions(&recv_desc, name) {
-                // Public-only, like normal resolution: a non-public `@InlineOnly` candidate is for the
-                // inline route only and must not shadow the real generic overload here (it would type the
-                // lambda's `it` as the erased `Any`).
-                if !c.public {
-                    continue;
-                }
-                let Some(sig) = c.signature.as_deref() else {
-                    continue;
-                };
-                let Some((_, psigs, _)) = parse_method_gsig(sig) else {
-                    continue;
-                };
-                if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
-                    continue;
-                }
-                let mut binds = std::collections::HashMap::new();
-                unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
-                for (ps, at) in psigs[1..].iter().zip(arg_tys) {
-                    if let Some(t) = at {
-                        unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
+        // Pass 1 prefers a PUBLIC candidate (a non-public `@InlineOnly` one must not shadow a real generic
+        // overload — it would type `it` as the erased `Any`). Pass 2 falls back to non-public, for a scope
+        // fn with NO public overload (`takeIf`/`takeUnless`: `<T> T.takeIf((T) -> Boolean): T?`, inlined
+        // from its real body). Either way the lambda's parameter types come from the generic signature.
+        for allow_non_public in [false, true] {
+            for recv_desc in supertype_descriptors(&self.cp, recv) {
+                for c in self.cp.find_extensions(&recv_desc, name) {
+                    if !c.public && !allow_non_public {
+                        continue;
                     }
-                }
-                let out: Vec<Vec<Ty>> = psigs[1..]
-                    .iter()
-                    .map(|ps| function_input_types(ps, &binds))
-                    .collect();
-                if out.iter().any(|v| !v.is_empty()) {
-                    return Some(out);
+                    let Some(sig) = c.signature.as_deref() else {
+                        continue;
+                    };
+                    // A non-public candidate matched via the erased `Object` key must have a type-variable
+                    // receiver (the scope-fn family) — never a concrete value-class receiver (`Result.map`).
+                    if !c.public
+                        && recv_desc == "Ljava/lang/Object;"
+                        && !nonpublic_ext_receiver_is_typevar(Some(sig))
+                    {
+                        continue;
+                    }
+                    let Some((_, psigs, _)) = parse_method_gsig(sig) else {
+                        continue;
+                    };
+                    if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
+                        continue;
+                    }
+                    let mut binds = std::collections::HashMap::new();
+                    unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
+                    for (ps, at) in psigs[1..].iter().zip(arg_tys) {
+                        if let Some(t) = at {
+                            unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
+                        }
+                    }
+                    let out: Vec<Vec<Ty>> = psigs[1..]
+                        .iter()
+                        .map(|ps| function_input_types(ps, &binds))
+                        .collect();
+                    if out.iter().any(|v| !v.is_empty()) {
+                        return Some(out);
+                    }
                 }
             }
         }

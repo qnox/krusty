@@ -332,9 +332,16 @@ fn insn_size(insn: &Insn, at: usize) -> usize {
 /// length), computed to a fixpoint since a switch's padding depends on its position. Lets a transform
 /// map an instruction index to its byte offset in the assembled layout.
 pub fn insn_offsets(insns: &[Insn]) -> Vec<usize> {
-    let mut offs = vec![0usize; insns.len() + 1];
+    insn_offsets_at(insns, 0)
+}
+
+/// Like [`insn_offsets`] but the first instruction sits at byte offset `base` (the position this body
+/// will occupy in the final method) — switch padding aligns to 4 bytes from the METHOD start, so a
+/// spliced body containing a `tableswitch`/`lookupswitch` must be laid out at its real offset.
+pub fn insn_offsets_at(insns: &[Insn], base: usize) -> Vec<usize> {
+    let mut offs = vec![base; insns.len() + 1];
     loop {
-        let mut at = 0;
+        let mut at = base;
         let mut changed = false;
         for (i, insn) in insns.iter().enumerate() {
             if offs[i] != at {
@@ -355,8 +362,15 @@ pub fn insn_offsets(insns: &[Insn]) -> Vec<usize> {
 }
 
 pub fn assemble(insns: &[Insn]) -> Vec<u8> {
-    let offs = insn_offsets(insns);
-    let mut out = Vec::with_capacity(offs[insns.len()]);
+    assemble_at(insns, 0)
+}
+
+/// Like [`assemble`] but laid out as if starting at byte offset `base` in the method — switch padding
+/// aligns to 4 bytes from the method start. (Branch deltas are position-independent, so `base` only
+/// affects `tableswitch`/`lookupswitch` padding.)
+pub fn assemble_at(insns: &[Insn], base: usize) -> Vec<u8> {
+    let offs = insn_offsets_at(insns, base);
+    let mut out = Vec::with_capacity(offs[insns.len()].saturating_sub(base));
     for (i, insn) in insns.iter().enumerate() {
         let here = offs[i];
         match insn {
@@ -382,7 +396,7 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
                 targets,
             } => {
                 out.push(0xaa);
-                while (out.len()) % 4 != 0 {
+                while !(base + out.len()).is_multiple_of(4) {
                     out.push(0);
                 }
                 out.extend_from_slice(
@@ -398,7 +412,7 @@ pub fn assemble(insns: &[Insn]) -> Vec<u8> {
             }
             Insn::LookupSwitch { default, pairs } => {
                 out.push(0xab);
-                while (out.len()) % 4 != 0 {
+                while !(base + out.len()).is_multiple_of(4) {
                     out.push(0);
                 }
                 out.extend_from_slice(
@@ -1034,15 +1048,15 @@ fn relocate_vtype(v: &VType, src_cp: &[C], cw: &mut ClassWriter) -> Option<VType
     })
 }
 
-/// The result of splicing a **branchy** body: the spliced bytes plus the relocated `StackMapTable`
-/// frames the caller must add (each: byte offset within `bytes`, the *body* locals at that point, and
-/// the operand stack). The caller prepends its own locals (slots `0..base`) and supplies the absolute
-/// code position. The final entry is the **join** frame (where the body's returns land): empty body
-/// locals + the return value on the stack.
+/// The result of splicing a **branchy** body: the spliced bytes (laid out at the `start_offset` passed
+/// to [`splice_unified`]) plus the relocated `StackMapTable` frames the caller must add (each: ABSOLUTE
+/// byte offset, the *body* locals at that point, and the operand stack). The caller prepends its own
+/// locals (slots `0..base`). The **join** is where the body's returns land (empty body locals + the
+/// return value on the stack), bound by the caller right after the spliced bytes.
 pub struct BranchySplice {
     pub bytes: Vec<u8>,
-    /// Frames *inside* the body: (byte offset within `bytes`, body locals, stack). The caller prepends
-    /// its own locals and supplies the absolute position.
+    /// Frames *inside* the body: (ABSOLUTE byte offset, body locals, stack). The caller prepends its own
+    /// locals and binds at the offset directly.
     pub frames: Vec<(usize, Vec<VType>, Vec<VType>)>,
     /// The operand stack at the **join** (where the body's returns land = the continuation right after
     /// `bytes`): the return value, or empty for `void`. The caller binds this frame at the live
@@ -1053,6 +1067,10 @@ pub struct BranchySplice {
     /// trailing return dropped to fall through — which the caller can then append at ANY stack height
     /// (mid-expression), exactly like the former `splice_branchless`.
     pub join_required: bool,
+    /// ABSOLUTE byte offset where each lambda argument's spliced body begins (parallel to the `lambdas`
+    /// input). The caller relocates that lambda body's OWN `StackMapTable` frames relative to this (a
+    /// branchy predicate body has internal branch targets).
+    pub lambda_byte_starts: Vec<usize>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1066,10 +1084,19 @@ pub struct LambdaSplice {
 }
 
 /// Parse a descriptor's parameters into `(frame0 vtype, byte-of-descriptor advance)` — like
+/// The index of the `Class` constant in `src_cp` whose name is `name`, if any.
+fn source_class_index(src_cp: &[C], name: &str) -> Option<u16> {
+    src_cp
+        .iter()
+        .position(|c| matches!(c, C::Class(ni) if matches!(src_cp.get(*ni as usize), Some(C::Utf8(s)) if s == name)))
+        .map(|p| p as u16)
+}
+
 /// Frame-0 locals of a *static* method: one [`VType`] per parameter (`long`/`double` are one entry). A
-/// reference/array parameter becomes `Top` (its real type is unmodeled); the caller then requires every
-/// such parameter to be a spliced-away lambda (a dead slot), bailing otherwise.
-fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
+/// reference/array parameter becomes `Object(<src_cp Class index>)` so its frame type survives (a
+/// `takeIf` receiver returned from the body), or `Top` if that class has no `Class` constant in the
+/// source pool — then the caller requires it to be a spliced-away lambda (a dead slot), bailing otherwise.
+fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
     let inner = descriptor.strip_prefix('(')?.split(')').next()?;
     let b = inner.as_bytes();
     let mut i = 0;
@@ -1093,13 +1120,16 @@ fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
                 i += 1;
             }
             b'L' => {
+                let start = i;
                 while *b.get(i)? != b';' {
                     i += 1;
                 }
+                let name = std::str::from_utf8(&b[start + 1..i]).ok()?;
+                out.push(source_class_index(src_cp, name).map_or(VType::Top, VType::Object));
                 i += 1;
-                out.push(VType::Top);
             }
             b'[' => {
+                let start = i;
                 i += 1;
                 while *b.get(i)? == b'[' {
                     i += 1;
@@ -1110,7 +1140,8 @@ fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
                     }
                 }
                 i += 1;
-                out.push(VType::Top);
+                let name = std::str::from_utf8(&b[start..i]).ok()?;
+                out.push(source_class_index(src_cp, name).map_or(VType::Top, VType::Object));
             }
             _ => return None,
         }
@@ -1173,6 +1204,7 @@ pub fn splice_unified(
     descriptor: &str,
     base: u16,
     lambdas: &[LambdaSplice],
+    start_offset: usize,
     cw: &mut ClassWriter,
 ) -> Option<BranchySplice> {
     if body.has_handlers || is_reified_inline(body) {
@@ -1208,7 +1240,7 @@ pub fn splice_unified(
     // spliced-away lambda (a dead slot) — otherwise a frame that keeps it live would be wrong; bail.
     let host_frames: Vec<(usize, Frame)> = match body.stackmap.as_ref() {
         Some(sm) => {
-            let frame0 = param_vtypes_full(descriptor)?;
+            let frame0 = param_vtypes_full(descriptor, &body.source_cp)?;
             for (pi, v) in frame0.iter().enumerate() {
                 if *v == VType::Top && !lambdas.iter().any(|l| l.param_index == pi) {
                     return None; // an unresolved non-lambda reference parameter — can't model its frame
@@ -1252,10 +1284,10 @@ pub fn splice_unified(
             }
         }
     }
-    // A lambda host with a LOOP (a backward branch) — `mapIndexed`/`forEach`-style — relocates frames
-    // around the inserted lambda body in ways not yet modeled (the loop's back-edge frame interacts with
-    // the splice); bail so it skips rather than emit inconsistent frames. Single forward-branch hosts
-    // (`takeIf`/`takeUnless`/`require`) are fine.
+    // A lambda host with a LOOP (a backward branch) — `map`/`fold`/`forEach`-style — needs its loop
+    // back-edge `StackMapTable` frames relocated around the inserted lambda body, not yet modeled; bail so
+    // a PUBLIC such host falls back to a real call and a non-public one skips (never a miscompile). Single
+    // forward-branch hosts (`takeIf`/`takeUnless`/`require`) splice fully.
     if !lambdas.is_empty()
         && insns.iter().enumerate().any(|(i, insn)| match insn {
             Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
@@ -1288,6 +1320,7 @@ pub fn splice_unified(
     // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
     let deleted: std::collections::HashSet<usize> =
         edits.iter().flat_map(|e| e.at..e.at + e.len).collect();
+    let mut lambda_sites: Vec<usize> = Vec::with_capacity(lambdas.len()); // invoke index per lambda
     for lam in lambdas {
         let orig_slot = *offsets_of_param.get(lam.param_index)?;
         // The lambda parameter is loaded exactly once (the receiver of its `FunctionN.invoke`); for an
@@ -1330,6 +1363,7 @@ pub fn splice_unified(
             len: 1,
             repl: lam.body.clone(),
         }); // replace the invoke with the lambda body
+        lambda_sites.push(site);
     }
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
@@ -1404,7 +1438,31 @@ pub fn splice_unified(
         let mut e = 0usize;
         while i < insns.len() {
             if e < edits.len() && edits[e].at == i {
-                merged.extend(edits[e].repl.iter().cloned());
+                // A replacement (lambda body) carries its OWN internal branch targets (instruction
+                // indices within the lambda body). Shift them by `p0`, the lambda body's start position
+                // in `merged`, so a branchy predicate body's branches resolve in the merged stream.
+                let p0 = merged.len();
+                for mut insn in edits[e].repl.iter().cloned() {
+                    match &mut insn {
+                        Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target += p0,
+                        Insn::TableSwitch {
+                            default, targets, ..
+                        } => {
+                            *default += p0;
+                            for t in targets {
+                                *t += p0;
+                            }
+                        }
+                        Insn::LookupSwitch { default, pairs } => {
+                            *default += p0;
+                            for (_, t) in pairs {
+                                *t += p0;
+                            }
+                        }
+                        Insn::Plain { .. } => {}
+                    }
+                    merged.push(insn);
+                }
                 i += edits[e].len;
                 e += 1;
             } else {
@@ -1451,7 +1509,9 @@ pub fn splice_unified(
     shift_targets(&mut merged, p);
     let mut final_insns = prologue;
     final_insns.extend(merged);
-    let offs = insn_offsets(&final_insns);
+    // Lay out at the body's REAL method offset so a `tableswitch`/`lookupswitch` (e.g. `toList`'s
+    // `when (size)`) pads correctly; returned frame/lambda offsets are then absolute.
+    let offs = insn_offsets_at(&final_insns, start_offset);
 
     // Relocate the host frames: remap old index → new (+prologue), drop each spliced-away lambda slot
     // (its local is now dead → `Top`), and relocate the verification types into `cw`.
@@ -1479,11 +1539,18 @@ pub fn splice_unified(
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));
     }
+    // Byte offset where each lambda's spliced body begins (= its replaced invoke's new position): the
+    // caller binds that lambda body's own (branchy) frames relative to this.
+    let lambda_byte_starts: Vec<usize> = lambda_sites
+        .iter()
+        .map(|&site| offs[p + old2new[site]])
+        .collect();
     Some(BranchySplice {
-        bytes: assemble(&final_insns),
+        bytes: assemble_at(&final_insns, start_offset),
         frames,
         join_stack: ret.into_iter().collect(),
         join_required,
+        lambda_byte_starts,
     })
 }
 
@@ -1530,7 +1597,7 @@ mod tests {
             has_handlers: false,
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let bs = splice_unified(&body, "(I)I", 3, &[], &mut cw).expect("branchless splice");
+        let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw).expect("branchless splice");
         // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
         // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
         assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
@@ -1628,7 +1695,7 @@ mod tests {
             has_handlers: false,
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
-        assert!(splice_unified(&body, "(I)I", 1, &[], &mut cw).is_none());
+        assert!(splice_unified(&body, "(I)I", 1, &[], 0, &mut cw).is_none());
     }
 
     #[test]

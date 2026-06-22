@@ -766,6 +766,25 @@ fun box(): String {
 }
 "#,
     ),
+    // `takeIf`/`takeUnless`: BRANCHY host (returns receiver or null per the inlined predicate) with a
+    // `Function1` predicate whose body is a COMPARISON — i.e. a branchy lambda body. Exercises the
+    // universal splicer's full frame relocation: the host's StackMapTable frames AND the lambda body's own.
+    (
+        "TakeIf",
+        r#"
+fun box(): String {
+    val a = "hi".takeIf { it.length == 2 }
+    if (a != "hi") return "f0: $a"
+    val b = "hi".takeIf { it.length == 9 }
+    if (b != null) return "f1"
+    val c = "yo".takeUnless { it.length == 0 }
+    if (c != "yo") return "f2"
+    val d = "x".takeUnless { it.length == 1 }
+    if (d != null) return "f3"
+    return "OK"
+}
+"#,
+    ),
     (
         "ScopeFns",
         r#"

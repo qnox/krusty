@@ -5303,7 +5303,7 @@ impl<'a> Checker<'a> {
                 // rather than the erased `Any`. Type the non-lambda arguments first (the accumulator in
                 // `fold(0) { acc, x -> }` binds `R`); lambda positions are `None` until resolved.
                 let ext_lambda_pts: Option<Vec<Vec<Ty>>> = if method_sig.is_none()
-                    && matches!(rt, Ty::Obj(..))
+                    && rt != Ty::Error
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
@@ -5558,6 +5558,18 @@ impl<'a> Checker<'a> {
                 {
                     self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
                     return c.ret;
+                }
+                // A non-public (`@InlineOnly`) extension scope fn (`takeIf`/`takeUnless`/…): no callable
+                // method, but the backend SPLICES it. The lambda was already typed (via `ext_lambda_pts`);
+                // recover the (receiver-bound) logical return. Don't record an `ext_call` — it's inlined.
+                if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
+                    if let Some(c) = self
+                        .syms
+                        .libraries
+                        .resolve_scope_inline(&name, rt, &arg_tys)
+                    {
+                        return c.ret;
+                    }
                 }
                 // User-defined extension function in this file (invokestatic on the file facade).
                 {

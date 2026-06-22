@@ -2572,6 +2572,27 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 436 — inline branchy-lambda hosts (`takeIf`/`takeUnless`): full host + lambda-body frame relocation  ✅
+- `splice_unified` now relocates a BRANCHY lambda BODY's own `StackMapTable` frames (a comparison
+  predicate `{ it.length == 2 }` materializes to branches), not just the host's. The emitter
+  (`try_inline_unified`) builds each lambda body to a scratch `CodeBuilder`, LINKS it (patches its branch
+  operands), captures its resolved frames, and binds them at `lambda_byte_start + frame_offset` with full
+  locals = caller prefix + host params (`merge_lambda_frame_locals`). `splice_unified` reports each
+  lambda body's absolute byte start; the repl's internal branch targets are shifted by its merged position.
+- `assemble`/`insn_offsets` gained `_at(base)` variants so a spliced body containing a `tableswitch`/
+  `lookupswitch` (`toList`'s `when (size)`, `listOf`) pads to 4 bytes from the REAL method offset — the
+  branchy path re-splices at its `splice_start`. Fixed `typeAliasAsBareType` (a `tableswitch` corrupted by
+  0-based padding).
+- `can_inline_lambda` opened to a `splice_unified` dry-run (any host it can splice). Guard against a
+  value-class extension (`Result.map`, receiver erased to `Object`) wrongly matching an unrelated receiver
+  through the erased `Object` key: a non-public extension matched via that key must have a TYPE-VARIABLE
+  receiver (`T.takeIf` — the scope-fn family). Checker types the predicate via `extension_lambda_param_types`
+  (now non-public + non-`Obj`-receiver aware) and the return via `resolve_scope_inline`.
+- Box gate **1311 → 1313, 0 FAIL** (TDD `feature_box_e2e::TakeIf`: `takeIf`/`takeUnless` with comparison
+  predicates, JVM `-Xverify:all`). REMAINING (next): LOOP hosts (`map`/`fold`/`forEach`) — their loop
+  back-edge frames aren't relocated yet, so a lambda LOOP host still bails (a public one falls back to a
+  real call, a non-public one skips — never a miscompile). That guard is the last one to remove.
+
 ### Phase 435 — splicer hardening toward complete inline support (branchy-lambda hosts)  ✅
 - Toward inlining branchy-lambda hosts (`takeIf`/`takeUnless`): attempted relaxing the `can_inline_lambda`
   gate to a `splice_unified` dry-run so any classpath lambda host routes through the one splicer. The

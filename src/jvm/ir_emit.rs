@@ -97,6 +97,9 @@ pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8
 /// their initializers in declaration order.
 /// Convert the inliner's `VType` (a relocated frame verification type) to the class-writer's
 /// `VerifType`. `Uninitialized` types shouldn't reach here (`splice_unified` bails on them).
+/// A method's `StackMapTable` frames resolved to byte offsets: `(offset, locals, stack)` each.
+type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
+
 fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
     use crate::jvm::inline::VType;
     match v {
@@ -109,6 +112,33 @@ fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
         VType::Object(idx) => VerifType::Object(*idx),
         VType::UninitThis | VType::Uninit(_) => VerifType::Top,
     }
+}
+
+/// Expand a COLLAPSED frame-locals list (long/double = one entry) to SLOT-indexed (long/double = the
+/// type + a trailing `Top` filler), so per-slot overlays line up.
+fn expand_collapsed_locals(collapsed: &[VerifType]) -> Vec<VerifType> {
+    let mut out = Vec::with_capacity(collapsed.len());
+    for v in collapsed {
+        let wide = matches!(v, VerifType::Long | VerifType::Double);
+        out.push(v.clone());
+        if wide {
+            out.push(VerifType::Top);
+        }
+    }
+    out
+}
+
+/// Collapse a SLOT-indexed locals list back to the JVM `StackMapTable` form (long/double = one entry,
+/// its second slot dropped).
+fn collapse_locals(slots: &[VerifType]) -> Vec<VerifType> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < slots.len() {
+        let wide = matches!(slots[i], VerifType::Long | VerifType::Double);
+        out.push(slots[i].clone());
+        i += if wide { 2 } else { 1 };
+    }
+    out
 }
 
 fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
@@ -1350,8 +1380,10 @@ impl<'a> Emitter<'a> {
         }
         let top_local = base + body.max_locals;
         self.next_slot = self.next_slot.max(top_local);
-        // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack).
+        // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
+        // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
+        let mut lam_frames: Vec<ResolvedFrames> = Vec::new();
         for (i, &a) in args.iter().enumerate() {
             let IrExpr::Lambda {
                 impl_fn,
@@ -1412,9 +1444,8 @@ impl<'a> Emitter<'a> {
             if impl_ret.is_primitive() {
                 box_prim_free(self.cw, &mut scratch, impl_ret);
             }
-            if scratch.needs_stackmap || scratch.has_frames() {
-                return false; // a branchy lambda body — its internal frames aren't relocated yet
-            }
+            scratch.link(); // patch the lambda body's own branch operands before reading its bytes
+            let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
             let Some(lam_insns) = crate::jvm::inline::disassemble(&scratch.bytes) else {
                 return false;
             };
@@ -1422,6 +1453,7 @@ impl<'a> Emitter<'a> {
                 code.max_locals = scratch.max_locals;
             }
             self.next_slot = self.next_slot.max(scratch.max_locals);
+            lam_frames.push(lam_fr);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
                 body: lam_insns,
@@ -1430,15 +1462,15 @@ impl<'a> Emitter<'a> {
         if lam_splices.is_empty() {
             return false; // no lambda argument — not this path
         }
-        let Some(bs) =
-            crate::jvm::inline::splice_unified(body, descriptor, base, &lam_splices, self.cw)
+        // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
+        let Some(probe) =
+            crate::jvm::inline::splice_unified(body, descriptor, base, &lam_splices, 0, self.cw)
         else {
             return false;
         };
-        // A branchy host needs the join frame ⇒ an empty operand-stack baseline; a branchless lambda host
-        // (`let`/`also`/…) does not and may be spliced mid-expression.
-        if bs.join_required && code.stack_height() != 0 {
-            return false;
+        let needs_frames = probe.join_required || lam_frames.iter().any(|f| !f.is_empty());
+        if needs_frames && code.stack_height() != 0 {
+            return false; // frames carry no stack prefix → need an empty baseline
         }
         let ret_words = if descriptor.ends_with(")V") {
             0
@@ -1458,29 +1490,110 @@ impl<'a> Emitter<'a> {
             }
             arg_words += slot_words(params[i]) as i32;
         }
-        if !bs.join_required {
-            // Branchless host: append the bytes, no frames; works at any operand-stack height.
-            code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+        if !needs_frames {
+            // Pure branchless host + lambda: append the bytes, no frames; works at any stack height.
+            code.splice_inline(
+                &probe.bytes,
+                body.max_stack,
+                top_local,
+                arg_words,
+                ret_words,
+            );
             return true;
         }
-        // Branchy host: bind the relocated frames (caller locals + body locals), splice, then the join.
+        // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
+        // bind the relocated HOST frames, the LAMBDA bodies' own frames, the spliced bytes, and the join.
         let splice_start = code.bytes.len();
+        let Some(bs) = crate::jvm::inline::splice_unified(
+            body,
+            descriptor,
+            base,
+            &lam_splices,
+            splice_start,
+            self.cw,
+        ) else {
+            return false;
+        };
         let prefix = self.verif_locals_upto(base);
-        for (rel, body_locals, stack) in &bs.frames {
+        for (abs_off, body_locals, stack) in &bs.frames {
             let mut locals = prefix.clone();
             locals.extend(body_locals.iter().map(vtype_to_verif));
             let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
             let l = code.new_label();
-            code.bind_at(l, splice_start + rel);
+            code.bind_at(l, *abs_off);
             code.add_frame_if_new(l, locals, st);
+        }
+        let lambda_indices: Vec<usize> = lam_splices.iter().map(|l| l.param_index).collect();
+        for (k, frames) in lam_frames.iter().enumerate() {
+            for (fb, locals, stack) in frames {
+                let off = bs.lambda_byte_starts[k] + fb;
+                let merged = self.merge_lambda_frame_locals(
+                    base,
+                    top_local,
+                    &params,
+                    &lambda_indices,
+                    locals,
+                );
+                let l = code.new_label();
+                code.bind_at(l, off);
+                code.add_frame_if_new(l, merged, stack.clone());
+            }
         }
         code.set_needs_stackmap();
         code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
-        let join = code.new_label();
-        code.bind(join);
-        let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
-        code.add_frame_if_new(join, prefix, join_stack);
+        if bs.join_required {
+            let join = code.new_label();
+            code.bind(join);
+            let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
+            code.add_frame_if_new(join, prefix, join_stack);
+        }
         true
+    }
+
+    /// Full locals for a frame INSIDE a spliced lambda body: the caller's locals (`0..base`), then the
+    /// host's parameters (`base..top_local`, a spliced-away lambda param is dead → `Top`), then the
+    /// lambda's own slots (`top_local..`) from its scratch frame. `lam_locals` is the (collapsed) scratch
+    /// frame, whose host-slot portion is `Top` (the lambda body didn't know them) and is overlaid here.
+    fn merge_lambda_frame_locals(
+        &mut self,
+        base: u16,
+        top_local: u16,
+        params: &[Ty],
+        lambda_indices: &[usize],
+        lam_locals: &[VerifType],
+    ) -> Vec<VerifType> {
+        // Slot-indexed caller locals (`0..base`).
+        let mut slots = self.verif_slots_upto(base);
+        // Host parameters at `base..top_local` (each at `base + offset`); a lambda param is dead → `Top`.
+        let mut host = vec![VerifType::Top; (top_local.saturating_sub(base)) as usize];
+        let mut off = 0u16;
+        for (i, &pty) in params.iter().enumerate() {
+            if !lambda_indices.contains(&i) {
+                if let Some(slot) = host.get_mut(off as usize) {
+                    *slot = self.verif_single(pty);
+                }
+            }
+            off += slot_words(pty);
+        }
+        slots.extend(host);
+        // The lambda's own slots: expand the scratch frame to slot-indexed and take `top_local..`.
+        let expanded = expand_collapsed_locals(lam_locals);
+        for s in expanded.into_iter().skip(top_local as usize) {
+            slots.push(s);
+        }
+        collapse_locals(&slots)
+    }
+
+    /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
+    fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
+        let mut raw = vec![VerifType::Top; upto as usize];
+        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        for (slot, ty) in entries {
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = self.verif_single(ty);
+            }
+        }
+        raw
     }
 
     /// Attempt to splice a cross-module `inline fun`'s compiled body at the call site (the bytecode
@@ -1527,10 +1640,11 @@ impl<'a> Emitter<'a> {
         };
         let top_local = base + body.max_locals;
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
-        // paths). It drops a trailing return, so a pure branchless body reports `join_required == false`
-        // and is appended at ANY operand-stack height (mid-expression); a branchy body needs the join
-        // frame + an empty baseline.
-        let Some(bs) = crate::jvm::inline::splice_unified(&body, descriptor, base, &[], self.cw)
+        // paths). Probe at offset 0 to learn `join_required` (a branchless body has no switch, so its
+        // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
+        // any `tableswitch`/`lookupswitch` pads correctly.
+        let Some(probe) =
+            crate::jvm::inline::splice_unified(&body, descriptor, base, &[], 0, self.cw)
         else {
             return false;
         };
@@ -1538,37 +1652,45 @@ impl<'a> Emitter<'a> {
             .iter()
             .map(|&a| slot_words(self.value_ty(a)) as i32)
             .sum();
-        if !bs.join_required {
+        if !probe.join_required {
             // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
             // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
             self.emit_operands(args, code);
-            let diverges = bs.bytes.last() == Some(&0xbf);
+            let diverges = probe.bytes.last() == Some(&0xbf);
             let ret_words = if diverges { 0 } else { ret_words };
-            code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+            code.splice_inline(
+                &probe.bytes,
+                body.max_stack,
+                top_local,
+                arg_words,
+                ret_words,
+            );
             return true;
         }
-        // Branchy body: relocate the callee's StackMapTable frames into the caller. Requires an empty
-        // operand-stack baseline (so frames need no operand-stack prefix); a sub-expression inline call
-        // (non-empty stack) falls back to a normal call.
+        // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
+        // prefix); a sub-expression inline call (non-empty stack) falls back to a normal call.
         if code.stack_height() != 0 {
             return false;
         }
         self.emit_operands(args, code);
         let splice_start = code.bytes.len();
+        let Some(bs) =
+            crate::jvm::inline::splice_unified(&body, descriptor, base, &[], splice_start, self.cw)
+        else {
+            return false;
+        };
         let prefix = self.verif_locals_upto(base);
-        for (rel, body_locals, stack) in &bs.frames {
+        for (abs_off, body_locals, stack) in &bs.frames {
             let mut locals = prefix.clone();
             locals.extend(body_locals.iter().map(vtype_to_verif));
             let st: Vec<VerifType> = stack.iter().map(vtype_to_verif).collect();
             let l = code.new_label();
-            code.bind_at(l, splice_start + rel);
+            code.bind_at(l, *abs_off);
             code.add_frame_if_new(l, locals, st);
         }
         code.set_needs_stackmap();
         code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
         // Join frame: the redirected returns land at the continuation right after the spliced body.
-        // Bind it at the *live* position (now `code.bytes.len()`) so it can never fall at `code.len()`
-        // and be dropped — caller locals only (body locals are dead), with the return value on stack.
         let join = code.new_label();
         code.bind(join);
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();

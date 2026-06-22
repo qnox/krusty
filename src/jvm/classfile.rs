@@ -598,6 +598,19 @@ impl CodeBuilder {
         !self.frames.is_empty()
     }
 
+    /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
+    /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
+    /// `usize::MAX`) are dropped.
+    pub fn resolved_frames(&self) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+        self.frames
+            .iter()
+            .filter_map(|(lid, locals, stack)| {
+                let off = self.labels.get(*lid as usize).copied()?;
+                (off != usize::MAX).then(|| (off, locals.clone(), stack.clone()))
+            })
+            .collect()
+    }
+
     /// Record the frame at `label` (given locals + stack) if not already recorded.
     /// First registration wins — early callers capture the "outer" scope before inner vars appear.
     /// `stack` is the operand-stack verification types at this label (empty in most cases).
