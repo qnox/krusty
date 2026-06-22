@@ -945,6 +945,17 @@ impl LibrarySet for JvmLibraries {
         self.extension_callable(name, receiver, args, &[], true)
     }
 
+    fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
+        supertype_descriptors(&self.cp, receiver)
+            .iter()
+            .any(|desc| {
+                self.cp
+                    .find_extensions(desc, name)
+                    .iter()
+                    .any(|c| self.cp.is_inline_method(&c.owner, &c.name))
+            })
+    }
+
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
         self.cp
             .find_top_level(name)
