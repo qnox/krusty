@@ -820,6 +820,8 @@ inline fun Int.doubled(): Int = this * 2
 inline fun String.shout(): String = this + "!"
 inline fun Int.clampPos(): Int { if (this < 0) return 0; return this }
 inline fun <T> T.echo(): T = this
+inline fun String.withLen(f: (String) -> Int): Int = f(this)
+inline fun <T> T.alsoLen(f: (T) -> Int): Int = f(this)
 fun box(): String {
     if (5.doubled() != 10) return "f0: ${5.doubled()}"
     if ("hi".shout() != "hi!") return "f1"
@@ -830,6 +832,10 @@ fun box(): String {
     val s: String = "ok".echo()
     if (s != "ok") return "f4: $s"
     if (42.echo() != 42) return "f5"
+    // Extension with a lambda parameter (concrete + generic receiver): the lambda's `it` types as the
+    // actual receiver type so `it.length` resolves; the lambda body is inlined at the `f(this)` site.
+    if ("abcd".withLen { it.length } != 4) return "f6"
+    if ("hello".alsoLen { it.length } != 5) return "f7"
     return "OK"
 }
 "#,
