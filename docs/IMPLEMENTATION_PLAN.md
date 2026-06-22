@@ -3589,6 +3589,14 @@ bodies exist only as jar bytecode):
   typed-`val` initializers and HOF arguments already used). Fixes `mk()(5)`. TDD e2e `LambdaFromReturnType`
   (`inc(): (Int)->Int`, `addN(n)` via `return`, a two-param `combine`). Gate **1334/0**.
 
+## Phase 464 — inline lambda parameter used as a value (`a(f)`)  ✅ (+1 → 1335)
+- An inline fn's lambda parameter is inline-spliced only when used solely as a callee (`f(args)`). When it
+  is also used as a VALUE — forwarded to another call (`a(f)`), stored, or returned — krusty now
+  materializes it as a `FunctionN` (the same value-binding path as a callable-ref argument, phase 460) and
+  `f(args)` invokes via `FunctionN.invoke`; previously it bailed. New `name_used_as_value` walks the body to
+  distinguish a callee use from a value use. A purely-invoked lambda still splices unchanged. TDD e2e
+  `InlineLambdaForwarded` (`b{…}=a(f)+1` inline→inline, `c{…}=callIt(f)*2` inline→normal). Gate **1335/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

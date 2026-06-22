@@ -137,6 +137,23 @@ fun box(): String {
 }
 "#,
     ),
+    // An inline fn's lambda parameter used as a VALUE (passed on to another call) rather than only
+    // invoked: it's materialized as a FunctionN instead of being spliced. A lambda used purely as a
+    // callee still splices.
+    (
+        "InlineLambdaForwarded",
+        r#"
+inline fun a(f: () -> Int): Int = f()
+inline fun b(f: () -> Int): Int = a(f) + 1
+fun callIt(f: () -> Int): Int = f()
+inline fun c(f: () -> Int): Int = callIt(f) * 2
+fun box(): String {
+    if (b { 5 } != 6) return "f0"
+    if (c { 7 } != 14) return "f1"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
