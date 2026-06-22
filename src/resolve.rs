@@ -5842,6 +5842,10 @@ impl<'a> Checker<'a> {
                 // A non-public (`@InlineOnly`) extension scope fn (`takeIf`/`takeUnless`/…): no callable
                 // method, but the backend SPLICES it. The lambda was already typed (via `ext_lambda_pts`);
                 // recover the (receiver-bound) logical return. Don't record an `ext_call` — it's inlined.
+                // (A NO-lambda `@InlineOnly` extension, e.g. `Char.isDigit()`, is NOT accepted here: many
+                // such bodies — unsigned conversions/ranges, the `let`/`apply` fallback with a non-literal
+                // function arg — splice to wrong values or an `IllegalAccessError`, so widening this gate
+                // miscompiles. A correct no-lambda splice needs precise return-type/value-class handling.)
                 if args.len() == 1 && matches!(self.file.expr(args[0]), Expr::Lambda { .. }) {
                     if let Some(c) = self
                         .syms
