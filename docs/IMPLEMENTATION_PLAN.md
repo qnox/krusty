@@ -3390,6 +3390,23 @@ bodies exist only as jar bytecode):
 - TDD e2e `ReifiedInline` extended with `pair<String>(...)` → `Array<String>`. Gate **1313/0** — the
   parser fix touches every trailing-lambda call with no regression.
 
+## Phase 447 — non-local-return inline (inline fn bodies with `return`)  ✅ (+1 → 1314)
+- The IR inliner bailed any inline fn whose body had a `return` (`body_has_return`). Now it expands them:
+  the body is wrapped in `while(true){ <body>; [result = fall-through;] break@end }` and each `return x`
+  lowers to `result = x; break@end` (a new `inline_return` stack of `(slot, label, ret_ty)` consulted in
+  `Stmt::Return`). The function return becomes a jump to the body's end — including a `return` out of a
+  `for`/`while` loop in the body. Lambda args carrying a return are still pre-bailed, so a surviving
+  `return` always belongs to the innermost inline body (sound).
+- Frame correctness, three fixes: (a) the result slot is initialized to a type default (an uninitialized
+  slot is `top` at the loop head but the body assigns it → mismatch); (b) when the body ALWAYS diverges
+  (type `Nothing`), the fall-through assign+break are omitted (they'd be unframed dead code after a
+  `goto`); (c) `value_ty(Block)` recovers a block-local slot's type from its `Variable` declaration when
+  the slot isn't yet emit-registered (a comparison querying the inline result before the block emits would
+  otherwise see `Ty::Error` and pick the reference path → "Bad type on operand stack").
+- `try { … } finally { … }` around a `return` in an inlined body is not yet combined with the jump — that
+  case bails (file skips, never a miscompile). TDD e2e `InlineNonLocalReturn` (sequential/conditional
+  returns, a `return` out of a `for` loop, a `Unit` early `return`). Gate **1314/0** (+1), parity 16/0.
+
 ---
 
 ### Working agreements

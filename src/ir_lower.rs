@@ -57,6 +57,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
         reified_subst: Vec::new(),
+        inline_return: Vec::new(),
     };
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -1791,6 +1792,12 @@ pub(crate) struct Lower<'a> {
     /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
     /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
     reified_subst: Vec<std::collections::HashMap<String, ast::TypeRef>>,
+    /// Active inline-fn return targets while expanding an `inline fun` whose body has `return`: each is
+    /// `(result slot, end label, return type)`. A `return x` in the inlined body lowers to `result = x;
+    /// break@end` (the body is wrapped in a `do { … } while(false)` labeled `end`), turning the function
+    /// return into a jump to the body's end. Innermost (`.last()`) is the enclosing inline fn; lambda
+    /// args with returns are pre-bailed, so a `return` always belongs to the innermost inline body.
+    inline_return: Vec<(u32, String, IrType)>,
 }
 
 impl<'a> Lower<'a> {
@@ -4154,6 +4161,34 @@ impl<'a> Lower<'a> {
         match self.afile.stmt(s).clone() {
             Stmt::Expr(e) => self.expr(e),
             Stmt::Return(e) => {
+                // Inside an expanded `inline fun` body: `return x` is not a real method return — it
+                // assigns the inline result slot and breaks to the body's end label (the `do…while(false)`
+                // wrapper). A `try { … } finally { … }` around the return is not yet combined with this
+                // transfer, so bail that combination (the file skips — never a miscompile).
+                if let Some((slot, label, rty)) = self.inline_return.last().cloned() {
+                    if !self.try_finally_stack.is_empty() {
+                        return None;
+                    }
+                    let mut stmts = Vec::new();
+                    // A `Unit`-returning inline fn has no result slot — `return`/`return Unit` is a bare
+                    // `break`. Otherwise assign the (coerced) value to the result slot, then break.
+                    if rty != IrType::Unit {
+                        let val = match e {
+                            Some(e) if self.info.ty(e) != Ty::Nothing => self.lower_arg(e, &rty)?,
+                            Some(e) => self.expr(e)?,
+                            None => self.ir.add_expr(IrExpr::UnitInstance),
+                        };
+                        stmts.push(self.ir.add_expr(IrExpr::SetValue {
+                            var: slot,
+                            value: val,
+                        }));
+                    } else if let Some(e) = e {
+                        // `return someUnitExpr` — run the expression for its side effects.
+                        stmts.push(self.expr(e)?);
+                    }
+                    stmts.push(self.ir.add_expr(IrExpr::Break { label: Some(label) }));
+                    return Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }));
+                }
                 let v = match e {
                     // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
                     Some(e)
@@ -5200,9 +5235,14 @@ impl<'a> Lower<'a> {
             FunBody::None => return None,
         };
         let pnames: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-        if body_has_return(self.afile, body) {
-            return None;
-        }
+        // A body with `return`s is wrapped in a `do { … } while(false)` and each `return` becomes
+        // `result = x; break` (see below). A `return` lexically inside a *nested lambda* of the body
+        // would be a non-local return targeting the WRONG inline level — but a lambda argument carrying a
+        // return is already pre-bailed at registration, so the only returns that survive are direct.
+        let has_return = body_has_return(self.afile, body);
+        // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
+        // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
+        let body_diverges = self.info.ty(body) == Ty::Nothing;
         let sigs = self.syms.funs.get(fname)?;
         let sig = if sigs.len() == 1 {
             sigs[0].clone()
@@ -5338,13 +5378,101 @@ impl<'a> Lower<'a> {
                 self.scope.push((pnames[i].clone(), slot, spty));
             }
         }
+        // For a body with `return`s, set up the inline-return target (result slot + end label) so a
+        // `return x` lowers to `result = x; break@end`; the body is then wrapped in `do { … } while(false)`
+        // labeled `end`. A `Unit` return type needs no result slot (a `return` is a bare `break`).
+        let ret_ty = ty_to_ir(sig.ret);
+        let target = if has_return {
+            let slot = self.fresh_value();
+            let label = format!("$inl${slot}");
+            self.inline_return
+                .push((slot, label.clone(), ret_ty.clone()));
+            Some((slot, label))
+        } else {
+            None
+        };
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
         self.inline_active.truncate(active_depth);
         self.reified_subst.truncate(reif_depth);
+        if has_return {
+            self.inline_return.pop();
+        }
         let body_val = body_val?;
-        if stmts.is_empty() {
+        if let Some((slot, label)) = target {
+            let unit_ret = ret_ty == IrType::Unit;
+            // `while(true) { <body>; [result = fall-through value;] break@end }` — runs the inlined body
+            // exactly once (the trailing `break` exits), while any `return` inside breaks early (after
+            // setting the result). A standard `while(true)`+`break` shape the frame emitter handles.
+            // If the body ALWAYS diverges (every path returns — type `Nothing`), the fall-through assign +
+            // break are unreachable dead code AFTER a `goto`, which would lack a stackmap frame — so omit
+            // them and emit the body alone (its internal `return`s already break to the end).
+            let loop_body = if body_diverges {
+                body_val
+            } else {
+                let brk = self.ir.add_expr(IrExpr::Break {
+                    label: Some(label.clone()),
+                });
+                if unit_ret {
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![body_val, brk],
+                        value: None,
+                    })
+                } else {
+                    let assign = self.ir.add_expr(IrExpr::SetValue {
+                        var: slot,
+                        value: body_val,
+                    });
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![assign, brk],
+                        value: None,
+                    })
+                }
+            };
+            let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            let loopw = self.ir.add_expr(IrExpr::While {
+                cond,
+                body: loop_body,
+                update: None,
+                post_test: false,
+                label: Some(label),
+            });
+            if !unit_ret {
+                // Initialize the result slot to a type default so its frame type is consistent at the
+                // loop head (an uninitialized slot is `top` there but the body assigns it → mismatch).
+                let init = if ir_type_is_reference(&ret_ty) {
+                    IrConst::Null
+                } else if let IrType::Class { fq_name, .. } = &ret_ty {
+                    match fq_name.as_str() {
+                        "kotlin/Long" => IrConst::Long(0),
+                        "kotlin/Float" => IrConst::Float(0.0),
+                        "kotlin/Double" => IrConst::Double(0.0),
+                        "kotlin/Boolean" => IrConst::Boolean(false),
+                        "kotlin/Char" => IrConst::Char('\0'),
+                        _ => IrConst::Int(0), // Int/Short/Byte
+                    }
+                } else {
+                    IrConst::Null
+                };
+                let init = self.ir.add_expr(IrExpr::Const(init));
+                stmts.push(self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty: ret_ty,
+                    init: Some(init),
+                }));
+            }
+            stmts.push(loopw);
+            let value = if unit_ret {
+                self.ir.add_expr(IrExpr::UnitInstance)
+            } else {
+                self.ir.add_expr(IrExpr::GetValue(slot))
+            };
+            Some(self.ir.add_expr(IrExpr::Block {
+                stmts,
+                value: Some(value),
+            }))
+        } else if stmts.is_empty() {
             Some(body_val)
         } else {
             Some(self.ir.add_expr(IrExpr::Block {
