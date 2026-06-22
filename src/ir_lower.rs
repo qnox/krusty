@@ -4179,6 +4179,142 @@ impl<'a> Lower<'a> {
         Some(self.coerce_generic_read(read, e, m.ret))
     }
 
+    /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
+    /// shared path behind a qualified `recv.name(args)` and a receiver-lambda / extension-fn body's
+    /// implicit `this.name(args)` (`"ab".run { uppercase() }`, `fun String.shout() = uppercase()`).
+    /// `recv_ir` is the already-lowered receiver value. Tries a public library extension first
+    /// (`invokestatic facade.name(recv, args)`), then a private `@InlineOnly` extension whose real body
+    /// the backend splices (`String.uppercase()` → `toUpperCase(Locale.ROOT)`). `None` when neither
+    /// resolves. No stdlib name is hardcoded — owner/descriptor come from the library reader.
+    fn lower_ext_call_on(
+        &mut self,
+        recv_ir: u32,
+        rt: Ty,
+        name: &str,
+        args: &[AstExprId],
+        e: AstExprId,
+    ) -> Option<u32> {
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let c = self
+            .syms
+            .libraries
+            .resolve_callable(name, Some(rt), &arg_tys, &[])
+            .filter(|c| !c.default_call) // a defaulted extension needs the AST receiver expr — bail
+            .or_else(|| {
+                self.syms
+                    .libraries
+                    .resolve_scope_inline(name, rt, &arg_tys)
+                    .filter(|c| {
+                        c.is_inline
+                            && self
+                                .syms
+                                .libraries
+                                .can_inline_call(&c.owner, &c.name, &c.descriptor)
+                    })
+            })?;
+        // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
+        // `Object` receiver param; a reference receiver widens to its declared param type for free.
+        let p0 = *c.params.first().unwrap_or(&rt);
+        let recv = if rt.is_primitive() && p0.is_reference() {
+            self.coerce_erased(recv_ir, rt, p0)
+        } else {
+            recv_ir
+        };
+        let mut a = vec![recv];
+        for (i, &arg) in args.iter().enumerate() {
+            match c.params.get(i + 1) {
+                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                None => a.push(self.expr(arg)?),
+            }
+        }
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: c.owner,
+                name: c.name,
+                descriptor: c.descriptor,
+                inline: c.is_inline,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: a,
+        });
+        Some(self.coerce_generic_read(call, e, c.physical_ret))
+    }
+
+    /// Lower an unqualified CALL `name(args)` against the implicit `this` receiver — the body of a
+    /// receiver lambda (`"ab".run { uppercase() }`) or an extension function (`fun String.f() =
+    /// uppercase()`), where `cur_class` is cleared and the `this` slot holds the external receiver. The
+    /// implicit receiver takes priority over a receiver-less top-level function (Kotlin scoping), so
+    /// this runs first. Tries, in order: a user instance method, a builtin/library member, then a stdlib
+    /// extension. `None` when none match (the call falls through to top-level resolution).
+    fn lower_this_member_call(
+        &mut self,
+        this_v: u32,
+        this_ty: Ty,
+        name: &str,
+        args: &[AstExprId],
+        e: AstExprId,
+    ) -> Option<u32> {
+        // A user instance method on the receiver's class — `this.m(args)`.
+        if let Some(internal) = this_ty.obj_internal() {
+            if let Some((class, index, mfid, _)) = self.resolve_method(internal, name) {
+                let params = self.ir.functions[mfid as usize].params.clone();
+                if args.len() == params.len() {
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let mut a = Vec::new();
+                    for (arg, pt) in args.iter().zip(&params) {
+                        a.push(self.lower_arg(*arg, pt)?);
+                    }
+                    return Some(self.ir.add_expr(IrExpr::MethodCall {
+                        class,
+                        index,
+                        receiver: recv,
+                        args: a.into_iter().map(Some).collect(),
+                    }));
+                }
+            }
+        }
+        // A builtin/library member method (`StringBuilder.append`, `String.isEmpty`) — `this.m(args)`.
+        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+        let lib_owner = match this_ty {
+            Ty::String => Some("java/lang/String".to_string()),
+            Ty::Obj(i, _) => Some(i.to_string()),
+            _ => None,
+        };
+        if let Some(internal) = &lib_owner {
+            if let Some(m) =
+                crate::libraries::resolve_instance(&*self.syms.libraries, internal, name, &arg_tys)
+            {
+                if m.params.len() == args.len() {
+                    let is_iface = self
+                        .syms
+                        .libraries
+                        .resolve_type(internal)
+                        .map_or(false, |ty| ty.is_interface);
+                    let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let mut a = Vec::new();
+                    for (arg, pt) in args.iter().zip(&m.params) {
+                        a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                    }
+                    let call = self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: internal.clone(),
+                            name: m.name.clone(),
+                            descriptor: m.descriptor,
+                            interface: is_iface,
+                        },
+                        dispatch_receiver: Some(recv),
+                        args: a,
+                    });
+                    return Some(self.coerce_generic_read(call, e, m.ret));
+                }
+            }
+        }
+        // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
+        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+        self.lower_ext_call_on(recv, this_ty, name, args, e)
+    }
+
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
@@ -8521,6 +8657,24 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: None,
                             args: a,
                         })
+                    } else if let Some(r) = {
+                        // Inside a receiver lambda / extension-fn body (`cur_class` cleared, `this` is the
+                        // external receiver), an unqualified call resolves against the implicit `this`
+                        // receiver — a member or a stdlib extension — BEFORE a receiver-less top-level
+                        // function, matching Kotlin's scoping (`"ab".run { reversed() }` is
+                        // `this.reversed()`, not the top-level `reversed`).
+                        if self.cur_class.is_none()
+                            && self.lookup(&fname).is_none()
+                            && !self.syms.funs.contains_key(&fname)
+                        {
+                            self.lookup("this").and_then(|(this_v, this_ty)| {
+                                self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
+                            })
+                        } else {
+                            None
+                        }
+                    } {
+                        r
                     } else if let Some(c) = {
                         // A receiver-less top-level library function (`listOf(…)`) → `invokestatic
                         // facade.name(args)`. Resolved (vararg-aware) through the library set, so no
@@ -8724,82 +8878,6 @@ impl<'a> Lower<'a> {
                             receiver: this0,
                             args: a.into_iter().map(Some).collect(),
                         })
-                    } else if let Some((class, index, mfid, _)) = {
-                        // A bare instance-method call on an external `this` receiver (an inlined
-                        // `apply`/`run`, where `cur_class` is cleared and `this` is the receiver slot,
-                        // not value 0): `m(args)` → `this.m(args)`.
-                        let internal = self
-                            .lookup("this")
-                            .map(|(_, t)| t)
-                            .and_then(|t| t.obj_internal().map(|s| s.to_string()));
-                        internal.and_then(|i| self.resolve_method(&i, &fname))
-                    } {
-                        let (this_v, _) = self.lookup("this")?;
-                        let params = self.ir.functions[mfid as usize].params.clone();
-                        if args.len() != params.len() {
-                            return None;
-                        }
-                        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&params) {
-                            a.push(self.lower_arg(*arg, pt)?);
-                        }
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index,
-                            receiver: recv,
-                            args: a.into_iter().map(Some).collect(),
-                        })
-                    } else if let Some((owner, m, is_iface)) = {
-                        // A bare instance-method call on an external builtin/library `this` receiver — an
-                        // inlined receiver lambda (`sb.apply { append(x) }` → `this.append(x)`, `"ab".run
-                        // { uppercase() }`). Resolved generically through the classpath reader, exactly
-                        // like the qualified `recv.m(args)` path (no hardcoded member list).
-                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.lookup("this")
-                            .map(|(_, t)| t)
-                            .and_then(|t| match t {
-                                Ty::String => Some("java/lang/String".to_string()),
-                                Ty::Obj(i, _) => Some(i.to_string()),
-                                _ => None,
-                            })
-                            .and_then(|internal| {
-                                crate::libraries::resolve_instance(
-                                    &*self.syms.libraries,
-                                    &internal,
-                                    &fname,
-                                    &arg_tys,
-                                )
-                                .map(|m| {
-                                    let is_iface = self
-                                        .syms
-                                        .libraries
-                                        .resolve_type(&internal)
-                                        .map_or(false, |ty| ty.is_interface);
-                                    (internal, m, is_iface)
-                                })
-                            })
-                    } {
-                        let (this_v, _) = self.lookup("this")?;
-                        if m.params.len() != args.len() {
-                            return None;
-                        }
-                        let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&m.params) {
-                            a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                        }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Virtual {
-                                owner,
-                                name: m.name.clone(),
-                                descriptor: m.descriptor,
-                                interface: is_iface,
-                            },
-                            dispatch_receiver: Some(recv),
-                            args: a,
-                        });
-                        self.coerce_generic_read(call, e, m.ret)
                     } else if let Some(internal) = self
                         .info
                         .ty(e)

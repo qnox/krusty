@@ -4869,6 +4869,17 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // A stdlib/library EXTENSION on the receiver (`String.reversed()`, `String.uppercase()`):
+        // resolved receiver-aware so the right overload is selected (`CharSequence.reversed`, not the
+        // `Iterable.reversed` that a receiver-blind fallthrough would pick). Mirrors the qualified
+        // `recv.name(args)` extension typing.
+        if let Some(c) = self
+            .syms
+            .libraries
+            .resolve_callable(name, Some(rt), arg_tys, &[])
+        {
+            return Some(c.ret);
+        }
         None
     }
 

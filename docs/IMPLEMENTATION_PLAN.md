@@ -3726,6 +3726,29 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 477 — bare stdlib-EXTENSION calls through the implicit `this` (closes the receiver-lambda bail)  ✅
+- A bare extension call in a receiver-lambda body / extension-fn body (`"ab".run { uppercase() }`,
+  `fun String.shout() = uppercase()`) bailed: `uppercase`/`reversed` are stdlib EXTENSIONS (`StringsKt`),
+  not `java.lang.String` members, so the member-only implicit-`this` resolution missed them.
+  - **Lowerer**: new `lower_ext_call_on` resolves an extension call on a lowered receiver value through the
+    library reader — a public extension (`invokestatic facade.name(recv, args)`), then a private
+    `@InlineOnly` one whose real body the backend splices (`String.uppercase()` → `toUpperCase(Locale.ROOT)`,
+    `reversed()` → `StringBuilder(this).reverse()`). A new `lower_this_member_call` tries, in order, a user
+    instance method, a builtin/library member, then an extension — and is invoked **before** the
+    receiver-less top-level-function branch (gated on `cur_class.is_none()` + a `this` slot), so the implicit
+    receiver wins, matching Kotlin scoping. This was the bug behind `reversed()` mis-resolving to the
+    top-level `ArraysKt.reversed` (→ `[]`); now it picks `CharSequence.reversed`.
+  - **Checker**: `this_member_call_ret` gains receiver-aware extension resolution
+    (`resolve_callable(name, Some(rt), …)`) so the call is typed by the right overload, not the receiver-blind
+    fallthrough that picked `Iterable.reversed → List`.
+  - The three duplicated implicit-`this`-call branches (user method / library member / extension) collapsed
+    into the single `lower_this_member_call`.
+- This also fixes the pre-existing gap where a bare extension call in an ordinary extension-fn body
+  (`fun String.shout() = uppercase()`) didn't compile.
+- TDD e2e: `ReceiverLambdaAnyReceiver` extended with `uppercase()`/`trim()`; new `ExtensionFnBodyBareExtCall`
+  (`shout`/`echo` composing `uppercase`/`reversed` through implicit `this`). All verify under `-Xverify:all`.
+  Gate **1346/0**.
+
 ## Phase 476 — receiver lambdas (`run`/`apply`) over ANY receiver + de-hardcode `String.length`  ✅
 - A receiver lambda's `this` is the receiver, so a bare member in the body resolves against it. Previously
   this only worked for a USER-class receiver (`check_with_receiver` rejected anything else with "must be a
