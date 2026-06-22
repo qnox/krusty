@@ -220,6 +220,25 @@ fun box(): String {
 }
 "#,
     ),
+    // The standalone `run { … }` scope function — resolved as a top-level `@InlineOnly inline fun` from
+    // the classpath (no hardcoded name) and spliced from its real stdlib bytecode. Covers a reference,
+    // primitive, and Unit result, and a non-local `return` from inside the (inlined) lambda.
+    (
+        "ScopeRun",
+        r#"
+fun box(): String {
+    val a = run { "O" + "K" }
+    if (a != "OK") return "f0: $a"
+    val b = run { val x = 2; x + 3 }
+    if (b != 5) return "f1: $b"
+    var s = 0
+    run { s = 42 }
+    if (s != 42) return "f2"
+    val c = run { if (b == 5) return "OK"; "x" }
+    return "f3: $c"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

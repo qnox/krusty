@@ -621,6 +621,12 @@ pub struct IrFile {
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
     /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
     pub open_methods: std::collections::HashSet<u32>,
+    /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
+    /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
+    /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
+    /// would carry the enclosing fn's return type, mismatching the lambda's). The splice reads the
+    /// lambda's `inline_body`, not this method, so the backend must NOT emit a `FunId` in this set.
+    pub inline_only_fns: std::collections::HashSet<u32>,
 }
 
 impl IrFile {

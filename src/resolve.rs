@@ -5882,17 +5882,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Standalone `run { … }` — runs the (no-param) lambda body inline, yielding its value.
-                if fname == "run" && args.len() == 1 && !self.syms.funs.contains_key(&fname) {
-                    if let Expr::Lambda { params, body } = self.file.expr(args[0]).clone() {
-                        if params.is_empty() {
-                            self.push_scope();
-                            let bt = self.expr(body);
-                            self.pop_scope();
-                            return bt;
-                        }
-                    }
-                }
                 // SAM conversion `Pred { lambda }` — a (fun) interface with a single abstract method
                 // built from a lambda. Type the lambda from the SAM method's parameters; the result is
                 // the interface type.

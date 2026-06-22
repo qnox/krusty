@@ -3637,6 +3637,23 @@ bodies exist only as jar bytecode):
   site recurs, so the call-id check catches it at depth 2 (no compiler stack overflow). TDD e2e `InlineNested`
   (`a{a{5}}`, 3-deep, a nested-in-a-local). Gate **1336/0**.
 
+## Phase 469 — de-hardcode standalone `run { … }`; fix the top-level inline-splice path  ✅ (+7 → 1343)
+- Removed the `if fname == "run"` checker hardcode. Standalone `run`/`with` now resolve as top-level
+  `@InlineOnly inline fun`s from the classpath and splice from real stdlib bytecode through the EXISTING
+  generic inline route (the same one that handles `require`/`error`) — no name match. Four root-cause fixes
+  in that generic path (each helps *every* top-level inline fn, not just `run`):
+  1. **Generic-return recovery** (`jvm_libraries` `resolve_callable` `@InlineOnly` top-level branch): bind the
+     type variables from the arguments and recover the logical return (`run`'s `R` from the lambda's return),
+     instead of the erased `Object`. A primitive result (`run { 2 + 3 }: Int`) was typing as a reference.
+  2. **Spliced-result coercion** (`ir_lower`): a spliced top-level inline call's erased `Object` result is now
+     coerced to the logical type (unbox/checkcast), as the member path already did.
+  3. **`max_stack` for spliced lambda bodies** (`ir_emit`): the host's `max_stack` now covers the deepest
+     spliced lambda body (`run { 123 != intArrayOf() as Any }` overflowed otherwise).
+  4. **Inline-only lambda methods not emitted** (`IrFile::inline_only_fns`): a lambda whose body has a BARE
+     (non-local) `return` is inline-only — its standalone impl method would `areturn` the enclosing fn's type
+     and fail verification. The splice uses `inline_body`; the dead method is skipped. A labeled `return@x`
+     (local) stays emittable. TDD e2e `ScopeRun`. Gate **1343/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
