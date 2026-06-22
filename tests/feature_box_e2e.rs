@@ -785,6 +785,27 @@ fun box(): String {
 }
 "#,
     ),
+    // A frame-recording inline HOF call used as a NON-FIRST operand — i.e. at a NON-EMPTY caller operand
+    // baseline (a dispatch receiver / earlier argument already on the stack). `records_frame` must report
+    // the inline splice so the parent operand sequence spills the earlier operands to temps, letting the
+    // splice land at an empty baseline instead of bailing to a real `invokestatic CollectionsKt.*` call.
+    (
+        "InlineHofNonEmptyBaseline",
+        r#"
+fun makePair(k: String, v: List<Int>): String = "$k=$v"
+fun box(): String {
+    // map result is the 2nd arg → `k`-temp is live on the stack across the branchy-lambda splice.
+    val a = makePair("k", listOf(-1, 2, -3).map { if (it > 0) it else -it })
+    if (a != "k=[1, 2, 3]") return "f0: $a"
+    // filter result reached through a receiver chain with a StringBuilder already on the stack.
+    val sb = StringBuilder()
+    sb.append("r=")
+    sb.append(listOf(1, 2, 3, 4).filter { it % 2 == 0 }.toString())
+    if (sb.toString() != "r=[2, 4]") return "f1: $sb"
+    return "OK"
+}
+"#,
+    ),
     // `takeIf`/`takeUnless`: BRANCHY host (returns receiver or null per the inlined predicate) with a
     // `Function1` predicate whose body is a COMPARISON — i.e. a branchy lambda body. Exercises the
     // universal splicer's full frame relocation: the host's StackMapTable frames AND the lambda body's own.

@@ -3313,6 +3313,27 @@ bodies exist only as jar bytecode):
 - Tests: unit `host_state_at_models_dup_family` (spec `dup2_x1` form-1 reordering). Gate unchanged at
   **1313 box()=OK · 0 FAIL**.
 
+## Phase 442 — inline frame-recording HOFs at a nonempty caller operand baseline (last inline bail)  ✅
+- Closes the final inline fallback: a frame-recording inline call (a loop HOF like `map`/`filter`, a
+  branchy lambda body, or a branchy `@InlineOnly` `require`/`check`) used as a NON-FIRST operand — e.g.
+  `sb.append(xs.map { if (..) a else b })`, where a dispatch receiver / earlier argument is already on
+  the operand stack — previously hit `try_inline_unified`'s empty-baseline guard and fell back to a real
+  `invokestatic CollectionsKt.*`. The relocated frames are bound relative to an empty operand base (no
+  caller operand prefix is threaded in), so a nonempty baseline can't bind them directly.
+- **Fix uses the EXISTING spill mechanism, no CodeBuilder operand-type tracking.** `emit_operands` already
+  spills earlier operands to temps (then reloads) when a later operand `records_frame` — keeping the
+  splice at an empty baseline (the same path `when`/`try` use). The gap was that `records_frame` didn't
+  recognise an inline call whose SPLICE records frames. Now its `IrExpr::Call` arm reports a `Callee::
+  Static{inline|must_inline}` whose lambda arg has a branchy `inline_body`, OR whose host body
+  disassembles to any branch/switch (loop HOFs, `require`/`check`). `needs_frames` in `try_inline_unified`
+  now also counts host frames (`!probe.frames.is_empty()`) so a non-spilled loop host at a nonempty
+  baseline bails SAFELY instead of binding prefix-less frames (closes a latent miscompile too).
+- Verified via `javap`: `makePair("k", xs.map { branchy })` and `sb.append(xs.filter { … }.toString())`
+  now emit iterator loops with NO `invokestatic CollectionsKt.map/filter`. TDD e2e
+  `InlineHofNonEmptyBaseline`. Gate **1313 box()=OK · 0 FAIL**, bytecode-parity 16/0 — no regression.
+- Inline support is now bail-free for every shape the splicer can represent; the only remaining `None`
+  returns are hard soundness boundaries (unrelocatable `invokedynamic`, untypeable operand-prefix slot).
+
 ---
 
 ### Working agreements
