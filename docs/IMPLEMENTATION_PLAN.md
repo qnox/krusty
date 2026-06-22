@@ -3682,6 +3682,19 @@ bodies exist only as jar bytecode):
   (FAIL 0, never miscompiles); fixing the splice to relocate a non-local return out of a spliced loop host is
   the next piece. TDD e2e covers `repeat` via the generic path (`ScopeRun`-adjacent snippets).
 
+## Phase 472 — non-local return through a spliced loop host  ✅ (+2 → 1344)
+- The bytecode splicer now carries a **non-local `return` out of a diverging spliced body**. When a lambda
+  body ends in a `*return`/`athrow` (`repeat { return … }`, `forEach { … return it }`), the host's post-invoke
+  continuation (a loop back-edge / exit) becomes unreachable; `splice_unified` now **synthesizes the stack-map
+  frame** that position needs (host state at the invoke + the dropped `FunctionN.invoke` result), so the dead
+  continuation verifies instead of a `VerifyError`.
+- `lower_lambda` no longer bails on a `Nothing`-returning lambda when its body is an unconditional **non-local
+  `return`** (those only splice — the impl method is inline-only, not emitted). It still bails a `Nothing`
+  lambda with only a `return@label` or a `throw` (which can materialize as a real closure — that path is
+  unchanged, no miscompile).
+- Recovers the phase-471 `repeat` `−1` (`inline/kt66017.kt`, `forEach { repeat(n){ return } }`) **plus one more**
+  diverging-non-local-return case. TDD e2e `InlineNonLocalReturnThroughLoop`. Gate **1344/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

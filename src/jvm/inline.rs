@@ -2003,6 +2003,41 @@ pub fn splice_unified(
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));
     }
+    // A DIVERGING spliced lambda body ends in a `*return`/`athrow` (a non-local return — `repeat { return
+    // … }`): the host's post-invoke continuation (e.g. a loop back-edge / exit) is then unreachable, and
+    // the verifier can't fall through the return, so it needs a stack-map frame there. Synthesize one from
+    // the host state at the invoke plus the (dropped) `FunctionN.invoke` result, so the dead continuation
+    // still verifies. (Without this the splice would emit a frameless target → `VerifyError`.)
+    for (k, lam) in lambdas.iter().enumerate() {
+        let diverges = matches!(
+            lam.body.last(),
+            Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1 | 0xbf)
+        );
+        if !diverges {
+            continue;
+        }
+        let Some((locals, stack)) = host_states[k].clone() else {
+            continue;
+        };
+        let cont_old = lambda_sites[k] + 1;
+        if cont_old >= insns.len() {
+            continue; // the diverging body is the last instruction — no continuation to frame
+        }
+        let cont_off = offs[old2new[cont_old] + p];
+        if frames.iter().any(|(o, _, _)| *o == cont_off) {
+            continue; // already framed (a branch target)
+        }
+        let mut rl = Vec::with_capacity(locals.len());
+        for v in &locals {
+            rl.push(relocate_vtype(v, &body.source_cp, cw)?);
+        }
+        let mut rs = Vec::with_capacity(stack.len() + 1);
+        for v in &stack {
+            rs.push(relocate_vtype(v, &body.source_cp, cw)?);
+        }
+        rs.push(VType::Object(cw.class_ref("java/lang/Object"))); // the dropped invoke result
+        frames.push((cont_off, rl, rs));
+    }
     // Relocate the exception table: each entry's `start`/`end`/`handler` are byte offsets into the
     // ORIGINAL code — map each to its instruction index (`old_off`), through `old2new` (+ prologue `p`)
     // to the spliced instruction, then to its absolute byte offset (`offs`). `catch_type` is re-interned
