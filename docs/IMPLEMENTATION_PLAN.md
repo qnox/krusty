@@ -3535,6 +3535,17 @@ bodies exist only as jar bytecode):
   `d`. TDD e2e `ElvisTrivial` (`42 ?: 239`, `42L ?: 239L`, `null ?: null ?: "OK"`, side-effecting lhs).
   Unblocks `elvis/nullNullOk.kt`, `primitiveTypes/kt711.kt`, `elvis/primitive.kt`. Gate **1329/0**.
 
+## Phase 458 — arithmetic operator methods by name on primitives (`a.plus(b)`)  ✅
+- `a.plus(b)`/`a.minus(b)`/`a.times(b)`/`a.div(b)`/`a.rem(b)` on a primitive numeric receiver (valid Kotlin,
+  identical to `a + b`) now lowers — previously the checker typed it but the IR backend bailed. New
+  `lower_prim_op_method` maps the operator-method call to the same `PrimitiveBinOp` the operator form
+  produces (mixed-operand promotion + the unsigned `div`/`rem` intrinsics). Routed from the `Expr::Member`
+  call arm for a primitive receiver. `Char` arithmetic methods (`c.plus(n): Char`, `c.minus(c2): Int`) added
+  to the checker too (`Char` isn't `is_numeric` but maps to the operator via `check_binary`).
+- **Serves the inline goal directly:** an `inline fun` body that uses operator-method syntax (`a.plus(b).times(2)`)
+  now inlines and runs. TDD e2e `PrimOpMethod` (incl. an inline `combine`). Gate **1329/0** (no regression;
+  the corpus files using this also have other blockers, so the count holds — the construct itself is fixed).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
