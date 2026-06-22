@@ -3726,6 +3726,23 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 480 — safe-call scope functions `s?.let`/`?.run`/`?.also`/`?.apply`  ✅
+- The most idiomatic null-handling form bailed (`unresolved member 'let' on 'String'`): three gaps —
+  - Parser: a trailing lambda after a safe call (`s?.let { … }`) was wrapped in an OUTER call
+    (`(s?.let)(lambda)`); now it attaches as the safe call's argument (`SafeCall` arm in the trailing-lambda
+    postfix), appending after any `(…)` args.
+  - Checker: `safe_scope_call_result` types `s?.scopeFn { … }` like the non-safe form (binds `it`=receiver for
+    `let`/`also`, `this`=receiver via `check_with_receiver` for `run`/`apply`); `let`/`run` → the lambda body,
+    `also`/`apply` → the receiver. The existing safe-call tail then wraps it nullable.
+  - Lowerer: `lower_scope_inline_on` inlines a scope fn over an already-lowered receiver value (binds `it`/
+    `this`, lowers the body, yields body or receiver); `lower_safe_scope_member` drives it in the safe call's
+    non-null branch (reusing `recv2` = the non-null temp), so the surrounding null-check + nullable-wrap make
+    `s?.…` yield `null` when `s` is null.
+- TDD e2e `SafeCallScopeFn` (`let`/`run`/`also`/`apply`, null + non-null receiver, primitive/reference/user
+  results). All verify under `-Xverify:all`. Gate **1347/0**.
+- (Separate gap, still open: a chained safe-call EXTENSION — `s?.uppercase()?.length` — bails; the safe-call
+  path doesn't yet resolve stdlib extension calls. Never miscompiles.)
+
 ## Phase 479 — `takeIf`/`takeUnless` nullable result (fixes the dropped-elvis NPE miscompile)  ✅
 - `5.takeUnless { it > 3 } ?: 0` threw `NullPointerException` (and `takeIf` was wrong whenever the predicate
   selected the null branch): `takeIf`/`takeUnless` return `T?`, but that nullability lives only in `@Metadata`

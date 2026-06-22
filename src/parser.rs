@@ -3387,6 +3387,24 @@ impl<'a> Parser<'a> {
                             self.file
                                 .add_expr(Expr::Call { callee, args }, Span::new(lspan.lo, end.hi))
                         }
+                        // `recv?.scopeFn { … }` — the trailing lambda is the safe call's argument, not an
+                        // invocation of its result. Attach it (appending after any `(…)` args).
+                        Expr::SafeCall {
+                            receiver,
+                            name,
+                            args,
+                        } => {
+                            let mut a = args.unwrap_or_default();
+                            a.push(lambda);
+                            self.file.add_expr(
+                                Expr::SafeCall {
+                                    receiver,
+                                    name,
+                                    args: Some(a),
+                                },
+                                Span::new(lspan.lo, end.hi),
+                            )
+                        }
                         _ => self.file.add_expr(
                             Expr::Call {
                                 callee: lhs,

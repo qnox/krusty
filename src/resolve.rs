@@ -4024,35 +4024,41 @@ impl<'a> Checker<'a> {
                         return self.set(e, sig.ret);
                     }
                 }
-                let result = match &args {
-                    None => self.check_member(rt, &name, self.span(e)),
-                    Some(a) => {
-                        let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
-                        if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::String
-                        } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::Int // Int (not a reference), so safe-call rejection fires below
-                        } else if rt == Ty::String {
-                            self.syms
-                                .libraries
-                                .builtin_member_ret("kotlin/String", &name, &arg_tys)
-                                .or_else(|| resolve_string_instance(&name, &arg_tys))
-                                .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = rt {
-                            self.lookup_method(internal, &name)
-                                .map(|s| s.ret)
-                                .or_else(|| {
-                                    crate::libraries::resolve_instance(
-                                        &*self.syms.libraries,
-                                        internal,
-                                        &name,
-                                        &arg_tys,
-                                    )
-                                    .map(|m| m.ret)
-                                })
-                                .unwrap_or(Ty::Error)
-                        } else {
-                            Ty::Error
+                // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
+                // inside; type it like the non-safe form, then wrap the result nullable below.
+                let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
+                    t
+                } else {
+                    match &args {
+                        None => self.check_member(rt, &name, self.span(e)),
+                        Some(a) => {
+                            let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
+                            if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
+                                Ty::String
+                            } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
+                                Ty::Int // Int (not a reference), so safe-call rejection fires below
+                            } else if rt == Ty::String {
+                                self.syms
+                                    .libraries
+                                    .builtin_member_ret("kotlin/String", &name, &arg_tys)
+                                    .or_else(|| resolve_string_instance(&name, &arg_tys))
+                                    .unwrap_or(Ty::Error)
+                            } else if let Ty::Obj(internal, _) = rt {
+                                self.lookup_method(internal, &name)
+                                    .map(|s| s.ret)
+                                    .or_else(|| {
+                                        crate::libraries::resolve_instance(
+                                            &*self.syms.libraries,
+                                            internal,
+                                            &name,
+                                            &arg_tys,
+                                        )
+                                        .map(|m| m.ret)
+                                    })
+                                    .unwrap_or(Ty::Error)
+                            } else {
+                                Ty::Error
+                            }
                         }
                     }
                 };
@@ -4838,6 +4844,42 @@ impl<'a> Checker<'a> {
         self.pop_scope();
         self.this_ty = prev_this;
         bt
+    }
+
+    /// Type a SAFE-CALL scope function `recv?.name { … }` (`let`/`run`/`also`/`apply`): inside, the
+    /// receiver `rt` is non-null; the lambda binds `it`=rt (`let`/`also`) or `this`=rt (`run`/`apply`).
+    /// Returns the NON-nullable result (`let`/`run` → the lambda body; `also`/`apply` → the receiver);
+    /// the caller wraps it nullable. `None` when it isn't a recognized lambda-bearing scope call.
+    fn safe_scope_call_result(
+        &mut self,
+        rt: Ty,
+        name: &str,
+        args: &Option<Vec<ExprId>>,
+    ) -> Option<Ty> {
+        let a = args.as_ref()?;
+        if a.len() != 1 {
+            return None;
+        }
+        let Expr::Lambda { params, body } = self.file.expr(a[0]).clone() else {
+            return None;
+        };
+        match name {
+            "run" | "apply" if params.is_empty() => {
+                let bt = self.check_with_receiver(rt, body, self.span(a[0]));
+                Some(if name == "apply" { rt } else { bt })
+            }
+            "let" | "also" => {
+                let lt = self.check_lambda_with_types(a[0], &[rt]);
+                Some(if name == "also" {
+                    rt
+                } else if let Ty::Fun(s) = lt {
+                    s.ret
+                } else {
+                    Ty::Error
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Resolve an UNQUALIFIED call `name(args)` as a member of the implicit receiver `rt` (`this`) —
