@@ -5343,6 +5343,63 @@ impl<'a> Checker<'a> {
                     }
                     None
                 });
+                // A USER extension taking a lambda (`inline fun String.withLen(f: (String)->Int)`): its
+                // `Signature` carries the lambda parameter types directly. For a GENERIC-receiver
+                // extension (keyed under `Any`), specialize the receiver type parameter to `rt` so the
+                // lambda's `it` types as the actual receiver, not the erased `Any`.
+                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
+                    if rt == Ty::Error {
+                        return None;
+                    }
+                    let has_lam =
+                        |s: &Signature| s.lambda_param_types.iter().any(|v| !v.is_empty());
+                    if let Some(s) = self
+                        .syms
+                        .ext_funs
+                        .get(&(rt.descriptor(), name.clone()))
+                        .filter(|s| has_lam(s))
+                    {
+                        return Some(s.lambda_param_types.clone());
+                    }
+                    // Generic receiver: the decl's receiver type param → `rt` in the lambda param types.
+                    let any_desc = Ty::obj("kotlin/Any").descriptor();
+                    let s = self.syms.ext_funs.get(&(any_desc, name.clone()))?;
+                    if !has_lam(s) {
+                        return None;
+                    }
+                    let recv_tp = self
+                        .file
+                        .decls
+                        .iter()
+                        .find_map(|&d| match self.file.decl(d) {
+                            Decl::Fun(fd)
+                                if fd.name == name
+                                    && fd.receiver.as_ref().is_some_and(|r| {
+                                        fd.type_params.iter().any(|tp| tp == &r.name)
+                                    }) =>
+                            {
+                                fd.receiver.as_ref().map(|r| r.name.clone())
+                            }
+                            _ => None,
+                        });
+                    let any = Ty::obj("kotlin/Any");
+                    Some(
+                        s.lambda_param_types
+                            .iter()
+                            .map(|v| {
+                                v.iter()
+                                    .map(|t| {
+                                        if recv_tp.is_some() && *t == any {
+                                            rt
+                                        } else {
+                                            *t
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    )
+                });
                 // `recv.forEach { … }` resolving to the stdlib library extension is inlined to a
                 // for-each loop by the backend, so a mutable capture in its lambda is fine (no closure).
                 // Permit it for this call only (the lowering must inline, or bail — never form a closure).

@@ -3441,6 +3441,18 @@ bodies exist only as jar bytecode):
   skipped. (Found+fixed via `boxing14.kt` triage: also confirmed the checker fallback must be `inline`-only.)
 - TDD e2e `InlineExtension` extended with `<T> T.echo()` on `String` and `Int`. Gate **1314/0**, parity 16/0.
 
+## Phase 450 — inline extensions with a LAMBDA parameter (concrete + generic receiver)  ✅
+- A user `inline fun Recv.foo(f: (…)->R)` (e.g. `String.withLen(f:(String)->Int)`, `<T> T.alsoLen(f:(T)->Int)`)
+  now inlines — previously the checker only pre-typed lambda args for LIBRARY extensions, so a user
+  extension's lambda `it` typed as the erased `Any` and `it.length` failed → file skipped.
+- The method-call resolution's `ext_lambda_pts` now falls back to the user extension's `Signature
+  .lambda_param_types` (exact-receiver key), and for a GENERIC-receiver extension (keyed under `Any`)
+  specializes the receiver type parameter → the actual receiver `rt` so the lambda's `it` types as the
+  concrete type. The lowerer already inlines the lambda body at the `f(this)` site (lambda-arg splicing
+  composes with the receiver-`this` binding from phase 448/449).
+- TDD e2e `InlineExtension` extended with `String.withLen { it.length }` and `<T> T.alsoLen { it.length }`.
+  Gate **1314/0**, parity 16/0.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
