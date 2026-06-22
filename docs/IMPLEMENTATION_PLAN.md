@@ -3726,6 +3726,14 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 481 — safe-call stdlib EXTENSION calls + chains (`s?.uppercase()?.length`)  ✅
+- The safe-call lowerer resolved only members (`resolve_method`/`resolve_instance`); a stdlib extension via a
+  safe call (`s?.uppercase()`) bailed, which also broke any chain through it (`s?.uppercase()?.length`). The
+  classpath-instance-method branch now falls back to `lower_ext_call_on(recv2, …)` (the shared extension path
+  from phase 477) when `resolve_instance` finds no member — inlining the extension on the non-null receiver.
+- TDD: `SafeCallScopeFn` extended with `s?.uppercase()`, `s?.uppercase()?.length`, and the null-receiver
+  short-circuit. Gate **1347/0**.
+
 ## Phase 480 — safe-call scope functions `s?.let`/`?.run`/`?.also`/`?.apply`  ✅
 - The most idiomatic null-handling form bailed (`unresolved member 'let' on 'String'`): three gaps —
   - Parser: a trailing lambda after a safe call (`s?.let { … }`) was wrapped in an OUTER call

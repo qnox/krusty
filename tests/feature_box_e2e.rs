@@ -312,6 +312,9 @@ fun box(): String {
     if (b!!.v != 5) return "f5: ${b.v}"
     val r = B(1).apply { v = 7 }
     if (r.v != 7) return "f6: ${r.v}"
+    if ((s?.uppercase() ?: "x") != "AB") return "f7"          // safe-call stdlib extension
+    if ((s?.uppercase()?.length ?: 0) != 2) return "f8"       // chained safe calls
+    if ((z?.uppercase()?.length ?: 0) != 0) return "f9"       // null short-circuits the chain
     return "OK"
 }
 "#,

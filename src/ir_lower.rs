@@ -6662,26 +6662,31 @@ impl<'a> Lower<'a> {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys: Vec<Ty> =
                                     args.iter().map(|&a| self.info.ty(a)).collect();
-                                let m = crate::libraries::resolve_instance(
+                                if let Some(m) = crate::libraries::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
                                     &name,
                                     &arg_tys,
-                                )?;
-                                let mut a = Vec::new();
-                                for (arg, pt) in args.iter().zip(&m.params) {
-                                    a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                                ) {
+                                    let mut a = Vec::new();
+                                    for (arg, pt) in args.iter().zip(&m.params) {
+                                        a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                                    }
+                                    self.ir.add_expr(IrExpr::Call {
+                                        callee: Callee::Virtual {
+                                            owner: internal.clone(),
+                                            name: m.name,
+                                            descriptor: m.descriptor,
+                                            interface: is_iface,
+                                        },
+                                        dispatch_receiver: Some(recv2),
+                                        args: a,
+                                    })
+                                } else {
+                                    // A stdlib EXTENSION via safe call (`s?.uppercase()`) — inline it on
+                                    // the non-null receiver, the same path as the qualified call.
+                                    self.lower_ext_call_on(recv2, rty, &name, &args, e)?
                                 }
-                                self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Virtual {
-                                        owner: internal.clone(),
-                                        name: m.name,
-                                        descriptor: m.descriptor,
-                                        interface: is_iface,
-                                    },
-                                    dispatch_receiver: Some(recv2),
-                                    args: a,
-                                })
                             }
                         }
                         None => {
