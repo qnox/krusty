@@ -3466,6 +3466,17 @@ bodies exist only as jar bytecode):
   type-mismatched arg). Found via `continueInFor.kt`/`continueToLabelInFor.kt` (unblocked by arrayOfNulls).
 - TDD e2e `ArrayOfNullsAndPrimColl`. Gate **1317/0** (+3), parity 16/0.
 
+## Phase 452 — String indexing `s[i]` via the `get` operator  ✅ (+3 → 1320)
+- `s[i]` now type-checks as `Char`. It is the Kotlin `String.get(Int): Char` operator — added to the
+  curated `resolve_string_instance` table (alongside `length`/`substring`/… — the front end deliberately
+  models Kotlin's String API, NOT `java.lang.String`'s JVM methods) with `charAt` as its explicit form.
+  The `Expr::Index` checker arm routes a String receiver through `resolve_string_instance("get", …)` —
+  the same member-resolution path as every other String member, not an ad-hoc special-case. The backend
+  already lowered `s[i]` via the `kotlin/String.get` external intrinsic (→ `charAt`), like `String.length`.
+  Unblocks `this[0]` inside inline extensions on `String`.
+- TDD e2e `StringIndex` (`"hi".firstChar() = this[0]`, a `for`-loop char read). Gate **1320/0** (+3),
+  parity 16/0.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
