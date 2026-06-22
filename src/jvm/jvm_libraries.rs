@@ -165,7 +165,9 @@ impl JvmLibraries {
                 is_inline: self.cp.is_inline_method(&c.owner, &c.name),
                 default_call: false,
                 vararg_elem: None,
-                must_inline: false,
+                // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
+                // skip the file (never an `IllegalAccessError`); a PUBLIC one can fall back to a real call.
+                must_inline: !c.public,
             });
         }
         None

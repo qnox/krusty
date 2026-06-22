@@ -766,6 +766,25 @@ fun box(): String {
 }
 "#,
     ),
+    // LOOP hosts `forEach`/`map`/`fold` with a (branchless) lambda body: the host iterates, so its body
+    // has a back-edge and is INLINED (iterator/hasNext/next loop spliced in — no `invokestatic
+    // CollectionsKt.map`). The universal splicer relocates the host's loop StackMapTable frames around the
+    // spliced lambda body. (A branchy lambda body inside a loop still falls back to a real call.)
+    (
+        "LoopInline",
+        r#"
+fun box(): String {
+    var s = 0
+    listOf(1, 2, 3).forEach { s += it }
+    if (s != 6) return "f0: $s"
+    val m = listOf(1, 2, 3).map { it * 10 }
+    if (m != listOf(10, 20, 30)) return "f1: $m"
+    val t = listOf("a", "b", "c").fold("") { acc, x -> acc + x }
+    if (t != "abc") return "f2: $t"
+    return "OK"
+}
+"#,
+    ),
     // `takeIf`/`takeUnless`: BRANCHY host (returns receiver or null per the inlined predicate) with a
     // `Function1` predicate whose body is a COMPARISON — i.e. a branchy lambda body. Exercises the
     // universal splicer's full frame relocation: the host's StackMapTable frames AND the lambda body's own.

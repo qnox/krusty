@@ -3061,16 +3061,17 @@ impl<'a> Lower<'a> {
         }
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
+        let must_inline = c.must_inline;
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: c.owner,
                 name: c.name,
                 descriptor: c.descriptor,
                 inline: true,
-                // A scope fn (`let`/`also`/…) is non-public `@InlineOnly` — no callable method exists, so
-                // if the splice ever fails the file must be SKIPPED, never fall back to an `invokestatic`
-                // on the private method (an `IllegalAccessError`).
-                must_inline: true,
+                // A non-public `@InlineOnly` scope fn (`let`/`also`/…) has no callable method — a failed
+                // splice must SKIP the file, never an `invokestatic` on the private method. A PUBLIC host
+                // (`map`/`fold`/`forEach`) can fall back to a real call, so `must_inline` is false for it.
+                must_inline,
             },
             dispatch_receiver: None,
             args: vec![recv, lam],
