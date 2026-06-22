@@ -2160,6 +2160,23 @@ pub struct TypeInfo {
     /// statement is an in-place operator CALL (`target.plusAssign(rhs)`), legal even on a `val`, NOT a
     /// reassignment. The lowerer resolves the operator and emits the call for these.
     pub plus_assign: std::collections::HashSet<StmtId>,
+    /// Calls the checker resolved as a RECEIVER-lambda scope function (`x.run { … }`, `x.apply { … }`,
+    /// `with(x) { … }`): the call `ExprId` → how to inline it (the receiver expression, the lambda body,
+    /// and whether the call yields the receiver — `apply`/`also` — or the body — `run`/`with`). The
+    /// lowerer drives its receiver-lambda inlining off this table, so the decision lives once in the
+    /// checker rather than being re-derived (and name-matched) in the backend.
+    pub receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
+}
+
+/// How to inline a receiver-lambda scope-function call (see [`TypeInfo::receiver_lambdas`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiverLambda {
+    /// The receiver expression — the lambda body's implicit `this`.
+    pub receiver: ExprId,
+    /// The lambda body expression (lowered with `this` bound to the receiver).
+    pub body: ExprId,
+    /// `true` for `apply`/`also` (the call yields the receiver), `false` for `run`/`with` (yields body).
+    pub returns_receiver: bool,
 }
 
 /// A bridge method: erased signature (the supertype's descriptor, what callers invoke) delegating to
@@ -2212,6 +2229,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         bridges: HashMap::new(),
         boxed_vars: std::collections::HashSet::new(),
         plus_assign: std::collections::HashSet::new(),
+        receiver_lambdas: HashMap::new(),
         local_fun_captures: std::collections::HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
@@ -2645,6 +2663,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         boxed_vars: c.boxed_vars,
         local_fun_captures: c.local_fun_captures,
         plus_assign: c.plus_assign,
+        receiver_lambdas: c.receiver_lambdas,
     }
 }
 
@@ -2678,6 +2697,7 @@ struct Checker<'a> {
     bridges: HashMap<String, Vec<BridgeSpec>>,
     boxed_vars: std::collections::HashSet<String>,
     plus_assign: std::collections::HashSet<StmtId>,
+    receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
     local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
@@ -5300,7 +5320,16 @@ impl<'a> Checker<'a> {
                         if params.is_empty() {
                             let rt = self.expr(receiver);
                             let bt = self.check_with_receiver(rt, body, self.span(args[0]));
-                            return if name == "run" { bt } else { rt };
+                            let returns_receiver = name == "apply";
+                            self.receiver_lambdas.insert(
+                                call,
+                                ReceiverLambda {
+                                    receiver,
+                                    body,
+                                    returns_receiver,
+                                },
+                            );
+                            return self.set(call, if returns_receiver { rt } else { bt });
                         }
                     }
                 }
@@ -5954,7 +5983,16 @@ impl<'a> Checker<'a> {
                     if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
                         if params.is_empty() {
                             let rt = self.expr(args[0]);
-                            return self.check_with_receiver(rt, body, self.span(args[1]));
+                            let bt = self.check_with_receiver(rt, body, self.span(args[1]));
+                            self.receiver_lambdas.insert(
+                                call,
+                                ReceiverLambda {
+                                    receiver: args[0],
+                                    body,
+                                    returns_receiver: false,
+                                },
+                            );
+                            return self.set(call, bt);
                         }
                     }
                 }

@@ -266,6 +266,29 @@ fun box(): String {
 }
 "#,
     ),
+    // `with(receiver) { … }` — the stdlib 2-arg receiver-lambda scope function: the first argument is
+    // the lambda body's implicit `this`. Driven by the checker's recorded receiver-lambda decision (the
+    // same generic path as `x.run`/`x.apply`), over a builtin / classpath / user receiver, with member
+    // reads, member calls, and stdlib extension calls — including nesting inside another scope lambda.
+    (
+        "WithReceiver",
+        r#"
+class B(val v: Int) { fun dbl() = v * 2 }
+fun box(): String {
+    val n = with("ab") { length }                        // builtin receiver, member read
+    if (n != 2) return "f0: $n"
+    val up = with("ab") { uppercase() }                  // stdlib extension on `this`
+    if (up != "AB") return "f1: $up"
+    val s = with(StringBuilder()) { append("O"); append("K"); toString() }  // classpath, member calls
+    if (s != "OK") return "f2: $s"
+    val d = with(B(3)) { dbl() }                         // user receiver, member method
+    if (d != 6) return "f3: $d"
+    val nested = "xy".run { with(this) { length } }      // `with` nested in a receiver lambda
+    if (nested != 2) return "f4: $nested"
+    return "OK"
+}
+"#,
+    ),
     // A bare call to a stdlib EXTENSION (`uppercase`/`reversed`) through an extension function's own
     // implicit `this` receiver — `this.uppercase()` written unqualified, resolved through the same
     // extension-call path as a qualified receiver call (no per-function hardcode).

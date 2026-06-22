@@ -3726,6 +3726,24 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 478 — `with(x) { … }` + checker-driven receiver-lambda lowering (closes the `with` bail)  ✅
+- `with(x) { … }` (the stdlib 2-arg receiver-lambda scope fn) bailed in the lowerer — only `x.run`/`x.apply`
+  were inlined (name-matched in the backend). Generalized via a checker→lowerer side table so the receiver-
+  lambda decision lives once in the checker and the backend is name-match-free:
+  - `TypeInfo.receiver_lambdas: HashMap<ExprId, ReceiverLambda>` — the checker records each resolved
+    receiver-lambda scope call (`x.run`/`x.apply`/`with(x)`) as `{ receiver, body, returns_receiver }` at the
+    `check_with_receiver` sites.
+  - Lowerer: a new `lower_receiver_lambda` evaluates the receiver into a fresh `this`-bound slot, lowers the
+    body (with `cur_class` cleared so members resolve through the implicit-`this` paths), and yields the body
+    (`run`/`with`) or the receiver (`apply`/`also`). Driven by the table via a guarded `Expr::Call` arm —
+    `run`/`apply` no longer name-matched in the backend.
+- TDD e2e `WithReceiver` (`with` over builtin/classpath/user receivers; member read, member call, stdlib
+  extension call; nested `"xy".run { with(this) { length } }`). All verify under `-Xverify:all`. Gate **1347/0**
+  (+1 corpus case).
+- (Still open: `x.run { run { … } }` — a NESTED *top-level* `run` whose plain `()->R` lambda captures the outer
+  `this` — bails cleanly; needs `this`-capturing closures. The common nested forms via an explicit receiver —
+  `run { with(this) { … } }`, `apply { v = with(x) { … } }` — work.)
+
 ## Phase 477 — bare stdlib-EXTENSION calls through the implicit `this` (closes the receiver-lambda bail)  ✅
 - A bare extension call in a receiver-lambda body / extension-fn body (`"ab".run { uppercase() }`,
   `fun String.shout() = uppercase()`) bailed: `uppercase`/`reversed` are stdlib EXTENSIONS (`StringsKt`),
