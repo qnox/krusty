@@ -810,6 +810,24 @@ fun box(): String {
 }
 "#,
     ),
+    // User-defined `inline fun` EXTENSIONS (`inline fun T.foo()`): the receiver is bound as `this` and
+    // the body expanded at the call site (kotlinc's inliner), so a mutable capture / reified / non-local
+    // return through an extension works without a real call.
+    (
+        "InlineExtension",
+        r#"
+inline fun Int.doubled(): Int = this * 2
+inline fun String.shout(): String = this + "!"
+inline fun Int.clampPos(): Int { if (this < 0) return 0; return this }
+fun box(): String {
+    if (5.doubled() != 10) return "f0: ${5.doubled()}"
+    if ("hi".shout() != "hi!") return "f1"
+    if ((-3).clampPos() != 0) return "f2"
+    if (7.clampPos() != 7) return "f3"
+    return "OK"
+}
+"#,
+    ),
     // Inline functions whose body has `return` (early/conditional/loop returns). The IR inliner wraps
     // the body in `do { … } while(false)` and rewrites each `return x` to `result = x; break@end`, so the
     // function return becomes a jump to the body's end — including a `return` out of a `for` loop.

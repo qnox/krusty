@@ -54,6 +54,20 @@ pub fn emit_all(
 /// `kotlin/jvm/functions/Function0..22`; a function type or lambda of higher arity needs a different
 /// vararg representation krusty doesn't emit, so such a file is skipped — never miscompiled. This is a
 /// JVM constraint (the language allows any arity), so it lives in the JVM emitter, not common lowering.
+/// Map every `IrExpr::Variable`'s declaration index → its JVM type, across the whole file. `value_ty`
+/// consults this so a `GetValue` of a slot whose `Variable` hasn't been emit-registered yet (e.g. an
+/// inline-expansion result/`this` temp queried by a comparison before its block emits) still types
+/// correctly, instead of falling back to `Ty::Error` and picking the wrong (reference) operator path.
+fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
+    let mut m = HashMap::new();
+    for e in &ir.exprs {
+        if let IrExpr::Variable { index, ty, .. } = e {
+            m.insert(*index, ir_ty_to_jvm(ty));
+        }
+    }
+    m
+}
+
 fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &IrType) -> bool {
         match t {
@@ -220,6 +234,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         owner: facade.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
+        var_types: collect_var_types(ir),
         next_slot: 0,
         ret: Ty::Unit,
         loop_stack: Vec::new(),
@@ -337,6 +352,7 @@ fn emit_class(
                 owner: c.fq_name.clone(),
                 facade: facade.to_string(),
                 slots: HashMap::new(),
+                var_types: collect_var_types(ir),
                 next_slot: 1 + params_words,
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
@@ -457,6 +473,7 @@ fn emit_class(
                 owner: c.fq_name.clone(),
                 facade: facade.to_string(),
                 slots: HashMap::new(),
+                var_types: collect_var_types(ir),
                 next_slot: 1 + sc_words,
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
@@ -1026,6 +1043,7 @@ fn emit_enum_class(
             owner: fq.clone(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            var_types: collect_var_types(ir),
             next_slot: 0,
             ret: Ty::Unit,
             loop_stack: Vec::new(),
@@ -1161,6 +1179,7 @@ fn emit_method(
         owner: owner.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
+        var_types: collect_var_types(ir),
         next_slot: 0,
         ret,
         loop_stack: Vec::new(),
@@ -1246,6 +1265,7 @@ fn emit_default_stub(
         owner: owner.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
+        var_types: collect_var_types(ir),
         next_slot: 0,
         ret,
         loop_stack: Vec::new(),
@@ -1316,6 +1336,9 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
+    /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
+    /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
+    var_types: HashMap<u32, Ty>,
     next_slot: u16,
     ret: Ty,
     /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
@@ -3931,7 +3954,12 @@ impl<'a> Emitter<'a> {
                 IrConst::Byte(_) => Ty::Byte,
                 IrConst::Null => Ty::Null,
             },
-            IrExpr::GetValue(i) => self.slots.get(i).map(|(_, t)| *t).unwrap_or(Ty::Error),
+            IrExpr::GetValue(i) => self
+                .slots
+                .get(i)
+                .map(|(_, t)| *t)
+                .or_else(|| self.var_types.get(i).copied())
+                .unwrap_or(Ty::Error),
             IrExpr::GetField { class, index, .. } => {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1)
             }
@@ -3994,25 +4022,7 @@ impl<'a> Emitter<'a> {
             IrExpr::EnumValues { class } => {
                 Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name))
             }
-            IrExpr::Block { value, stmts } => {
-                let Some(v) = value else { return Ty::Unit };
-                let t = self.value_ty(*v);
-                // The block's value may read a slot declared INSIDE this block but not yet emit-registered
-                // (an inline-return result temp queried — e.g. by a comparison — before the block emits).
-                // Recover its type from the `Variable` declaration so the operator picks the right path.
-                if t == Ty::Error {
-                    if let IrExpr::GetValue(idx) = self.ir.expr(*v) {
-                        for &s in stmts {
-                            if let IrExpr::Variable { index, ty, .. } = self.ir.expr(s) {
-                                if index == idx {
-                                    return ir_ty_to_jvm(ty);
-                                }
-                            }
-                        }
-                    }
-                }
-                t
-            }
+            IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp {
                 op, type_operand, ..
             } => match op {

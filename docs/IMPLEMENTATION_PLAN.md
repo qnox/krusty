@@ -3407,6 +3407,21 @@ bodies exist only as jar bytecode):
   case bails (file skips, never a miscompile). TDD e2e `InlineNonLocalReturn` (sequential/conditional
   returns, a `return` out of a `for` loop, a `Unit` early `return`). Gate **1314/0** (+1), parity 16/0.
 
+## Phase 448 — user `inline fun` EXTENSIONS (concrete receiver)  ✅
+- `lower_inline_fn_call` gains a `recv` parameter: an extension call `recv.foo(args)` resolved to a user
+  `inline fun <Recv>.foo()` evaluates the receiver once into a temp and binds it as `this` in the inlined
+  body's scope (so `this`/`this.member`/implicit-receiver access resolve), then expands the body —
+  composing with reified, non-local return, and lambda-arg inlining. Decl matched receiver-aware; the
+  signature comes from `ext_funs`. Wired in before the non-inline `ext_fun_ids` static-call path.
+- **General `value_ty` fix:** a `GetValue` of a slot whose `Variable` isn't emit-registered yet (an inline
+  result/`this` temp queried by a comparison before its block emits) returned `Ty::Error` → wrong
+  (reference) operator path → "Bad type on operand stack". New `var_types` map (every `Variable` index →
+  JVM type, file-wide) is a `value_ty(GetValue)` fallback; supersedes the narrow phase-447 Block fix.
+- TDD e2e `InlineExtension` (`Int.doubled`/`String.shout`/`Int.clampPos` incl. a non-local-return
+  extension). Gate **1314/0**, parity 16/0. Remaining: GENERIC-receiver extension inline (`<T> T.echo()`
+  — not in `ext_funs`; needs receiver-type specialization), `T::class`/reflection, `arrayOfNulls`,
+  `String[i]` (all pre-existing, orthogonal to inline).
+
 ---
 
 ### Working agreements
