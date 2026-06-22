@@ -3477,6 +3477,22 @@ bodies exist only as jar bytecode):
 - TDD e2e `StringIndex` (`"hi".firstChar() = this[0]`, a `for`-loop char read). Gate **1320/0** (+3),
   parity 16/0.
 
+## Phase 453 — builtins class-member parser (de-hardcode String members, step 1)  ✅
+- New `metadata::builtins_class_members(data, fqname)` reads a `.kotlin_builtins` `Class`'s declared
+  MEMBERS — functions (`Class.function`=9: `name`=2, `value_parameter`=6 with `type_id`=5, `return_type_id`
+  =7) resolved through the per-class `type_table` (=30) → `Type.class_name` → `QualifiedNameTable`, yielding
+  Kotlin internal names (`kotlin/Int`, `kotlin/Char`, …). This is the authoritative source for a builtin
+  type's API — no curated table. TDD `builtins_string_members_from_metadata` (String `get(Int):Char`,
+  `plus(Any?):String`, `compareTo(String):Int`).
+- **Findings driving the rest of the de-hardcoding:** (1) String's single PROPERTY (`length`) message in
+  this metadata version carries ONLY flags — no name/type — so properties need separate handling.
+  (2) `resolve_string_instance` CONFLATES String class members (`get`/`plus`/`compareTo`/`toString`/
+  `subSequence` — builtins-sourceable, now parsed) with stdlib EXTENSIONS (`substring`/`indexOf`/
+  `uppercase`/… — `StringsKt` `@Metadata` package functions, a different source). Full table removal is a
+  two-source refactor: class members from `kotlin.kotlin_builtins`, extensions from `StringsKt` metadata.
+- Parser added + tested; not yet wired into resolution (behavior unchanged, gate **1320/0**). Wiring the
+  class-member half (incl. the `get` operator) into String resolution is the next step.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
