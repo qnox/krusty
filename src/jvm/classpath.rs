@@ -129,6 +129,9 @@ type MetaTypeCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>
 /// Per-class `@Metadata` cache for an overloaded property: class internal name → (function name → ALL its
 /// Kotlin extension-receiver names). Used by [`Classpath::metadata_receiver_types`].
 type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>;
+/// Per-class `@Metadata` cache for return-type nullability: class internal name → (function name →
+/// whether its Kotlin return type is nullable `T?`). Used by [`Classpath::metadata_return_nullable`].
+type MetaNullableCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, bool>>>>;
 
 #[derive(Default)]
 pub struct Classpath {
@@ -152,6 +155,9 @@ pub struct Classpath {
     /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
     /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
     meta_receivers: MetaReceiverCache,
+    /// Cache of each class's `@Metadata` function name → whether its Kotlin return type is nullable
+    /// (`takeIf`/`takeUnless` → `T?`). The JVM signature erases this; only `@Metadata` keeps it.
+    meta_ret_nullable: MetaNullableCache,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
@@ -190,6 +196,7 @@ impl Classpath {
             inline_names: RefCell::new(HashMap::new()),
             meta_returns: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
+            meta_ret_nullable: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
         }
     }
@@ -245,6 +252,38 @@ impl Classpath {
         let rc = std::rc::Rc::new(map);
         let hit = rc.get(fn_name).cloned().unwrap_or_default();
         self.meta_receivers
+            .borrow_mut()
+            .insert(internal.to_string(), rc);
+        hit
+    }
+
+    /// Whether function `fn_name` in class `internal` has a NULLABLE Kotlin return type (`takeIf`/
+    /// `takeUnless` → `T?`), from `@Metadata`. The JVM descriptor/`Signature` erase nullability; only
+    /// `@Metadata` carries it. A multifile FACADE has no function metadata of its own — merge its parts.
+    pub fn metadata_return_nullable(&self, internal: &str, fn_name: &str) -> bool {
+        if let Some(m) = self.meta_ret_nullable.borrow().get(internal) {
+            return m.get(fn_name).copied().unwrap_or(false);
+        }
+        let ci = self.find(internal);
+        let mut map = ci
+            .as_ref()
+            .map(super::metadata::package_function_return_nullable)
+            .unwrap_or_default();
+        if map.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        for (k, v) in super::metadata::package_function_return_nullable(&pci) {
+                            let e = map.entry(k).or_insert(false);
+                            *e = *e || v;
+                        }
+                    }
+                }
+            }
+        }
+        let rc = std::rc::Rc::new(map);
+        let hit = rc.get(fn_name).copied().unwrap_or(false);
+        self.meta_ret_nullable
             .borrow_mut()
             .insert(internal.to_string(), rc);
         hit

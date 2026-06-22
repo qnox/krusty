@@ -3726,6 +3726,27 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 479 — `takeIf`/`takeUnless` nullable result (fixes the dropped-elvis NPE miscompile)  ✅
+- `5.takeUnless { it > 3 } ?: 0` threw `NullPointerException` (and `takeIf` was wrong whenever the predicate
+  selected the null branch): `takeIf`/`takeUnless` return `T?`, but that nullability lives only in `@Metadata`
+  (the JVM `Signature` erases it), so the result typed as a non-null primitive `Int`. The elvis lowering folds
+  `x ?: d` to `x` for a non-reference (never-null) lhs (resolve `Expr::Elvis`, `!lty.is_reference()`), dropping
+  the null-check and unboxing a possibly-null value → NPE.
+  - Metadata: `parse_function` now reads the return `Type.nullable` flag (`parse_type_nullable`);
+    `package_function_return_nullable` + `Classpath::metadata_return_nullable` expose it (facade-part merged,
+    cached).
+  - `extension_callable`: when the resolved scope fn's metadata return is nullable AND the logical return is a
+    primitive, type the result as the boxed wrapper (`Int` → `java/lang/Integer`) — a reference, so the elvis
+    keeps its null-check. The spliced body already yields a boxed-or-null value, so the type now matches.
+- TDD e2e `TakeIfNullableResult` (`takeIf`/`takeUnless`, predicate true/false, primitive + reference receiver,
+  nullable-typed binding). Gate **1347/0**.
+- (Found + documented, separate emitter limitation: TWO branchy lambda splices each wrapped in an elvis in the
+  SAME method — `val a = x.takeIf{}?:d; val b = y.takeIf{}?:d` — bails cleanly. The emitter's `cur_stack`
+  tracker drifts +1 after a branchy lambda splice (its internal branches aren't linearly modelled — the single
+  case still VERIFIES, so the real stack is balanced; only the tracker is approximate), so the second splice
+  falsely sees a non-empty baseline. Was a wrong-but-compiling miscompile before this fix; now a safe bail.
+  Next target: accurate post-branchy-splice stack tracking.)
+
 ## Phase 478 — `with(x) { … }` + checker-driven receiver-lambda lowering (closes the `with` bail)  ✅
 - `with(x) { … }` (the stdlib 2-arg receiver-lambda scope fn) bailed in the lowerer — only `x.run`/`x.apply`
   were inlined (name-matched in the backend). Generalized via a checker→lowerer side table so the receiver-
