@@ -1329,124 +1329,6 @@ impl<'a> Emitter<'a> {
         self.slots = saved_slots;
     }
 
-    /// Route (b): inline a cross-module `inline fun` whose body calls a lambda *parameter*, splicing the
-    /// caller's lambda body at the `FunctionN.invoke` site. v1: a branchless single-invoke body
-    /// (`let`/`also`/`run`/`apply`/…), one lambda argument, no captures. Returns `true` if inlined.
-    fn try_inline_lambda_call(
-        &mut self,
-        descriptor: &str,
-        args: &[u32],
-        lam_idx: usize,
-        lam_expr: u32,
-        body: &crate::jvm::classreader::MethodCode,
-        base: u16,
-        code: &mut CodeBuilder,
-    ) -> bool {
-        let IrExpr::Lambda {
-            impl_fn,
-            arity,
-            captures,
-            inline_body,
-            ..
-        } = self.ir.expr(lam_expr).clone()
-        else {
-            return false;
-        };
-        let Some(inline_body) = inline_body else {
-            return false;
-        }; // a callable ref has no inlinable body
-        let arity = arity as usize;
-        let Some(params) = parse_descriptor_params(descriptor) else {
-            return false;
-        };
-        if lam_idx >= params.len() {
-            return false;
-        }
-        // Slot offset of the lambda parameter within the (shifted) body frame.
-        let lambda_off: u16 = params[..lam_idx].iter().map(|t| slot_words(*t)).sum();
-        let Some((before, after)) =
-            crate::jvm::inline::branchless_lambda_segments(body, base, lambda_off, self.cw)
-        else {
-            return false;
-        };
-        // Reserve the spliced body's own local range (`base..base+max_locals`, e.g. kotlinc's `$i$f`
-        // inline-marker store) so the fresh lambda-param slots sit above it and `max_locals` covers all.
-        self.next_slot = self.next_slot.max(base + body.max_locals);
-        // The lambda impl's parameters are `[captures…, lambda_params…]`.
-        let impl_f = &self.ir.functions[impl_fn as usize];
-        let Some(n_cap) = impl_f.params.len().checked_sub(arity) else {
-            return false;
-        };
-        if n_cap != captures.len() {
-            return false;
-        }
-        let cap_tys: Vec<Ty> = impl_f.params[..n_cap].iter().map(ir_ty_to_jvm).collect();
-        let lam_tys: Vec<Ty> = impl_f.params[n_cap..].iter().map(ir_ty_to_jvm).collect();
-        let impl_ret = ir_ty_to_jvm(&impl_f.ret);
-        // Capture parameters bind to the caller's *actual* slots, so a mutable capture written by the
-        // lambda body propagates to the enclosing variable (`var s; recv.let { s += it }`).
-        let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(n_cap);
-        for (i, &cap) in captures.iter().enumerate() {
-            let IrExpr::GetValue(v) = self.ir.expr(cap) else {
-                return false;
-            };
-            let Some(&(slot, _)) = self.slots.get(v) else {
-                return false;
-            };
-            cap_slots.push((slot, cap_tys[i]));
-        }
-
-        // Prologue: emit each NON-lambda argument and store it into its parameter slot (the lambda param
-        // has no value — its loads were elided from the body segments).
-        let mut off: u16 = 0;
-        for (i, pty) in params.iter().enumerate() {
-            let jt = *pty;
-            if i != lam_idx {
-                self.emit_value(args[i], code);
-                // Box a primitive argument into a reference parameter (a generic `T` erased to `Object`,
-                // e.g. the receiver of `5.let { … }`) — else `astore` of an `int` fails the verifier.
-                let at = self.value_ty(args[i]);
-                if jt.is_reference() && at.is_primitive() {
-                    box_prim_free(self.cw, code, at);
-                }
-                store(jt, base + off, code);
-            }
-            off += slot_words(jt);
-        }
-        // `before`: the relocated body up to the invoke (lambda-object loads elided) — leaves the lambda's
-        // (boxed) arguments on the stack.
-        self.append_segment(&before, body.max_stack, code, arity as i32);
-        // Unbox each argument to the lambda's typed parameter and store it (top = last argument). The
-        // full parameter→slot map is the captures (bound to caller slots) followed by these.
-        let mut param_slots: Vec<(u16, Ty)> = cap_slots;
-        param_slots.extend(std::iter::repeat((0, Ty::Error)).take(arity));
-        for j in (0..arity).rev() {
-            let jt = lam_tys[j];
-            if jt.is_primitive() {
-                unbox_prim(self.cw, code, jt);
-            }
-            let slot = self.next_slot;
-            self.next_slot += slot_words(jt);
-            store(jt, slot, code);
-            param_slots[n_cap + j] = (slot, jt);
-        }
-        code.set_stack(0);
-        // The lambda body, inlined (its captures resolve to the caller's frame; mutable capture works).
-        self.emit_fn_body_inline(inline_body, &param_slots, code);
-        // Box the typed result back to `Object` — the body's `after` continues from the invoke's `Object`.
-        if impl_ret.is_primitive() {
-            box_prim_free(self.cw, code, impl_ret);
-        }
-        // `after`: the relocated body past the invoke (the trailing return dropped) — yields the value.
-        self.append_segment(
-            &after,
-            body.max_stack,
-            code,
-            slot_words(ty_from_descriptor_ret(descriptor)) as i32,
-        );
-        true
-    }
-
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
     /// BRANCHY host `inline fun` body, replacing each zero-arg lambda-parameter `Function0.invoke` site
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
@@ -1460,10 +1342,6 @@ impl<'a> Emitter<'a> {
         base: u16,
         code: &mut CodeBuilder,
     ) -> bool {
-        // Branchy frames carry no operand-stack prefix → an empty baseline is required.
-        if code.stack_height() != 0 {
-            return false;
-        }
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
         };
@@ -1488,14 +1366,17 @@ impl<'a> Emitter<'a> {
             let Some(inline_body) = inline_body else {
                 return false;
             };
-            if arity != 0 {
-                return false; // v1: zero-arg (Function0) lambdas only
-            }
+            let arity = arity as usize;
             let impl_f = &self.ir.functions[impl_fn as usize];
-            if impl_f.params.len() != captures.len() {
-                return false; // arity 0 ⇒ all impl params are captures
+            // The impl method's parameters are `[captures…, lambda_params…]`.
+            let Some(n_cap) = impl_f.params.len().checked_sub(arity) else {
+                return false;
+            };
+            if n_cap != captures.len() {
+                return false;
             }
-            let cap_tys: Vec<Ty> = impl_f.params.iter().map(ir_ty_to_jvm).collect();
+            let cap_tys: Vec<Ty> = impl_f.params[..n_cap].iter().map(ir_ty_to_jvm).collect();
+            let lam_tys: Vec<Ty> = impl_f.params[n_cap..].iter().map(ir_ty_to_jvm).collect();
             let impl_ret = ir_ty_to_jvm(&impl_f.ret);
             // Each capture binds to the caller's actual slot (a mutable capture writes through).
             let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
@@ -1508,10 +1389,26 @@ impl<'a> Emitter<'a> {
                 };
                 cap_slots.push((slot, cap_tys[k]));
             }
-            // Emit the lambda body into a scratch builder, then box its result to `Object` (matching the
-            // replaced `invoke`'s `Object` result). A branchy lambda body (frames) isn't modeled yet.
+            // Build the lambda body into a scratch builder. The host left the lambda's `arity` arguments
+            // on the stack (as `Object`, the erased `FunctionN.invoke` parameters); unbox each to its
+            // typed parameter and store it (top = last). A reference value keeps its precise verification
+            // type through the store, so no checkcast is needed. Then run the body, then box the result to
+            // `Object` (matching the replaced `invoke`'s `Object` result).
             let mut scratch = CodeBuilder::new(self.next_slot);
-            self.emit_fn_body_inline(inline_body, &cap_slots, &mut scratch);
+            scratch.set_stack(arity as u16);
+            let mut param_slots: Vec<(u16, Ty)> = cap_slots;
+            param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
+            for j in (0..arity).rev() {
+                let jt = lam_tys[j];
+                if jt.is_primitive() {
+                    unbox_prim(self.cw, &mut scratch, jt);
+                }
+                let slot = self.next_slot;
+                self.next_slot += slot_words(jt);
+                store(jt, slot, &mut scratch);
+                param_slots[n_cap + j] = (slot, jt);
+            }
+            self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
             if impl_ret.is_primitive() {
                 box_prim_free(self.cw, &mut scratch, impl_ret);
             }
@@ -1538,7 +1435,17 @@ impl<'a> Emitter<'a> {
         else {
             return false;
         };
-        // Emit each NON-lambda argument (the empty-baseline operands the host prologue stores).
+        // A branchy host needs the join frame ⇒ an empty operand-stack baseline; a branchless lambda host
+        // (`let`/`also`/…) does not and may be spliced mid-expression.
+        if bs.join_required && code.stack_height() != 0 {
+            return false;
+        }
+        let ret_words = if descriptor.ends_with(")V") {
+            0
+        } else {
+            slot_words(ty_from_descriptor_ret(descriptor)) as i32
+        };
+        // Emit each NON-lambda argument (the operands the host prologue stores into its parameter slots).
         let mut arg_words = 0i32;
         for (i, &a) in args.iter().enumerate() {
             if matches!(self.ir.expr(a), IrExpr::Lambda { .. }) {
@@ -1551,7 +1458,12 @@ impl<'a> Emitter<'a> {
             }
             arg_words += slot_words(params[i]) as i32;
         }
-        // Bind the relocated host frames (caller locals + body locals), then splice, then the join frame.
+        if !bs.join_required {
+            // Branchless host: append the bytes, no frames; works at any operand-stack height.
+            code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
+            return true;
+        }
+        // Branchy host: bind the relocated frames (caller locals + body locals), splice, then the join.
         let splice_start = code.bytes.len();
         let prefix = self.verif_locals_upto(base);
         for (rel, body_locals, stack) in &bs.frames {
@@ -1563,36 +1475,12 @@ impl<'a> Emitter<'a> {
             code.add_frame_if_new(l, locals, st);
         }
         code.set_needs_stackmap();
-        let ret_words = if descriptor.ends_with(")V") {
-            0
-        } else {
-            slot_words(ty_from_descriptor_ret(descriptor)) as i32
-        };
         code.splice_inline(&bs.bytes, body.max_stack, top_local, arg_words, ret_words);
         let join = code.new_label();
         code.bind(join);
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
         code.add_frame_if_new(join, prefix, join_stack);
         true
-    }
-
-    /// Append a pre-relocated, branchless instruction segment (from `branchless_lambda_segments`) as raw
-    /// bytes, reserving `body_stack` of headroom and setting the resulting stack height to `result_slots`.
-    fn append_segment(
-        &mut self,
-        seg: &[crate::jvm::inline::Insn],
-        body_stack: u16,
-        code: &mut CodeBuilder,
-        result_slots: i32,
-    ) {
-        let bytes = crate::jvm::inline::assemble(seg);
-        let base_stack = code.stack_height();
-        code.set_stack((base_stack as u16).saturating_add(body_stack)); // reserve peak headroom
-        code.bytes.extend_from_slice(&bytes);
-        if code.max_locals < self.next_slot {
-            code.max_locals = self.next_slot;
-        }
-        code.set_stack((base_stack + result_slots).max(0) as u16);
     }
 
     /// Attempt to splice a cross-module `inline fun`'s compiled body at the call site (the bytecode
@@ -1615,19 +1503,14 @@ impl<'a> Emitter<'a> {
         // high-water mark, so the spliced temporaries can never collide with a caller local (live or
         // reserved-but-unstored).
         let base = self.next_slot.max(code.max_locals);
-        // Route (b): a literal lambda argument → inline its body at the body's `FunctionN.invoke` site.
-        if let Some((lam_idx, lam_expr)) = args
+        // Route (b): a literal lambda argument → splice its body at the host's `FunctionN.invoke` site
+        // (the unified host+lambda splice handles both the branchy `require(c){m}` and the branchless
+        // `let`/`also`/… shapes).
+        if args
             .iter()
-            .enumerate()
-            .find_map(|(i, &a)| matches!(self.ir.expr(a), IrExpr::Lambda { .. }).then_some((i, a)))
+            .any(|&a| matches!(self.ir.expr(a), IrExpr::Lambda { .. }))
         {
-            // The unified host+lambda splice handles a BRANCHY host (`require(c){m}`); the older
-            // branchless segment splice handles the common `let`/`also`/… shape. Try unified first.
-            if self.try_inline_unified(descriptor, args, &body, base, code) {
-                return true;
-            }
-            return self
-                .try_inline_lambda_call(descriptor, args, lam_idx, lam_expr, &body, base, code);
+            return self.try_inline_unified(descriptor, args, &body, base, code);
         }
         // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) isn't
         // spliceable — fall back to a normal call.

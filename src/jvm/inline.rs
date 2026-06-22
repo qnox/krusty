@@ -912,16 +912,10 @@ fn is_aload_of(insn: &Insn, slot: u16) -> bool {
     }
 }
 
-/// Prepare a **branchless, single-invoke** lambda-inline body (e.g. `let`/`also`/`run`/`apply`) for the
-/// emitter to interleave the caller's lambda: relocate the body, shift its locals by `base`, then split
-/// it at the single `FunctionN.invoke` site into the instructions *before* and *after* the invoke, with
-/// the dead `aload <lambda-param>` loads elided (no closure object is passed). The lambda's arguments
-/// are whatever the `before` segment leaves on the stack; `after` runs on the lambda's result. The
-/// trailing return is dropped (the value falls through). `None` if the shape isn't supported.
-/// Whether a body is shaped so the lambda-argument splice will succeed: branchless, no exception
-/// handlers, exactly one `FunctionN.invoke` call, and a single trailing return (after stripping the
-/// entry `checkNotNullParameter` null-checks). Lets the front end route a call to the inliner ONLY
-/// when the emitter is guaranteed to splice it — required because an `@InlineOnly` callee has no
+/// Whether a lambda-bearing `inline fun` body can be spliced (gates routing a `let`/`also`/… call to the
+/// inliner): branchless, no exception handlers, exactly one `FunctionN.invoke` call, and a single
+/// trailing return (after stripping the entry `checkNotNullParameter` null-checks). The front end routes
+/// a call to [`splice_unified`] ONLY when this holds — required because an `@InlineOnly` callee has no
 /// runtime body to fall back to.
 pub fn is_lambda_spliceable(body: &MethodCode) -> bool {
     if body.has_handlers {
@@ -974,65 +968,6 @@ fn strip_param_null_checks(insns: &mut Vec<Insn>, src_cp: &[C]) {
             .map(|(x, _)| x)
             .collect();
     }
-}
-
-pub fn branchless_lambda_segments(
-    body: &MethodCode,
-    base: u16,
-    lambda_slot: u16,
-    cw: &mut ClassWriter,
-) -> Option<(Vec<Insn>, Vec<Insn>)> {
-    if body.has_handlers {
-        return None;
-    }
-    let mut insns = disassemble(&body.code)?;
-    if insns.iter().any(|i| !matches!(i, Insn::Plain { .. })) {
-        return None; // branchless only (loops handled later)
-    }
-    // Strip kotlinc's entry `checkNotNullParameter` null-checks (they guard the original parameters,
-    // incl. the lambda object, which don't exist once inlined). Branchless ⇒ no branch targets removed.
-    strip_param_null_checks(&mut insns, &body.source_cp);
-    let sites = function_invoke_sites(&insns, &body.source_cp);
-    if sites.len() != 1 {
-        return None; // exactly one lambda call (let/also/run/apply/…)
-    }
-    let invoke = sites[0];
-    // Single exit: one return, the last instruction.
-    let returns: Vec<usize> = insns
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op)))
-        .map(|(j, _)| j)
-        .collect();
-    if returns.len() != 1 || returns[0] != insns.len() - 1 {
-        return None;
-    }
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
-    shift_locals(&mut insns, base)?;
-    let shifted_lambda = base + lambda_slot;
-    // The lambda parameter must be loaded exactly once (to feed its single invoke); more loads mean it
-    // is used in a way we don't model (passed on, stored), so eliding them would corrupt the stack — bail.
-    if insns
-        .iter()
-        .filter(|i| is_aload_of(i, shifted_lambda))
-        .count()
-        != 1
-    {
-        return None;
-    }
-    // `before` = instructions up to the invoke, with the lambda-object loads elided; `after` =
-    // instructions after the invoke, dropping the trailing return.
-    let before: Vec<Insn> = insns[..invoke]
-        .iter()
-        .filter(|i| !is_aload_of(i, shifted_lambda))
-        .cloned()
-        .collect();
-    let after: Vec<Insn> = insns[invoke + 1..insns.len() - 1]
-        .iter()
-        .filter(|i| !is_aload_of(i, shifted_lambda))
-        .cloned()
-        .collect();
-    Some((before, after))
 }
 
 /// Byte offset of each instruction in `code` (index → offset), plus a trailing `code.len()`. `None`
@@ -1316,30 +1251,51 @@ pub fn splice_unified(
             }
         }
     }
+    // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
+    let deleted: std::collections::HashSet<usize> =
+        edits.iter().flat_map(|e| e.at..e.at + e.len).collect();
     for lam in lambdas {
         let orig_slot = *offsets_of_param.get(lam.param_index)?;
-        // The invoke must be immediately preceded by `aload <orig_slot>` (a zero-arg `Function0.invoke`).
-        let site = insns.iter().enumerate().find_map(|(i, insn)| {
-            let Insn::Plain { op: 0xb9, operands } = insn else {
-                return None;
-            };
-            let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
-            let (cls, name) = methodref_target(&body.source_cp, idx)?;
-            if name == "invoke"
-                && cls.starts_with("kotlin/jvm/functions/Function")
-                && i >= 1
-                && is_aload_of(&insns[i - 1], orig_slot)
-            {
-                Some(i)
-            } else {
-                None
+        // The lambda parameter is loaded exactly once (the receiver of its `FunctionN.invoke`); for an
+        // N-ary lambda its `aload` is NOT adjacent to the invoke — the lambda's argument expressions sit
+        // between (`block.invoke(this)` = `aload block; aload this; invoke`). Locate that single load
+        // (ignoring the entry null-check's load, already slated for deletion) and the `FunctionN.invoke`
+        // site after it, then DELETE the load (the closure object is gone) and REPLACE the invoke with
+        // the lambda body (which consumes the on-stack arguments).
+        let load_idx = {
+            let mut found = None;
+            for (i, insn) in insns.iter().enumerate() {
+                if !deleted.contains(&i) && is_aload_of(insn, orig_slot) {
+                    if found.is_some() {
+                        return None; // loaded more than once — used in a way we don't model
+                    }
+                    found = Some(i);
+                }
             }
-        })?;
+            found?
+        };
+        let site = insns
+            .iter()
+            .enumerate()
+            .skip(load_idx + 1)
+            .find_map(|(i, insn)| {
+                let Insn::Plain { op: 0xb9, operands } = insn else {
+                    return None;
+                };
+                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (cls, name) = methodref_target(&body.source_cp, idx)?;
+                (name == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")).then_some(i)
+            })?;
         edits.push(Edit {
-            at: site - 1,
-            len: 2,
+            at: load_idx,
+            len: 1,
+            repl: Vec::new(),
+        }); // delete the dead lambda-object load
+        edits.push(Edit {
+            at: site,
+            len: 1,
             repl: lam.body.clone(),
-        });
+        }); // replace the invoke with the lambda body
     }
     relocate_insns(&mut insns, &body.source_cp, cw)?;
     shift_locals(&mut insns, base)?;
@@ -1546,36 +1502,6 @@ mod tests {
         assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
         // A pure branchless body needs no join frame — appendable at any operand-stack height.
         assert!(!bs.join_required);
-    }
-
-    #[test]
-    fn branchless_lambda_segments_let() {
-        // Body of `inline fun <T,R> T.let(block: (T)->R): R = block(this)`:
-        //   aload_1 (block) ; aload_0 (this) ; invokeinterface Function1.invoke ; areturn
-        let cp = vec![
-            C::Other,
-            C::Utf8("kotlin/jvm/functions/Function1".into()), // 1
-            C::Class(1),                                      // 2
-            C::Utf8("invoke".into()),                         // 3
-            C::Utf8("(Ljava/lang/Object;)Ljava/lang/Object;".into()), // 4
-            C::NameAndType(3, 4),                             // 5
-            C::InterfaceMethodref(2, 5),                      // 6
-        ];
-        let code = vec![0x2b, 0x2a, 0xb9, 0x00, 0x06, 0x02, 0x00, 0xb0];
-        let body = MethodCode {
-            max_stack: 2,
-            max_locals: 2,
-            code,
-            source_cp: cp,
-            stackmap: None,
-            has_handlers: false,
-        };
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        // base=2, lambda (block) at original slot 1 → shifted slot 3; receiver `this` at slot 0 → 2.
-        let (before, after) = branchless_lambda_segments(&body, 2, 1, &mut cw).expect("segments");
-        // before: the lambda-object load (aload_3) is elided, leaving `aload_2` (the `this` argument).
-        assert_eq!(assemble(&before), vec![0x2c]); // aload_2
-        assert!(after.is_empty()); // only the dropped `areturn` followed the invoke
     }
 
     #[test]
