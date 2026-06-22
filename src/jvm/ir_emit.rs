@@ -100,6 +100,17 @@ pub fn emit_file(ir: &IrFile, facade: &str, bodies: &dyn MethodBodies) -> Vec<u8
 /// A method's `StackMapTable` frames resolved to byte offsets: `(offset, locals, stack)` each.
 type ResolvedFrames = Vec<(usize, Vec<VerifType>, Vec<VerifType>)>;
 
+/// The internal class name to `checkcast` a value to when narrowing an erased `Object` to `ty` — or
+/// `None` when no narrowing is needed (`Object`/`Any`, a primitive, `Unit`/`Nothing`).
+fn checkcast_internal(ty: Ty) -> Option<String> {
+    match ty {
+        Ty::String => Some("java/lang/String".to_string()),
+        Ty::Array(_) => Some(ty.descriptor()),
+        Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 fn vtype_to_verif(v: &crate::jvm::inline::VType) -> VerifType {
     use crate::jvm::inline::VType;
     match v {
@@ -1435,12 +1446,11 @@ impl<'a> Emitter<'a> {
                 let jt = lam_tys[j];
                 if jt.is_primitive() {
                     unbox_prim(self.cw, &mut scratch, jt);
-                } else if let Some(internal) = jt
-                    .obj_internal()
-                    .filter(|n| *n != "java/lang/Object" && *n != "kotlin/Any")
-                {
-                    let ci = self.cw.class_ref(internal);
-                    scratch.checkcast(ci); // narrow the erased `Object` arg to the parameter's type
+                } else if let Some(internal) = checkcast_internal(jt) {
+                    // The erased `Object` arg (`iterator.next()` in `map`, a `Function0.invoke` result)
+                    // narrows to the parameter's type before use (`it.uppercase()` needs `String`).
+                    let ci = self.cw.class_ref(&internal);
+                    scratch.checkcast(ci);
                 }
                 let slot = self.next_slot;
                 self.next_slot += slot_words(jt);
@@ -1530,17 +1540,11 @@ impl<'a> Emitter<'a> {
             code.bind_at(l, *abs_off);
             code.add_frame_if_new(l, locals, st);
         }
-        let lambda_indices: Vec<usize> = lam_splices.iter().map(|l| l.param_index).collect();
         for (k, frames) in lam_frames.iter().enumerate() {
+            let host_ctx = bs.lambda_host_locals.get(k).cloned().unwrap_or_default();
             for (fb, locals, stack) in frames {
                 let off = bs.lambda_byte_starts[k] + fb;
-                let merged = self.merge_lambda_frame_locals(
-                    base,
-                    top_local,
-                    &params,
-                    &lambda_indices,
-                    locals,
-                );
+                let merged = self.merge_lambda_frame_locals(base, top_local, &host_ctx, locals);
                 let l = code.new_label();
                 code.bind_at(l, off);
                 code.add_frame_if_new(l, merged, stack.clone());
@@ -1558,34 +1562,29 @@ impl<'a> Emitter<'a> {
     }
 
     /// Full locals for a frame INSIDE a spliced lambda body: the caller's locals (`0..base`), then the
-    /// host's parameters (`base..top_local`, a spliced-away lambda param is dead → `Top`), then the
-    /// lambda's own slots (`top_local..`) from its scratch frame. `lam_locals` is the (collapsed) scratch
-    /// frame, whose host-slot portion is `Top` (the lambda body didn't know them) and is overlaid here.
+    /// HOST's live body locals at the invoke (`host_ctx`, slots `base..` — for a loop host the loop
+    /// iterator/accumulator, not just params), then the lambda's own slots (`top_local..`) from its
+    /// scratch frame. All three are slot-expanded, overlaid, and re-collapsed.
     fn merge_lambda_frame_locals(
         &mut self,
         base: u16,
         top_local: u16,
-        params: &[Ty],
-        lambda_indices: &[usize],
+        host_ctx: &[crate::jvm::inline::VType],
         lam_locals: &[VerifType],
     ) -> Vec<VerifType> {
-        // Slot-indexed caller locals (`0..base`).
-        let mut slots = self.verif_slots_upto(base);
-        // Host parameters at `base..top_local` (each at `base + offset`); a lambda param is dead → `Top`.
-        let mut host = vec![VerifType::Top; (top_local.saturating_sub(base)) as usize];
-        let mut off = 0u16;
-        for (i, &pty) in params.iter().enumerate() {
-            if !lambda_indices.contains(&i) {
-                if let Some(slot) = host.get_mut(off as usize) {
-                    *slot = self.verif_single(pty);
-                }
-            }
-            off += slot_words(pty);
+        let mut slots = self.verif_slots_upto(base); // 0..base caller locals (slot-indexed)
+                                                     // The host's live locals at `base..` (slot-indexed), then pad to `top_local` with `Top`.
+        let host_collapsed: Vec<VerifType> = host_ctx.iter().map(vtype_to_verif).collect();
+        slots.extend(expand_collapsed_locals(&host_collapsed));
+        slots.truncate(top_local as usize);
+        while slots.len() < top_local as usize {
+            slots.push(VerifType::Top);
         }
-        slots.extend(host);
-        // The lambda's own slots: expand the scratch frame to slot-indexed and take `top_local..`.
-        let expanded = expand_collapsed_locals(lam_locals);
-        for s in expanded.into_iter().skip(top_local as usize) {
+        // The lambda's own slots (`top_local..`): expand the scratch frame, take from `top_local`.
+        for s in expand_collapsed_locals(lam_locals)
+            .into_iter()
+            .skip(top_local as usize)
+        {
             slots.push(s);
         }
         collapse_locals(&slots)

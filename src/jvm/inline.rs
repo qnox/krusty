@@ -1071,6 +1071,11 @@ pub struct BranchySplice {
     /// input). The caller relocates that lambda body's OWN `StackMapTable` frames relative to this (a
     /// branchy predicate body has internal branch targets).
     pub lambda_byte_starts: Vec<usize>,
+    /// The host's BODY locals live at each lambda's invoke point (slots `base..`, a spliced-away lambda
+    /// param → `Top`), parallel to `lambdas`. For a host with a LOOP this is the loop-body frame (the
+    /// iterator/accumulator are live there), not just the parameters — the context a branchy lambda
+    /// body's own frames need. Empty (the params are the only locals) for a host with no `StackMapTable`.
+    pub lambda_host_locals: Vec<Vec<VType>>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1284,10 +1289,12 @@ pub fn splice_unified(
             }
         }
     }
-    // A lambda host with a LOOP (a backward branch) — `map`/`fold`/`forEach`-style — needs its loop
-    // back-edge `StackMapTable` frames relocated around the inserted lambda body, not yet modeled; bail so
-    // a PUBLIC such host falls back to a real call and a non-public one skips (never a miscompile). Single
-    // forward-branch hosts (`takeIf`/`takeUnless`/`require`) splice fully.
+    // A lambda host with a LOOP (a backward branch) — `map`/`fold`/`forEach` build a collection, so the
+    // lambda is invoked at a NON-EMPTY operand baseline (the destination is on the stack for the later
+    // `.add`); the lambda body's own frames would need that operand-stack prefix, which requires
+    // abstract-interpreting the host's stack at the invoke (not yet done). Bail so a PUBLIC such host
+    // falls back to a real call and a non-public one skips — never a miscompile. Empty-baseline hosts
+    // (`takeIf`/`takeUnless`/`require`/`let`/`also`) splice fully, branchy lambda body and all.
     if !lambdas.is_empty()
         && insns.iter().enumerate().any(|(i, insn)| match insn {
             Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
@@ -1545,12 +1552,54 @@ pub fn splice_unified(
         .iter()
         .map(|&site| offs[p + old2new[site]])
         .collect();
+    // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
+    // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
+    // (iterator/accumulator live), the context a branchy lambda body's frames need. Empty if no frame
+    // precedes the invoke (the caller then uses the parameters).
+    // Fallback context when no host frame precedes the invoke (`takeIf` — the invoke is before the first
+    // branch): the method's parameters (`base..`, a lambda param dead → `Top`).
+    let param_ctx: Vec<VType> = param_vtypes_full(descriptor, &body.source_cp)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(k, v)| {
+            if lambda_entry.contains(&k) {
+                VType::Top
+            } else {
+                v
+            }
+        })
+        .collect();
+    let lambda_host_locals: Vec<Vec<VType>> = lambda_sites
+        .iter()
+        .map(|&site| {
+            host_frames
+                .iter()
+                .filter(|(old_idx, _)| *old_idx <= site)
+                .max_by_key(|(old_idx, _)| *old_idx)
+                .and_then(|(_, f)| {
+                    f.locals
+                        .iter()
+                        .enumerate()
+                        .map(|(k, v)| {
+                            if lambda_entry.contains(&k) {
+                                Some(VType::Top)
+                            } else {
+                                relocate_vtype(v, &body.source_cp, cw)
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or_else(|| param_ctx.clone())
+        })
+        .collect();
     Some(BranchySplice {
         bytes: assemble_at(&final_insns, start_offset),
         frames,
         join_stack: ret.into_iter().collect(),
         join_required,
         lambda_byte_starts,
+        lambda_host_locals,
     })
 }
 
