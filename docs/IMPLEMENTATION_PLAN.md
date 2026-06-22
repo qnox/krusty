@@ -3527,6 +3527,14 @@ bodies exist only as jar bytecode):
   neither — a miscompile. The lowerer now SKIPS such an override (a principled skip, like the existing
   bound-distinct-overload rejection) until bound-aware erasure exists. Gate **1326/0**, no over-skip.
 
+## Phase 457 — trivial elvis folding (`x ?: d` with a non-null/`null` lhs)  ✅ (+3 → 1329)
+- `Expr::Elvis` no longer bails when the lhs is a non-reference primitive or the `null` literal — both are
+  cases kotlinc folds at compile time (it warns "left operand is never null"/"is always null"). A
+  non-reference lhs is never null, so `x ?: d` == `x` (the rhs is dead — dropped, but the lhs is still
+  emitted for its side effects); a statically-`null` lhs makes the elvis always the rhs, so `null ?: d` ==
+  `d`. TDD e2e `ElvisTrivial` (`42 ?: 239`, `42L ?: 239L`, `null ?: null ?: "OK"`, side-effecting lhs).
+  Unblocks `elvis/nullNullOk.kt`, `primitiveTypes/kt711.kt`, `elvis/primitive.kt`. Gate **1329/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
