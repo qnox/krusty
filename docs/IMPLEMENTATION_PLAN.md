@@ -3300,6 +3300,19 @@ bodies exist only as jar bytecode):
 - Box conformance after this phase: **7351 scanned · 1313 box()=OK · 0 FAIL** (same count — these
   cases were already correct via fallback; they now INLINE instead of calling the stdlib HOF).
 
+## Phase 441 — exhaustive operand-state opcode coverage (close the simulator's unmodeled-opcode gap)  ✅
+- `host_state_at` now models EVERY operand-stack opcode that can legally appear on a straight-line region
+  in a v52+ method body: the full `dup` family (`dup_x2`/`dup2`/`dup2_x1`/`dup2_x2` via a category-aware
+  `pop_group` helper), `wide` (2-byte-index load/store + `wide iinc`), `monitorenter`/`monitorexit`, and
+  `multianewarray`. The previous "unmodeled opcode → fall back" gap (a soft inline bail) is closed.
+- The residual `None` returns are now SOUNDNESS BOUNDARIES, not feature gaps: (a) `invokedynamic` can't be
+  relocated without bootstrap-method handling — the splice bails on it at `relocate_insns` regardless;
+  (b) `athrow`/returns/`jsr`/`ret` are terminal or forbidden in v52+, so they can't precede the lambda
+  load on a fall-through path; (c) an opaque value (e.g. an array element) surviving onto the operand
+  prefix has no expressible frame type. None of these is a modelable case we decline.
+- Tests: unit `host_state_at_models_dup_family` (spec `dup2_x1` form-1 reordering). Gate unchanged at
+  **1313 box()=OK · 0 FAIL**.
+
 ---
 
 ### Working agreements
