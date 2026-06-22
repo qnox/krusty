@@ -120,6 +120,23 @@ fun box(): String {
 }
 "#,
     ),
+    // A lambda that is the expression body (or `return`) of a function whose declared return type is a
+    // function type: the lambda's parameter types come from that return type, so `it`/named params type
+    // concretely (`fun mk(): (Int) -> Int = { it + 1 }`).
+    (
+        "LambdaFromReturnType",
+        r#"
+fun inc(): (Int) -> Int = { it + 1 }
+fun addN(n: Int): (Int) -> Int { return { x -> x + n } }
+fun combine(): (Int, Int) -> Int = { a, b -> a * b }
+fun box(): String {
+    if (inc()(5) != 6) return "f0"
+    if (addN(10)(5) != 15) return "f1"
+    if (combine()(3, 4) != 12) return "f2"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined

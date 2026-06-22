@@ -3581,6 +3581,14 @@ bodies exist only as jar bytecode):
   primitive/reference-element cases. TDD e2e `InlineVararg` (`sum(1,2,3)`, `sum()`, `join("-","a","b","c")`).
   Gate **1334/0** (construct fixed; corpus inline-vararg files have other blockers, so the count holds).
 
+## Phase 463 — lambda param types from a function's declared return type  ✅
+- A lambda that is the expression body (or a `return` value) of a function whose declared return type is a
+  function type now takes its parameter types from that return type — `fun mk(): (Int) -> Int = { it + 1 }`
+  types `it` as `Int`, not the erased `Object`. The checker's `check_fun_body` (expression body) and the
+  `Stmt::Return` arm now route a lambda through `check_lambda_with_types(ret.params)` (the same path local
+  typed-`val` initializers and HOF arguments already used). Fixes `mk()(5)`. TDD e2e `LambdaFromReturnType`
+  (`inc(): (Int)->Int`, `addN(n)` via `return`, a two-param `combine`). Gate **1334/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
