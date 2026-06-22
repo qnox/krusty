@@ -3726,6 +3726,15 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 483 — chained safe-call scope fns over a nullable-primitive result (`s?.let{}?.let{it+1}`)  ✅
+- A chained `s?.let { it.length }?.let { it + 1 }` mistyped the second `it` as the boxed `java/lang/Integer`
+  (the first `?.let`'s `Int?` result), so `it + 1` failed (`operator … 'java/lang/Integer' and 'Int'`). Inside a
+  safe-call scope fn the receiver is NON-null, so a nullable-primitive receiver now binds `it`/`this` as the
+  UNBOXED primitive: `safe_scope_call_result` unwraps the wrapper for the lambda typing, and
+  `lower_scope_inline_on` unboxes the receiver value (`Integer`→`int`) before binding the slot.
+- TDD: `SafeCallScopeFn` extended with chained `?.let`/`?.run` over primitive results + null short-circuit.
+  Gate **1352/0**.
+
 ## Phase 482 — no-lambda `@InlineOnly` extensions on a primitive receiver (`Char.isDigit()` etc.)  ✅
 - `'a'.isDigit()`/`isLetter()`/`uppercaseChar()`/… bailed (`unresolved method on Char`): they're no-lambda
   `@InlineOnly` extensions, which the checker only accepted for *lambda* args (`takeIf`). The checker now also

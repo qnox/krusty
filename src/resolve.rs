@@ -4863,6 +4863,10 @@ impl<'a> Checker<'a> {
         let Expr::Lambda { params, body } = self.file.expr(a[0]).clone() else {
             return None;
         };
+        // Inside the lambda the receiver is NON-null: a nullable-primitive receiver (`Int?` =
+        // `java/lang/Integer`, e.g. from a chained `s?.let { … }?.let { it + 1 }`) binds `it`/`this` as
+        // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`.
+        let rt = rt.obj_internal().and_then(prim_of_wrapper).unwrap_or(rt);
         match name {
             "run" | "apply" if params.is_empty() => {
                 let bt = self.check_with_receiver(rt, body, self.span(a[0]));

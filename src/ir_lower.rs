@@ -4364,6 +4364,19 @@ impl<'a> Lower<'a> {
         body: AstExprId,
         returns_receiver: bool,
     ) -> Option<u32> {
+        // A nullable-primitive receiver (`Int?` = `java/lang/Integer`, from a chained `…?.let { … }`) binds
+        // the scope param as the UNBOXED primitive — matching the checker, so `it + 1` is primitive math.
+        let (rty, recv_val) = match rty.obj_internal().and_then(crate::resolve::prim_of_wrapper) {
+            Some(prim) => {
+                let unboxed = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: recv_val,
+                    type_operand: ty_to_ir(prim),
+                });
+                (prim, unboxed)
+            }
+            None => (rty, recv_val),
+        };
         let depth = self.scope.len();
         let p_slot = self.fresh_value();
         let saved_cur = self.cur_class.clone();

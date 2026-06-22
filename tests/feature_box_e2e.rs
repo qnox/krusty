@@ -335,6 +335,9 @@ fun box(): String {
     if ((s?.uppercase() ?: "x") != "AB") return "f7"          // safe-call stdlib extension
     if ((s?.uppercase()?.length ?: 0) != 2) return "f8"       // chained safe calls
     if ((z?.uppercase()?.length ?: 0) != 0) return "f9"       // null short-circuits the chain
+    if ((s?.let { it.length }?.let { it + 1 } ?: 0) != 3) return "f10"  // chained ?.let, primitive
+    if ((z?.let { it.length }?.let { it + 1 } ?: 0) != 0) return "f11"  // null short-circuits
+    if ((s?.run { length }?.run { this * 3 } ?: 0) != 6) return "f12"   // chained ?.run, unboxed `this`
     return "OK"
 }
 "#,
