@@ -3552,6 +3552,15 @@ bodies exist only as jar bytecode):
   receiver to the plain primitive op via `lower_prim_op_method`, instead of bailing. Unblocks
   `controlStructures/kt416.kt` (`var a = 10; a?.plus(10)`). TDD: extends `PrimOpMethod`. Gate **1330/0**.
 
+## Phase 460 — callable reference into an inline HOF (`inlineHof(::g)`)  ✅
+- The inline expander only inline-expanded a function-typed argument that was a *lambda literal*; a callable
+  reference (`::g`, `obj::m`) bailed. Now a non-lambda function argument is bound as a function VALUE (a
+  `FunctionN`) and `f(v)` in the inlined body invokes it via `.invoke` — semantically identical (kotlinc
+  inlines the reference too; the value form is box-OK and verifies, with no FunctionN-drop bookkeeping). A
+  lambda literal still inlines directly. TDD e2e `InlineCallableRef` (`::g`, bound `c::m`, and a lambda in the
+  same inline `apply1`). Gate **1330/0** (no regression; corpus callable-ref files have other blockers, so the
+  construct is fixed without moving the count).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
