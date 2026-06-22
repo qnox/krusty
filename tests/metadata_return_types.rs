@@ -99,7 +99,10 @@ fn builtins_string_members_from_metadata() {
         .expect("kotlin.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let members = krusty::jvm::metadata::builtins_class_members(&bytes, "kotlin/String");
+    let members = krusty::jvm::metadata::parse_builtins(&bytes)
+        .remove("kotlin/String")
+        .map(|c| c.members)
+        .unwrap_or_default();
     let find = |name: &str| members.iter().find(|m| m.name == name);
     // Functions: `get(Int): Char` (the `s[i]` operator), `plus(Any?): String`, `compareTo(String): Int`.
     let get = find("get").expect("String.get");
