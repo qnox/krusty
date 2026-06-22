@@ -810,6 +810,36 @@ fun box(): String {
 }
 "#,
     ),
+    // Inline functions whose body has `return` (early/conditional/loop returns). The IR inliner wraps
+    // the body in `do { … } while(false)` and rewrites each `return x` to `result = x; break@end`, so the
+    // function return becomes a jump to the body's end — including a `return` out of a `for` loop.
+    (
+        "InlineNonLocalReturn",
+        r#"
+inline fun classify(x: Int): String {
+    if (x < 0) return "neg"
+    if (x == 0) return "zero"
+    return "pos"
+}
+inline fun firstEven(xs: List<Int>): Int {
+    for (x in xs) { if (x % 2 == 0) return x }
+    return -1
+}
+inline fun shout(s: String, loud: Boolean) {
+    if (!loud) return
+    println(s)
+}
+fun box(): String {
+    if (classify(-5) != "neg") return "f0"
+    if (classify(0) != "zero") return "f1"
+    if (classify(7) != "pos") return "f2"
+    if (firstEven(listOf(1, 3, 4, 5)) != 4) return "f3"
+    if (firstEven(listOf(1, 3, 5)) != -1) return "f4"
+    shout("x", false)
+    return "OK"
+}
+"#,
+    ),
     // Inline functions with EXCEPTION HANDLERS (try/catch/finally): `synchronized` (monitorenter; try
     // { block } finally { monitorexit }), `run`/`let` are handler-free, but `synchronized`/`runCatching`/
     // `use` carry an exception table. The splicer relocates each entry's byte offsets + catch_type into

@@ -3994,7 +3994,25 @@ impl<'a> Emitter<'a> {
             IrExpr::EnumValues { class } => {
                 Ty::array(Ty::obj(&self.ir.classes[*class as usize].fq_name))
             }
-            IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
+            IrExpr::Block { value, stmts } => {
+                let Some(v) = value else { return Ty::Unit };
+                let t = self.value_ty(*v);
+                // The block's value may read a slot declared INSIDE this block but not yet emit-registered
+                // (an inline-return result temp queried — e.g. by a comparison — before the block emits).
+                // Recover its type from the `Variable` declaration so the operator picks the right path.
+                if t == Ty::Error {
+                    if let IrExpr::GetValue(idx) = self.ir.expr(*v) {
+                        for &s in stmts {
+                            if let IrExpr::Variable { index, ty, .. } = self.ir.expr(s) {
+                                if index == idx {
+                                    return ir_ty_to_jvm(ty);
+                                }
+                            }
+                        }
+                    }
+                }
+                t
+            }
             IrExpr::TypeOp {
                 op, type_operand, ..
             } => match op {
