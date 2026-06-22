@@ -956,6 +956,13 @@ impl LibrarySet for JvmLibraries {
             })
     }
 
+    fn toplevel_is_inline(&self, name: &str) -> bool {
+        self.cp
+            .find_top_level(name)
+            .iter()
+            .any(|c| self.cp.is_inline_method(&c.owner, &c.name))
+    }
+
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
         self.cp
             .find_top_level(name)

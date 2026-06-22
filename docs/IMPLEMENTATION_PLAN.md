@@ -3668,6 +3668,20 @@ bodies exist only as jar bytecode):
   mutates `c`; without mutation-allowed the `let`/`also` checker removal would have `Ref`-boxed `c` against the
   inlined call → VerifyError). TDD e2e `ScopeFnsBranchy`. Gate **1343/0**.
 
+## Phase 471 — de-hardcode `repeat`  ✅ (−1 → 1342, FAIL 0)
+- Removed the `if fname == "repeat"` desugar in the lowerer and the `repeat_lambda` special-case in the
+  checker. `repeat` is an ordinary top-level `inline fun (Int, (Int) -> Unit)` — it now types via the generic
+  `toplevel_lambda_param_types` path (lambda index = `Int`, return `Unit` from its descriptor) and splices its
+  real stdlib loop body via the bytecode loop-host splice, no name match.
+- Generalized the mutation-allowed signal: a new `LibrarySet::toplevel_is_inline(name)` (mirrors
+  `extension_is_inline`) sets `allow_lambda_mutation` for ANY inline top-level fn's lambda (it's spliced, so a
+  mutable capture is an inline capture, not a `Ref` box) — replacing the `repeat`-name mutation special-case.
+- Trade-off: `inline/kt66017.kt` (`forEach { repeat(size) { return "OK" } }` — a NON-LOCAL return through a
+  bytecode-spliced `repeat`) now skips instead of compiling (the old in-place desugar made the return local to
+  the inlined loop; the generic splice can't yet carry a non-local return through a spliced `repeat`). It SKIPS
+  (FAIL 0, never miscompiles); fixing the splice to relocate a non-local return out of a spliced loop host is
+  the next piece. TDD e2e covers `repeat` via the generic path (`ScopeRun`-adjacent snippets).
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

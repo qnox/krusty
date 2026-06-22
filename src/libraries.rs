@@ -320,6 +320,13 @@ pub trait LibrarySet {
     fn extension_is_inline(&self, _receiver: Ty, _name: &str) -> bool {
         false
     }
+
+    /// Whether ANY receiver-less top-level function named `name` is `inline` (`run`, `repeat`, `with`, …).
+    /// Like [`extension_is_inline`](Self::extension_is_inline) but for a top-level call: its lambda is
+    /// spliced, so a mutable variable it captures is an inline capture, not a `Ref` box. `false` for non-JVM.
+    fn toplevel_is_inline(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

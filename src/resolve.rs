@@ -5904,14 +5904,6 @@ impl<'a> Checker<'a> {
                     || fname == "Array")
                     && args.len() == 2
                     && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
-                // `repeat(n) { i -> … }` — the stdlib inline `repeat` whose body is
-                // `for (i in 0 until times) action(i)`. Its lambda parameter (the index) is `Int`, and a
-                // mutable capture is fine because the backend inlines it to a counted loop.
-                let repeat_lambda = fname == "repeat"
-                    && known_sig.is_none()
-                    && self.lookup(&fname).is_none()
-                    && args.len() == 2
-                    && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
                 // A receiver-less top-level *library* function with a lambda argument (`applyIt(5){ it+1 }`):
                 // recover the lambda parameter types from its generic signature so `it` types correctly
                 // (the erased `Function1` descriptor hides them), mirroring the extension-call path.
@@ -5922,7 +5914,6 @@ impl<'a> Checker<'a> {
                 // (a user fn allowed too, so a user generic inline HOF reaches `user_generic_call`).
                 let toplevel_partial: Option<Vec<Option<Ty>>> = if self.lookup(&fname).is_none()
                     && !array_init_lambda
-                    && !repeat_lambda
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
@@ -5972,19 +5963,19 @@ impl<'a> Checker<'a> {
                         if array_init_lambda && i == 1 {
                             return self.check_lambda_with_types(a, &[Ty::Int]);
                         }
-                        if repeat_lambda && i == 1 {
-                            let prev = self.allow_lambda_mutation;
-                            self.allow_lambda_mutation = true;
-                            let t = self.check_lambda_with_types(a, &[Ty::Int]);
-                            self.allow_lambda_mutation = prev;
-                            return t;
-                        }
                         if let Some(ref pts) = toplevel_lambda_pts {
                             if matches!(self.file.expr(a), Expr::Lambda { .. })
                                 && i < pts.len()
                                 && !pts[i].is_empty()
                             {
-                                return self.check_lambda_with_types(a, &pts[i]);
+                                // A top-level INLINE fn (`repeat`/`run`/…) splices its lambda, so a mutable
+                                // variable the lambda captures is an inline capture (no `Ref` box).
+                                let prev = self.allow_lambda_mutation;
+                                self.allow_lambda_mutation =
+                                    self.syms.libraries.toplevel_is_inline(&fname);
+                                let t = self.check_lambda_with_types(a, &pts[i]);
+                                self.allow_lambda_mutation = prev;
+                                return t;
                             }
                         }
                         // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):
@@ -6027,9 +6018,6 @@ impl<'a> Checker<'a> {
                         self.expr(a)
                     })
                     .collect();
-                if repeat_lambda && matches!(arg_tys.first(), Some(Ty::Int)) {
-                    return Ty::Unit; // `repeat(count) { … }` → Unit (inlined to a counted loop)
-                }
                 if fname == "println" {
                     return Ty::Unit; // builtin: accepts one value of any type (v0)
                 }

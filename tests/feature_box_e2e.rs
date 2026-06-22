@@ -239,6 +239,22 @@ fun box(): String {
 }
 "#,
     ),
+    // `repeat(n) { i -> … }` — the stdlib top-level `inline fun`, spliced from its real loop body via the
+    // generic route (no name-match desugar). The index `i` is `Int`; a mutable capture works (inline).
+    (
+        "Repeat",
+        r#"
+fun box(): String {
+    var s = 0
+    repeat(4) { s += it }
+    if (s != 6) return "f0: $s"
+    var c = 0
+    repeat(3) { c++ }
+    if (c != 3) return "f1: $c"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
