@@ -1066,9 +1066,9 @@ pub struct LambdaSplice {
 }
 
 /// Parse a descriptor's parameters into `(frame0 vtype, byte-of-descriptor advance)` — like
-/// [`param_vtypes`] but a reference/array parameter becomes `Top` (its real type is unmodeled; the
-/// caller must ensure every such parameter is a spliced-away lambda, whose slot is dead anyway).
-/// `long`/`double` stay one frame entry. Returns one entry per parameter, in order.
+/// Frame-0 locals of a *static* method: one [`VType`] per parameter (`long`/`double` are one entry). A
+/// reference/array parameter becomes `Top` (its real type is unmodeled); the caller then requires every
+/// such parameter to be a spliced-away lambda (a dead slot), bailing otherwise.
 fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
     let inner = descriptor.strip_prefix('(')?.split(')').next()?;
     let b = inner.as_bytes();
@@ -1097,9 +1097,10 @@ fn param_vtypes_full(descriptor: &str) -> Option<Vec<VType>> {
                     i += 1;
                 }
                 i += 1;
-                out.push(VType::Top); // reference param — must be a spliced-away lambda (dead slot)
+                out.push(VType::Top);
             }
             b'[' => {
+                i += 1;
                 while *b.get(i)? == b'[' {
                     i += 1;
                 }
@@ -1210,7 +1211,7 @@ pub fn splice_unified(
             let frame0 = param_vtypes_full(descriptor)?;
             for (pi, v) in frame0.iter().enumerate() {
                 if *v == VType::Top && !lambdas.iter().any(|l| l.param_index == pi) {
-                    return None; // a non-lambda reference parameter — can't model its frame type
+                    return None; // an unresolved non-lambda reference parameter — can't model its frame
                 }
             }
             decode_stackmap(sm, frame0)?
@@ -1250,6 +1251,39 @@ pub fn splice_unified(
                 }
             }
         }
+    }
+    // A lambda host with a LOOP (a backward branch) — `mapIndexed`/`forEach`-style — relocates frames
+    // around the inserted lambda body in ways not yet modeled (the loop's back-edge frame interacts with
+    // the splice); bail so it skips rather than emit inconsistent frames. Single forward-branch hosts
+    // (`takeIf`/`takeUnless`/`require`) are fine.
+    if !lambdas.is_empty()
+        && insns.iter().enumerate().any(|(i, insn)| match insn {
+            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target <= i,
+            Insn::TableSwitch {
+                default, targets, ..
+            } => *default <= i || targets.iter().any(|t| *t <= i),
+            Insn::LookupSwitch { default, pairs } => {
+                *default <= i || pairs.iter().any(|(_, t)| *t <= i)
+            }
+            Insn::Plain { .. } => false,
+        })
+    {
+        return None;
+    }
+    // The body must contain exactly one `FunctionN.invoke` per lambda argument — otherwise matching each
+    // lambda to its invoke site (and which `aload` feeds it) is ambiguous, and a mis-paired splice calls
+    // `.invoke` on the wrong object. Conservative: bail unless the counts line up (skips complex stdlib
+    // HOFs that call a lambda more than once or alongside other functional values).
+    let invoke_count = insns
+        .iter()
+        .filter(|insn| {
+            matches!(insn, Insn::Plain { op: 0xb9, operands } if operands.len() == 4
+                && methodref_target(&body.source_cp, (operands[0] as u16) << 8 | operands[1] as u16)
+                    .is_some_and(|(cls, n)| n == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")))
+        })
+        .count();
+    if invoke_count != lambdas.len() {
+        return None;
     }
     // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
     let deleted: std::collections::HashSet<usize> =
