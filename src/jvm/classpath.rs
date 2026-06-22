@@ -129,9 +129,6 @@ type MetaTypeCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>
 /// Per-class `@Metadata` cache for an overloaded property: class internal name → (function name → ALL its
 /// Kotlin extension-receiver names). Used by [`Classpath::metadata_receiver_types`].
 type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>;
-/// The Kotlin collection hierarchy (class internal name → direct supertype internal names), shared via
-/// `Rc` from the per-instance cache once read from `collections.kotlin_builtins`.
-type CollectionSupers = std::rc::Rc<HashMap<String, Vec<String>>>;
 
 #[derive(Default)]
 pub struct Classpath {
@@ -155,13 +152,11 @@ pub struct Classpath {
     /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
     /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
     meta_receivers: MetaReceiverCache,
-    /// The Kotlin collection hierarchy read from `collections.kotlin_builtins` (class → direct
-    /// supertypes), built once on first use. Empty if no stdlib is on the classpath.
-    collection_supers: RefCell<Option<CollectionSupers>>,
-    /// Members (functions + properties) of a builtin type, read from its `.kotlin_builtins` fragment and
-    /// cached per class internal name — the authoritative source for any builtin's API (`String`,
-    /// `CharSequence`, `Int`, …), keyed e.g. `kotlin/String`. No type-specific hardcoded table.
-    builtin_members: RefCell<HashMap<String, std::rc::Rc<Vec<super::metadata::BuiltinMember>>>>,
+    /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
+    /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
+    /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
+    /// read-only/mutable hierarchy AND every builtin type's API. Empty if no stdlib is on the classpath.
+    builtins: RefCell<HashMap<String, std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>>>>,
 }
 
 impl Classpath {
@@ -195,8 +190,7 @@ impl Classpath {
             inline_names: RefCell::new(HashMap::new()),
             meta_returns: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
-            collection_supers: RefCell::new(None),
-            builtin_members: RefCell::new(HashMap::new()),
+            builtins: RefCell::new(HashMap::new()),
         }
     }
 
@@ -288,64 +282,55 @@ impl Classpath {
         hit
     }
 
-    /// The Kotlin collection hierarchy (class internal name → direct supertype internal names), read
-    /// once from `kotlin/collections/collections.kotlin_builtins` on the classpath. Cached per-instance.
-    fn collection_supertypes(&self) -> CollectionSupers {
-        if let Some(m) = self.collection_supers.borrow().as_ref() {
+    /// A parsed `.kotlin_builtins` fragment by resource path (class internal name → supertypes+members),
+    /// read once and cached. The single builtins entry point — both the collection hierarchy and a
+    /// type's member API derive from it.
+    fn builtins_file(
+        &self,
+        path: &str,
+    ) -> std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>> {
+        if let Some(m) = self.builtins.borrow().get(path) {
             return m.clone();
         }
         let mut map = HashMap::new();
         for e in &self.entries {
             if let Entry::Jar(j) = e {
-                if let Some(bytes) =
-                    read_jar_entry(j, "kotlin/collections/collections.kotlin_builtins")
-                {
-                    map = super::metadata::builtins_supertypes(&bytes);
+                if let Some(bytes) = read_jar_entry(j, path) {
+                    map = super::metadata::parse_builtins(&bytes);
                     break;
                 }
             }
         }
         let rc = std::rc::Rc::new(map);
-        *self.collection_supers.borrow_mut() = Some(rc.clone());
+        self.builtins
+            .borrow_mut()
+            .insert(path.to_string(), rc.clone());
         rc
     }
 
-    /// The declared members of a builtin type (`internal` e.g. `kotlin/String`), read from the
-    /// `.kotlin_builtins` fragment of its package and cached. The fragment path mirrors kotlinc's
-    /// `BuiltInSerializerProtocol.getBuiltInsFilePath`: package `kotlin` → `kotlin/kotlin.kotlin_builtins`,
-    /// `kotlin/collections` → `kotlin/collections/collections.kotlin_builtins`. Empty for a non-builtin.
-    fn builtin_class_members(
-        &self,
-        internal: &str,
-    ) -> std::rc::Rc<Vec<super::metadata::BuiltinMember>> {
-        if let Some(m) = self.builtin_members.borrow().get(internal) {
-            return m.clone();
-        }
+    /// The `.kotlin_builtins` fragment path for a package, mirroring kotlinc's
+    /// `BuiltInSerializerProtocol.getBuiltInsFilePath`: `kotlin` → `kotlin/kotlin.kotlin_builtins`,
+    /// `kotlin/collections` → `kotlin/collections/collections.kotlin_builtins`.
+    fn builtins_path_for(internal: &str) -> String {
         let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
         let last = pkg.rsplit_once('/').map_or(pkg, |(_, l)| l);
-        let path = format!("{pkg}/{last}.kotlin_builtins");
-        let mut members = Vec::new();
-        for e in &self.entries {
-            if let Entry::Jar(j) = e {
-                if let Some(bytes) = read_jar_entry(j, &path) {
-                    members = super::metadata::builtins_class_members(&bytes, internal);
-                    break;
-                }
-            }
-        }
-        let rc = std::rc::Rc::new(members);
-        self.builtin_members
-            .borrow_mut()
-            .insert(internal.to_string(), rc.clone());
-        rc
+        format!("{pkg}/{last}.kotlin_builtins")
+    }
+
+    /// The parsed `collections.kotlin_builtins` fragment (the Kotlin collection hierarchy lives here).
+    fn collection_builtins(&self) -> std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>> {
+        self.builtins_file("kotlin/collections/collections.kotlin_builtins")
     }
 
     /// Resolve a builtin type's member return `Ty` by name + argument types, straight from its builtins
     /// declarations (no per-type hardcoded table). `None` if no member of that name/arity is declared
     /// there (e.g. a `StringsKt` EXTENSION on `String` lives in package metadata, resolved elsewhere).
     pub fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
-        let members = self.builtin_class_members(internal);
-        let m = members
+        let path = Self::builtins_path_for(internal);
+        let f = self.builtins_file(&path);
+        let m = f
+            .get(internal)?
+            .members
             .iter()
             .find(|m| m.name == name && m.params.len() == args.len())?;
         Some(kotlin_name_to_ty(&m.ret))
@@ -356,7 +341,7 @@ impl Classpath {
     /// class is NOT (the front end never produces the former for a Kotlin collection; both keep their
     /// JVM-erased resolution).
     pub fn is_kotlin_collection(&self, internal: &str) -> bool {
-        self.collection_supertypes().contains_key(internal)
+        self.collection_builtins().contains_key(internal)
     }
 
     /// Whether `sub` is, or transitively is a subtype of, `sup` within the Kotlin collection hierarchy
@@ -364,14 +349,18 @@ impl Classpath {
     /// generic subtype query behind extension applicability — `MutableCollection.plusAssign` applies to a
     /// `MutableList` receiver but not a read-only `List`, exactly as kotlinc's overload resolution.
     pub fn kotlin_subtype(&self, sub: &str, sup: &str) -> bool {
-        let supers = self.collection_supertypes();
-        fn walk(map: &HashMap<String, Vec<String>>, sub: &str, sup: &str) -> bool {
+        let f = self.collection_builtins();
+        fn walk(
+            map: &HashMap<String, super::metadata::BuiltinClass>,
+            sub: &str,
+            sup: &str,
+        ) -> bool {
             sub == sup
                 || map
                     .get(sub)
-                    .is_some_and(|ss| ss.iter().any(|s| walk(map, s, sup)))
+                    .is_some_and(|c| c.supertypes.iter().any(|s| walk(map, s, sup)))
         }
-        walk(&supers, sub, sup)
+        walk(&f, sub, sup)
     }
 
     pub fn empty() -> Classpath {
