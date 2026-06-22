@@ -228,6 +228,13 @@ pub trait LibrarySet {
         None
     }
 
+    /// The return `Ty` of a BUILTIN type's class member (`internal` e.g. `kotlin/String`), by name +
+    /// argument types, read from the type's builtins declarations rather than a hardcoded table. `None`
+    /// if the name isn't a declared member there (e.g. a `StringsKt` extension on `String`).
+    fn builtin_member_ret(&self, _internal: &str, _name: &str, _args: &[Ty]) -> Option<Ty> {
+        None
+    }
+
     /// The single abstract method of a functional interface (`Runnable.run`, `Comparator.compare`) —
     /// its name and `LibraryMember` — for SAM conversion of a lambda. `None` if `internal` isn't an
     /// interface with exactly one abstract (non-default, non-static, non-`Object`) method.

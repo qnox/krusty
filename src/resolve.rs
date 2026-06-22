@@ -377,10 +377,10 @@ pub fn qualified_path(file: &File, e: ExprId) -> Option<String> {
 /// here; this keeps `java/lang/String` out of the front end.
 pub fn resolve_string_instance(method: &str, arg_tys: &[Ty]) -> Option<Ty> {
     Some(match (method, arg_tys) {
-        ("length", []) => Ty::Int,
-        // `s[i]` desugars to the `get(Int): Char` operator (`charAt` is its explicit form). Kotlin's
-        // `String.get` has no `java.lang.String` backing method — the backend lowers it to `charAt`.
-        ("get", [Ty::Int]) | ("charAt", [Ty::Int]) => Ty::Char,
+        // NOTE: String CLASS members (`length`, `get`/`charAt`, `plus`, `compareTo`, `toString`,
+        // `subSequence`, `equals`) are NOT listed here — they're resolved from the builtins declarations
+        // (`Classpath::builtin_member_ret` ← `kotlin.kotlin_builtins`). This table is now only the stdlib
+        // EXTENSIONS on `String`/`CharSequence` (`StringsKt`), a curated subset pending metadata sourcing.
         ("isEmpty", []) | ("isBlank", []) => Ty::Boolean,
         ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => Ty::String,
         ("indexOf", [Ty::String]) | ("indexOf", [Ty::Char]) => Ty::Int,
@@ -3637,10 +3637,15 @@ impl<'a> Checker<'a> {
                     self.expect_assignable(Ty::Int, it, self.span(index), "array index");
                     return self.set(e, elem);
                 }
-                // `str[i]` is the `String.get(Int): Char` operator (resolved through the curated Kotlin
-                // String-member table, like any other String member — not a bare special-case).
+                // `str[i]` is the `String.get(Int): Char` operator — resolved from the builtins String
+                // declarations (then the curated table for anything builtins doesn't declare).
                 if at == Ty::String {
-                    if let Some(ret) = resolve_string_instance("get", &[it]) {
+                    if let Some(ret) = self
+                        .syms
+                        .libraries
+                        .builtin_member_ret("kotlin/String", "get", &[it])
+                        .or_else(|| resolve_string_instance("get", &[it]))
+                    {
                         return self.set(e, ret);
                     }
                 }
@@ -3959,7 +3964,11 @@ impl<'a> Checker<'a> {
                         } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                             Ty::Int // Int (not a reference), so safe-call rejection fires below
                         } else if rt == Ty::String {
-                            resolve_string_instance(&name, &arg_tys).unwrap_or(Ty::Error)
+                            self.syms
+                                .libraries
+                                .builtin_member_ret("kotlin/String", &name, &arg_tys)
+                                .or_else(|| resolve_string_instance(&name, &arg_tys))
+                                .unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = rt {
                             self.lookup_method(internal, &name)
                                 .map(|s| s.ret)
@@ -5448,7 +5457,12 @@ impl<'a> Checker<'a> {
                     return Ty::String; // intrinsic on any type
                 }
                 if rt == Ty::String {
-                    if let Some(ret) = resolve_string_instance(&name, &arg_tys) {
+                    if let Some(ret) = self
+                        .syms
+                        .libraries
+                        .builtin_member_ret("kotlin/String", &name, &arg_tys)
+                        .or_else(|| resolve_string_instance(&name, &arg_tys))
+                    {
                         return ret;
                     }
                     // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
