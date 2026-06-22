@@ -266,6 +266,31 @@ fun box(): String {
 }
 "#,
     ),
+    // `takeIf`/`takeUnless` return `T?` — a nullable result the JVM signature erases but `@Metadata`
+    // keeps. Over a PRIMITIVE receiver the result is the boxed wrapper, so `?: default` must keep its
+    // null-check (a primitive-typed result would fold the elvis away and unbox a possibly-null value →
+    // NPE — the bug this fixes). The lambda's `it` is the receiver. (One scope-fn-with-elvis per helper:
+    // two BRANCHY lambda splices in one method is a separate emitter stack-tracking limitation.)
+    (
+        "TakeIfNullableResult",
+        r#"
+fun takeIfTrue(): Int = 5.takeIf { it > 3 } ?: 0
+fun takeIfFalse(): Int = 5.takeIf { it < 3 } ?: 9
+fun takeUnlessTrue(): Int = 5.takeUnless { it > 3 } ?: 0
+fun takeUnlessFalse(): Int = 5.takeUnless { it < 3 } ?: 7
+fun takeIfRef(): String = "ab".takeIf { it.length > 1 } ?: "x"
+fun takeIfNullable(): Int? = 5.takeIf { it > 3 }
+fun box(): String {
+    if (takeIfTrue() != 5) return "f0: ${takeIfTrue()}"        // predicate true → 5
+    if (takeIfFalse() != 9) return "f1: ${takeIfFalse()}"      // predicate false → null → 9
+    if (takeUnlessTrue() != 0) return "f2: ${takeUnlessTrue()}" // predicate true → null → 0
+    if (takeUnlessFalse() != 5) return "f3: ${takeUnlessFalse()}" // predicate false → 5
+    if (takeIfRef() != "ab") return "f4: ${takeIfRef()}"       // reference receiver
+    if (takeIfNullable() != 5) return "f5: ${takeIfNullable()}" // nullable return type
+    return "OK"
+}
+"#,
+    ),
     // `with(receiver) { … }` — the stdlib 2-arg receiver-lambda scope function: the first argument is
     // the lambda body's implicit `this`. Driven by the checker's recorded receiver-lambda decision (the
     // same generic path as `x.run`/`x.apply`), over a builtin / classpath / user receiver, with member

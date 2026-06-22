@@ -155,6 +155,18 @@ impl JvmLibraries {
                     gsig_to_ty(&rsig, &binds)
                 })
                 .unwrap_or(ret);
+            // A nullable Kotlin return (`takeIf`/`takeUnless`: `T?`) over a PRIMITIVE receiver erases to
+            // the boxed wrapper — type the result as that reference wrapper so a `?:`/null-check on it is
+            // preserved (a primitive `Ty` is treated as never-null and would fold the elvis away, then
+            // unbox a possibly-null value → NPE). The JVM signature drops nullability; `@Metadata` keeps it.
+            let ret_ty =
+                if ret_ty.is_primitive() && self.cp.metadata_return_nullable(&c.owner, &c.name) {
+                    super::jvm_class_map::wrapper_internal(ret_ty)
+                        .map(crate::types::Ty::obj)
+                        .unwrap_or(ret_ty)
+                } else {
+                    ret_ty
+                };
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
