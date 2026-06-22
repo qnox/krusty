@@ -6085,10 +6085,15 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let lty = self.info.ty(lhs);
-                // A statically-null or non-reference lhs isn't a meaningful elvis (and would emit a
-                // bad-typed null compare) — bail. The common reference case is handled below.
-                if lty == Ty::Null || !lty.is_reference() {
-                    return None;
+                // A trivial elvis kotlinc folds at compile time (it warns "left/right operand is never
+                // null"/"is always null"): a non-reference (primitive) lhs is never null, so `x ?: d` == `x`
+                // (the rhs is dead — drop it, but still emit `x` for its side effects); a statically-`null`
+                // lhs makes the elvis always take the rhs, so `null ?: d` == `d`.
+                if lty == Ty::Null {
+                    return self.lower_arg(rhs, &ty_to_ir(result_ty));
+                }
+                if !lty.is_reference() {
+                    return self.lower_arg(lhs, &ty_to_ir(result_ty));
                 }
                 let lv = self.expr(lhs)?;
                 let v = self.fresh_value();

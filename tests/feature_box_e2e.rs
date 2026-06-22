@@ -29,6 +29,24 @@ fun box(): String {
 }
 "#,
     ),
+    // A trivial elvis kotlinc folds: a non-null (primitive) lhs makes `x ?: d` == `x` (rhs is dead),
+    // and a statically-`null` lhs makes `null ?: d` == `d`. krusty must emit the folded side, keeping
+    // the live operand's side effects.
+    (
+        "ElvisTrivial",
+        r#"
+fun box(): String {
+    if ((42 ?: 239) != 42) return "f0"
+    if ((42.toLong() ?: 239.toLong()) != 42L) return "f1"
+    val s: String = null ?: null ?: "OK"
+    if (s != "OK") return "f2: $s"
+    var n = 0
+    fun side(): Int { n++; return 7 }
+    if ((side() ?: 0) != 7 || n != 1) return "f3: $n"
+    return "OK"
+}
+"#,
+    ),
     // A user generic `inline fun` taking a lambda (`twice(1) { it+10 }`): the inliner SPECIALIZES the type
     // parameter `T` from the call's VALUE arguments — the lambda's `it`, the value-parameter slots, and the
     // call's return type are the concrete type (`Int`/`String`), not the erased `Any`. The body is inlined
