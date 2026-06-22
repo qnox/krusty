@@ -3608,6 +3608,15 @@ bodies exist only as jar bytecode):
   mis-validated by the checker's trailing-`required`-count model (`map_call_args`) — `cfg(g = {…})` reports
   `x` as required. Tracked for a follow-up that records per-parameter defaults.
 
+## Phase 466 — a required parameter after a defaulted one  ✅
+- The checker's argument validation (`map_call_args`) assumed defaults were trailing — it required the first
+  `required` parameters, mis-rejecting a required parameter that *follows* a defaulted one
+  (`fun h(x: Int = 5, y: Int)` called `h(y = 2)`). `Signature` now records per-parameter defaults
+  (`param_defaults: Vec<bool>`); `map_call_args` checks each unfilled slot against its own default (falling
+  back to the `required`-prefix count only when the per-parameter info is absent). Fixes the limitation noted
+  in phase 465 — `cfg(g = { … })` and `h(y = 2)` now resolve (inline and non-inline alike). TDD e2e
+  `DefaultBeforeRequired` + an extra `cfg(g = {…})` case in `InlineDefaultParam`. Gate **1335/0**.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.

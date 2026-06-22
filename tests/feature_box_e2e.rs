@@ -168,6 +168,20 @@ fun box(): String {
     if (f(5, 1) != 6) return "f1"
     if (cfg(10) { 4 } != 14) return "f2"
     if (pick(b = 9) != 193) return "f3"   // a=1, b=9, c=3 → 100 + 90 + 3
+    if (cfg(g = { 4 }) != 7) return "f4"  // x defaulted, the required `g` passed by name
+    return "OK"
+}
+"#,
+    ),
+    // A required parameter that FOLLOWS a defaulted one (`h(x: Int = 5, y: Int)`), supplied by name —
+    // the checker must validate `y` (not `x`) as the required slot, not assume defaults are trailing.
+    (
+        "DefaultBeforeRequired",
+        r#"
+fun h(x: Int = 5, y: Int): Int = x * 10 + y
+fun box(): String {
+    if (h(y = 2) != 52) return "f0"
+    if (h(1, 2) != 12) return "f1"
     return "OK"
 }
 "#,

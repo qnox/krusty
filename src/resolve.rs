@@ -23,6 +23,10 @@ pub struct Signature {
     /// Minimum number of arguments a caller must supply — params beyond this have default values
     /// that the caller fills in. Equals `params.len()` when there are no defaults.
     pub required: usize,
+    /// For each parameter: whether it has a default value (so it may be omitted by name or position).
+    /// Parallel to `params`; empty when unknown (callers then fall back to the `required` prefix count).
+    /// This captures a *non-trailing* default (`f(x: Int = 3, g: () -> Int)`) that `required` cannot.
+    pub param_defaults: Vec<bool>,
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
@@ -621,6 +625,7 @@ pub fn collect_signatures_with_cp(
                         ret,
                         vararg,
                         required,
+                        param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         lambda_param_types,
                         is_inline: f.is_inline,
@@ -948,6 +953,11 @@ pub fn collect_signatures_with_cp(
                                         .iter()
                                         .take_while(|p| p.default.is_none())
                                         .count(),
+                                    param_defaults: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.default.is_some())
+                                        .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
                                     is_inline: false,
@@ -967,6 +977,7 @@ pub fn collect_signatures_with_cp(
                                     ret: *ty,
                                     vararg: false,
                                     required: 0,
+                                    param_defaults: Vec::new(),
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
                                     is_inline: false,
@@ -983,6 +994,7 @@ pub fn collect_signatures_with_cp(
                                 ret: self_ty,
                                 vararg: false,
                                 required: 0,
+                                param_defaults: vec![true; props.len()],
                                 param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
                                 lambda_param_types: Vec::new(),
                                 is_inline: false,
@@ -1065,6 +1077,11 @@ pub fn collect_signatures_with_cp(
                                         .iter()
                                         .take_while(|p| p.default.is_none())
                                         .count(),
+                                    param_defaults: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.default.is_some())
+                                        .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
                                     is_inline: false,
@@ -1259,6 +1276,7 @@ pub fn map_call_args(
     names: Option<&[Option<String>]>,
     param_names: &[String],
     required: usize,
+    param_defaults: &[bool],
 ) -> Result<Vec<Option<ExprId>>, String> {
     let n = param_names.len();
     let mut slots: Vec<Option<ExprId>> = vec![None; n];
@@ -1289,8 +1307,16 @@ pub fn map_call_args(
             }
         }
     }
-    for (i, slot) in slots.iter().enumerate().take(required) {
-        if slot.is_none() {
+    // A parameter must be supplied unless it has a default. With per-parameter default info, check each
+    // slot individually (so a required parameter that FOLLOWS a defaulted one is validated correctly);
+    // otherwise fall back to the `required`-prefix count (defaults assumed trailing).
+    for (i, slot) in slots.iter().enumerate() {
+        let has_default = if param_defaults.is_empty() {
+            i >= required
+        } else {
+            param_defaults.get(i).copied().unwrap_or(false)
+        };
+        if slot.is_none() && !has_default {
             return Err(format!(
                 "no value passed for required parameter '{}'",
                 param_names.get(i).map(|s| s.as_str()).unwrap_or("?")
@@ -5513,6 +5539,7 @@ impl<'a> Checker<'a> {
                                 arg_names.as_deref(),
                                 &sig.param_names,
                                 sig.required,
+                                &sig.param_defaults,
                             ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
@@ -6331,7 +6358,13 @@ impl<'a> Checker<'a> {
                             }
                         } else if let Some(names) = &arg_names {
                             // Named arguments: map onto positional slots, then type-check each slot.
-                            match map_call_args(args, Some(names), &sig.param_names, sig.required) {
+                            match map_call_args(
+                                args,
+                                Some(names),
+                                &sig.param_names,
+                                sig.required,
+                                &sig.param_defaults,
+                            ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -7110,6 +7143,7 @@ impl<'a> Checker<'a> {
             ret: ret_ty,
             vararg: f.params.last().map_or(false, |p| p.is_vararg),
             required: params.len(),
+            param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
             is_inline: false,
