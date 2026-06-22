@@ -5218,15 +5218,39 @@ impl<'a> Lower<'a> {
         fname: &str,
         args: &[AstExprId],
         call_id: u32,
+        recv: Option<AstExprId>,
     ) -> Option<u32> {
-        let f = self.top_fun_decl(fname)?.clone();
-        // Subset: a plain top-level inline fn with no extension receiver, no default/vararg params. A
-        // `return` in the body would be a non-local return once inlined — bail. Non-reified generic type
-        // params are SPECIALIZED from the actual argument types; REIFIED type params are bound to the
-        // call's explicit type arguments and substituted into `is T`/`as T`/`T::class` in the body.
-        if f.receiver.is_some() {
+        // Find the matching top-level fn: an extension call wants the decl WITH a receiver, a plain call
+        // the one WITHOUT (so an extension and a same-named plain fn don't shadow each other here).
+        let f = self
+            .afile
+            .decls
+            .iter()
+            .find_map(|&d| match self.afile.decl(d) {
+                Decl::Fun(f) if f.name == fname && f.receiver.is_some() == recv.is_some() => {
+                    Some(f)
+                }
+                _ => None,
+            })?
+            .clone();
+        // A non-extension call must hit a non-extension fn and vice versa. An extension binds its receiver
+        // as `this` (below). No default/vararg params. Non-reified generic type params are SPECIALIZED
+        // from the actual argument types; REIFIED type params are bound to the call's explicit type
+        // arguments and substituted into `is T`/`as T`/`T::class` in the body.
+        if f.receiver.is_some() != recv.is_some() {
             return None;
         }
+        // The extension receiver type (`inline fun String.foo()` → `String`), or `None` for a plain fn.
+        let recv_ty = match &f.receiver {
+            Some(r) => {
+                let t = ty_of(self.afile, r);
+                if t == Ty::Error {
+                    return None;
+                }
+                Some(t)
+            }
+            None => None,
+        };
         if f.params.iter().any(|p| p.default.is_some() || p.is_vararg) {
             return None;
         }
@@ -5243,18 +5267,27 @@ impl<'a> Lower<'a> {
         // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
         // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
         let body_diverges = self.info.ty(body) == Ty::Nothing;
-        let sigs = self.syms.funs.get(fname)?;
-        let sig = if sigs.len() == 1 {
-            sigs[0].clone()
-        } else {
-            let want: String = f
-                .params
-                .iter()
-                .map(|p| ty_of(self.afile, &p.ty).descriptor())
-                .collect();
-            sigs.iter()
-                .find(|s| crate::resolve::erased_params_key(s) == want)?
+        let sig = if let Some(rt) = &recv_ty {
+            // An extension fn is keyed in `ext_funs` by `(receiver descriptor, name)`; its `params` are the
+            // value params only (the receiver is bound separately as `this`).
+            self.syms
+                .ext_funs
+                .get(&(rt.descriptor(), fname.to_string()))?
                 .clone()
+        } else {
+            let sigs = self.syms.funs.get(fname)?;
+            if sigs.len() == 1 {
+                sigs[0].clone()
+            } else {
+                let want: String = f
+                    .params
+                    .iter()
+                    .map(|p| ty_of(self.afile, &p.ty).descriptor())
+                    .collect();
+                sigs.iter()
+                    .find(|s| crate::resolve::erased_params_key(s) == want)?
+                    .clone()
+            }
         };
         if sig.params.len() != args.len() || sig.params.len() != pnames.len() {
             return None;
@@ -5304,6 +5337,36 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
+        // An extension fn binds its receiver as `this`: evaluate it once into a temp, visible as `this`
+        // in the body (so `this`, `this.member`, and implicit-receiver member access all resolve to it).
+        if let Some(rt) = &recv_ty {
+            let recv_ast = match recv {
+                Some(r) => r,
+                None => {
+                    self.scope.truncate(depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                }
+            };
+            let rt = *rt;
+            let slot = self.fresh_value();
+            let val = match self.lower_arg(recv_ast, &ty_to_ir(rt)) {
+                Some(v) => v,
+                None => {
+                    self.scope.truncate(depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                }
+            };
+            stmts.push(self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: ty_to_ir(rt),
+                init: Some(val),
+            }));
+            self.scope.push(("this".to_string(), slot, rt));
+        }
         for (i, pty) in sig.params.iter().enumerate() {
             if let Ty::Fun(fnsig) = pty {
                 // A lambda parameter: require a literal lambda argument with no non-local return.
@@ -7802,7 +7865,7 @@ impl<'a> Lower<'a> {
                             .get(&fname)
                             .map_or(false, |v| v.iter().any(|s| s.is_inline))
                     {
-                        return self.lower_inline_fn_call(&fname, &args, e.0);
+                        return self.lower_inline_fn_call(&fname, &args, e.0, None);
                     }
                     // `repeat(count) { i -> body }` — the stdlib inline `repeat`, body
                     // `for (i in 0 until times) action(i)`. Inline to a counted loop (the lambda's
@@ -8804,6 +8867,23 @@ impl<'a> Lower<'a> {
                                     }));
                                 }
                                 return None;
+                            }
+                        }
+                    }
+                    // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
+                    // receiver bound as `this`, instead of a real static call.
+                    {
+                        let recv_desc = self.recv_ty(receiver).descriptor();
+                        let is_inline_ext = self.afile.decls.iter().any(|&d| {
+                            matches!(self.afile.decl(d), Decl::Fun(f)
+                                if f.name == name && f.is_inline
+                                && f.receiver.as_ref().is_some_and(|r| ty_of(self.afile, r).descriptor() == recv_desc))
+                        });
+                        if is_inline_ext {
+                            if let Some(r) =
+                                self.lower_inline_fn_call(&name, &args, e.0, Some(receiver))
+                            {
+                                return Some(r);
                             }
                         }
                     }
