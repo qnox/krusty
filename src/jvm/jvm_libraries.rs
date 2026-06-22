@@ -882,6 +882,10 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
+    fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
+        self.cp.builtin_member_ret(internal, name, args)
+    }
+
     fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
         // Dry-run the ONE splicer with each `FunctionN` parameter as a lambda site — branchless
         // (`let`/`also`) AND branchy (`takeIf`/`takeUnless`) hosts; `splice_unified` relocates host AND

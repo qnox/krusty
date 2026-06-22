@@ -17,6 +17,24 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
+use crate::types::Ty;
+
+/// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
+fn kotlin_name_to_ty(name: &str) -> Ty {
+    match name {
+        "kotlin/Int" => Ty::Int,
+        "kotlin/Char" => Ty::Char,
+        "kotlin/Boolean" => Ty::Boolean,
+        "kotlin/Long" => Ty::Long,
+        "kotlin/Double" => Ty::Double,
+        "kotlin/Float" => Ty::Float,
+        "kotlin/Byte" => Ty::Byte,
+        "kotlin/Short" => Ty::Short,
+        "kotlin/String" => Ty::String,
+        "kotlin/Unit" => Ty::Unit,
+        _ => Ty::obj(name),
+    }
+}
 
 enum Entry {
     Dir(PathBuf),
@@ -140,6 +158,10 @@ pub struct Classpath {
     /// The Kotlin collection hierarchy read from `collections.kotlin_builtins` (class → direct
     /// supertypes), built once on first use. Empty if no stdlib is on the classpath.
     collection_supers: RefCell<Option<CollectionSupers>>,
+    /// Members (functions + properties) of a builtin type, read from its `.kotlin_builtins` fragment and
+    /// cached per class internal name — the authoritative source for any builtin's API (`String`,
+    /// `CharSequence`, `Int`, …), keyed e.g. `kotlin/String`. No type-specific hardcoded table.
+    builtin_members: RefCell<HashMap<String, std::rc::Rc<Vec<super::metadata::BuiltinMember>>>>,
 }
 
 impl Classpath {
@@ -174,6 +196,7 @@ impl Classpath {
             meta_returns: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
             collection_supers: RefCell::new(None),
+            builtin_members: RefCell::new(HashMap::new()),
         }
     }
 
@@ -285,6 +308,47 @@ impl Classpath {
         let rc = std::rc::Rc::new(map);
         *self.collection_supers.borrow_mut() = Some(rc.clone());
         rc
+    }
+
+    /// The declared members of a builtin type (`internal` e.g. `kotlin/String`), read from the
+    /// `.kotlin_builtins` fragment of its package and cached. The fragment path mirrors kotlinc's
+    /// `BuiltInSerializerProtocol.getBuiltInsFilePath`: package `kotlin` → `kotlin/kotlin.kotlin_builtins`,
+    /// `kotlin/collections` → `kotlin/collections/collections.kotlin_builtins`. Empty for a non-builtin.
+    fn builtin_class_members(
+        &self,
+        internal: &str,
+    ) -> std::rc::Rc<Vec<super::metadata::BuiltinMember>> {
+        if let Some(m) = self.builtin_members.borrow().get(internal) {
+            return m.clone();
+        }
+        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
+        let last = pkg.rsplit_once('/').map_or(pkg, |(_, l)| l);
+        let path = format!("{pkg}/{last}.kotlin_builtins");
+        let mut members = Vec::new();
+        for e in &self.entries {
+            if let Entry::Jar(j) = e {
+                if let Some(bytes) = read_jar_entry(j, &path) {
+                    members = super::metadata::builtins_class_members(&bytes, internal);
+                    break;
+                }
+            }
+        }
+        let rc = std::rc::Rc::new(members);
+        self.builtin_members
+            .borrow_mut()
+            .insert(internal.to_string(), rc.clone());
+        rc
+    }
+
+    /// Resolve a builtin type's member return `Ty` by name + argument types, straight from its builtins
+    /// declarations (no per-type hardcoded table). `None` if no member of that name/arity is declared
+    /// there (e.g. a `StringsKt` EXTENSION on `String` lives in package metadata, resolved elsewhere).
+    pub fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
+        let members = self.builtin_class_members(internal);
+        let m = members
+            .iter()
+            .find(|m| m.name == name && m.params.len() == args.len())?;
+        Some(kotlin_name_to_ty(&m.ret))
     }
 
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
