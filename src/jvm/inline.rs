@@ -1140,6 +1140,19 @@ fn method_desc_effect(desc: &str, src_cp: &[C]) -> Option<(usize, Option<VType>)
     Some((args, rv))
 }
 
+/// Pop one "value group" off the operand stack for the `dup2`/`dup_x2`/`dup2_x1`/`dup2_x2` forms: a
+/// single category-2 value (`long`/`double`, one frame entry), else the top two category-1 values.
+/// Returned bottom-to-top so it can be re-pushed by `extend`.
+fn pop_group(stack: &mut Vec<VType>) -> Option<Vec<VType>> {
+    let top = stack.pop()?;
+    if matches!(top, VType::Long | VType::Double) {
+        Some(vec![top])
+    } else {
+        let lo = stack.pop()?;
+        Some(vec![lo, top])
+    }
+}
+
 /// Set local slot `idx` to `v`, growing the slot table with `Top`; a `long`/`double` also clobbers
 /// its second slot to `Top` (it occupies two slots).
 fn set_slot(slots: &mut Vec<VType>, idx: usize, v: VType) {
@@ -1265,6 +1278,32 @@ fn host_state_at(
                 stack.push(b);
                 stack.push(a);
             } // dup_x1
+            0x5b => {
+                let a = stack.pop()?; // top is always category-1 for dup_x2
+                let under = pop_group(&mut stack)?;
+                stack.push(a);
+                stack.extend(under);
+                stack.push(a);
+            } // dup_x2: [..h, a] -> [.., a, h, a]
+            0x5c => {
+                let g = pop_group(&mut stack)?;
+                stack.extend(g.iter().copied());
+                stack.extend(g);
+            } // dup2
+            0x5d => {
+                let g = pop_group(&mut stack)?;
+                let u = stack.pop()?; // single category-1 value below the group
+                stack.extend(g.iter().copied());
+                stack.push(u);
+                stack.extend(g);
+            } // dup2_x1
+            0x5e => {
+                let g = pop_group(&mut stack)?;
+                let h = pop_group(&mut stack)?;
+                stack.extend(g.iter().copied());
+                stack.extend(h);
+                stack.extend(g);
+            } // dup2_x2
             0x5f => {
                 let a = stack.pop()?;
                 let b = stack.pop()?;
@@ -1367,7 +1406,39 @@ fn host_state_at(
                 stack.pop()?;
                 stack.push(VType::Int);
             } // instanceof
-            _ => return None, // an opcode we don't model — bail rather than guess the stack
+            0xc2 | 0xc3 => {
+                stack.pop()?;
+            } // monitorenter/monitorexit
+            0xc4 => {
+                // wide: a 2-byte-index load/store (or `wide iinc`, no stack effect).
+                let sub = *operands.first()?;
+                let idx = ((*operands.get(1)? as usize) << 8) | *operands.get(2)? as usize;
+                match sub {
+                    0x15 => stack.push(VType::Int),       // wide iload
+                    0x16 => stack.push(VType::Long),      // wide lload
+                    0x17 => stack.push(VType::Float),     // wide fload
+                    0x18 => stack.push(VType::Double),    // wide dload
+                    0x19 => stack.push(*slots.get(idx)?), // wide aload
+                    0x36..=0x3a => {
+                        let v = stack.pop()?;
+                        set_slot(&mut slots, idx, v);
+                    } // wide istore/lstore/fstore/dstore/astore
+                    0x84 => {}                            // wide iinc — no stack effect
+                    _ => return None,
+                }
+            }
+            0xc5 => {
+                let dims = *operands.get(2)? as usize; // index2 + dimensions byte
+                for _ in 0..dims {
+                    stack.pop()?;
+                }
+                stack.push(VType::Top); // array type opaque (bails if it reaches the prefix)
+            } // multianewarray
+            // Residual `None` is a SOUNDNESS BOUNDARY, not an unmodeled-feature gap: `invokedynamic`
+            // (0xba) can't be relocated without bootstrap-method handling — the splice bails on it at
+            // `relocate_insns` anyway; `athrow`/returns/`jsr`/`ret` are terminal or forbidden in v52+, so
+            // they can't appear on a straight-line fall-through path before the lambda load.
+            _ => return None,
         }
     }
     // A surviving opaque `Top` can't be expressed as a valid operand-stack frame entry.
@@ -2186,6 +2257,69 @@ mod tests {
         assert_eq!(stack, vec![VType::Object(2)]); // prefix = [Collection]
         assert_eq!(slots[7], VType::Object(4)); // element local retyped to Integer
         assert_eq!(slots[4], VType::Object(2)); // dest local still Collection
+    }
+
+    #[test]
+    fn host_state_at_models_dup_family() {
+        // Seed an empty frame; push three distinct cat-1 refs then `dup2_x1`, and stop at the load.
+        //   aconst_null(Null) ; ldc-ish via iconst → use checkcast to make refs distinguishable.
+        // Simpler: iconst_1(Int=c), aconst_null(Null=b), aconst_null then checkcast Integer (a),
+        //   dup2_x1  → [c, a?, ...]. We assert the resulting stack matches the spec form 1.
+        let cp = vec![
+            C::Other,
+            C::Utf8("java/lang/Integer".into()), // 1
+            C::Class(1),                         // 2
+        ];
+        // 0: iconst_1            [Int]
+        // 1: aconst_null         [Int, Null]
+        // 2: aconst_null         [Int, Null, Null]
+        // 3: checkcast Integer   [Int, Null, Object]   (top retyped)
+        // 4: dup2_x1             [Int]→ form1: [Null, Object, Int, Null, Object]
+        // 5: nop  (load_idx = 5)
+        let insns = vec![
+            Insn::Plain {
+                op: 0x04,
+                operands: vec![],
+            }, // iconst_1
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            }, // aconst_null
+            Insn::Plain {
+                op: 0x01,
+                operands: vec![],
+            }, // aconst_null
+            Insn::Plain {
+                op: 0xc0,
+                operands: vec![0x00, 0x02],
+            }, // checkcast Integer
+            Insn::Plain {
+                op: 0x5d,
+                operands: vec![],
+            }, // dup2_x1
+            Insn::Plain {
+                op: 0x00,
+                operands: vec![],
+            }, // nop
+        ];
+        // dup2_x1 form1 over [Int, Null, Object]: top group=[Null,Object], under=Int →
+        //   [Null, Object, Int, Null, Object]. But a surviving `Top`? none here — all typed.
+        let frame = Frame {
+            offset: 0,
+            locals: vec![],
+            stack: vec![],
+        };
+        let (_, stack) = host_state_at(&insns, 5, &[(0, frame)], &[], &cp).expect("state");
+        assert_eq!(
+            stack,
+            vec![
+                VType::Null,
+                VType::Object(2),
+                VType::Int,
+                VType::Null,
+                VType::Object(2)
+            ]
+        );
     }
 
     #[test]
