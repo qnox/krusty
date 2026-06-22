@@ -5404,13 +5404,15 @@ impl<'a> Lower<'a> {
             (None, None) => None,
             _ => return None,
         };
-        // Defaults aren't modeled. A `vararg` IS supported, but only as the LAST parameter of a plain
-        // (non-extension) inline fn whose element isn't a type parameter or a function type — the trailing
-        // arguments are packed into an array bound to that parameter (kotlinc's form).
-        if f.params.iter().any(|p| p.default.is_some()) {
+        // Default parameters ARE modeled (an inline fn substitutes the default expression directly — no
+        // `$default` method): an omitted parameter is filled with its default below. A `vararg` IS
+        // supported, but only as the LAST parameter of a plain (non-extension) inline fn whose element
+        // isn't a type parameter or a function type. The two aren't combined (rare) — bail on the overlap.
+        let has_default = f.params.iter().any(|p| p.default.is_some());
+        let vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        if has_default && vararg {
             return None;
         }
-        let vararg = f.params.last().is_some_and(|p| p.is_vararg);
         if f.params.iter().rev().skip(1).any(|p| p.is_vararg) {
             return None; // a non-last vararg (only reachable with trailing named args) — bail
         }
@@ -5469,19 +5471,75 @@ impl<'a> Lower<'a> {
             return None;
         }
         // Fixed (non-vararg) parameter count. A vararg call supplies `>= n_fixed` arguments (the rest pack
-        // into the trailing array); a non-vararg call must match exactly.
+        // into the trailing array); a non-vararg call must match exactly (after default-filling).
         let n_fixed = if vararg {
             sig_params.len() - 1
         } else {
             sig_params.len()
         };
-        if vararg {
+        // Effective per-parameter arguments. For a non-vararg call, place named arguments at their declared
+        // position and fill each omitted parameter with its default expression (an inline fn substitutes the
+        // default directly — no `$default` method). A vararg call keeps the raw list (packed below).
+        let eff_storage: Vec<AstExprId>;
+        let has_named = self
+            .afile
+            .call_arg_names
+            .get(&call_id)
+            .is_some_and(|n| n.iter().any(|x| x.is_some()));
+        let args: &[AstExprId] = if vararg {
             if args.len() < n_fixed {
                 return None;
             }
-        } else if sig_params.len() != args.len() {
-            return None;
-        }
+            args
+        } else if has_default || has_named {
+            let names = self
+                .afile
+                .call_arg_names
+                .get(&call_id)
+                .cloned()
+                .unwrap_or_default();
+            let np = f.params.len();
+            if args.len() > np {
+                return None;
+            }
+            let mut slot: Vec<Option<AstExprId>> = vec![None; np];
+            let mut pos = 0;
+            for (i, &arg) in args.iter().enumerate() {
+                match names.get(i).and_then(|o| o.as_ref()) {
+                    None => {
+                        if pos >= np {
+                            return None;
+                        }
+                        slot[pos] = Some(arg);
+                        pos += 1;
+                    }
+                    Some(nm) => {
+                        let idx = f.params.iter().position(|p| &p.name == nm)?;
+                        if slot[idx].is_some() {
+                            return None;
+                        }
+                        slot[idx] = Some(arg);
+                    }
+                }
+            }
+            let mut eff = Vec::with_capacity(np);
+            for (k, p) in f.params.iter().enumerate() {
+                match slot[k] {
+                    Some(a) => eff.push(a),
+                    None => match p.default {
+                        Some(d) => eff.push(d),
+                        None => return None,
+                    },
+                }
+            }
+            eff_storage = eff;
+            &eff_storage
+        } else {
+            if sig_params.len() != args.len() {
+                return None;
+            }
+            args
+        };
         // A (self- or mutually-) recursive inline call would expand forever — bail.
         if self.inline_active.iter().any(|n| n == fname) {
             return None;
