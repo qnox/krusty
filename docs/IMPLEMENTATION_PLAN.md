@@ -3726,6 +3726,29 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 486 — `LibrarySet` redesign: one `functions()` query → `FunctionSet`  ✅ (core)
+- Replaces the scattered per-fact lookups (`resolve_callable` / `is_inline` / return-overload / nullability /
+  receiver-types) with ONE platform-agnostic query that returns every overload + full metadata:
+  - Types (platform-neutral — only `Ty` + an opaque `LibraryCallable` handle the front end never inspects):
+    `FunctionSet { overloads: Vec<FunctionInfo> }`, `FunctionInfo { kind, receiver, ret_nullable, flags
+    (inline/inline_only), callable }`, `FnKind` (Member/Extension/TopLevel), `FnFlags`.
+  - `LibrarySet::functions(name, receiver)`: `receiver = Some(t)` → the type's MEMBERS (own + inherited) AND
+    EXTENSIONS on it AND the `@OverloadResolutionByLambdaReturnType` family (`sumOf` → `sumOfInt`/…);
+    `receiver = None` → top-level functions. Each tagged with `FnKind` so the caller applies Kotlin
+    precedence (member > extension > top-level). Logical return is receiver-substituted (`<T> T.takeIf(): T?`
+    → receiver, with nullable-primitive boxing).
+  - Function BODY fetch stays separate (the emitter's `MethodBodies`), per the design — memory.
+- Consumers migrated to the one query: `resolve_lambda_return_overload` (sumOf), `toplevel_is_inline`,
+  `toplevel_has_must_inline`, `extension_is_inline` — all now read from `functions()` instead of re-scanning.
+- Metadata plumbing: `JvmOverload` type; `Classpath::lambda_return_overloads` (Kotlin-name → `@JvmName`
+  overloads, unioned up the facade superclass chain); `metadata::resolve_string` (plain string-table entries
+  vs class names).
+- **Layering (remaining, incremental):** the arg-binding SELECTORS `resolve_callable` / `resolve_instance` /
+  `resolve_scope_inline` stay as the resolution layer — they bind generic returns from *arguments* (e.g.
+  `fold`'s `R` from the initial value), which the arg-independent `functions()` can't. Folding them in (so the
+  member-call sites consume `FunctionSet` directly) + making `Callable` module-private + resolving default
+  `kotlin.*` imports inside `functions()` are the follow-up slices. Gate **1354/0** throughout (slices 1–4).
+
 ## Phase 485 — `sumOf { … }` (`@OverloadResolutionByLambdaReturnType`)  ✅
 - `listOf(1,2,3).sumOf { it*2 }` bailed: there is NO JVM method named `sumOf` — kotlinc emits
   `sumOfInt`/`sumOfLong`/`sumOfDouble`/… (`@JvmName`-mangled, package-private `@InlineOnly`) and picks one by
