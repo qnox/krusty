@@ -302,6 +302,13 @@ fn emit_class(
         access |= 0x0400;
     } // ABSTRACT
     cw.set_access(access);
+    if let Some(s) = ir
+        .class_signatures
+        .get(&c.fq_name)
+        .and_then(jvm_class_signature)
+    {
+        cw.set_signature(&s);
+    }
     for itf in &c.interfaces {
         cw.add_interface(itf);
     }
@@ -1266,13 +1273,69 @@ fn emit_method(
     } else {
         0x0019 // PUBLIC | STATIC | FINAL
     };
+    let signature = ir
+        .signatures
+        .get(&fid)
+        .and_then(|g| jvm_method_signature(g, f));
     e.cw.add_method_sig(
         access,
         &f.name,
         &method_descriptor(&param_tys, ret),
         &code,
-        ir.signatures.get(&fid).map(|s| s.as_str()),
+        signature.as_deref(),
     );
+}
+
+/// Format a function's backend-agnostic [`crate::ir::IrGenericSig`] into a JVM generic `Signature`
+/// (`<T:Ljava/lang/Object;>(TT;)TT;`). `None` if a bound can't be represented yet. Concrete parameter/
+/// return descriptors come from the (erased) `IrFunction`; bare type-parameter positions are `T<name>;`.
+fn jvm_method_signature(g: &crate::ir::IrGenericSig, f: &crate::ir::IrFunction) -> Option<String> {
+    let mut s = jvm_type_params(g)?;
+    s.push('(');
+    for (i, pt) in g.param_tparams.iter().enumerate() {
+        match pt {
+            Some(name) => s.push_str(&format!("T{name};")),
+            None => s.push_str(&ir_ty_to_jvm(&f.params[i]).descriptor()),
+        }
+    }
+    s.push(')');
+    match &g.ret_tparam {
+        Some(name) => s.push_str(&format!("T{name};")),
+        None => s.push_str(&ir_ty_to_jvm(&f.ret).descriptor()),
+    }
+    Some(s)
+}
+
+/// Format a class's generic shape into a JVM class `Signature` (`<T:Ljava/lang/Object;>Ljava/lang/Object;`).
+fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
+    let mut s = jvm_type_params(g)?;
+    s.push_str("Ljava/lang/Object;");
+    Some(s)
+}
+
+/// The shared `<T:bound…>` type-parameter section. `None` if any bound can't be represented.
+fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
+    let mut s = String::from("<");
+    for (name, bound) in &g.type_params {
+        s.push_str(name);
+        s.push(':');
+        s.push_str(&jvm_bound_descriptor(bound)?);
+    }
+    s.push('>');
+    Some(s)
+}
+
+/// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
+/// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`). `None` for anything else.
+fn jvm_bound_descriptor(bound: &crate::ir::IrType) -> Option<String> {
+    let ty = ir_ty_to_jvm(bound);
+    if ty == Ty::obj("kotlin/Any") {
+        return Some("Ljava/lang/Object;".to_string());
+    }
+    if ty.is_primitive() {
+        return crate::resolve::nullable_prim_wrapper(ty).map(|w| format!("L{w};"));
+    }
+    None
 }
 
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an

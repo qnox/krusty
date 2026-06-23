@@ -67,6 +67,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P14 — class-level generic `Signature` + move signature FORMATTING to the JVM backend (gate
+  1491, FAIL=0).** (a) ARCHITECTURE FIX (owner-flagged): P12/P13 built JVM descriptor strings inside
+  `ir_lower`, coupling the backend-agnostic IR to the JVM target ([[feedback-platform-decouple]]). Now
+  `ir_lower` only EXTRACTS a backend-agnostic `ir::IrGenericSig` (type-param names + bounds as Kotlin
+  `IrType`; which params/return are bare type-param refs); the JVM backend (`ir_emit::jvm_method_signature`
+  / `jvm_class_signature` / `jvm_bound_descriptor`) formats the `Signature` string. (b) NEW: generic
+  CLASSES emit a class `Signature` (`class Box<T>` → `<T:Ljava/lang/Object;>Ljava/lang/Object;`) via
+  `ClassWriter::set_signature`. Function + member + class signatures verified byte-identical to kotlinc;
+  gate 1491/0. Landed on branch `phase-signatures` (the shared `master` working tree was being
+  concurrently reset, wiping source — see [[feedback-never-bypass-hooks]]). NEXT: field signatures.
 - **Phase P13 — generic member methods: scope own type params + emit `Signature` (gate 1491, FAIL=0).**
   Two coupled fixes: (1) CORRECTNESS — a member method's return type referencing the method's OWN type
   parameter (`class Box { fun <U> wrap(u: U): U }`) was rejected "unresolved reference 'U'": the signature

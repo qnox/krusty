@@ -287,6 +287,15 @@ impl ClassWriter {
         self.access = access;
     }
 
+    /// Attach a class-level generic `Signature` attribute (e.g. `<T:Ljava/lang/Object;>Ljava/lang/Object;`).
+    pub fn set_signature(&mut self, signature: &str) {
+        let name = self.cp.utf8("Signature");
+        let sig = self.cp.utf8(signature);
+        let mut body = Vec::new();
+        u2(&mut body, sig);
+        self.class_attributes.push((name, body));
+    }
+
     /// Add an implemented interface / extended interface by internal name.
     pub fn add_interface(&mut self, internal: &str) {
         let c = self.cp.class(internal);
