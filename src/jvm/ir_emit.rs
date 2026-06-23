@@ -17,6 +17,18 @@ thread_local! {
     static INLINE_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
+/// encoded protobuf, one byte per `char`) / `d2` (string table) arrays. Attached to the facade class so
+/// another Kotlin/krusty compilation can resolve its top-level declarations — in particular reading the
+/// `IS_SUSPEND` flag + logical signature of a `suspend fun`.
+pub struct KotlinMetadata {
+    pub k: i32,
+    pub mv: Vec<i32>,
+    pub xi: i32,
+    pub d1: Vec<String>,
+    pub d2: Vec<String>,
+}
+
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
@@ -24,6 +36,7 @@ pub fn emit_all(
     ir: &IrFile,
     facade: &str,
     bodies: &dyn MethodBodies,
+    metadata: Option<&KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
@@ -39,6 +52,9 @@ pub fn emit_all(
         emit_method(ir, i as u32, facade, facade, &mut cw, false, bodies);
     }
     emit_statics(ir, facade, &mut cw, bodies);
+    if let Some(m) = metadata {
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
     out.push((facade.to_string(), cw.finish()));
     // Each class.
     for c in &ir.classes {

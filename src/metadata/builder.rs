@@ -12,7 +12,19 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// `suspend fun` — sets `Function.flags` `IS_SUSPEND` (bit 13). Its `params`/`ret` are the LOGICAL
+    /// signature (no `Continuation`, the source return), exactly as kotlinc records in `@Metadata`.
+    pub suspend: bool,
+    /// The PHYSICAL JVM method descriptor (`(…,Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` for
+    /// a suspend fn) recorded as the `JvmMethodSignature` extension, so a kotlinc reader maps the
+    /// metadata function to its bytecode method. `None` omits the extension.
+    pub jvm_desc: Option<String>,
 }
+
+/// `Function.flags` kotlinc emits for a `public final suspend fun`: `IS_SUSPEND` (bit 13) plus the
+/// PUBLIC-visibility / FINAL-modality bits (`0x06`) — `8198`. Without the visibility bits a reader
+/// treats the function as `internal`/inaccessible; the reader keys suspension off bit 13 either way.
+const SUSPEND_FUN_FLAGS: u64 = (1 << 13) | 0x06;
 
 /// `predefinedIndex` of a builtin type's fq-name in `PREDEFINED_STRINGS`.
 fn builtin_index(t: Ty) -> Option<u64> {
@@ -90,6 +102,12 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
 
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
+    // Function.flags = 9 — emitted only when non-zero (a `suspend fun` sets IS_SUSPEND). kotlinc orders
+    // `flags` before `name`; matching that keeps the byte layout identical for a plain function (flags
+    // omitted) and lets the reader pick up IS_SUSPEND for a suspend one.
+    if f.suspend {
+        p.field_varint(9, SUSPEND_FUN_FLAGS);
+    }
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
     let ret = type_pb(st, f.ret);
     p.field_message(3, &ret); // Function.return_type = 3
@@ -99,6 +117,13 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         let ty = type_pb(st, *pty);
         vp.field_message(3, &ty); // ValueParameter.type = 3
         p.repeated_message(6, &vp); // Function.value_parameter = 6
+    }
+    // JvmProtoBuf.methodSignature extension (Function field 100): only the descriptor (field 2) — the
+    // name defaults to the function's, exactly as kotlinc emits for a top-level function.
+    if let Some(desc) = &f.jvm_desc {
+        let mut sig = Pb::new();
+        sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
+        p.field_message(100, &sig); // Function.methodSignature = 100
     }
     p
 }
@@ -196,6 +221,8 @@ mod tests {
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
+                suspend: false,
+                jvm_desc: None,
             }],
             &[],
         );
@@ -211,6 +238,8 @@ mod tests {
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
+                suspend: false,
+                jvm_desc: None,
             }],
             &[],
         );

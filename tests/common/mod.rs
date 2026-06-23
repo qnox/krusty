@@ -57,7 +57,7 @@ pub fn compile_in_process(
     if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
         return None; // value-class shape not lowered — skip, don't miscompile
     }
-    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp)?;
+    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
     if outputs.is_empty() {
         None
     } else {

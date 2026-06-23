@@ -241,6 +241,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`invokestatic check(Continuation)` with no continuation argument → an operand-stack VerifyError).
   Proven: `if (c && check()) return 1` drives `bar(true)`→1, `bar(false)`→2
   (`tests/suspend_e2e.rs::suspend_fun_suspension_in_and_condition`).
+- **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
+  a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
+  classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only
+  `@Metadata` carries `IS_SUSPEND` + the logical return). `metadata/builder.rs` writes the `Package`
+  protobuf (`Function.flags` = `IS_SUSPEND | public | final` = 8198, the LOGICAL `return_type`, and the
+  physical `JvmMethodSignature` extension), the backend builds it from the resolved `Signature`s and
+  attaches it via `ClassWriter::set_kotlin_metadata` (`k=2`, `mv=[2,4,0]`, `xi=48`; `d1` is the payload
+  one byte per `char`). Emitted only for facades with suspend functions (non-suspend facades resolve
+  from their physical descriptors, unchanged). Proven both directions: krusty compiles a `suspend fun
+  helper` lib, then krusty resolves + runs a caller against it → 43
+  (`tests/suspend_e2e.rs::krusty_compiled_suspend_dep_is_consumable`); the real kotlinc 2.4.0 also reads
+  the annotation and compiles the same caller without error.
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
