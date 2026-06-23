@@ -2133,7 +2133,7 @@ impl<'a> Lower<'a> {
         }
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
         let ctor =
-            crate::libraries::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
+            crate::call_resolver::resolve_constructor(&*self.syms.libraries, internal, &arg_tys)?;
         if ctor.params.len() != args.len() {
             return None;
         }
@@ -2236,95 +2236,96 @@ impl<'a> Lower<'a> {
             }
             let comp = format!("component{}", idx + 1);
             let recv = self.ir.add_expr(IrExpr::GetValue(tmp));
-            let (call, log_ty) =
-                if let Some((class, index, _, _)) = self.resolve_method(&internal, &comp) {
-                    let ret = self
-                        .syms
-                        .method_of(&internal, &comp)
-                        .map(|s| s.ret)
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                    (
-                        self.ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index,
-                            receiver: recv,
-                            args: vec![],
-                        }),
-                        ret,
-                    )
-                } else if let Some(m) =
-                    crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])
-                {
-                    let is_iface = self
-                        .syms
-                        .libraries
-                        .resolve_type(&internal)
-                        .map_or(false, |t| t.is_interface);
-                    let log = self
-                        .syms
-                        .libraries
-                        .member_return(it_ty, &comp, &[])
-                        .unwrap_or(m.ret);
-                    let c = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal.clone(),
-                            name: comp.clone(),
-                            descriptor: m.descriptor.clone(),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
+            let (call, log_ty) = if let Some((class, index, _, _)) =
+                self.resolve_method(&internal, &comp)
+            {
+                let ret = self
+                    .syms
+                    .method_of(&internal, &comp)
+                    .map(|s| s.ret)
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                (
+                    self.ir.add_expr(IrExpr::MethodCall {
+                        class,
+                        index,
+                        receiver: recv,
                         args: vec![],
-                    });
-                    (self.coerce_erased(c, log, m.ret), log)
-                } else if let Some(c) =
-                    self.syms
-                        .libraries
-                        .resolve_callable(&comp, Some(it_ty), &[], &[])
-                {
-                    // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
-                    let call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner: c.owner,
-                            name: c.name,
-                            descriptor: c.descriptor,
-                            inline: c.is_inline,
-                            must_inline: false,
-                        },
-                        dispatch_receiver: None,
-                        args: vec![recv],
-                    });
-                    (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
-                } else {
-                    // An indexable type: `componentN` is the inline `get(N-1)`.
-                    let m = crate::libraries::resolve_instance(
-                        &*self.syms.libraries,
-                        &internal,
-                        "get",
-                        &[Ty::Int],
-                    )?;
-                    let is_iface = self
-                        .syms
-                        .libraries
-                        .resolve_type(&internal)
-                        .map_or(false, |t| t.is_interface);
-                    let log = self
-                        .syms
-                        .libraries
-                        .member_return(it_ty, "get", &[Ty::Int])
-                        .unwrap_or(m.ret);
-                    let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
-                    let c = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: internal.clone(),
-                            name: "get".to_string(),
-                            descriptor: m.descriptor.clone(),
-                            interface: is_iface,
-                        },
-                        dispatch_receiver: Some(recv),
-                        args: vec![i],
-                    });
-                    (self.coerce_erased(c, log, m.ret), log)
-                };
+                    }),
+                    ret,
+                )
+            } else if let Some(m) =
+                crate::call_resolver::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])
+            {
+                let is_iface = self
+                    .syms
+                    .libraries
+                    .resolve_type(&internal)
+                    .map_or(false, |t| t.is_interface);
+                let log = self
+                    .syms
+                    .libraries
+                    .member_return(it_ty, &comp, &[])
+                    .unwrap_or(m.ret);
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: internal.clone(),
+                        name: comp.clone(),
+                        descriptor: m.descriptor.clone(),
+                        interface: is_iface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![],
+                });
+                (self.coerce_erased(c, log, m.ret), log)
+            } else if let Some(c) =
+                self.syms
+                    .libraries
+                    .resolve_callable(&comp, Some(it_ty), &[], &[])
+            {
+                // `List.component1()` etc. are stdlib extensions: `invokestatic facade.componentN(recv)`.
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: c.owner,
+                        name: c.name,
+                        descriptor: c.descriptor,
+                        inline: c.is_inline,
+                        must_inline: false,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![recv],
+                });
+                (self.coerce_erased(call, c.ret, c.physical_ret), c.ret)
+            } else {
+                // An indexable type: `componentN` is the inline `get(N-1)`.
+                let m = crate::call_resolver::resolve_instance(
+                    &*self.syms.libraries,
+                    &internal,
+                    "get",
+                    &[Ty::Int],
+                )?;
+                let is_iface = self
+                    .syms
+                    .libraries
+                    .resolve_type(&internal)
+                    .map_or(false, |t| t.is_interface);
+                let log = self
+                    .syms
+                    .libraries
+                    .member_return(it_ty, "get", &[Ty::Int])
+                    .unwrap_or(m.ret);
+                let i = self.ir.add_expr(IrExpr::Const(IrConst::Int(idx as i32)));
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: internal.clone(),
+                        name: "get".to_string(),
+                        descriptor: m.descriptor.clone(),
+                        interface: is_iface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![i],
+                });
+                (self.coerce_erased(c, log, m.ret), log)
+            };
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, log_ty));
             out.push(self.ir.add_expr(IrExpr::Variable {
@@ -3795,7 +3796,7 @@ impl<'a> Lower<'a> {
         // `iterator` *extension* (`for (e in map)` uses `Map.iterator()` → `Iterator<Map.Entry<K,V>>`).
         // `iter_ret` is the (possibly parameterized) iterator type; `ext_iter` flags the static call.
         let (iter_ret, iter_desc, iter_owner, iter_ext) = if let Some(m) =
-            crate::libraries::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
+            crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "iterator", &[])
         {
             (m.ret, m.descriptor, internal.to_string(), false)
         } else if let Some(c) =
@@ -3809,14 +3810,18 @@ impl<'a> Lower<'a> {
         };
         let iter_ty = iter_ret;
         let iter_internal = iter_ty.obj_internal()?.to_string();
-        let hasnext_m = crate::libraries::resolve_instance(
+        let hasnext_m = crate::call_resolver::resolve_instance(
             &*self.syms.libraries,
             &iter_internal,
             "hasNext",
             &[],
         )?;
-        let next_m =
-            crate::libraries::resolve_instance(&*self.syms.libraries, &iter_internal, "next", &[])?;
+        let next_m = crate::call_resolver::resolve_instance(
+            &*self.syms.libraries,
+            &iter_internal,
+            "next",
+            &[],
+        )?;
         // The element is the iterator's type argument (`Iterator<Map.Entry<K,V>>`), else the iterable's
         // own (`List<Int>` → `Int`), else the type parameter's upper bound (`Any`). The JVM `Object`
         // realization + checkcast are the backend's concern, applied at the Ty→bytecode boundary.
@@ -4159,7 +4164,7 @@ impl<'a> Lower<'a> {
             .into_iter()
             .flatten()
             .find_map(|cand| {
-                crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &cand, &[])
+                crate::call_resolver::resolve_instance(&*self.syms.libraries, &internal, &cand, &[])
                     .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
                     .map(|m| {
                         let is_iface = self
@@ -4286,9 +4291,12 @@ impl<'a> Lower<'a> {
             _ => None,
         };
         if let Some(internal) = &lib_owner {
-            if let Some(m) =
-                crate::libraries::resolve_instance(&*self.syms.libraries, internal, name, &arg_tys)
-            {
+            if let Some(m) = crate::call_resolver::resolve_instance(
+                &*self.syms.libraries,
+                internal,
+                name,
+                &arg_tys,
+            ) {
                 if m.params.len() == args.len() {
                     let is_iface = self
                         .syms
@@ -5256,7 +5264,7 @@ impl<'a> Lower<'a> {
                         let (it, vt) = (self.info.ty(index), self.info.ty(value));
                         // `MutableList.set(Int, E)`, or `MutableMap.put(K, V)` — Kotlin's `m[k] = v`
                         // operator maps to `put` on a map.
-                        let resolved = crate::libraries::resolve_instance(
+                        let resolved = crate::call_resolver::resolve_instance(
                             &*self.syms.libraries,
                             internal,
                             "set",
@@ -5264,7 +5272,7 @@ impl<'a> Lower<'a> {
                         )
                         .map(|m| ("set", m))
                         .or_else(|| {
-                            crate::libraries::resolve_instance(
+                            crate::call_resolver::resolve_instance(
                                 &*self.syms.libraries,
                                 internal,
                                 "put",
@@ -6438,8 +6446,13 @@ impl<'a> Lower<'a> {
                 .into_iter()
                 .flatten()
                 .find_map(|c| {
-                    crate::libraries::resolve_instance(&*self.syms.libraries, &internal, &c, &[])
-                        .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
+                    crate::call_resolver::resolve_instance(
+                        &*self.syms.libraries,
+                        &internal,
+                        &c,
+                        &[],
+                    )
+                    .filter(|m| !matches!(m.ret, Ty::Unit | Ty::Error))
                 })?;
             self.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
@@ -6679,7 +6692,7 @@ impl<'a> Lower<'a> {
                                 // A classpath instance method (`s?.substring(1)`).
                                 let arg_tys: Vec<Ty> =
                                     args.iter().map(|&a| self.info.ty(a)).collect();
-                                if let Some(m) = crate::libraries::resolve_instance(
+                                if let Some(m) = crate::call_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
                                     &name,
@@ -6749,7 +6762,7 @@ impl<'a> Lower<'a> {
                                     .into_iter()
                                     .flatten()
                                     .find_map(|c| {
-                                        crate::libraries::resolve_instance(
+                                        crate::call_resolver::resolve_instance(
                                             &*self.syms.libraries,
                                             &internal,
                                             &c,
@@ -7263,7 +7276,7 @@ impl<'a> Lower<'a> {
                 if let Ty::Obj(internal, _) = at {
                     if at.array_elem().is_none() {
                         let it = self.info.ty(index);
-                        if let Some(m) = crate::libraries::resolve_instance(
+                        if let Some(m) = crate::call_resolver::resolve_instance(
                             &*self.syms.libraries,
                             internal,
                             "get",
@@ -9232,7 +9245,7 @@ impl<'a> Lower<'a> {
                                     sig.params.clone(),
                                     crate::jvm::names::method_descriptor(&sig.params, sig.ret),
                                 )
-                            } else if let Some(m) = crate::libraries::resolve_instance(
+                            } else if let Some(m) = crate::call_resolver::resolve_instance(
                                 &*self.syms.libraries,
                                 &sup,
                                 &name,
@@ -9353,7 +9366,7 @@ impl<'a> Lower<'a> {
                                 || rty == Ty::String
                                 || rty.obj_internal().map_or(false, |i| {
                                     range_counted_elem(i).is_some()
-                                        || crate::libraries::resolve_instance(
+                                        || crate::call_resolver::resolve_instance(
                                             &*self.syms.libraries,
                                             i,
                                             "iterator",
@@ -9384,7 +9397,7 @@ impl<'a> Lower<'a> {
                         {
                             let rty = self.info.ty(receiver);
                             let iterable = rty.obj_internal().map_or(false, |i| {
-                                crate::libraries::resolve_instance(
+                                crate::call_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     i,
                                     "iterator",
@@ -9948,7 +9961,7 @@ impl<'a> Lower<'a> {
                                 }
                             })
                             .and_then(|internal| {
-                                crate::libraries::resolve_instance(
+                                crate::call_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     &internal,
                                     &name,
