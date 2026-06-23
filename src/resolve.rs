@@ -1266,17 +1266,40 @@ pub fn collect_signatures_with_cp(
                                 .to_string(),
                         );
                     }
-                    // Type from the annotation, else a light inference from a literal initializer (or,
-                    // for a computed property, from its expression getter body).
-                    let ty = match (&p.ty, &p.getter) {
-                        (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                        (None, Some(FunBody::Expr(g))) if is_computed => {
-                            infer_lit_ty(file, *g, &class_names, &fun_rets)
+                    // A delegated property `val x: T by Del()`: type is the annotation if present, else the
+                    // delegate's `getValue` return type. Resolving the read-type here lets `val a = x`
+                    // infer. (The lowering — `x$delegate`/`x$kprop` + `getX()` — is in ir_lower; an
+                    // unresolvable delegate type yields `Error` and the file skips.)
+                    let ty = if let Some(de) = p.delegate {
+                        match &p.ty {
+                            Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
+                            None => infer_lit_ty(file, de, &class_names, &fun_rets)
+                                .obj_internal()
+                                .and_then(|i| table.method_of(i, "getValue"))
+                                .map(|s| s.ret)
+                                .unwrap_or(Ty::Error),
                         }
-                        (None, _) => p
-                            .init
-                            .map(|i| infer_lit_ty(file, i, &class_names, &fun_rets))
-                            .unwrap_or(Ty::Error),
+                    } else {
+                        // Type from the annotation, else a light inference from a literal initializer (or,
+                        // for a computed property, from its expression getter body).
+                        match (&p.ty, &p.getter) {
+                            (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
+                            (None, Some(FunBody::Expr(g))) if is_computed => {
+                                infer_lit_ty(file, *g, &class_names, &fun_rets)
+                            }
+                            (None, _) => p
+                                .init
+                                .map(|i| {
+                                    // `val a = other` referencing an already-collected top-level property.
+                                    if let Expr::Name(n) = file.expr(i) {
+                                        if let Some((t, _)) = table.props.get(n) {
+                                            return *t;
+                                        }
+                                    }
+                                    infer_lit_ty(file, i, &class_names, &fun_rets)
+                                })
+                                .unwrap_or(Ty::Error),
+                        }
                     };
                     if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -2752,6 +2775,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                 }
                 c.this_ty = prev_this;
+                // A delegated property's delegate expression (`by Del()`) must be type-checked so its
+                // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
+                if let Some(de) = p.delegate {
+                    let _ = c.expr(de);
+                }
                 if let Some(init) = p.init {
                     let it = c.expr(init);
                     if let Some((declared, _)) = syms

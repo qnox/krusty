@@ -67,6 +67,29 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P19 — top-level delegated properties `val x by Del()` (gate 1492 → 1495, +3, FAIL=0).**
+  A top-level `val x: T by Delegate()` (explicit or inferred type) now compiles. Model (all reuse, no new
+  emit path): two synthetic statics `x$delegate: Del` (init = the delegate expression) and `x$kprop:
+  KProperty` (init = an inline `new PropertyReference0Impl(FacadeKt::class, "x", "getX()<retdesc>", 1)`),
+  plus a `getX()` accessor whose body is `x$delegate.getValue(null, x$kprop)`. Reads of `x` route through
+  `getX()` via `computed_props` (registered in lower pass 1c). Pieces:
+  - **IR**: new `IrExpr::ClassConst { internal }` — `ldc class <internal>`; empty `internal` is a sentinel
+    for the enclosing facade (lowering doesn't know the facade name; the emitter substitutes `self.facade`).
+  - **resolver** (`collect_signatures`): a delegated property's type = the annotation, else the delegate's
+    `getValue` return type (so `val a = x` infers). `check_file` now type-checks the delegate expression so
+    its sub-expression types are recorded for lowering. A top-level `val a = b` referencing another already-
+    collected top-level property now infers its type.
+  - **lower** (`ir_lower`): `lower_delegated_top_level` builds the two statics + `getX` body; pass 1c RESERVES
+    the two synthetic static-index slots so later non-delegated statics keep matching `GetStatic` indices
+    (the divergence that first produced a `VerifyError`). The early lowerability gate admits delegated props.
+  - **SOUND SKIP**: a file-local delegate whose `getValue` references its `KProperty` parameter (reflection —
+    `p.name`/`p.returnType`/`p.toString()`) is skipped: krusty emits no `@Metadata` property entry for the
+    synthesized reference, so reflection on it can't resolve (`useReflectionOnKProperty.kt` was the lone such
+    case — would `KotlinReflectionInternalError` otherwise). New `delegated_prop_e2e` (explicit + inferred,
+    incl. the `accessTopLevelDelegatedPropertyInClinit` shape). BYTE-PARITY follow-up: kotlinc keeps the
+    `KProperty`s in one `$$delegatedProperties` array (krusty uses a per-prop `$kprop` field — runtime-equal);
+    member delegated properties still skip (foundation bail). NEXT: member delegation (the larger ~mover) +
+    `@Metadata` for delegated properties.
 - **Phase P18 — nullable type-parameter `Signature`s (gate 1492, FAIL=0).** A nullable type-parameter
   reference (`fun <T> f(t: T?): T?`, `val a: T?`) is `T<name>;` in the JVM generic signature — `?` is not
   represented there (kotlinc drops it; the erased descriptor stays `Object`). Previously `ref_is_bare_tparam`

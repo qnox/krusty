@@ -2148,6 +2148,16 @@ impl<'a> Emitter<'a> {
                 IrConst::String(s) => code.push_string(s, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
+            IrExpr::ClassConst { internal } => {
+                // Empty `internal` is a sentinel for "the enclosing facade/owner class" (the lowering
+                // doesn't know the facade name — only the emitter does, via `self.facade`).
+                let name = if internal.is_empty() {
+                    self.facade.clone()
+                } else {
+                    internal.clone()
+                };
+                code.ldc_class(&name, self.cw);
+            }
             IrExpr::GetValue(i) => {
                 let (slot, jt) = self.slots[i];
                 load(jt, slot, code);
