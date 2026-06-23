@@ -342,6 +342,10 @@ pub struct FunDecl {
     pub body: FunBody,
     /// Generic type-parameter names (`fun <T, U> …`), erased to `Any`/`Object`.
     pub type_params: Vec<String>,
+    /// Declared non-`Any` upper bounds (`fun <T: Int> …` → `("T", Int)`). A PRIMITIVE bound makes the
+    /// parameter specialized to that primitive (kotlinc emits `(I)I`, not `(Object)Object`), like a
+    /// value class's underlying type — see `ClassDecl::type_param_bounds`.
+    pub type_param_bounds: Vec<(String, TypeRef)>,
     /// Subset of `type_params` that carry an `Any` upper bound (`T: Any`) — non-nullable on JVM.
     pub non_null_type_params: std::collections::HashSet<String>,
     /// Subset of `type_params` declared `reified` (only meaningful on an `inline` function): the body
@@ -553,9 +557,18 @@ pub struct File {
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
+    /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
+    /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
+    /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
+    pub spread_arg_ids: std::collections::HashSet<u32>,
 }
 
 impl File {
+    /// Whether call argument `id` (the inner expr of `*expr`) was written with the spread operator.
+    pub fn is_spread_arg(&self, id: ExprId) -> bool {
+        self.spread_arg_ids.contains(&id.0)
+    }
+
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.expr_arena[id.0 as usize]
     }

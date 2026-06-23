@@ -517,8 +517,7 @@ pub fn collect_signatures_with_cp(
             if let Decl::Fun(f) = file.decl(d) {
                 if f.receiver.is_none() {
                     if let Some(r) = &f.ret {
-                        let tp: std::collections::HashSet<String> =
-                            f.type_params.iter().cloned().collect();
+                        let tp = TParams::from_decl(&f.type_params, &f.type_param_bounds);
                         fun_rets.insert(f.name.clone(), ty_of_ref(r, &class_names, &tp, diags));
                     }
                 }
@@ -532,8 +531,7 @@ pub fn collect_signatures_with_cp(
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
-                    let tp: std::collections::HashSet<String> =
-                        f.type_params.iter().cloned().collect();
+                    let tp = TParams::from_decl(&f.type_params, &f.type_param_bounds);
                     // A `vararg` parameter's runtime type is `Array<elem>`.
                     let params: Vec<Ty> = f
                         .params
@@ -691,8 +689,7 @@ pub fn collect_signatures_with_cp(
                         .get(&c.name)
                         .cloned()
                         .unwrap_or_else(|| class_internal(file, &c.name));
-                    let ctp: std::collections::HashSet<String> =
-                        c.type_params.iter().cloned().collect();
+                    let ctp = TParams::erased(&c.type_params);
                     // An `init` block that calls an own member method *before* a later property
                     // initializer runs has subtle init-order semantics (cf. KT-73355) krusty doesn't
                     // model — the helper may observe/overwrite a not-yet-initialized field. Reject it.
@@ -882,8 +879,7 @@ pub fn collect_signatures_with_cp(
                         .methods
                         .iter()
                         .map(|m| {
-                            let mut mtp = ctp.clone();
-                            mtp.extend(m.type_params.iter().cloned());
+                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
@@ -1038,8 +1034,7 @@ pub fn collect_signatures_with_cp(
                         .companion_methods
                         .iter()
                         .map(|m| {
-                            let mut mtp = ctp.clone();
-                            mtp.extend(m.type_params.iter().cloned());
+                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
@@ -2007,12 +2002,95 @@ fn range_primitive_elem(internal: &str) -> Option<Ty> {
     }
 }
 
+/// Generic type parameters in scope, each with its JVM erasure. A parameter with a wrappable standard
+/// primitive upper bound (`<T : Int>`) erases to that PRIMITIVE — kotlinc specializes it (descriptor
+/// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
+#[derive(Default, Clone)]
+pub struct TParams {
+    erasure: std::collections::HashMap<String, Ty>,
+}
+
+impl TParams {
+    pub fn contains(&self, name: &str) -> bool {
+        self.erasure.contains_key(name)
+    }
+
+    /// The erasure of type parameter `name` (`Object` if unbounded / reference-bounded).
+    pub fn erase(&self, name: &str) -> Ty {
+        self.erasure
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+    }
+
+    /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
+    /// kotlinc specializes a class's primitive-bounded param too, but krusty's value-class pass already
+    /// owns class-param bound handling, and naive specialization there breaks the Object/value-class
+    /// boundary (VerifyError) — so classes keep the erased model; only FUNCTION params specialize.
+    pub fn erased(names: &[String]) -> Self {
+        let erasure = names
+            .iter()
+            .map(|n| (n.clone(), Ty::obj("kotlin/Any")))
+            .collect();
+        TParams { erasure }
+    }
+
+    /// Build from declared names + their non-`Any` upper bounds (`fun <T: Int>` → bounds `[("T", Int)]`).
+    pub fn from_decl(names: &[String], bounds: &[(String, TypeRef)]) -> Self {
+        let mut erasure = std::collections::HashMap::new();
+        for n in names {
+            let mut e = Ty::obj("kotlin/Any");
+            if let Some((_, b)) = bounds.iter().find(|(bn, _)| bn == n) {
+                if !b.nullable {
+                    if let Some(prim) = Ty::from_name(&b.name) {
+                        if prim.is_specializable_bound() {
+                            e = prim;
+                        }
+                    }
+                }
+            }
+            erasure.insert(n.clone(), e);
+        }
+        TParams { erasure }
+    }
+
+    /// Extend with another scope's parameters (a method inside a generic class sees both).
+    pub fn extended(&self, names: &[String], bounds: &[(String, TypeRef)]) -> Self {
+        let mut out = self.clone();
+        let more = TParams::from_decl(names, bounds);
+        out.erasure.extend(more.erasure);
+        out
+    }
+
+    /// Insert a scope's parameters (with their erasures), returning the names that were NEWLY added
+    /// (so the caller can `remove` exactly those on scope exit). Mirrors the old `HashSet::insert`-filter.
+    pub fn insert_decl(&mut self, names: &[String], bounds: &[(String, TypeRef)]) -> Vec<String> {
+        let scoped = TParams::from_decl(names, bounds);
+        let mut added = Vec::new();
+        for (n, e) in scoped.erasure {
+            if !self.erasure.contains_key(&n) {
+                self.erasure.insert(n.clone(), e);
+                added.push(n);
+            }
+        }
+        added
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.erasure.remove(name);
+    }
+
+    pub fn clear(&mut self) {
+        self.erasure.clear();
+    }
+}
+
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
-/// (→ `Ty::Obj`), or a generic type parameter (erased to `java/lang/Object`).
+/// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `java/lang/Object`).
 fn ty_of_ref(
     r: &TypeRef,
     classes: &HashMap<String, String>,
-    tparams: &std::collections::HashSet<String>,
+    tparams: &TParams,
     diags: &mut DiagSink,
 ) -> Ty {
     // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
@@ -2065,7 +2143,7 @@ fn ty_of_ref(
         // `X::class` lowers to here). Enough for class-literal storage/identity, not full reflection.
         Ty::obj("java/lang/Class")
     } else if tparams.contains(&r.name) {
-        Ty::obj("kotlin/Any") // erased generic type parameter
+        tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
     } else if let Some(internal) = classes.get(&r.name) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
@@ -2258,7 +2336,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
     for &d in &file.decls {
         match file.decl(d) {
             Decl::Fun(f) => {
-                c.tparams = f.type_params.iter().cloned().collect();
+                c.tparams = TParams::from_decl(&f.type_params, &f.type_param_bounds);
                 c.check_fun(f);
                 c.tparams.clear();
             }
@@ -2293,8 +2371,9 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                         "krusty: an annotation with an array member is not supported".to_string(),
                     );
                 }
-                // Class type parameters are in scope for all members.
-                c.tparams = cl.type_params.iter().cloned().collect();
+                // Class type parameters are in scope for all members (erased; only function params
+                // specialize — see `TParams::erased`).
+                c.tparams = TParams::erased(&cl.type_params);
                 // Member functions are checked with the class's properties (resolved in Stage C)
                 // visible as an implicit `this` scope.
                 let mut props = syms
@@ -2681,7 +2760,7 @@ struct Checker<'a> {
     ret_ty: Ty,
     imports: HashMap<String, String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
-    tparams: std::collections::HashSet<String>,
+    tparams: TParams,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
     /// The backing-field type while checking a property accessor body — makes the `field`
@@ -2844,7 +2923,7 @@ impl<'a> Checker<'a> {
                 None => Ty::Error,
             }
         } else if self.tparams.contains(&r.name) {
-            Ty::obj("kotlin/Any") // erased generic type parameter
+            self.tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             let internal = cs.internal.clone();
             self.obj_with_targs(&internal, r)
@@ -3156,7 +3235,7 @@ impl<'a> Checker<'a> {
         if let Some(t) = Ty::from_name(&r.name) {
             t
         } else if self.tparams.contains(&r.name) {
-            Ty::obj("kotlin/Any")
+            self.tparams.erase(&r.name)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal)
         } else {
@@ -3331,12 +3410,9 @@ impl<'a> Checker<'a> {
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
             collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
         }
-        let added: Vec<String> = f
-            .type_params
-            .iter()
-            .filter(|t| self.tparams.insert((*t).clone()))
-            .cloned()
-            .collect();
+        let added = self
+            .tparams
+            .insert_decl(&f.type_params, &f.type_param_bounds);
         self.ret_ty = f
             .ret
             .as_ref()
@@ -6402,6 +6478,16 @@ impl<'a> Checker<'a> {
                                 return t;
                             }
                         }
+                        // A spread argument `*a` (`Array<E>`/`XArray`) contributes its ELEMENT type `E`
+                        // to overload resolution and the vararg element check — it behaves like a list of
+                        // `E`-typed varargs; only the lowering differs (the array is passed through). A
+                        // mixed/unsupported spread shape still type-checks here but the lowering skips it.
+                        if self.file.is_spread_arg(a) {
+                            let t = self.expr(a);
+                            if let Some(elem) = t.array_elem() {
+                                return elem;
+                            }
+                        }
                         self.expr(a)
                     })
                     .collect();
@@ -7444,13 +7530,10 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Add the local function's own type parameters (erased to Object, same as top-level funs).
-        let added_tparams: Vec<String> = f
-            .type_params
-            .iter()
-            .filter(|t| self.tparams.insert((*t).clone()))
-            .cloned()
-            .collect();
+        // Add the local function's own type parameters (a primitive bound specializes, else Object).
+        let added_tparams = self
+            .tparams
+            .insert_decl(&f.type_params, &f.type_param_bounds);
 
         // Resolve parameter types.
         let params: Vec<Ty> = f

@@ -297,6 +297,18 @@ impl Ty {
         matches!(self, Ty::UInt | Ty::ULong)
     }
 
+    /// A primitive whose generic upper bound (`fun <T: Int>`) krusty specializes a FUNCTION type
+    /// parameter to (descriptor uses the primitive, like kotlinc). Restricted to the INTEGRAL JVM
+    /// primitives: floating types (`Double`/`Float`) have boxed-vs-primitive `==` (−0.0/NaN) semantics
+    /// that differ, and the unsigned/value primitives aren't representable, so those bounds stay
+    /// rejected (the file skips) rather than risk a miscompile.
+    pub fn is_specializable_bound(self) -> bool {
+        matches!(
+            self,
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Boolean | Ty::Char
+        )
+    }
+
     /// The signed primitive an unsigned type is represented by on the JVM (`UInt` → `Int`).
     pub fn unsigned_repr(self) -> Option<Ty> {
         match self {

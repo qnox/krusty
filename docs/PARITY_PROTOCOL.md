@@ -67,7 +67,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P11 — RESTORE P10's lost source + spread operator `*arr` (gate 1491, FAIL=0).** CORRECTION:
+  the P10 commit `a3b10f8` was HOLLOW — it captured only `docs/` + the test file; the actual source
+  (the `TParams` refactor, `is_specializable_bound`, `FunDecl.type_param_bounds`) was reverted by tooling
+  before the commit, so the pushed tree was really at the P9 gate (1457) and P10's test passed *vacuously*
+  (it skips when compile fails). This phase re-applies the full P10 source — verified `fun <T: Int>` →
+  descriptor `(I)I` and gate back to **1491**. LESSON: after `cargo fmt`/pre-commit, always re-check
+  `git diff --stat` lists the SOURCE files before committing; a green pre-push can still hide a vacuously-
+  skipping test. Also adds the **spread operator** `*arr`: `foo(*a)` (single spread → a top-level vararg
+  function) lowers to `Arrays.copyOf(a, a.size)` + `checkcast` — byte-identical to kotlinc (verified). A
+  guard at the `Expr::Call` lowering entry routes any spread call to a focused handler; every other shape
+  (mixed spreads, fixed args, member/library callee, primitive element, non-`Name` spread) returns `None`
+  → the file skips, so a spread arg never reaches the normal vararg-packing paths (never miscompiles). The
+  checker reports a spread arg's ELEMENT type to resolution/vararg-checking (it behaves like N varargs).
+  Spread test files mostly have other co-blockers (array-literal `dup` divergence, `Array<out>` variance),
+  so net gate is +0 for now, but the codegen is proven. Tests: `tests/spread_operator_e2e.rs`,
+  `tests/primitive_bound_generic_e2e.rs` (now asserts for real, not vacuous).
 - **Phase P10 — specialize integral primitive-bounded FUNCTION type parameters (gate 1459 → 1491, +32).**
+  ⚠️ The source for this phase did NOT land in commit `a3b10f8` (hollow — see P11); it is RESTORED in P11.
   `fun <T: Int> f(t: T): T` is specialized by kotlinc to the primitive (descriptor `(I)I`, not
   `(Object)Object` — verified). krusty previously REJECTED any primitive bound. Now a FUNCTION type
   parameter with an INTEGRAL wrappable bound (`Int`/`Long`/`Short`/`Byte`/`Char`/`Boolean`) erases to
