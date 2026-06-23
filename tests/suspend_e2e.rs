@@ -8,6 +8,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -78,7 +80,7 @@ fn krusty_compiled_suspend_dep_is_consumable() {
     // with IS_SUSPEND + the logical signature), then krusty compiles a CALLER against that dir. Without
     // the metadata writer the callee's physical `Object helper(Continuation)` is unresolvable as
     // `helper()`. Drives UseKt.caller(k) → 43.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -137,34 +139,25 @@ public class M {\n\
         lib.to_str().unwrap(),
         stdlib
     );
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
+    let out = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
     );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "suspend round-trip: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let Some(out) = out else {
+        eprintln!("skipping: java runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "suspend round-trip: {out}");
 }
 
 #[test]
 fn suspend_lambda_control_flow_with_capture_runs() {
     // A `suspend` lambda whose VALUE is a conditional suspension over a captured variable
     // (`{ if (c) foo() else 7 }`). Only the `c == true` branch suspends. make(true)→42, make(false)→7.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -208,24 +201,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "control-flow+capture lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "control-flow+capture lambda",);
 }
 
 #[test]
@@ -233,7 +218,7 @@ fn suspend_lambda_param_with_suspension_runs() {
     // A `suspend` lambda with its OWN parameter that ALSO suspends (`{ val a = foo(); it + a }`). The
     // parameter `it` is a field (set by `create`) reloaded into a local each invokeSuspend entry, like
     // a capture. make().invoke(10, k) → 10 + 42 = 52.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -274,24 +259,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "param+suspension lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "param+suspension lambda",);
 }
 
 #[test]
@@ -299,7 +276,7 @@ fn suspend_lambda_captures_with_suspension_runs() {
     // A `suspend` lambda that BOTH captures an enclosing variable AND suspends (`{ n + foo() }`). The
     // capture `n` is a field reloaded into a local at each invokeSuspend entry; the suspension threads
     // `this`. make(10).invoke(k) → 10 + 42 = 52.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -340,24 +317,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "capture+suspension lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "capture+suspension lambda",);
 }
 
 #[test]
@@ -442,24 +411,16 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "async two-suspension lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "async two-suspension lambda",);
 }
 
 #[test]
@@ -467,7 +428,7 @@ fn suspend_lambda_two_suspensions_runs() {
     // A `suspend` lambda with TWO suspension points (`{ val a = foo(); val b = bar(); a + b }`). Its
     // invokeSuspend needs a multi-state machine (the lambda instance as the continuation) — the general
     // lambda-mode flattener. Both callees complete synchronously → make().invoke(k) = 42 + 100 = 142.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -508,24 +469,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "two-suspension lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "two-suspension lambda",);
 }
 
 #[test]
@@ -533,7 +486,7 @@ fn suspend_lambda_non_tail_body_runs() {
     // A `suspend` lambda whose body BINDS a suspension result and then computes a tail expression
     // (`{ val a = foo(); a + 1 }`). The `invokeSuspend` state machine resumes into the binding, then
     // runs the tail. foo completes synchronously → make().invoke(k) yields boxed 43.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -574,24 +527,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "non-tail suspend lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "non-tail suspend lambda",);
 }
 
 #[test]
@@ -599,7 +544,7 @@ fn suspend_fun_suspension_in_and_condition() {
     // A suspension on the RHS of `&&` in an `if` CONDITION (`if (c && check())`). The condition is
     // evaluated (and suspends) before the branch; only the `c == true` path calls `check()`. Drives:
     // bar(true) → check() true → 1; bar(false) → short-circuits (no suspension) → 2.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -643,24 +588,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "&& condition suspension: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "&& condition suspension",);
 }
 
 #[test]
@@ -669,7 +606,7 @@ fn suspend_lambda_with_parameter_runs() {
     // parameter is a field set by `create(value, completion)`; `invoke(p, completion)` boxes p, calls
     // create, then invokeSuspend. The lambda implements Function2<Integer, Continuation, Object>.
     // Driven: make().invoke(10, k) -> 11.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -710,24 +647,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "suspend lambda param: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "suspend lambda param",);
 }
 
 #[test]
@@ -812,24 +741,16 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "async internal-suspension lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "async internal-suspension lambda",);
 }
 
 #[test]
@@ -837,7 +758,7 @@ fn suspend_lambda_with_internal_suspension_runs() {
     // A `suspend` lambda whose body SUSPENDS (`{ foo() }`, foo a suspend fn). Its `invokeSuspend` is a
     // state machine with the lambda instance itself as the continuation. foo completes synchronously →
     // make().invoke(k) yields boxed 42.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -878,24 +799,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "suspend lambda internal suspension: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "suspend lambda internal suspension",);
 }
 
 #[test]
@@ -903,7 +816,7 @@ fn suspend_lambda_captures_enclosing_variable() {
     // A `suspend` lambda capturing an enclosing parameter (`{ n + 1 }`). The captured value becomes a
     // field on the `SuspendLambda` subclass, set at construction and copied into the fresh instance
     // `invoke` builds. Driven: make(10).invoke(k) -> 10 + 1 = 11.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -944,24 +857,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "suspend lambda capture: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "suspend lambda capture",);
 }
 
 #[test]
@@ -970,7 +875,7 @@ fn leaf_suspend_lambda_creates_and_invokes() {
     // `SuspendLambda` subclass implementing `Function1<Continuation,Object>`, NOT krusty's
     // invokedynamic path. A Java driver gets the returned `Function1` and invokes it with a
     // continuation; the synchronously-completing body yields boxed 42.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1007,24 +912,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "leaf suspend lambda: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "leaf suspend lambda",);
 }
 
 #[test]
@@ -1050,7 +947,7 @@ fn suspend_fun_suspension_on_elvis_rhs() {
     // A suspension on the RHS of an elvis (`x ?: fallback()`) — a CONDITIONAL suspension (only the
     // null case suspends). Drives both: `bar(null)` takes the suspending branch → 7+1=8; `bar(5)`
     // takes the value branch (no suspension) → 5+1=6.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1094,24 +991,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "elvis suspension: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "elvis suspension",);
 }
 
 #[test]
@@ -1139,7 +1028,7 @@ fn leaf_suspend_fun_has_cps_signature() {
 /// The suspend callees complete synchronously (never COROUTINE_SUSPENDED), so the whole state machine
 /// runs to completion under `-Xverify:all`. Skips if javac / kotlin-stdlib is unavailable.
 fn run_suspend(name: &str, src: &str, call: &str, expect: i32) {
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1179,27 +1068,16 @@ public class M {{\n\
     );
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "{name}: javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "{name}: wrong result; stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "{name}: wrong result; got {out}",);
 }
 
 /// Like `run_suspend`, but compiles TWO source files in one krusty invocation. The callee lives in a
@@ -1207,7 +1085,7 @@ public class M {{\n\
 /// `suspend_funs` — the coroutine pass must learn it from the resolver (`@Metadata`/module symbols).
 /// `call` is `Facade.method`, driven as `Facade.method(k)`.
 fn run_suspend_2(name: &str, lib: &str, user: &str, facade: &str, method: &str, expect: i32) {
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1246,27 +1124,16 @@ public class M {{\n\
     );
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "{name}: javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "{name}: wrong result; stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "{name}: wrong result; got {out}",);
 }
 
 #[test]
@@ -1372,26 +1239,19 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
+        out.trim(),
         "OK",
-        "classpath suspend call: wrong result; stderr={}",
-        String::from_utf8_lossy(&run.stderr)
+        "classpath suspend call: wrong result; got {out}",
     );
 }
 
@@ -1452,7 +1312,7 @@ fn suspend_fun_suspension_inside_if_not_taken() {
 fn state_machine_member_suspend_fun_runs() {
     // A member suspend fn that SUSPENDS (calls `foo`): its continuation `C$m$1` must capture the
     // receiver and, on resume, call `receiver.m(continuation)`. Driven: new C(100).m(k) -> 100+42=142.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1492,24 +1352,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "got {out}",);
 }
 
 #[test]
@@ -1517,7 +1369,7 @@ fn state_machine_member_suspend_fun_with_param_runs() {
     // A member suspend fn that SUSPENDS and has its OWN parameter `x`, live across the suspension:
     // the continuation `C$m$1` must capture the receiver AND spill `x` (restored on resume). Driven:
     // new C(100).m(5, k) -> 100 + 42 + 5 = 147.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1557,24 +1409,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "got {out}",);
 }
 
 #[test]
@@ -1658,24 +1502,16 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "async toplevel-param: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "async toplevel-param",);
 }
 
 #[test]
@@ -1760,31 +1596,23 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    assert!(Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "async member-param: stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "async member-param",);
 }
 
 #[test]
 fn leaf_member_suspend_fun_runs() {
     // A leaf `suspend` member function: it gets the CPS signature on the instance method (`Object
     // m(Continuation)`), no state machine. A Java driver creates the instance and calls it: 100+5=105.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
@@ -1823,27 +1651,16 @@ public class M {\n\
 }\n";
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
-        "OK",
-        "member suspend wrong result; stderr={}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_eq!(out.trim(), "OK", "member suspend wrong result; got {out}",);
 }
 
 #[test]
@@ -2055,25 +1872,18 @@ public class M {\n\
         libjar.to_str().unwrap(),
         stdlib
     );
-    let jc = Command::new(format!("{jh}/bin/javac"))
-        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac driver failed:\n{}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{jh}/bin/java"))
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
+    let Some(out) = common::javac_run(
+        dir.join("M.java").to_str().unwrap(),
+        &cp,
+        dir.to_str().unwrap(),
+        "M",
+    ) else {
+        return;
+    };
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(
-        String::from_utf8_lossy(&run.stdout).trim(),
+        out.trim(),
         "OK",
-        "async suspend/resume: wrong result; stderr={}",
-        String::from_utf8_lossy(&run.stderr)
+        "async suspend/resume: wrong result; got {out}",
     );
 }

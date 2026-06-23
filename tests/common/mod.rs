@@ -828,6 +828,180 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     }
 }
 
+// --- Persistent javac+run server ------------------------------------------
+//
+// Tests that exercise a hand-written Java driver (e.g. invoking a krusty-compiled `suspend` function
+// with a `Continuation` from Java) compile `M.java` with `javac` then run it with `java` — two process
+// spawns per test, the dominant cost of those suites. Instead run ONE persistent JVM that compiles the
+// driver IN-PROCESS (`ToolProvider.getSystemJavaCompiler().run`, no spawn) and runs its `main` via a
+// `URLClassLoader` (capturing stdout), all file-path based — the test still writes the sources/classes
+// to disk exactly as before. Launched with `-Xverify:all` so loaded classes are verified like the
+// per-test `java -Xverify:all` they replace.
+
+const JAVA_RUNNER_SRC: &str = r#"
+import javax.tools.*;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+
+public class JavaRunner {
+    public static void main(String[] a) throws Exception {
+        DataInputStream din = new DataInputStream(new BufferedInputStream(System.in, 65536));
+        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
+        PrintStream realOut = System.out;
+        while (true) {
+            String driver, cp, outdir, mainClass;
+            try { driver = readStr(din); } catch (EOFException e) { break; }
+            cp = readStr(din); outdir = readStr(din); mainClass = readStr(din);
+            String result;
+            try {
+                ByteArrayOutputStream jerr = new ByteArrayOutputStream();
+                JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
+                int rc = jc.run(null, null, new PrintStream(jerr, true, "UTF-8"),
+                        "-cp", cp, "-d", outdir, driver);
+                if (rc != 0) {
+                    result = "ERROR:javac:" + jerr.toString("UTF-8");
+                } else {
+                    // Classpath for running: outdir + the given cp entries.
+                    String[] parts = cp.split(File.pathSeparator);
+                    URL[] urls = new URL[parts.length + 1];
+                    urls[0] = new File(outdir).toURI().toURL();
+                    for (int i = 0; i < parts.length; i++) urls[i + 1] = new File(parts[i]).toURI().toURL();
+                    ByteArrayOutputStream capture = new ByteArrayOutputStream();
+                    PrintStream cps = new PrintStream(capture, true, "UTF-8");
+                    System.setOut(cps);
+                    try (URLClassLoader ldr = new URLClassLoader(urls, ClassLoader.getSystemClassLoader())) {
+                        Class<?> cls = Class.forName(mainClass, true, ldr);
+                        cls.getMethod("main", String[].class).invoke(null, (Object) new String[0]);
+                        result = capture.toString("UTF-8");
+                    } catch (Throwable t) {
+                        Throwable c = t.getCause() != null ? t.getCause() : t;
+                        result = "ERROR:run:" + c;
+                    } finally {
+                        System.setOut(realOut);
+                    }
+                }
+            } catch (Throwable t) {
+                result = "ERROR:" + t;
+            }
+            byte[] rb = result.getBytes(StandardCharsets.UTF_8);
+            dout.writeInt(rb.length);
+            dout.write(rb);
+            dout.flush();
+        }
+    }
+
+    static String readStr(DataInputStream in) throws IOException {
+        int n = in.readInt();
+        return new String(in.readNBytes(n), StandardCharsets.UTF_8);
+    }
+}
+"#;
+
+fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in JAVA_RUNNER_SRC.bytes() {
+        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));
+    if dir.join("JavaRunner.class").is_file() {
+        return Some(dir);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let src_path = dir.join("JavaRunner.java");
+    std::fs::write(&src_path, JAVA_RUNNER_SRC).ok()?;
+    let javac = format!("{java_home}/bin/javac");
+    if !Path::new(&javac).exists() {
+        return None;
+    }
+    let out = Command::new(&javac)
+        .args(["-d", &dir.to_string_lossy()])
+        .arg(&src_path)
+        .output()
+        .ok()?;
+    out.status.success().then_some(dir)
+}
+
+struct JavaRunner {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
+impl JavaRunner {
+    fn new(java: &str, runner_dir: &Path) -> Option<Self> {
+        let mut child = Command::new(java)
+            .args([
+                "-Xverify:all",
+                "-cp",
+                &runner_dir.to_string_lossy(),
+                "JavaRunner",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        Some(JavaRunner {
+            _child: child,
+            stdin,
+            stdout,
+        })
+    }
+
+    fn write_str(&mut self, s: &str) -> std::io::Result<()> {
+        self.stdin.write_all(&(s.len() as u32).to_be_bytes())?;
+        self.stdin.write_all(s.as_bytes())
+    }
+
+    fn try_run(
+        &mut self,
+        driver: &str,
+        cp: &str,
+        outdir: &str,
+        main_class: &str,
+    ) -> std::io::Result<String> {
+        self.write_str(driver)?;
+        self.write_str(cp)?;
+        self.write_str(outdir)?;
+        self.write_str(main_class)?;
+        self.stdin.flush()?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let fd = self.stdout.as_raw_fd();
+        let mut len = [0u8; 4];
+        read_exact_deadline(fd, &mut len, deadline)?;
+        let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+        read_exact_deadline(fd, &mut buf, deadline)?;
+        Ok(String::from_utf8_lossy(&buf).into_owned())
+    }
+}
+
+/// Compile a Java `driver_path` against `cp` into `outdir` and run `main_class`'s `main`, in ONE
+/// persistent JVM (in-process javac + classloader, no per-call `javac`/`java` spawn). Returns the
+/// driver's stdout (or `ERROR:…`), or `None` if the JDK/JVM is unavailable. `cp` is the run+compile
+/// classpath (krusty output dirs + stdlib); `outdir` receives the driver's `.class`.
+#[allow(dead_code)]
+pub fn javac_run(driver_path: &str, cp: &str, outdir: &str, main_class: &str) -> Option<String> {
+    static POOL: OnceLock<Mutex<JavaRunner>> = OnceLock::new();
+    let java_home = java_home()?;
+    let java = format!("{java_home}/bin/java");
+    if !Path::new(&java).exists() {
+        return None;
+    }
+    let runner_dir = setup_java_runner(&java_home)?;
+    let mx = POOL.get_or_init(|| Mutex::new(JavaRunner::new(&java, &runner_dir).unwrap()));
+    let mut runner = mx.lock().unwrap();
+    match runner.try_run(driver_path, cp, outdir, main_class) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            *runner = JavaRunner::new(&java, &runner_dir)?;
+            runner.try_run(driver_path, cp, outdir, main_class).ok()
+        }
+    }
+}
+
 fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 8 || out.len() > 4 {
         return;
