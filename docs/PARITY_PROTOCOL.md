@@ -67,6 +67,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P16 — synthesized accessor `Signature`s for type-parameter properties (gate 1492, FAIL=0).** A
+  generic class's synthesized property accessors over a type-parameter field now carry their JVM
+  `Signature`: `getA()` → `()TT;`, `setA(T)` → `(TT;)V` (no `<…>` prefix — they USE the class's `T` but
+  declare none; `jvm_type_params` returns `""` for an empty type-param list). Verified byte-identical to
+  kotlinc. `ir_lower` records an `IrGenericSig` (empty `type_params`) per accessor fid in
+  `IrFile.signatures`; the existing `emit_method` path formats it. Generic-class byte-parity now covers
+  class + fields + getters/setters; the only remaining piece is the synthesized `<init>` `(TT;)V`. Tests:
+  `generic_signature_e2e`. (Landed via worktree branch — `master` was being force-pushed; see
+  [[feedback-never-bypass-hooks]].)
 - **Phase P15 — field `Signature` for type-parameter-typed fields (gate 1491 → 1492, FAIL=0).** A field
   whose declared type is a bare type parameter (`class Pair<A, B>(val a: A, val b: B)` → fields `a`/`b`)
   gets a JVM field `Signature` (`TA;`/`TB;`), like kotlinc — verified byte-identical. `ClassWriter` gained

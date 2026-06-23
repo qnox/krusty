@@ -504,6 +504,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // An inner class's `this$0` occupies field index 0, so the declared properties' fields
                 // are shifted by one — map each property's `field_props` index to its real field index.
                 let field_offset = if inner_outer.is_some() { 1 } else { 0 };
+                // For a generic class, a field typed by a bare type parameter (`val a: A`) → its
+                // synthesized accessors carry a JVM `Signature` (`getA()` → `()TA;`, `setA(TA;)V`).
+                let field_tp: std::collections::HashMap<String, String> =
+                    class_field_tparams(c).into_iter().collect();
                 for (pi, (pname, is_var)) in field_props.iter().enumerate() {
                     let fidx = pi + field_offset;
                     let fty = fields[fidx].1;
@@ -534,6 +538,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             dispatch_receiver: Some(internal.clone()),
                             param_checks: vec![],
                         });
+                        if let Some(tp) = field_tp.get(pname) {
+                            lo.ir.signatures.insert(
+                                fid,
+                                crate::ir::IrGenericSig {
+                                    type_params: vec![],
+                                    param_tparams: vec![],
+                                    ret_tparam: Some(tp.clone()),
+                                },
+                            );
+                        }
                         methods.insert(gname, (mi, fid, fty));
                         method_fids.push(fid);
                     }
@@ -562,6 +576,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 dispatch_receiver: Some(internal.clone()),
                                 param_checks: vec![],
                             });
+                            if let Some(tp) = field_tp.get(pname) {
+                                lo.ir.signatures.insert(
+                                    fid,
+                                    crate::ir::IrGenericSig {
+                                        type_params: vec![],
+                                        param_tparams: vec![Some(tp.clone())],
+                                        ret_tparam: None,
+                                    },
+                                );
+                            }
                             methods.insert(sname, (mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }

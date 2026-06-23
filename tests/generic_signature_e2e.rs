@@ -105,6 +105,24 @@ fn type_parameter_fields_get_field_signatures() {
 }
 
 #[test]
+fn type_parameter_accessors_get_signatures() {
+    // A generic class's synthesized accessors for a type-parameter property carry signatures:
+    // `getA()` → `()TT;`, `setA(T)` → `(TT;)V` (no `<…>` prefix — they use the class's `T`, declare none).
+    let src = "class Box<T>(var a: T)\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    assert_eq!(
+        method_signature(&cs, "Box", "getA").as_deref(),
+        Some("()TT;")
+    );
+    assert_eq!(
+        method_signature(&cs, "Box", "setA").as_deref(),
+        Some("(TT;)V")
+    );
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";

@@ -1324,8 +1324,13 @@ fn jvm_class_signature(g: &crate::ir::IrGenericSig) -> Option<String> {
     Some(s)
 }
 
-/// The shared `<T:bound…>` type-parameter section. `None` if any bound can't be represented.
+/// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type
+/// parameters (e.g. a generic class's getter `getA()` → `()TA;` USES the class's `A` but declares none).
+/// `None` if any bound can't be represented.
 fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
+    if g.type_params.is_empty() {
+        return Some(String::new());
+    }
     let mut s = String::from("<");
     for (name, bound) in &g.type_params {
         s.push_str(name);
