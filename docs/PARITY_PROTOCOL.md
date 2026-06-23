@@ -38,22 +38,41 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     JVM launch for the whole `bytecode_parity_e2e` differential set instead of one-per-test:
     ~47s → **9.9s** (21 tests). No committed goldens. Other kotlinc-spawning files (`diff_kotlinc`,
     `diagnostics_match_kotlinc`, …) can adopt the same one-shot batch — follow-up.
-  - Heavy tier (~220–290s): the full `cargo test`. PROFILED — the cost is NOT kotlinc (only 1–6 spawns
-    across the differential files, now golden-cached) but (a) the conformance gate (~38s, already
-    optimal — rayon + persistent JVM runner) and (b) the execution e2e suites that spawn `javac`+`java`
-    PER TEST (e.g. `suspend_e2e` = 36 tests). nextest (installed) parallelizes binaries but the gate
-    saturates the 4 cores. Path to full-suite <60s: give the execution e2e a PERSISTENT JVM runner +
-    in-process krusty compile (the pattern the conformance gate already uses — `compile_in_process` +
-    one JVM, ClassLoader+reflection, no per-test `javac`/`java`). Large refactor across ~20 e2e files —
-    a dedicated follow-up. Until then the <60s budget is met by the conformance gate (the correctness
-    validator); the execution+differential e2e is the heavier CI/pre-push tier.
+  - **Persistent JVM box-runner for the execution e2e (P8 — IN PROGRESS).** The execution e2e used to
+    spawn the krusty BINARY + `javac` + `java` PER TEST (3 process launches, 2 JVM cold-starts). The fix
+    (the path this protocol named): a shared `tests/common` helper `compile_and_run_box(src, stem,
+    cp_jars, jdk_modules)` that compiles IN-PROCESS (`compile_in_process`) and runs `box()` on a
+    PERSISTENT JVM subprocess (`BoxRunner`, the conformance gate's pattern: bytes over stdin →
+    ClassLoader+reflection → result, `poll(2)` deadline). One JVM per (test-binary, classpath), reused
+    across every `#[test]` in that binary. CONVERTED so far (24 files, all green): `short_circuit`,
+    `destructure`, `generic_fn`, `finally`, `class_body`, `vararg`, `try_catch`, `throw`, `safe_call`,
+    `lambda`, `inheritance`, `companion`, `data_copy`, `property_accessor`, `not_null_assert`,
+    `extension_fun`, `do_while`, `diverging_init`, `default_args_member`, `computed_prop`, `callable_ref`,
+    `break_continue`, `range_step`, `secondary_ctor_noprimary`. NOT converted (need machinery the helper
+    doesn't model — follow-up): `suspend_e2e` (36 tests, separate workstream), `top_level_property`
+    (`main()`, not `box()`), `inline_splice` (real-kotlinc cross-module + raw-bytes asserts), `java_instance`
+    (javac-built aux class dir on cp), `feature_box`/`box_vendored` (multi-snippet custom harness),
+    `cli_dropin` (exercises the real CLI binary on purpose), `diff_kotlinc`/`diagnostics_match_kotlinc`
+    (kotlinc differential). NOTE: `range_step`/`secondary_ctor_noprimary` previously hard-asserted krusty
+    compile success; via the helper a compile failure now flows to the `None`-skip branch (consistent with
+    the rest of the suite's "skip-on-unsupported"), a slight loosening to revisit if either regresses.
+  - Heavy tier (was ~220–290s): the full `cargo test`. PROFILED — the cost is NOT kotlinc (1–6 spawns,
+    compile-once-batched) but (a) the conformance gate (~38s, optimal) and (b) the execution e2e — now
+    being moved onto the P8 persistent runner. nextest (installed) parallelizes binaries; the gate
+    saturates the cores. Remaining gap to full-suite <60s: convert `suspend_e2e` (the big one) onto the
+    same runner.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
-- **Phase P1 — for-in-local-array: no redundant array copy.** `lower_for_each` copied the iterable into
+- **Phase P8 — persistent JVM box-runner for the execution e2e (test-time <60s work).** Added
+  `tests/common::{compile_and_run_box, run_box, find_box_class, java_home}` — a shared persistent-JVM
+  `BoxRunner` (the conformance gate's in-process-compile + ClassLoader/reflection pattern) so execution
+  e2e tests stop spawning the krusty binary + `javac` + `java` per test. Converted 24 single-source
+  `box()` e2e files to it (all green); each test now costs ~0 process launches after the per-binary JVM
+  warmup. No compiler source touched — pure harness speedup. Remaining big item: `suspend_e2e`. `lower_for_each` copied the iterable into
   a fresh local before looping; kotlinc iterates on an existing local directly (only snapshots into a
   temp when the iterable is a complex expr OR its backing `var` is reassigned in the body — confirmed
   by `forIn*VarUpdatedInLoopBody` box tests). Now reuses the local unless the body reassigns it
