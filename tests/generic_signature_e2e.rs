@@ -137,6 +137,20 @@ fn generic_class_constructor_gets_signature() {
 }
 
 #[test]
+fn nullable_type_parameter_signature_drops_nullability() {
+    // `fun <T> f(t: T?): T?` → `<T:Ljava/lang/Object;>(TT;)TT;` — `?` is not represented in the JVM
+    // generic signature (kotlinc drops it; the erased descriptor is `Object`).
+    let src = "fun <T> f(t: T?): T? = t\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    assert_eq!(
+        method_signature(&cs, "GKt", "f").as_deref(),
+        Some("<T:Ljava/lang/Object;>(TT;)TT;")
+    );
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";
