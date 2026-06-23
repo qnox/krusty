@@ -7,6 +7,7 @@
 
 pub mod ast;
 pub mod backend;
+pub mod call_resolver;
 pub mod cli;
 pub mod diag;
 pub mod ir;
