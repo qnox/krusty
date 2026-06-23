@@ -314,6 +314,27 @@ fn suspend_fun_suspension_in_while_loop() {
 }
 
 #[test]
+fn suspend_fun_suspension_in_do_while_loop() {
+    // A `do`-`while` (post-test) loop whose body suspends: the body runs once before the condition is
+    // tested. 1+1+1 = 3.
+    run_suspend(
+        "smdowhile",
+        "suspend fun one(): Int = 1\n\
+         suspend fun dw(): Int {\n\
+         \x20   var sum = 0\n\
+         \x20   var i = 0\n\
+         \x20   do {\n\
+         \x20       val x = one()\n\
+         \x20       sum = sum + x\n\
+         \x20       i = i + 1\n\
+         \x20   } while (i < 3)\n\
+         \x20   return sum\n}\n",
+        "dw",
+        3,
+    );
+}
+
+#[test]
 fn suspend_fun_suspension_in_if_statement() {
     // The suspension `foo()` is a bare statement inside an `if` STATEMENT branch (not a value). The
     // flattener routes the branch through its own states and converges at the merge. Returns 5.
