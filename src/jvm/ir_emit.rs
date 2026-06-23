@@ -293,10 +293,13 @@ fn emit_class(
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
     // (kotlinc does the same) — for both normal classes and objects.
-    let base_field_acc: u16 = 0x0002;
     for (i, (name, ty)) in c.fields.iter().enumerate() {
-        // A `val` backing field is `final`.
-        let acc = base_field_acc
+        // Map the field's (platform-neutral) visibility to JVM access flags: a `private` field →
+        // `ACC_PRIVATE` (the default — Kotlin backing fields are private, reached via accessors); a
+        // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
+        // `result`/`label`). `field_private` empty ⇒ all private.
+        let private = c.field_private.get(i).copied().unwrap_or(true);
+        let acc = (if private { 0x0002 } else { 0x0001 })
             | if c.field_final.get(i).copied().unwrap_or(false) {
                 0x0010
             } else {
@@ -323,7 +326,7 @@ fn emit_class(
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
         // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
-        let super_param_tys: Vec<Ty> =
+        let mut super_param_tys: Vec<Ty> =
             if crate::jvm::jvm_class_map::to_jvm_internal(&c.superclass) == "java/lang/Object" {
                 Vec::new()
             } else {
@@ -362,6 +365,12 @@ fn emit_class(
             for (vi, t) in param_tys.iter().enumerate() {
                 e.slots.insert(vi as u32 + 1, (s, *t));
                 s += slot_words(*t);
+            }
+            // A classpath superclass (not an IR class) with `super(args)`: the IR-class lookup above
+            // found no parameter types, so derive the super constructor's descriptor from the argument
+            // expressions themselves (e.g. a synthesized coroutine continuation's `super(completion)`).
+            if super_param_tys.is_empty() && !c.super_args.is_empty() {
+                super_param_tys = c.super_args.iter().map(|&a| e.value_ty(a)).collect();
             }
             // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
             // the very start of `<init>` — before the super() call.

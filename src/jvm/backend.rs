@@ -62,7 +62,7 @@ impl Backend for JvmBackend {
         // JVM-only IR→IR transform: realize `suspend fun`s as their continuation-passing-style ABI
         // (the IR keeps them as plain functions so JS / other backends are unaffected). A suspend shape
         // it can't yet lower → skip the file rather than miscompile.
-        if !crate::jvm::suspend::lower_suspend(&mut ir) {
+        if !crate::jvm::suspend::lower_suspend(&mut ir, &facade_name) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this suspend-function shape is not yet supported by the IR backend"

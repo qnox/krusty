@@ -50,7 +50,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     if !lower_value_classes(&mut ir) {
         return None;
     }
-    if !krusty::jvm::suspend::lower_suspend(&mut ir) {
+    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
         return None;
     }
     let out = emit_all(&ir, &facade, &**cp)?;

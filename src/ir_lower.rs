@@ -75,12 +75,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     }
 
     // --- suspend (coroutines) lowerability gate ---------------------------------------------------
-    // The coroutine transform itself lives in `jvm::suspend`; this only decides whether the file is
-    // lowerable at all. Slice 1 supports a top-level *leaf* `suspend fun` (no suspension point) — it
-    // lowers to the CPS signature with no state machine. Anything else would miscompile, so skip the
-    // whole file (never miscompile): an extension/member suspend fn, a suspend body with a call
-    // (a potential suspension point — call-site continuation threading isn't modeled yet), or any
-    // *call* to a suspend fn (its rewritten arity wouldn't match a plain call).
+    // The coroutine transform itself lives in `jvm::suspend` (CPS signature + state machine); this only
+    // decides whether the file is lowerable at all. ir_lower lowers a suspend fn body PLAINLY (a call
+    // to another suspend fn becomes an ordinary call the pass then rewrites). Skip the whole file
+    // (never miscompile) for shapes the pass doesn't model: an extension/member suspend fn, or a *call*
+    // to a suspend fn from a NON-suspend function (call-site continuation threading isn't modeled — and
+    // calling a suspend fn from a non-suspend context is a Kotlin error anyway). The pass itself skips
+    // any suspend *body* shape it can't yet restructure.
     let suspend_fns: Vec<String> = file
         .decls
         .iter()
@@ -96,14 +97,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if f.receiver.is_some() {
                         return None; // extension suspend fn — not modeled
                     }
-                    match &f.body {
-                        FunBody::Expr(e) | FunBody::Block(e) => {
-                            if !suspend_leaf_ok(file, *e) {
-                                return None; // has a call / suspension point
-                            }
-                        }
-                        FunBody::None => return None,
-                    }
                 }
                 Decl::Class(c) if c.methods.iter().any(|m| m.is_suspend) => {
                     return None; // member suspend fn — not modeled
@@ -111,7 +104,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 _ => {}
             }
         }
-        // No call site may reference a suspend fn (call-site continuation threading isn't modeled).
+        // A NON-suspend body must not reference a suspend fn (call-site threading isn't modeled).
         let mut bodies: Vec<AstExprId> = Vec::new();
         for &d in &file.decls {
             match file.decl(d) {
@@ -342,6 +335,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|p| !p.is_var),
                     )
                     .collect(),
+                field_private: vec![], // user backing fields are all private (default)
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
             });
@@ -576,6 +570,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     is_companion: true,
                     companion_class: None,
                     field_final: vec![],
+                    field_private: vec![],
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
                 });
@@ -1514,6 +1509,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             is_companion: false,
                             companion_class: None,
                             field_final: vec![],
+                            field_private: vec![],
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                         });
@@ -3546,6 +3542,7 @@ impl<'a> Lower<'a> {
             is_companion: false,
             companion_class: None,
             field_final: vec![],
+            field_private: vec![],
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
@@ -10656,45 +10653,6 @@ fn body_declares_local(file: &ast::File, e: AstExprId) -> bool {
         }
     }
     ex(file, e)
-}
-
-/// Whether a `suspend fun` body `e` is a *leaf* the coroutine pass can lower without a state machine:
-/// it has no suspension point. Conservatively (sound by construction): an allowlist of expression forms
-/// that can never be a call — literals, name/property reads, and the structural control-flow nodes
-/// (`if`/`when`/block/elvis/`!!`/`throw`/`is`/`as`/string template) recursed into. ANY other form
-/// (a call, member/index access, operator that may desugar to a user/operator `fun`, lambda, `try`,
-/// range, callable reference) returns `false` → the file skips. Slice 1 keeps the set tight; later
-/// slices (with the state machine + suspension-point detection) relax it.
-fn suspend_leaf_ok(file: &ast::File, e: AstExprId) -> bool {
-    use ast::Expr::*;
-    match file.expr(e) {
-        IntLit(_) | LongLit(_) | UIntLit(_) | ULongLit(_) | DoubleLit(_) | FloatLit(_)
-        | BoolLit(_) | StringLit(_) | CharLit(_) | NullLit | Name(_) => true,
-        If { .. }
-        | When { .. }
-        | Block { .. }
-        | Elvis { .. }
-        | NotNull { .. }
-        | Throw { .. }
-        | Is { .. }
-        | As { .. }
-        | Template(_) => {
-            // OK iff no child expression/statement is non-leaf (i.e. nothing call-like inside).
-            !file.any_child_expr(e, &mut |c| !suspend_leaf_ok(file, c), &mut |s| {
-                !suspend_leaf_stmt_ok(file, s)
-            })
-        }
-        _ => false,
-    }
-}
-
-/// Statement form of [`suspend_leaf_ok`]: a `LocalFun` is its own scope (not modeled) → non-leaf;
-/// every other statement is leaf iff each of its child expressions is.
-fn suspend_leaf_stmt_ok(file: &ast::File, s: ast::StmtId) -> bool {
-    match file.stmt(s) {
-        Stmt::LocalFun(_) => false,
-        _ => !file.any_child_stmt(s, &mut |c| !suspend_leaf_ok(file, c)),
-    }
 }
 
 /// Whether `e` contains a `break`/`continue` that escapes past this region (a loop-local one is fine).

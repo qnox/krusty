@@ -155,6 +155,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   with suspension points is a later slice). Until then, ir_lower's suspend gate skips (never
   miscompiles) any non-leaf shape: a suspension point, an extension/member suspend fn, or any *call*
   to a suspend fn (call-site continuation threading isn't modeled yet).
+- **`suspend fun` slice 2 — the state machine.** A suspend function WITH a suspension point (a call to
+  another suspend function) lowers to a coroutine state machine. `jvm::suspend` synthesizes a
+  `Facade$fn$1 extends kotlin/coroutines/jvm/internal/ContinuationImpl` continuation class (fields
+  `result: Object`, `label: int`, a `<init>(Continuation)` delegating to super, and `invokeSuspend`
+  that stores the resume value, sets the `MIN_VALUE` label bit, and re-enters the function), and
+  rewrites the body to: get-or-create its continuation (`$completion instanceof Facade$fn$1 && label &
+  MIN_VALUE` ⇒ reuse, else `new`), read `result`/`COROUTINE_SUSPENDED`, then dispatch on `label` —
+  state 0 calls the suspend callee with its own continuation and returns `COROUTINE_SUSPENDED` if the
+  callee suspends, the resume state reads `result`; both yield the suspension value, bound once via a
+  `when`-expression (a single store — assigning a pre-declared local in two branches trips the frame
+  verifier). Built as ordinary IR (the emitter produces bytecode + frames), runtime-equivalent to
+  kotlinc's `tableswitch` form (an `if`-chain dispatch). Proven end-to-end: a Java `Continuation`
+  driver runs `bar` (`val a = foo(); return a + 1`) to completion → 43
+  (`tests/suspend_e2e.rs::suspend_fun_with_suspension_point_runs_via_continuation`). Two supporting
+  changes: `IrClass.field_private` (platform-neutral per-field visibility — the continuation's
+  `result`/`label` are non-private so the facade reads them cross-class; the JVM emitter maps
+  non-private → `ACC_PUBLIC`), and the constructor emitter now derives a *classpath* superclass's
+  `super(args)` descriptor from the argument types. Still skipped (later slices): >1 suspension point
+  (N states + local field spilling), suspension inside control flow, suspend lambdas / `suspend`
+  function types, builders.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
