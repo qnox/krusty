@@ -5952,35 +5952,44 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // User-defined extension function in this file (invokestatic on the file facade).
+                // User-defined extension function in this file (invokestatic on the file facade), resolved
+                // through the current module as a `SymbolSource`. The exact-receiver overload is rung 0;
+                // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
+                // `(recv + params)ret` the emitter wants.
                 {
-                    let recv_desc = rt.descriptor();
-                    if let Some(sig) = self
-                        .syms
-                        .ext_funs
-                        .get(&(recv_desc.clone(), name.clone()))
-                        .cloned()
-                    {
-                        if sig.params.len() != arg_tys.len() {
+                    let module_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
+                        });
+                    if let Some(fi) = module_ext {
+                        // Logical params (the receiver is `callable.params[0]`; the rest are the args).
+                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
+                        if logical.len() != arg_tys.len() {
                             self.diags.error(
                                 span,
                                 format!(
                                     "extension '{name}' expects {} args, got {}",
-                                    sig.params.len(),
+                                    logical.len(),
                                     arg_tys.len()
                                 ),
                             );
                         } else {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                            for (i, (p, a)) in logical.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        // Full static descriptor: (receiver_desc + param_descs)ret_desc
-                        let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
-                        let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
-                        self.ext_calls
-                            .insert(call, ("$local".to_string(), name.clone(), desc));
-                        return sig.ret;
+                        self.ext_calls.insert(
+                            call,
+                            (
+                                "$local".to_string(),
+                                name.clone(),
+                                fi.callable.descriptor.clone(),
+                            ),
+                        );
+                        return fi.callable.ret;
                     }
                 }
                 // A user GENERIC-receiver extension `<T> T.foo()` — its receiver erases to `kotlin/Any`,
