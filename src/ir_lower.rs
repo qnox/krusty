@@ -2650,7 +2650,9 @@ impl<'a> Lower<'a> {
         let body_suspends = call_names
             .iter()
             .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
-        if body_suspends && (n_cap > 0 || arity > 0) {
+        // Own parameters combined with a suspension aren't modeled yet (the general machine handles
+        // CAPTURES, but a parameter would also need its field reloaded each entry).
+        if body_suspends && arity > 0 {
             return None;
         }
         let jvm_arity = arity + 1; // + the trailing continuation
@@ -2773,7 +2775,16 @@ impl<'a> Lower<'a> {
             // body with `next_value` reset to 2 (saved/restored so the enclosing method is unaffected).
             let saved_next_sm = self.next_value;
             self.next_value = 2;
+            // Bind captures to locals 2..2+n_cap (the coroutine pass reloads them from their fields at
+            // each invokeSuspend entry). Only the GENERAL machine is used when there are captures; the
+            // inline hand-roll requires `n_cap == 0`.
+            let saved_scope_sm = std::mem::take(&mut self.scope);
+            for (name, _, ty) in &captures {
+                let lv = self.fresh_value();
+                self.scope.push((name.clone(), lv, *ty));
+            }
             let body_val = self.expr(body)?;
+            self.scope = saved_scope_sm;
             // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
             // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
             // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
@@ -2821,7 +2832,7 @@ impl<'a> Lower<'a> {
             };
             // A clean SINGLE tail/bound suspension uses the inline two-state machine here; anything else
             // (a second suspension, control flow) gets the general lambda-mode machine from the pass.
-            let handroll = is_susp && n_susp == 1;
+            let handroll = is_susp && n_susp == 1 && n_cap == 0;
             if !handroll {
                 needs_pass_sm = true;
                 self.next_value = saved_next_sm;
@@ -3090,9 +3101,12 @@ impl<'a> Lower<'a> {
             // Hand the plain `invokeSuspend` to the coroutine pass to flatten into the general state machine
             // (its result/label/spilled fields are appended after the captures/params at `field_base`).
         if needs_pass_sm {
-            self.ir
-                .suspend_lambda_sm
-                .push((invoke_susp_fid, class_id, n_cap + arity as u32));
+            self.ir.suspend_lambda_sm.push((
+                invoke_susp_fid,
+                class_id,
+                n_cap + arity as u32,
+                n_cap,
+            ));
         }
 
         // invoke(Object p0.., Object completion): `r = new This(this.cap.., (Continuation)completion);
