@@ -914,7 +914,17 @@ fn collect_jar(jar: &Path, all: &mut HashMap<String, ClassLite>) {
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
         };
-        if !entry.name().ends_with(".class") {
+        let name = entry.name();
+        if !name.ends_with(".class") {
+            continue;
+        }
+        // Kotlin top-level / extension functions are compiled to FILE-FACADE classes (`<File>Kt`) and
+        // their package-private multifile PART classes (`<Facade>__<Part>`, also `…Kt…`) — kotlinc's
+        // naming convention. The ext index only needs those, so skip every other class WITHOUT reading
+        // it (a regular class / JDK type holds no resolvable top-level statics here). This avoids
+        // parsing the thousands of non-facade stdlib classes — the dominant cost of building the index.
+        let simple = name.rsplit('/').next().unwrap_or(name);
+        if !simple.contains("Kt") {
             continue;
         }
         let mut buf = Vec::new();
