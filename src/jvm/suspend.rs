@@ -61,6 +61,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     let fids = ir.suspend_funs.clone();
     for fid in fids {
         let body = ir.functions[fid as usize].body;
+        // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
+        // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
+        // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
+        let ret_ty = ir.functions[fid as usize].ret.clone();
+        if let Some(b) = body {
+            desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
+        }
         let points = match body {
             Some(b) => suspension_points(ir, b, &suspend_set),
             None => Some(Vec::new()),
@@ -170,6 +177,42 @@ fn suspension_points(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> Opti
         }
     }
     Some(points)
+}
+
+/// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
+/// (a fresh local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
+/// suspension point. Runs before the CPS rewrite, so `ret_ty` is the function's declared return type.
+fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &IrType) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut new_stmts = Vec::with_capacity(stmts.len() + 1);
+    let mut changed = false;
+    for s in stmts {
+        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
+            if as_suspend_call(ir, e, suspend_set).is_some() {
+                let tmp = max_value_index(ir) + 1;
+                let var = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty: ret_ty.clone(),
+                    init: Some(e),
+                });
+                let get = ir.add_expr(IrExpr::GetValue(tmp));
+                let ret = ir.add_expr(IrExpr::Return(Some(get)));
+                new_stmts.push(var);
+                new_stmts.push(ret);
+                changed = true;
+                continue;
+            }
+        }
+        new_stmts.push(s);
+    }
+    if changed {
+        ir.exprs[b as usize] = IrExpr::Block {
+            stmts: new_stmts,
+            value,
+        };
+    }
 }
 
 /// If `e` is a direct call to a suspend function, return its `(FunId, args)`.
