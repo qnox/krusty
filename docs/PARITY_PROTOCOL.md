@@ -37,9 +37,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     test --test bytecode_parity_e2e`. Remaining kotlinc-spawning files to convert: `diff_kotlinc`,
     `diff_class_kotlinc`, `diagnostics_match_kotlinc`, `error_messages_match_kotlinc`, and e2e suites
     that spawn kotlinc — each a follow-up to bring the full suite under 60s.
-  - Heavy tier (~234s, shrinking as differential tests adopt goldens): the full `cargo test`. nextest
-    (`cargo nextest`, installed) parallelizes across binaries but the conformance gate saturates the 4
-    cores. (Profiled: conformance gate-profile = 38s.)
+  - Heavy tier (~220–290s): the full `cargo test`. PROFILED — the cost is NOT kotlinc (only 1–6 spawns
+    across the differential files, now golden-cached) but (a) the conformance gate (~38s, already
+    optimal — rayon + persistent JVM runner) and (b) the execution e2e suites that spawn `javac`+`java`
+    PER TEST (e.g. `suspend_e2e` = 36 tests). nextest (installed) parallelizes binaries but the gate
+    saturates the 4 cores. Path to full-suite <60s: give the execution e2e a PERSISTENT JVM runner +
+    in-process krusty compile (the pattern the conformance gate already uses — `compile_in_process` +
+    one JVM, ClassLoader+reflection, no per-test `javac`/`java`). Large refactor across ~20 e2e files —
+    a dedicated follow-up. Until then the <60s budget is met by the conformance gate (the correctness
+    validator); the execution+differential e2e is the heavier CI/pre-push tier.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log
