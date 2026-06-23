@@ -14,6 +14,13 @@
 use crate::libraries::{FunctionSet, LibrarySeed, LibraryType};
 use crate::types::Ty;
 
+/// The shared-base form of a [`LibrarySeed`]: `(class_names, type_aliases)`, each behind an `Rc` so
+/// many files compiled against one library set share the (large) maps rather than cloning them.
+pub type SharedSeed = (
+    std::rc::Rc<std::collections::HashMap<String, String>>,
+    std::rc::Rc<std::collections::HashMap<String, String>>,
+);
+
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
@@ -21,6 +28,18 @@ pub trait SymbolSource {
     /// plus type aliases). Empty by default.
     fn seed(&self) -> LibrarySeed {
         LibrarySeed::default()
+    }
+
+    /// The same type universe as [`seed`], but with the (large) base maps shared by `Rc` so a caller
+    /// that compiles many files against one library set does NOT clone the whole stdlib+JDK class-name
+    /// map per file. Returns `(class_names, type_aliases)`. The default just wraps `seed`; a heavy
+    /// classpath-backed source (the JVM one) overrides this to cache and return a shared `Rc`.
+    fn seed_shared(&self) -> SharedSeed {
+        let s = self.seed();
+        (
+            std::rc::Rc::new(s.class_names),
+            std::rc::Rc::new(s.type_aliases),
+        )
     }
 
     /// ALL overloads of function `name` applicable to a call — members + extensions (`receiver = Some`)

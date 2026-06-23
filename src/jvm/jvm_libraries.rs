@@ -603,6 +603,25 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
 
 impl SymbolSource for JvmLibraries {
     fn seed(&self) -> LibrarySeed {
+        let (class_names, type_aliases) = self.seed_shared();
+        LibrarySeed {
+            class_names: (*class_names).clone(),
+            type_aliases: (*type_aliases).clone(),
+        }
+    }
+
+    fn seed_shared(&self) -> crate::symbol_source::SharedSeed {
+        // The merged class-name map (classpath index + the ported built-in mapping) is identical for
+        // every file compiled against this classpath, so build it ONCE per (thread, classpath) and hand
+        // back a shared `Rc`. Cloning this ~40k-entry map per file was the dominant `sigs` cost.
+        thread_local! {
+            static CACHE: std::cell::RefCell<std::collections::HashMap<usize, crate::symbol_source::SharedSeed>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        let key = std::rc::Rc::as_ptr(&self.cp) as *const () as usize;
+        if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            return hit;
+        }
         let idx = self.cp.scan_types();
         let mut class_names = idx.class_names.clone();
         // Seed the Kotlin built-in → JVM class mapping (ported `JavaToKotlinClassMap`): intrinsic
@@ -621,10 +640,12 @@ impl SymbolSource for JvmLibraries {
                 }
             }
         }
-        LibrarySeed {
-            class_names,
-            type_aliases: idx.type_aliases.clone(),
-        }
+        let pair = (
+            std::rc::Rc::new(class_names),
+            std::rc::Rc::new(idx.type_aliases.clone()),
+        );
+        CACHE.with(|c| c.borrow_mut().insert(key, pair.clone()));
+        pair
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
