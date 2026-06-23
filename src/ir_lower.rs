@@ -5182,6 +5182,43 @@ impl<'a> Lower<'a> {
     /// (`invokestatic facade.name(recv, args)`), then a private `@InlineOnly` extension whose real body
     /// the backend splices (`String.uppercase()` → `toUpperCase(Locale.ROOT)`). `None` when neither
     /// resolves. No stdlib name is hardcoded — owner/descriptor come from the library reader.
+    /// Resolve a classpath extension `recv.name(args)`, retrying once with integer-LITERAL `Int`
+    /// arguments widened to `Long` — Kotlin adapts an integer literal to a wider expected type, so
+    /// `longRange step 3` resolves `LongProgression.step(Long)`. A non-literal `Int` is left as-is
+    /// (kotlinc rejects `longRange step intVar`). Mirrors the checker's classpath-extension adaptation.
+    fn resolve_ext_lit_widened(
+        &self,
+        name: &str,
+        rt: Ty,
+        args: &[AstExprId],
+        arg_tys: &[Ty],
+    ) -> Option<crate::libraries::LibraryCallable> {
+        if let Some(c) = self
+            .syms
+            .libraries
+            .resolve_callable(name, Some(rt), arg_tys, &[])
+        {
+            return Some(c);
+        }
+        let widened: Vec<Ty> = arg_tys
+            .iter()
+            .zip(args.iter())
+            .map(|(t, &a)| {
+                if *t == Ty::Int && matches!(self.afile.expr(a), Expr::IntLit(_)) {
+                    Ty::Long
+                } else {
+                    *t
+                }
+            })
+            .collect();
+        if widened == arg_tys {
+            return None;
+        }
+        self.syms
+            .libraries
+            .resolve_callable(name, Some(rt), &widened, &[])
+    }
+
     fn lower_ext_call_on(
         &mut self,
         recv_ir: u32,
@@ -5192,9 +5229,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
         let c = self
-            .syms
-            .libraries
-            .resolve_callable(name, Some(rt), &arg_tys, &[])
+            .resolve_ext_lit_widened(name, rt, args, &arg_tys)
             .filter(|c| !c.default_call) // a defaulted extension needs the AST receiver expr — bail
             .or_else(|| {
                 self.syms
@@ -11107,9 +11142,7 @@ impl<'a> Lower<'a> {
                         // facade.name(recv, args)`. Owner + descriptor come from the library
                         // (`resolve_callable` with the receiver), so no stdlib name is hardcoded here.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms
-                            .libraries
-                            .resolve_callable(&name, Some(rt), &arg_tys, &[])
+                        self.resolve_ext_lit_widened(&name, rt, &args, &arg_tys)
                     } {
                         // Coerce the receiver + arguments to the extension's parameter types so a
                         // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
