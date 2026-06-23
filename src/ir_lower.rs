@@ -2765,23 +2765,60 @@ impl<'a> Lower<'a> {
             })
         };
         let inv_susp_body = if body_suspends {
-            // A single TAIL suspend call (`{ foo() }`), no captures (gated above). The continuation is
-            // `this`: thread it into the call, dispatch on `this.label`. State 0 calls the suspend
-            // callee (returns `COROUTINE_SUSPENDED` up if it suspends, else the value); state 1 (the
-            // async resume) returns the resumed `result`.
+            // Single-suspension lambda (`{ foo() }` or `{ val a = foo(); <tail> }`), no captures (gated
+            // above). The continuation is `this`: thread it into the call, dispatch on `this.label`.
+            // invokeSuspend value-indices are `this`=0, `result`=1, body locals from 2 — so lower the
+            // body with `next_value` reset to 2 (saved/restored so the enclosing method is unaffected).
+            let saved_next_sm = self.next_value;
+            self.next_value = 2;
             let body_val = self.expr(body)?;
-            let tail = match &self.ir.exprs[body_val as usize] {
-                IrExpr::Block {
-                    stmts,
-                    value: Some(v),
-                } if stmts.is_empty() => *v,
-                _ => body_val,
-            };
+            // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
+            // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
+            // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
+            let (tail, bound): (u32, Option<(u32, IrType)>) =
+                match &self.ir.exprs[body_val as usize] {
+                    IrExpr::Block {
+                        stmts,
+                        value: Some(v),
+                    } if stmts.is_empty() => (*v, None),
+                    IrExpr::Block {
+                        stmts,
+                        value: Some(v),
+                    } if stmts.len() == 1 => {
+                        if let IrExpr::Variable {
+                            index,
+                            ty,
+                            init: Some(init),
+                        } = &self.ir.exprs[stmts[0] as usize]
+                        {
+                            (*init, Some((*index, ty.clone())))
+                        } else {
+                            return None;
+                        }
+                    }
+                    _ => (body_val, None),
+                };
+            let tail_expr = bound
+                .as_ref()
+                .map(|_| match &self.ir.exprs[body_val as usize] {
+                    IrExpr::Block { value: Some(v), .. } => *v,
+                    _ => body_val,
+                });
             let is_susp = matches!(&self.ir.exprs[tail as usize],
                 IrExpr::Call { callee: Callee::Local(fid), .. } if self.ir.suspend_funs.contains(fid))
                 || self.ir.suspend_calls.contains_key(&tail);
-            if !is_susp {
-                return None; // not a clean tail suspend call — don't miscompile
+            // Only a SINGLE suspension is modeled by this two-state form. If the body calls a suspend fn
+            // more than once (a second suspension in the tail or elsewhere), bail for the general machine.
+            let n_susp = {
+                let c = std::cell::RefCell::new(Vec::new());
+                collect_call_names(self.afile, body, &c);
+                c.into_inner()
+                    .iter()
+                    .filter(|n| susp_names.contains(*n) || self.resolver().toplevel_is_suspend(n))
+                    .count()
+            };
+            if !is_susp || n_susp > 1 {
+                return None; // not a clean single-suspension tail — don't miscompile
             }
             // Thread `this` (as Continuation) as the callee's trailing argument.
             let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
@@ -2828,12 +2865,16 @@ impl<'a> Lower<'a> {
                 dispatch_receiver: None,
                 args: vec![],
             });
+            // Machine locals are allocated ABOVE the body's locals (the body was already lowered) so the
+            // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
+            let susp_idx = self.fresh_value();
+            let r_idx = self.fresh_value();
             let susp_var = self.ir.add_expr(IrExpr::Variable {
-                index: 2,
+                index: susp_idx,
                 ty: object_ir.clone(),
                 init: Some(susp_call),
             });
-            // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; return r.
+            // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
             let s0_tof = throw_on_failure(self, 1);
             let this_l = self.ir.add_expr(IrExpr::GetValue(0));
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -2844,18 +2885,18 @@ impl<'a> Lower<'a> {
                 value: one,
             });
             let r_var = self.ir.add_expr(IrExpr::Variable {
-                index: 3,
+                index: r_idx,
                 ty: object_ir.clone(),
                 init: Some(tail),
             });
-            let rg = self.ir.add_expr(IrExpr::GetValue(3));
-            let sg = self.ir.add_expr(IrExpr::GetValue(2));
+            let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
+            let sg = self.ir.add_expr(IrExpr::GetValue(susp_idx));
             let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::RefEq,
                 lhs: rg,
                 rhs: sg,
             });
-            let sg2 = self.ir.add_expr(IrExpr::GetValue(2));
+            let sg2 = self.ir.add_expr(IrExpr::GetValue(susp_idx));
             let ret_susp = self.ir.add_expr(IrExpr::Return(Some(sg2)));
             let ret_susp_b = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![ret_susp],
@@ -2868,18 +2909,45 @@ impl<'a> Lower<'a> {
             let susp_when = self.ir.add_expr(IrExpr::When {
                 branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
             });
-            let rg2 = self.ir.add_expr(IrExpr::GetValue(3));
-            let ret_r = self.ir.add_expr(IrExpr::Return(Some(rg2)));
+            // After the suspend call completes (synchronously here), bind the result `a` and run the
+            // tail expression; with no binding the lambda simply returns the suspension value. `tail_at`
+            // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
+            let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
+                if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
+                    let srcg = this.ir.add_expr(IrExpr::GetValue(src));
+                    let unb = this.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: srcg,
+                        type_operand: a_ty.clone(),
+                    });
+                    let bind = this.ir.add_expr(IrExpr::Variable {
+                        index: *a_idx,
+                        ty: a_ty.clone(),
+                        init: Some(unb),
+                    });
+                    let boxed = this.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: te,
+                        type_operand: object_ir.clone(),
+                    });
+                    vec![bind, this.ir.add_expr(IrExpr::Return(Some(boxed)))]
+                } else {
+                    let g = this.ir.add_expr(IrExpr::GetValue(src));
+                    vec![this.ir.add_expr(IrExpr::Return(Some(g)))]
+                }
+            };
+            let mut s0_stmts = vec![s0_tof, set_label, r_var, susp_when];
+            s0_stmts.extend(tail_at(self, r_idx));
             let s0 = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![s0_tof, set_label, r_var, susp_when, ret_r],
+                stmts: s0_stmts,
                 value: None,
             });
-            // State 1 (resume): throwOnFailure(result); return result.
+            // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
             let s1_tof = throw_on_failure(self, 1);
-            let rv = self.ir.add_expr(IrExpr::GetValue(1));
-            let s1_ret = self.ir.add_expr(IrExpr::Return(Some(rv)));
+            let mut s1_stmts = vec![s1_tof];
+            s1_stmts.extend(tail_at(self, 1));
             let s1 = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![s1_tof, s1_ret],
+                stmts: s1_stmts,
                 value: None,
             });
             // Dispatch on `this.label`.
@@ -2923,6 +2991,7 @@ impl<'a> Lower<'a> {
             let dispatch = self.ir.add_expr(IrExpr::When {
                 branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
             });
+            self.next_value = saved_next_sm;
             self.ir.add_expr(IrExpr::Block {
                 stmts: vec![susp_var, dispatch],
                 value: None,

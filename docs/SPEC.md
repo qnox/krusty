@@ -280,7 +280,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
   (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
   real kotlinc parking primitive suspends then resumes to 42
-  (`::suspend_lambda_internal_suspension_async_resume`). **Own parameters** (leaf, no captures): a
+  (`::suspend_lambda_internal_suspension_async_resume`). A **non-tail** body that BINDS the result and
+  computes a tail expression (`{ val a = foo(); a + 1 }`) is handled: state 0 resumes into the binding
+  (`a = unbox(callResult)`) and runs the tail; state 1 binds `a` from the invokeSuspend `result` and
+  runs the same tail. Limited to a SINGLE suspension; the invokeSuspend body is lowered with
+  `next_value` reset to 2 (`this`=0, `result`=1) so the bound local can't collide with the machine's
+  marker/result temps. Proven: `{ val a = foo(); a + 1 }` → 43 (`::suspend_lambda_non_tail_body_runs`).
+  **Own parameters** (leaf, no captures): a
   parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
   fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
   field, then calls `invokeSuspend(Unit)`; `invokeSuspend` loads the param fields into locals bound to
