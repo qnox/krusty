@@ -89,12 +89,6 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         }
         let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
         let is_static = ir.functions[fid as usize].is_static;
-        // A member state machine whose method has its OWN parameters isn't modeled yet — its continuation
-        // would have to capture them (like spilled locals). A no-arg member that suspends IS modeled (the
-        // continuation captures only the receiver). Skip rather than miscompile.
-        if has_susp && !is_static && !ir.functions[fid as usize].params.is_empty() {
-            return false;
-        }
         // CPS signature: append the continuation parameter, erase the return to Object.
         let f = &mut ir.functions[fid as usize];
         f.params.push(continuation_ty());
@@ -441,12 +435,38 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     }
     reads.sort_unstable();
     reads.dedup();
+
+    // For an instance method `this` is value-index 0, so params (and the appended continuation) shift up
+    // by one; the receiver's class internal name is the dispatch receiver (the continuation captures it).
+    let receiver: Option<String> = ir.functions[fid as usize].dispatch_receiver.clone();
+    let this_offset = u32::from(receiver.is_some());
+    // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
+    // `this_offset .. this_offset + real_params.len()`.
+    let real_params: Vec<IrType> = {
+        let p = &ir.functions[fid as usize].params;
+        p[..p.len().saturating_sub(1)].to_vec()
+    };
+    let completion_idx = real_params.len() as u32 + this_offset;
+    // Type of a value PARAMETER at value-index `idx` (not `this`, not the continuation). A param read
+    // across a suspension is spilled like a local, but — being live on ENTRY — the loop-top restore on
+    // the first iteration would clobber it with the (still-unset) field; so the continuation also
+    // CAPTURES it at construction (see `build_get_or_create` / `build_continuation_class`).
+    let param_ty = |idx: u32| -> Option<IrType> {
+        let hi = this_offset + real_params.len() as u32;
+        (idx >= this_offset && idx < hi).then(|| real_params[(idx - this_offset) as usize].clone())
+    };
     let mut spilled: Vec<(u32, IrType)> = Vec::new();
     for idx in reads {
-        if let Some(ty) = find_local_ty(ir, b, idx) {
+        if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
             spilled.push((idx, ty));
         }
     }
+    // The spilled value parameters — captured at continuation construction (in spilled order).
+    let param_caps: Vec<(u32, IrType)> = spilled
+        .iter()
+        .filter(|(idx, _)| param_ty(*idx).is_some())
+        .cloned()
+        .collect();
 
     let fname = ir.functions[fid as usize].name.clone();
     let cont_internal = format!("{facade}${fname}$1");
@@ -455,18 +475,21 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
         type_args: vec![],
         nullable: false,
     };
-    // For an instance method `this` is value-index 0, so params (and the appended continuation) shift up
-    // by one; the receiver's class internal name is the dispatch receiver (the continuation captures it).
-    let receiver: Option<String> = ir.functions[fid as usize].dispatch_receiver.clone();
-    let this_offset = u32::from(receiver.is_some());
-    let completion_idx = ir.functions[fid as usize].params.len() as u32 - 1 + this_offset;
 
     let base = max_value_index(ir) + 1;
     let cont_v = base;
     let r_v = base + 1;
     let suspended_v = base + 2;
 
-    let cont_id = build_continuation_class(ir, &cont_internal, fid, &spilled, receiver.as_deref());
+    let cont_id = build_continuation_class(
+        ir,
+        &cont_internal,
+        fid,
+        &spilled,
+        receiver.as_deref(),
+        &real_params,
+        &param_caps,
+    );
 
     // Flatten the body into a state graph.
     let mut flat = Flat {
@@ -500,9 +523,18 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     let spill_field =
         |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
 
-    // For an instance method, `new C$fn$1(this, completion)` also captures the receiver (value-index 0).
+    // For an instance method, `new C$fn$1(this, …, completion)` also captures the receiver (value-index
+    // 0); a member/top-level with live params additionally passes those param values (`param_caps`).
     let receiver_this = receiver.as_ref().map(|_| 0u32);
-    let get_or_create = build_get_or_create(ir, completion_idx, &cont_ty, cont_id, receiver_this);
+    let cap_indices: Vec<u32> = param_caps.iter().map(|(i, _)| *i).collect();
+    let get_or_create = build_get_or_create(
+        ir,
+        completion_idx,
+        &cont_ty,
+        cont_id,
+        receiver_this,
+        &cap_indices,
+    );
     let var_cont = k(
         ir,
         IrExpr::Variable {
@@ -545,18 +577,28 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
             init: Some(r_init),
         },
     ));
+    let is_param = |local: u32| param_caps.iter().any(|(p, _)| *p == local);
     for (local, ty) in spilled.clone() {
         let cont_for_f = k(ir, IrExpr::GetValue(cont_v));
         let fld = spill_field(local);
         let init = getf(ir, cont_for_f, fld);
-        loop_stmts.push(k(
-            ir,
+        // A value PARAMETER already owns its local slot (from the method signature), so assign it
+        // (`SetValue`) rather than declaring a fresh `Variable` — a re-declaration would allocate a
+        // phantom second slot and leave the param slot `top` at the loop back-edge (a frame conflict).
+        // An after-suspension LOCAL has no slot yet on the first iteration, so it must be declared.
+        let restore = if is_param(local) {
+            IrExpr::SetValue {
+                var: local,
+                value: init,
+            }
+        } else {
             IrExpr::Variable {
                 index: local,
                 ty,
                 init: Some(init),
-            },
-        ));
+            }
+        };
+        loop_stmts.push(k(ir, restore));
     }
 
     let mut branches: Branches = Vec::new();
@@ -1067,6 +1109,7 @@ fn build_get_or_create(
     cont_ty: &IrType,
     cont_id: ClassId,
     receiver_this: Option<u32>,
+    param_caps: &[u32],
 ) -> ExprId {
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
     let cast = |ir: &mut IrFile| {
@@ -1084,11 +1127,16 @@ fn build_get_or_create(
             index: 1,
         })
     };
-    // `new Cont([this,] $completion)` — a member continuation captures the receiver as its first arg.
+    // `new Cont([this,] [param_caps…,] $completion)` — a member continuation captures the receiver as
+    // its first arg, then each live value parameter (so the loop-top restore reads correct values on
+    // the first iteration), then the completion continuation.
     let new_cont = |ir: &mut IrFile| {
         let mut args = Vec::new();
         if let Some(this_idx) = receiver_this {
             args.push(ir.add_expr(IrExpr::GetValue(this_idx)));
+        }
+        for &p in param_caps {
+            args.push(ir.add_expr(IrExpr::GetValue(p)));
         }
         args.push(ir.add_expr(IrExpr::GetValue(completion_idx)));
         ir.add_expr(IrExpr::New {
@@ -1177,12 +1225,33 @@ fn build_get_or_create(
 /// Synthesize the `Facade$fn$1 extends ContinuationImpl` continuation class: `result`/`label` fields, a
 /// field per spilled local, a `<init>(Continuation)` delegating to super, and `invokeSuspend` (store the
 /// resume value, set the `MIN_VALUE` label bit, re-enter the outer function).
+/// A type-correct zero/`null` placeholder for `ty`, used as a value-parameter argument when
+/// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
+/// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
+fn zero_value(ir: &mut IrFile, ty: &IrType) -> ExprId {
+    use crate::types::Ty;
+    let c = match super::ir_emit::ir_ty_to_jvm(ty) {
+        Ty::Boolean => IrConst::Boolean(false),
+        Ty::Byte => IrConst::Byte(0),
+        Ty::Short => IrConst::Short(0),
+        Ty::Int => IrConst::Int(0),
+        Ty::Long => IrConst::Long(0),
+        Ty::Float => IrConst::Float(0.0),
+        Ty::Double => IrConst::Double(0.0),
+        Ty::Char => IrConst::Char('\0'),
+        _ => IrConst::Null,
+    };
+    ir.add_expr(IrExpr::Const(c))
+}
+
 fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
     outer_fid: u32,
     spilled: &[(u32, IrType)],
     receiver: Option<&str>,
+    params: &[IrType],
+    param_caps: &[(u32, IrType)],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
     // result(0), label(1), spilled(2..), and — for a member — the captured receiver `this$0` last.
@@ -1223,14 +1292,19 @@ fn build_continuation_class(
         arg: this_call,
         type_operand: continuation_ty(),
     });
+    // The outer fn now takes its real value parameters before the continuation. On re-entry the values
+    // are irrelevant (the loop-top restore overwrites them from the captured fields), so pass type-
+    // correct placeholders, exactly as kotlinc passes `iconst_0`/`aconst_null`.
+    let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
+    reentry_args.push(this_as_cont);
     let call_outer = match receiver {
         None => ir.add_expr(IrExpr::Call {
             callee: Callee::Local(outer_fid),
             dispatch_receiver: None,
-            args: vec![this_as_cont],
+            args: reentry_args,
         }),
         Some(owner) => {
-            // `((C)this.this$0).m((Continuation)this)` — invokevirtual the (no-arg) member on the receiver.
+            // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
                 receiver: cont_this,
@@ -1238,15 +1312,23 @@ fn build_continuation_class(
                 index: recv_field_idx,
             });
             let name = ir.functions[outer_fid as usize].name.clone();
+            // Build the member's CPS descriptor: its value params, then the trailing `Continuation`.
+            let mut p_jvm: Vec<crate::types::Ty> =
+                params.iter().map(super::ir_emit::ir_ty_to_jvm).collect();
+            p_jvm.push(super::ir_emit::ir_ty_to_jvm(&continuation_ty()));
+            let descriptor = crate::jvm::names::method_descriptor(
+                &p_jvm,
+                super::ir_emit::ir_ty_to_jvm(&object_ty()),
+            );
             ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
                     owner: owner.to_string(),
                     name,
-                    descriptor: "(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;".to_string(),
+                    descriptor,
                     interface: false,
                 },
                 dispatch_receiver: Some(recv),
-                args: vec![this_as_cont],
+                args: reentry_args,
             })
         }
     };
@@ -1279,40 +1361,55 @@ fn build_continuation_class(
         field_type_params.push(None);
     }
 
-    // Constructor: a member captures the receiver, so its `<init>` is `(C receiver, Continuation)` —
-    // store the receiver to `this$0`, then `super(completion)`. A top-level fn's is just `(Continuation)`.
-    let (ctor_args, init_body, super_completion_idx) = match receiver {
-        None => (vec![(continuation_ty(), false)], None, 1u32),
-        Some(owner) => {
-            let recv_ty = IrType::Class {
-                fq_name: owner.to_string(),
-                type_args: vec![],
-                nullable: false,
-            };
-            fields.push(("this$0".to_string(), recv_ty.clone()));
-            field_final.push(true);
-            field_private.push(false);
-            field_type_params.push(None);
-            // <init>: this=0, receiver=1, completion=2. Store receiver to this$0.
-            let this_c = ir.add_expr(IrExpr::GetValue(0));
-            let recv_v = ir.add_expr(IrExpr::GetValue(1));
-            let store = ir.add_expr(IrExpr::SetField {
-                receiver: this_c,
-                class: class_id,
-                index: recv_field_idx,
-                value: recv_v,
-            });
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![store],
-                value: None,
-            });
-            (
-                vec![(recv_ty, false), (continuation_ty(), false)],
-                Some(body),
-                2u32,
-            )
-        }
-    };
+    // Constructor value-indices: `this`=0, then (member) the receiver, then each captured value
+    // parameter, then the completion `Continuation`. Store the receiver to `this$0` and each captured
+    // param to its `L$i` field, then `super(completion)`. A top-level fn with no live params is just
+    // `<init>(Continuation)`.
+    let mut ctor_args: Vec<(IrType, bool)> = Vec::new();
+    let mut ctor_stores: Vec<ExprId> = Vec::new();
+    let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
+    if let Some(owner) = receiver {
+        let recv_ty = IrType::Class {
+            fq_name: owner.to_string(),
+            type_args: vec![],
+            nullable: false,
+        };
+        fields.push(("this$0".to_string(), recv_ty.clone()));
+        field_final.push(true);
+        field_private.push(false);
+        field_type_params.push(None);
+        let this_c = ir.add_expr(IrExpr::GetValue(0));
+        let recv_v = ir.add_expr(IrExpr::GetValue(arg_idx));
+        ctor_stores.push(ir.add_expr(IrExpr::SetField {
+            receiver: this_c,
+            class: class_id,
+            index: recv_field_idx,
+            value: recv_v,
+        }));
+        ctor_args.push((recv_ty, false));
+        arg_idx += 1;
+    }
+    for (v, ty) in param_caps {
+        let field = 2 + spilled.iter().position(|(l, _)| l == v).unwrap() as u32;
+        let this_c = ir.add_expr(IrExpr::GetValue(0));
+        let val = ir.add_expr(IrExpr::GetValue(arg_idx));
+        ctor_stores.push(ir.add_expr(IrExpr::SetField {
+            receiver: this_c,
+            class: class_id,
+            index: field,
+            value: val,
+        }));
+        ctor_args.push((ty.clone(), false));
+        arg_idx += 1;
+    }
+    ctor_args.push((continuation_ty(), false));
+    let super_completion_idx = arg_idx;
+    let init_body = (!ctor_stores.is_empty()).then(|| {
+        ir.add_expr(IrExpr::Block {
+            stmts: ctor_stores,
+            value: None,
+        })
+    });
 
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {

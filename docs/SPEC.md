@@ -209,6 +209,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and against a **real** kotlinc-compiled `helper` on the `-cp` classpath, both reaching 43
   (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`,
   `::suspend_fun_calls_classpath_suspend_fun`).
+- **`suspend fun` — async resume + parameters live across a suspension.** Two correctness items the
+  synchronous-completion tests couldn't reach. (1) The suspend-call sequence emits
+  `when(result == COROUTINE_SUSPENDED) { return result }` before storing the synchronous value; its
+  branch body must be a `Block` (the When-statement emitter drops a bare `Return`), else
+  `COROUTINE_SUSPENDED` falls through to the unbox — a `ClassCastException` the instant a callee
+  actually suspends. (2) A value PARAMETER read across a suspension must survive an async re-entry. It
+  is spilled like a local, but — being live on ENTRY — the continuation also CAPTURES it at
+  construction (`new Fn$1([this,] params…, completion)`), so the loop-top restore reads a correct value
+  on the first iteration; the restore assigns the existing param slot (`SetValue`, not a fresh
+  `Variable`, which would strand the param slot as `top`). `invokeSuspend` re-enters with type-correct
+  placeholders for the params (kotlinc passes `iconst_0`), the real values coming from the captured
+  fields. This unblocks member suspend fns WITH parameters (previously skipped). Proven by a real
+  kotlinc `suspendCoroutineUninterceptedOrReturn` primitive that parks its continuation: a
+  top-level/member suspend fn propagates `COROUTINE_SUSPENDED`, and a later `resumeWith` re-enters the
+  state machine and delivers the result with the parameter intact
+  (`tests/suspend_e2e.rs::suspend_fun_actually_suspends_and_resumes_async`,
+  `::member_suspend_fun_with_param_survives_async_resume`,
+  `::toplevel_suspend_fun_with_param_survives_async_resume`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
