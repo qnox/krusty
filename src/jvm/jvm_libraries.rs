@@ -1228,13 +1228,16 @@ impl LibrarySet for JvmLibraries {
             // Public-only: normal resolution emits an `invokestatic`, so a non-public (`@InlineOnly`)
             // candidate must never be picked here — it would fault with `IllegalAccessError` at runtime.
             // (The inline route reaches non-public scope fns through `resolve_scope_inline`, not this.)
-            let cands = self.cp.find_top_level(name);
-            let parsed: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = cands
-                .into_iter()
-                .filter(|c| c.public)
-                .map(|c| {
-                    let (params, ret) = parse_method_desc(&c.descriptor);
-                    (c, params, ret)
+            // Candidates come from the consolidated `functions` query (one source of truth), not a direct
+            // index read; the non-public `@InlineOnly` branch below reuses the same set.
+            let fs = self.functions(name, None);
+            let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
+                .overloads
+                .iter()
+                .filter(|o| o.kind == FnKind::TopLevel && o.public)
+                .map(|o| {
+                    let (params, ret) = parse_method_desc(&o.callable.descriptor);
+                    (o, params, ret)
                 })
                 .collect();
             // Exact arity first.
@@ -1272,10 +1275,15 @@ impl LibrarySet for JvmLibraries {
             // prefix-fill doesn't model, so skip the `$default` attempt for it — but still fall through
             // to the non-public `@InlineOnly` branch below (a `require(cond) { lazyMessage }` is spliced).
             let trailing_lambda = args.last().map_or(false, |a| matches!(a, Ty::Fun(_)));
+            let fsd = if pick.is_none() && !trailing_lambda {
+                self.functions(&format!("{name}$default"), None)
+            } else {
+                FunctionSet::default()
+            };
             if pick.is_none() && !trailing_lambda {
-                let default_name = format!("{name}$default");
-                for c in self.cp.find_top_level(&default_name) {
-                    if !c.public {
+                for o in fsd.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+                    let c = &o.callable;
+                    if !o.public {
                         continue;
                     }
                     let (params, ret) = parse_method_desc(&c.descriptor);
@@ -1330,8 +1338,9 @@ impl LibrarySet for JvmLibraries {
             // `can_inline_call` (dry-runs the splice) so an un-spliceable body simply stays unresolved
             // rather than falling back to an `invokestatic` on the private method.
             if pick.is_none() {
-                for c in self.cp.find_top_level(name) {
-                    if c.public || !self.cp.is_inline_method(&c.owner, &c.name) {
+                for o in fs.overloads.iter().filter(|o| o.kind == FnKind::TopLevel) {
+                    let c = &o.callable;
+                    if o.public || !self.cp.is_inline_method(&c.owner, &c.name) {
                         continue;
                     }
                     let (params, ret) = parse_method_desc(&c.descriptor);
@@ -1384,7 +1393,8 @@ impl LibrarySet for JvmLibraries {
                     });
                 }
             }
-            let (c, params, ret) = pick?;
+            let (o, params, ret) = pick?;
+            let c = &o.callable;
             // A reified reflection intrinsic (`typeOf` → `KType`) is implemented by inlining + reified
             // substitution; called as a plain static it throws at runtime. krusty doesn't inline it —
             // leave it unresolved (the file skips) rather than emit a call that fails.
