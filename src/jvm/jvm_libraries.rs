@@ -1045,11 +1045,16 @@ impl LibrarySet for JvmLibraries {
                 }
             }
             // Member functions of the receiver's type (own + inherited) — "functions inside types". A member
-            // wins over an extension; the caller uses `FnKind::Member` for that precedence.
+            // wins over an extension; the caller uses `FnKind::Member` for that precedence. The inherited-
+            // member walk is BREADTH-FIRST (a subtype's override before a supertype's), and each member
+            // carries its visit rung in `receiver_rank` so an arg-binding consumer (`resolve_instance`) can
+            // pick the closest type's overload — the same most-derived-first precedence the BFS gives.
             if let Ty::Obj(internal, _) = receiver {
                 let mut seen = std::collections::HashSet::new();
-                let mut queue = vec![internal.to_string()];
-                while let Some(cn) = queue.pop() {
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back(internal.to_string());
+                let mut rung: u32 = 0;
+                while let Some(cn) = queue.pop_front() {
                     if !seen.insert(cn.clone()) {
                         continue;
                     }
@@ -1063,7 +1068,7 @@ impl LibrarySet for JvmLibraries {
                                 receiver: Some(receiver),
                                 ret_nullable: false,
                                 public: true,
-                                receiver_rank: 0,
+                                receiver_rank: rung,
                                 flags: FnFlags::default(),
                                 callable: LibraryCallable {
                                     name: m.name.clone(),
@@ -1082,6 +1087,7 @@ impl LibrarySet for JvmLibraries {
                         }
                     }
                     queue.extend(t.supertypes);
+                    rung += 1;
                 }
             }
         } else {

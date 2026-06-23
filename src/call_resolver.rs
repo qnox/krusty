@@ -243,7 +243,9 @@ pub fn resolve_companion(
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
-/// member may be inherited from a (possibly non-public) supertype, so walk the chain breadth-first.
+/// member may be inherited from a (possibly non-public) supertype. Candidates come from the consolidated
+/// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
+/// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
 pub fn resolve_instance(
     lib: &dyn LibrarySet,
     internal: &str,
@@ -265,23 +267,28 @@ pub fn resolve_instance(
             }
         })
         .collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut q = std::collections::VecDeque::new();
-    q.push_back(internal.to_string());
-    while let Some(cur) = q.pop_front() {
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        let Some(t) = lib.resolve_type(&cur) else {
-            continue;
-        };
-        if let Some(m) = t
-            .instance_member(name, args)
-            .or_else(|| t.instance_member(name, &widened))
+    // Group the Member overloads by their BFS rung; `BTreeMap` iterates ranks ascending (closest type
+    // first), so the first rung with a best-overload match is the most-derived declaring type.
+    let fs = lib.functions(name, Some(Ty::obj(internal)));
+    let mut by_rank: std::collections::BTreeMap<u32, Vec<LibraryMember>> =
+        std::collections::BTreeMap::new();
+    for o in fs.overloads.iter().filter(|o| o.kind == FnKind::Member) {
+        by_rank
+            .entry(o.receiver_rank)
+            .or_default()
+            .push(LibraryMember {
+                name: o.callable.name.clone(),
+                params: o.callable.params.clone(),
+                ret: o.callable.ret,
+                descriptor: o.callable.descriptor.clone(),
+            });
+    }
+    for members in by_rank.values() {
+        if let Some(m) = crate::libraries::best_overload(members.iter(), name, args)
+            .or_else(|| crate::libraries::best_overload(members.iter(), name, &widened))
         {
             return Some(m.clone());
         }
-        q.extend(t.supertypes);
     }
     None
 }
