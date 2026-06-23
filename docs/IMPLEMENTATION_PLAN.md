@@ -3945,6 +3945,33 @@ Split call resolution into two layers, so the front end depends on a clean seam 
   `unbox_wrapper`, `arg_fits`) moved to `call_resolver.rs`; only backend signature *parsing*
   (`parse_method_gsig`, string → `GSig`) stays in the JVM impl. Gate held **1354/0** through every slice.
 
+## SymbolSource redesign — module + libraries as composable sources (commits "Phase 402–405")  🚧
+Goal: the current module's own decls resolve through the SAME path as libraries, so the scattered
+"user-first, else library" branching collapses into source precedence, and a second backend (JS) or
+per-jar/multi-module setups are just more sources.
+- **`trait SymbolSource`** (`src/symbol_source.rs`) — the federatable seam: `seed` + `functions` +
+  `resolve_type`. `LibrarySet: SymbolSource` (those three moved to it; the JVM-emit extras stay on
+  `LibrarySet`). **`CompositeSource`** is an ordered federation that is itself a `SymbolSource` — first
+  child wins; `functions` concatenates (origin-stamped), `resolve_type`/`seed` take the earliest. Nests.
+- **`Origin`** on `LibraryCallable` (`Library` | `Module{facade}`) — the lowerer's future cue to pick
+  same-file `Local` / cross-file / `invokestatic`, from resolution instead of `syms.funs` guards.
+- **`ModuleSymbols`** (`src/module_symbols.rs`) — the user half of `SymbolTable` as a `SymbolSource`:
+  top-level funs (all overloads), members (BFS over the user hierarchy with `receiver_rank`), extensions
+  (exact-then-`Any` key, receiver prepended), `resolve_type`/`seed`. Descriptors synthesized from `Ty`s.
+- **`CallSig`** on `FunctionInfo` (param_names/param_defaults/lambda_param_types/required/vararg) — the
+  source call shape the checker needs beyond the erased descriptor. `ModuleSymbols` fills it from the
+  `Signature`; JVM defaults it for now.
+- DONE: foundation (16 unit tests, gate 1354/0, not yet wired into the checker/lowerer).
+- REMAINING (high-risk, hot path — do per-site, gate-green, revert-if-regress):
+  1. Enrich JVM `functions()` `call_sig` (vararg/defaults/lambda types) so a library candidate carries
+     the same call shape a module one does — prerequisite for a true single-path collapse.
+  2. A federated selector (composite-level `resolve` over `functions()` + `call_sig` + `receiver_rank`,
+     per-source selection, cross-source precedence) returning a `FunctionInfo` with `origin`.
+  3. Migrate the checker call sites (the `syms.funs.contains_key` guards + `pick_overload` at
+     `resolve.rs:6542`, the `resolve_callable` fallbacks) one at a time to the federated selector.
+  4. Migrate the lowerer to switch on `origin` instead of `syms.funs`/`fun_ids` guards.
+  5. Delete each guard as its site lands; when the last goes, the duplication is gone.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
