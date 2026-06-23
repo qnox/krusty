@@ -25,6 +25,8 @@ use crate::ir::{
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
+/// A suspension point whose result is discarded (a bare `suspendCall()` statement) binds no local.
+const NO_LOCAL: u32 = u32::MAX;
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -81,7 +83,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             shift_locals(ir, b, p_old);
         }
         for pt in &mut points {
-            if pt.local >= p_old {
+            if pt.local != NO_LOCAL && pt.local >= p_old {
                 pt.local += 1;
             }
         }
@@ -150,6 +152,17 @@ fn suspension_points(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> Opti
                 }
             }
             _ => {
+                // A bare `suspendCall()` statement: a suspension point whose result is discarded.
+                if let Some((callee, args)) = as_suspend_call(ir, s, suspend_set) {
+                    points.push(Point {
+                        stmt: i,
+                        local: NO_LOCAL,
+                        local_ty: object_ty(),
+                        callee,
+                        args,
+                    });
+                    continue;
+                }
                 if expr_calls_suspend(ir, s, suspend_set) {
                     return None;
                 }
@@ -352,8 +365,8 @@ fn build_state_machine(
     for state in 0..=n {
         let mut ss: Vec<ExprId> = Vec::new();
         ss.push(throw_on_failure(ir, r_v));
-        // Bind the previous suspension's result (states 1..=n).
-        if state >= 1 {
+        // Bind the previous suspension's result (states 1..=n) — unless it was discarded.
+        if state >= 1 && points[state - 1].local != NO_LOCAL {
             let local = points[state - 1].local;
             let ty = points[state - 1].local_ty.clone();
             let r_get = k(ir, IrExpr::GetValue(r_v));
