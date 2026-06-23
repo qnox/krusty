@@ -1833,6 +1833,11 @@ impl<'a> Lower<'a> {
     fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
         crate::call_resolver::CallResolver::new(&*self.syms.libraries)
     }
+    /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
+    /// through the module source rather than touching `syms.funs` directly.
+    fn module_declares(&self, name: &str) -> bool {
+        crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
+    }
     fn fresh_value(&mut self) -> u32 {
         let v = self.next_value;
         self.next_value += 1;
@@ -3608,7 +3613,7 @@ impl<'a> Lower<'a> {
                     // a user-defined function or local of that name shadows it, exactly as in kotlinc.
                     return n == "emptyArray"
                         && self.lookup(n).is_none()
-                        && !self.syms.funs.contains_key(n);
+                        && !self.module_declares(n);
                 }
             }
         }
@@ -6965,7 +6970,7 @@ impl<'a> Lower<'a> {
                 // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
                 // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional
                 // case (the closure's arity matches the constructor's field params) is modeled.
-                if !self.syms.funs.contains_key(&name) {
+                if !self.module_declares(&name) {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
                     let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
@@ -8656,7 +8661,7 @@ impl<'a> Lower<'a> {
                     // `f(args)` where `f` is a field/property of the enclosing class (not a local value or
                     // a top-level function) — invoking a function value through a field isn't modeled;
                     // bail rather than miscompile (it would emit a bogus constructor call).
-                    if self.lookup(&fname).is_none() && !self.syms.funs.contains_key(&fname) {
+                    if self.lookup(&fname).is_none() && !self.module_declares(&fname) {
                         if let Some(cur) = self.cur_class.clone() {
                             if self
                                 .classes
@@ -8691,7 +8696,7 @@ impl<'a> Lower<'a> {
                     // supplies their IR body directly. Honor user shadowing first: a user-defined `fun
                     // arrayOf` (or a local of that name) wins, exactly as in kotlinc.
                     let array_intrinsic_ok =
-                        self.lookup(&fname).is_none() && !self.syms.funs.contains_key(&fname);
+                        self.lookup(&fname).is_none() && !self.module_declares(&fname);
                     if array_intrinsic_ok {
                         if let Some(syn) = crate::synthetics::lookup(&fname) {
                             let call = crate::synthetics::SynthCall {
@@ -8844,7 +8849,7 @@ impl<'a> Lower<'a> {
                         // `this.reversed()`, not the top-level `reversed`).
                         if self.cur_class.is_none()
                             && self.lookup(&fname).is_none()
-                            && !self.syms.funs.contains_key(&fname)
+                            && !self.module_declares(&fname)
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
                                 self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
