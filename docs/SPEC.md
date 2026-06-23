@@ -245,6 +245,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file) — never the prior `Function0`-vs-`Function1` miscompile. Proven by an ABI signature diff:
   `take(block: suspend () -> Int)` lowers to `void take(Function1)`
   (`tests/suspend_e2e.rs::suspend_function_type_lowers_to_function1_continuation`).
+- **`SuspendLambda` codegen (leaf, no captures).** A `suspend` lambda literal (`{ 42 }`) flowing into a
+  suspend function-type position compiles to a concrete class
+  `… extends kotlin/coroutines/jvm/internal/SuspendLambda implements Function{n+1}` — NOT krusty's
+  `invokedynamic`/`LambdaMetafactory` path (which can't realize the `SuspendLambda` ABI). The class has
+  `<init>(Continuation completion)` → `super(n+1, completion)`, `invokeSuspend(Object result)` (the body,
+  result boxed), and the erased `invoke(Object arg)` = `new This((Continuation)arg).invokeSuspend(Unit)`.
+  The creation site is `new This((Continuation) null)` (the completion is supplied when the lambda is
+  invoked). `lower_arg` routes a lambda bound for an `IrType::Function{suspend:true}` parameter to
+  `lower_suspend_lambda`; any non-lambda suspend value still bails. Proven end-to-end:
+  `make(): suspend () -> Int = { 42 }` returns a `Function1` a Java driver invokes with a continuation →
+  boxed 42 (`tests/suspend_e2e.rs::leaf_suspend_lambda_creates_and_invokes`). Still skipped (later
+  slices): captures, own parameters, and an internal suspension point (the lambda's `invokeSuspend`
+  would itself be a state machine with the instance as the continuation).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
