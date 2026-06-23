@@ -67,6 +67,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P18 — nullable type-parameter `Signature`s (gate 1492, FAIL=0).** A nullable type-parameter
+  reference (`fun <T> f(t: T?): T?`, `val a: T?`) is `T<name>;` in the JVM generic signature — `?` is not
+  represented there (kotlinc drops it; the erased descriptor stays `Object`). Previously `ref_is_bare_tparam`
+  bailed on the `?`, omitting the signature; now `T?` is treated as a bare type-param ref. Verified
+  `fun <T> f(t: T?): T?` → `<T:Ljava/lang/Object;>(TT;)TT;` matches kotlinc. Tests: `generic_signature_e2e`.
 - **Phase P17 — synthesized constructor `Signature` (gate 1492, FAIL=0). Generic-class byte-parity now
   COMPLETE.** The synthesized `<init>` of a generic class carries a `Signature` whose type-parameter
   params read `T<tp>;` — `class Pair2<A, B>(val a: A, val b: B)` → `(TA;TB;)V`, `class Box<T>(var a: T)`

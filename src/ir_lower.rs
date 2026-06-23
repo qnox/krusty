@@ -11832,7 +11832,9 @@ fn type_param_bounds_ir(
 }
 
 fn ref_is_bare_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
-    r.fun_params.is_empty() && r.targs.is_empty() && !r.nullable && tps.iter().any(|t| t == &r.name)
+    // A nullable type-parameter ref (`T?`) is still `T<name>;` in the JVM generic signature — nullability
+    // is not represented there (kotlinc drops it; the erased descriptor is `Object` either way).
+    r.fun_params.is_empty() && r.targs.is_empty() && tps.iter().any(|t| t == &r.name)
 }
 
 fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
