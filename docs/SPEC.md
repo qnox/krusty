@@ -280,7 +280,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
   (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
   real kotlinc parking primitive suspends then resumes to 42
-  (`::suspend_lambda_internal_suspension_async_resume`).
+  (`::suspend_lambda_internal_suspension_async_resume`). **Own parameters** (leaf, no captures): a
+  parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
+  fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
+  field, then calls `invokeSuspend(Unit)`; `invokeSuspend` loads the param fields into locals bound to
+  the lambda's parameter names. The class implements `Function{arity+1}`. Proven:
+  `make(): suspend (Int) -> Int = { it + 1 }`, `make().invoke(10, k)` → 11
+  (`::suspend_lambda_with_parameter_runs`). This is also the shape a coroutine-builder lambda takes
+  (`runBlocking`/`launch` accept `suspend CoroutineScope.() -> T` — a receiver lambda is a 1-parameter
+  suspend lambda), so builders are ordinary classpath calls once their suspend-lambda argument compiles.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
