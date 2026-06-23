@@ -227,6 +227,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/suspend_e2e.rs::suspend_fun_actually_suspends_and_resumes_async`,
   `::member_suspend_fun_with_param_survives_async_resume`,
   `::toplevel_suspend_fun_with_param_survives_async_resume`).
+- **`suspend fun` — suspension on an elvis / safe-call RHS.** `x ?: foo()` lowers to a block-valued
+  initializer `Variable { init: Block { prelude…, value: When } }` (the `When` selects the non-null
+  value or the suspending `foo()`). `normalize_block_inits` rewrites that to `prelude…; Variable { init:
+  When }`, surfacing the conditional suspension as the `Variable{init: When}` the flattener's
+  `stmt_cond_suspension` already handles. Proven both branches: `bar(null)` suspends on the elvis RHS
+  (→8), `bar(5)` takes the value branch with no suspension (→6)
+  (`tests/suspend_e2e.rs::suspend_fun_suspension_on_elvis_rhs`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.

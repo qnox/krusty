@@ -390,6 +390,42 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
     call_e
 }
 
+/// Rewrite each top-level `Variable { init: Block { stmts: prelude, value: Some(inner) } }` into the
+/// `prelude` statements followed by `Variable { init: inner }`. Elvis (`x ?: foo()`) and primitive
+/// safe-call elvis lower to such a block-valued initializer; unwrapping it lifts the inner `When` (whose
+/// branch value suspends) to a position the flattener's `stmt_cond_suspension` recognizes.
+fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
+    for s in stmts {
+        if let IrExpr::Variable {
+            index,
+            ref ty,
+            init: Some(init),
+        } = ir.exprs[s as usize].clone()
+        {
+            if let IrExpr::Block {
+                stmts: pre,
+                value: Some(inner),
+            } = ir.exprs[init as usize].clone()
+            {
+                out.extend(pre);
+                let nv = ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty: ty.clone(),
+                    init: Some(inner),
+                });
+                out.push(nv);
+                continue;
+            }
+        }
+        out.push(s);
+    }
+    ir.exprs[b as usize] = IrExpr::Block { stmts: out, value };
+}
+
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
@@ -413,6 +449,10 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
 fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bool {
+    // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
+    // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
+    // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
+    normalize_block_inits(ir, b);
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return false;
     };
