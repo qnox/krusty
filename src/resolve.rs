@@ -6505,17 +6505,9 @@ impl<'a> Checker<'a> {
                 // the classpath set — the federation precedence (module > implicit-receiver > library) made
                 // explicit, replacing the scattered `syms.funs.contains_key` guards.
                 let user_shadows = self.module_declares(&fname);
-                let module_top: Option<crate::libraries::FunctionInfo> = self
-                    .syms
-                    .funs
-                    .get(&fname)
-                    .and_then(|sigs| pick_overload(sigs, &arg_tys))
-                    .map(|i| {
-                        // ModuleSymbols builds overloads in `funs` order, so index `i` aligns.
-                        let mut fs = crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .functions(&fname, None);
-                        fs.overloads.swap_remove(i)
-                    });
+                let module_top: Option<crate::libraries::FunctionInfo> =
+                    crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .resolve_top_level(&fname, &arg_tys);
                 if module_top.is_none() && !user_shadows {
                     // Unqualified call to a member of the implicit receiver of a builtin/library type — a
                     // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).

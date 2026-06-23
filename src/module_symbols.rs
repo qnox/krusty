@@ -42,6 +42,14 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.funs.contains_key(name)
     }
 
+    /// Select the top-level overload of `name` matching `arg_tys` (Kotlin overload resolution via
+    /// [`crate::resolve::pick_overload`]) and return it as a [`FunctionInfo`]. The source owns the
+    /// selection, so callers need not touch `syms.funs` or re-run the picker themselves.
+    pub fn resolve_top_level(&self, name: &str, arg_tys: &[Ty]) -> Option<FunctionInfo> {
+        let i = crate::resolve::pick_overload(self.syms.funs.get(name)?, arg_tys)?;
+        self.functions(name, None).overloads.into_iter().nth(i)
+    }
+
     /// Collect members named `name` over the user hierarchy in DEPTH-FIRST pre-order (self, then each
     /// interface subtree, then the superclass subtree) — the exact order `Checker::lookup_method` uses,
     /// so the first collected overload is the one that lookup would return. `rung` is the visit counter.

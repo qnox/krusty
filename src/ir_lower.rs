@@ -16,7 +16,6 @@ use crate::ir::{
     IrTypeOp,
 };
 use crate::resolve::{SymbolTable, TypeInfo};
-use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 struct ClassInfo {
@@ -8714,16 +8713,8 @@ impl<'a> Lower<'a> {
                         // defined in THIS file (present in `fun_ids`) is handled here; a cross-file
                         // function (in `funs` but not `fun_ids`) falls through to the facade branch below.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms
-                            .funs
-                            .get(&fname)
-                            .and_then(|v| crate::resolve::pick_overload(v, &arg_tys))
-                            .map(|i| {
-                                crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .functions(&fname, None)
-                                    .overloads
-                                    .swap_remove(i)
-                            })
+                        crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .resolve_top_level(&fname, &arg_tys)
                             .and_then(|fi| {
                                 // `erased_params_key` == the params' descriptors concatenated.
                                 let key: String =
@@ -8811,17 +8802,8 @@ impl<'a> Lower<'a> {
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
                         // omitted defaults) is modeled here; anything else bails (skips the file).
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        let fi = self
-                            .syms
-                            .funs
-                            .get(&fname)
-                            .and_then(|v| crate::resolve::pick_overload(v, &arg_tys))
-                            .map(|i| {
-                                crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .functions(&fname, None)
-                                    .overloads
-                                    .swap_remove(i)
-                            })?;
+                        let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .resolve_top_level(&fname, &arg_tys)?;
                         let plen = fi.callable.params.len();
                         if fi.call_sig.vararg || fi.call_sig.required != plen || args.len() != plen
                         {
