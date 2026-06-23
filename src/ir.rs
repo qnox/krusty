@@ -663,6 +663,10 @@ pub struct IrFile {
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     pub class_signatures: std::collections::HashMap<String, IrGenericSig>,
+    /// Class fq-internal-name → `(field name, type-parameter name)` for each field whose declared type
+    /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
+    /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
+    pub field_signatures: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
