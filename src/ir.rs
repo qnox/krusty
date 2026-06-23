@@ -647,6 +647,13 @@ pub struct IrFile {
     /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
     /// calls are caught by `suspend_funs`; this is the cross-unit complement.
     pub suspend_calls: std::collections::HashMap<u32, IrType>,
+    /// A `suspend` LAMBDA's `invokeSuspend` that contains MULTIPLE suspensions / control flow and needs
+    /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
+    /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
+    /// (after its captures/parameters), where the coroutine pass appends the `result`/`label`/spilled
+    /// fields. ir_lower builds `invokeSuspend` with the plain body (suspend calls un-threaded); the pass
+    /// flattens it. (Single-suspension lambdas are handled inline by ir_lower instead.)
+    pub suspend_lambda_sm: Vec<(u32, u32, u32)>,
 }
 
 impl IrFile {

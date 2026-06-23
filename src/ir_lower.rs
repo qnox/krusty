@@ -2675,11 +2675,10 @@ impl<'a> Lower<'a> {
         for (name, ty) in bind_names.iter().zip(params.iter()) {
             fields.push((name.clone(), ty_to_ir(*ty)));
         }
-        // A suspending lambda needs a `label` field (its state-machine cursor) after the params.
+        // A suspending lambda's state-machine fields go after the captures/params. For the SINGLE-
+        // suspension inline machine a `label` field is appended below (`label_idx`); the general
+        // (multi-suspension) machine has its `result`/`label`/spilled fields added by the coroutine pass.
         let label_idx = n_cap + arity as u32;
-        if body_suspends {
-            fields.push(("label".to_string(), ty_to_ir(Ty::Int)));
-        }
         let ctor_args: Vec<(IrType, bool)> = captures
             .iter()
             .map(|(_, _, ty)| (ty_to_ir(*ty), false))
@@ -2764,6 +2763,9 @@ impl<'a> Lower<'a> {
                 args: vec![v],
             })
         };
+        // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
+        // built by the coroutine pass from the plain `invokeSuspend` body.
+        let mut needs_pass_sm = false;
         let inv_susp_body = if body_suspends {
             // Single-suspension lambda (`{ foo() }` or `{ val a = foo(); <tail> }`), no captures (gated
             // above). The continuation is `this`: thread it into the call, dispatch on `this.label`.
@@ -2817,185 +2819,215 @@ impl<'a> Lower<'a> {
                     .filter(|n| susp_names.contains(*n) || self.resolver().toplevel_is_suspend(n))
                     .count()
             };
-            if !is_susp || n_susp > 1 {
-                return None; // not a clean single-suspension tail — don't miscompile
-            }
-            // Thread `this` (as Continuation) as the callee's trailing argument.
-            let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
-            let this_cont = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: this_for_cont,
-                type_operand: cont_ir.clone(),
-            });
-            // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
-            // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
-            // resolved by its LOGICAL signature, so rewrite it to the physical CPS form here (append the
-            // `Continuation` parameter, erase the return to `Object`).
-            let cont_param_ty = cont_ir.clone();
-            let object_ret_ty = object_ir.clone();
-            match &mut self.ir.exprs[tail as usize] {
-                IrExpr::Call { args, callee, .. } => {
-                    match callee {
-                        Callee::Static { descriptor, .. } => {
-                            let close = descriptor.rfind(')').unwrap_or(descriptor.len());
-                            *descriptor = format!(
-                                "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
-                                &descriptor[..close]
-                            );
+            // A clean SINGLE tail/bound suspension uses the inline two-state machine here; anything else
+            // (a second suspension, control flow) gets the general lambda-mode machine from the pass.
+            let handroll = is_susp && n_susp == 1;
+            if !handroll {
+                needs_pass_sm = true;
+                self.next_value = saved_next_sm;
+                let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
+                    IrExpr::Block {
+                        stmts,
+                        value: Some(v),
+                    } => (stmts.clone(), *v),
+                    _ => (Vec::new(), body_val),
+                };
+                let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: b_val,
+                    type_operand: object_ir.clone(),
+                });
+                b_stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: b_stmts,
+                    value: None,
+                })
+            } else {
+                // The inline machine's `label` field is appended to the lambda class now.
+                {
+                    let cls = &mut self.ir.classes[class_id as usize];
+                    cls.fields.push(("label".to_string(), ty_to_ir(Ty::Int)));
+                    cls.field_final.push(false);
+                    cls.field_private.push(false);
+                    cls.field_type_params.push(None);
+                }
+                // Thread `this` (as Continuation) as the callee's trailing argument.
+                let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
+                let this_cont = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: this_for_cont,
+                    type_operand: cont_ir.clone(),
+                });
+                // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
+                // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
+                // resolved by its LOGICAL signature, so rewrite it to the physical CPS form here (append the
+                // `Continuation` parameter, erase the return to `Object`).
+                let cont_param_ty = cont_ir.clone();
+                let object_ret_ty = object_ir.clone();
+                match &mut self.ir.exprs[tail as usize] {
+                    IrExpr::Call { args, callee, .. } => {
+                        match callee {
+                            Callee::Static { descriptor, .. } => {
+                                let close = descriptor.rfind(')').unwrap_or(descriptor.len());
+                                *descriptor = format!(
+                                    "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+                                    &descriptor[..close]
+                                );
+                            }
+                            Callee::CrossFile { params, ret, .. } => {
+                                params.push(cont_param_ty);
+                                *ret = object_ret_ty;
+                            }
+                            _ => {}
                         }
-                        Callee::CrossFile { params, ret, .. } => {
-                            params.push(cont_param_ty);
-                            *ret = object_ret_ty;
-                        }
-                        _ => {}
+                        args.push(this_cont);
                     }
-                    args.push(this_cont);
+                    _ => return None,
                 }
-                _ => return None,
+                // SUSPENDED marker into local 2 (this=0, result=1).
+                let susp_call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
+                        name: "getCOROUTINE_SUSPENDED".to_string(),
+                        descriptor: "()Ljava/lang/Object;".to_string(),
+                        inline: false,
+                        must_inline: false,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![],
+                });
+                // Machine locals are allocated ABOVE the body's locals (the body was already lowered) so the
+                // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
+                let susp_idx = self.fresh_value();
+                let r_idx = self.fresh_value();
+                let susp_var = self.ir.add_expr(IrExpr::Variable {
+                    index: susp_idx,
+                    ty: object_ir.clone(),
+                    init: Some(susp_call),
+                });
+                // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
+                let s0_tof = throw_on_failure(self, 1);
+                let this_l = self.ir.add_expr(IrExpr::GetValue(0));
+                let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let set_label = self.ir.add_expr(IrExpr::SetField {
+                    receiver: this_l,
+                    class: class_id,
+                    index: label_idx,
+                    value: one,
+                });
+                let r_var = self.ir.add_expr(IrExpr::Variable {
+                    index: r_idx,
+                    ty: object_ir.clone(),
+                    init: Some(tail),
+                });
+                let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
+                let sg = self.ir.add_expr(IrExpr::GetValue(susp_idx));
+                let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::RefEq,
+                    lhs: rg,
+                    rhs: sg,
+                });
+                let sg2 = self.ir.add_expr(IrExpr::GetValue(susp_idx));
+                let ret_susp = self.ir.add_expr(IrExpr::Return(Some(sg2)));
+                let ret_susp_b = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret_susp],
+                    value: None,
+                });
+                let empty = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![],
+                    value: None,
+                });
+                let susp_when = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
+                });
+                // After the suspend call completes (synchronously here), bind the result `a` and run the
+                // tail expression; with no binding the lambda simply returns the suspension value. `tail_at`
+                // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
+                let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
+                    if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
+                        let srcg = this.ir.add_expr(IrExpr::GetValue(src));
+                        let unb = this.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: srcg,
+                            type_operand: a_ty.clone(),
+                        });
+                        let bind = this.ir.add_expr(IrExpr::Variable {
+                            index: *a_idx,
+                            ty: a_ty.clone(),
+                            init: Some(unb),
+                        });
+                        let boxed = this.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: te,
+                            type_operand: object_ir.clone(),
+                        });
+                        vec![bind, this.ir.add_expr(IrExpr::Return(Some(boxed)))]
+                    } else {
+                        let g = this.ir.add_expr(IrExpr::GetValue(src));
+                        vec![this.ir.add_expr(IrExpr::Return(Some(g)))]
+                    }
+                };
+                let mut s0_stmts = vec![s0_tof, set_label, r_var, susp_when];
+                s0_stmts.extend(tail_at(self, r_idx));
+                let s0 = self.ir.add_expr(IrExpr::Block {
+                    stmts: s0_stmts,
+                    value: None,
+                });
+                // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
+                let s1_tof = throw_on_failure(self, 1);
+                let mut s1_stmts = vec![s1_tof];
+                s1_stmts.extend(tail_at(self, 1));
+                let s1 = self.ir.add_expr(IrExpr::Block {
+                    stmts: s1_stmts,
+                    value: None,
+                });
+                // Dispatch on `this.label`.
+                let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
+                let lbl0 = self.ir.add_expr(IrExpr::GetField {
+                    receiver: lbl0r,
+                    class: class_id,
+                    index: label_idx,
+                });
+                let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: lbl0,
+                    rhs: c0,
+                });
+                let lbl1r = self.ir.add_expr(IrExpr::GetValue(0));
+                let lbl1 = self.ir.add_expr(IrExpr::GetField {
+                    receiver: lbl1r,
+                    class: class_id,
+                    index: label_idx,
+                });
+                let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+                let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: lbl1,
+                    rhs: c1,
+                });
+                let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
+                    "call to 'resume' before 'invoke' with coroutine".to_string(),
+                )));
+                let exc = self.ir.add_expr(IrExpr::NewExternal {
+                    internal: "java/lang/IllegalStateException".to_string(),
+                    ctor_desc: "(Ljava/lang/String;)V".to_string(),
+                    args: vec![msg],
+                });
+                let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
+                let else_b = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![throw],
+                    value: None,
+                });
+                let dispatch = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
+                });
+                self.next_value = saved_next_sm;
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![susp_var, dispatch],
+                    value: None,
+                })
             }
-            // SUSPENDED marker into local 2 (this=0, result=1).
-            let susp_call = self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
-                    name: "getCOROUTINE_SUSPENDED".to_string(),
-                    descriptor: "()Ljava/lang/Object;".to_string(),
-                    inline: false,
-                    must_inline: false,
-                },
-                dispatch_receiver: None,
-                args: vec![],
-            });
-            // Machine locals are allocated ABOVE the body's locals (the body was already lowered) so the
-            // bound `a` slot (if any) can't collide with the SUSPENDED marker / call-result temp.
-            let susp_idx = self.fresh_value();
-            let r_idx = self.fresh_value();
-            let susp_var = self.ir.add_expr(IrExpr::Variable {
-                index: susp_idx,
-                ty: object_ir.clone(),
-                init: Some(susp_call),
-            });
-            // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; tail.
-            let s0_tof = throw_on_failure(self, 1);
-            let this_l = self.ir.add_expr(IrExpr::GetValue(0));
-            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let set_label = self.ir.add_expr(IrExpr::SetField {
-                receiver: this_l,
-                class: class_id,
-                index: label_idx,
-                value: one,
-            });
-            let r_var = self.ir.add_expr(IrExpr::Variable {
-                index: r_idx,
-                ty: object_ir.clone(),
-                init: Some(tail),
-            });
-            let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
-            let sg = self.ir.add_expr(IrExpr::GetValue(susp_idx));
-            let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::RefEq,
-                lhs: rg,
-                rhs: sg,
-            });
-            let sg2 = self.ir.add_expr(IrExpr::GetValue(susp_idx));
-            let ret_susp = self.ir.add_expr(IrExpr::Return(Some(sg2)));
-            let ret_susp_b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![ret_susp],
-                value: None,
-            });
-            let empty = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![],
-                value: None,
-            });
-            let susp_when = self.ir.add_expr(IrExpr::When {
-                branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
-            });
-            // After the suspend call completes (synchronously here), bind the result `a` and run the
-            // tail expression; with no binding the lambda simply returns the suspension value. `tail_at`
-            // builds `[ (val a = unbox(src);) return box(tail_expr | src) ]` for a result at value `src`.
-            let tail_at = |this: &mut Self, src: u32| -> Vec<u32> {
-                if let (Some((a_idx, a_ty)), Some(te)) = (&bound, tail_expr) {
-                    let srcg = this.ir.add_expr(IrExpr::GetValue(src));
-                    let unb = this.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: srcg,
-                        type_operand: a_ty.clone(),
-                    });
-                    let bind = this.ir.add_expr(IrExpr::Variable {
-                        index: *a_idx,
-                        ty: a_ty.clone(),
-                        init: Some(unb),
-                    });
-                    let boxed = this.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: te,
-                        type_operand: object_ir.clone(),
-                    });
-                    vec![bind, this.ir.add_expr(IrExpr::Return(Some(boxed)))]
-                } else {
-                    let g = this.ir.add_expr(IrExpr::GetValue(src));
-                    vec![this.ir.add_expr(IrExpr::Return(Some(g)))]
-                }
-            };
-            let mut s0_stmts = vec![s0_tof, set_label, r_var, susp_when];
-            s0_stmts.extend(tail_at(self, r_idx));
-            let s0 = self.ir.add_expr(IrExpr::Block {
-                stmts: s0_stmts,
-                value: None,
-            });
-            // State 1 (resume): throwOnFailure(result); bind `a` from `result`; run the tail.
-            let s1_tof = throw_on_failure(self, 1);
-            let mut s1_stmts = vec![s1_tof];
-            s1_stmts.extend(tail_at(self, 1));
-            let s1 = self.ir.add_expr(IrExpr::Block {
-                stmts: s1_stmts,
-                value: None,
-            });
-            // Dispatch on `this.label`.
-            let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
-            let lbl0 = self.ir.add_expr(IrExpr::GetField {
-                receiver: lbl0r,
-                class: class_id,
-                index: label_idx,
-            });
-            let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-            let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: lbl0,
-                rhs: c0,
-            });
-            let lbl1r = self.ir.add_expr(IrExpr::GetValue(0));
-            let lbl1 = self.ir.add_expr(IrExpr::GetField {
-                receiver: lbl1r,
-                class: class_id,
-                index: label_idx,
-            });
-            let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-            let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: lbl1,
-                rhs: c1,
-            });
-            let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
-                "call to 'resume' before 'invoke' with coroutine".to_string(),
-            )));
-            let exc = self.ir.add_expr(IrExpr::NewExternal {
-                internal: "java/lang/IllegalStateException".to_string(),
-                ctor_desc: "(Ljava/lang/String;)V".to_string(),
-                args: vec![msg],
-            });
-            let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
-            let else_b = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![throw],
-                value: None,
-            });
-            let dispatch = self.ir.add_expr(IrExpr::When {
-                branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
-            });
-            self.next_value = saved_next_sm;
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![susp_var, dispatch],
-                value: None,
-            })
         } else {
             let mut stmts = vec![throw_on_failure(self, 1)];
             let saved_scope = std::mem::take(&mut self.scope);
@@ -3046,7 +3078,7 @@ impl<'a> Lower<'a> {
             stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
             self.ir.add_expr(IrExpr::Block { stmts, value: None })
         };
-        self.add_synth_method(
+        let invoke_susp_fid = self.add_synth_method(
             &internal,
             class_id,
             "invokeSuspend",
@@ -3055,6 +3087,13 @@ impl<'a> Lower<'a> {
             inv_susp_body,
             true,
         )?; // invokeSuspend is method index 0.
+            // Hand the plain `invokeSuspend` to the coroutine pass to flatten into the general state machine
+            // (its result/label/spilled fields are appended after the captures/params at `field_base`).
+        if needs_pass_sm {
+            self.ir
+                .suspend_lambda_sm
+                .push((invoke_susp_fid, class_id, n_cap + arity as u32));
+        }
 
         // invoke(Object p0.., Object completion): `r = new This(this.cap.., (Continuation)completion);
         // r.param_i = (paramType)p_i; return r.invokeSuspend(Unit.INSTANCE)`. Value-indices: this=0,

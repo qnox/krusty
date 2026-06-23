@@ -73,6 +73,174 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn suspend_lambda_two_suspensions_async_resume() {
+    // The ASYNC path of the general lambda-mode machine: `{ val a = suspendOnce(); val b = plain();
+    // a + b }`. The first callee PARKS (returns COROUTINE_SUSPENDED); `a` must be SPILLED across the
+    // second suspension. invoke suspends, resumeSaved(42) re-enters → 42 + 100 = 142.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_lam2as_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Lib.kt"),
+        "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<Int>? = null\n\
+suspend fun suspendOnce(): Int = suspendCoroutineUninterceptedOrReturn { c ->\n\
+    saved = c\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+suspend fun plain(): Int = 100\n\
+fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
+    )
+    .unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc = Command::new(&kotlinc)
+        .env("JAVA_HOME", &jh)
+        .args(["-d", libjar.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        eprintln!(
+            "skipping: kotlinc failed:\n{}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    fs::write(
+        dir.join("Use.kt"),
+        "fun make(): suspend () -> Int = {\n    val a = suspendOnce()\n    val b = plain()\n    a + b\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
+import kotlin.jvm.functions.Function1;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    final Object[] box = new Object[1];\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { box[0] = o; }\n\
+    };\n\
+    Object r = UseKt.make().invoke(k);\n\
+    boolean suspended = (r == IntrinsicsKt.getCOROUTINE_SUSPENDED());\n\
+    LibKt.resumeSaved(42);\n\
+    System.out.println(suspended && Integer.valueOf(142).equals(box[0]) ? \"OK\" : (\"s=\" + suspended + \" box=\" + box[0]));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        libjar.to_str().unwrap(),
+        stdlib
+    );
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "async two-suspension lambda: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn suspend_lambda_two_suspensions_runs() {
+    // A `suspend` lambda with TWO suspension points (`{ val a = foo(); val b = bar(); a + b }`). Its
+    // invokeSuspend needs a multi-state machine (the lambda instance as the continuation) — the general
+    // lambda-mode flattener. Both callees complete synchronously → make().invoke(k) = 42 + 100 = 142.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_lam2_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("S.kt"),
+        "suspend fun foo(): Int = 42\nsuspend fun bar(): Int = 100\nfun make(): suspend () -> Int = {\n    val a = foo()\n    val b = bar()\n    a + b\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.jvm.functions.Function1;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Function1 f = SKt.make();\n\
+    Object r = f.invoke(k);\n\
+    System.out.println(r.equals(Integer.valueOf(142)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "two-suspension lambda: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn suspend_lambda_non_tail_body_runs() {
     // A `suspend` lambda whose body BINDS a suspension result and then computes a tail expression
     // (`{ val a = foo(); a + 1 }`). The `invokeSuspend` state machine resumes into the binding, then

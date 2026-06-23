@@ -114,6 +114,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             return false;
         }
     }
+    // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
+    // whose continuation is the lambda instance itself (ir_lower handled the single-suspension shapes).
+    for (fid, class_id, field_base) in ir.suspend_lambda_sm.clone() {
+        if !build_lambda_state_machine(ir, fid, class_id, field_base) {
+            return false;
+        }
+    }
     true
 }
 
@@ -565,6 +572,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
         r_v,
         suspended_v,
         cont_id,
+        field_base: 0, // dedicated continuation class: result/label/spilled at field 0..
         spilled: spilled.clone(),
         states: vec![Vec::new()],
         next_local: base + 3,
@@ -747,6 +755,235 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     box_returns(ir, new_body)
 }
 
+/// Build the coroutine state machine for a suspend LAMBDA's `invokeSuspend` (`fid`) whose continuation
+/// is the lambda instance (`class_id`) itself. The lambda class already holds its captures/parameters
+/// at fields `0..field_base`; this appends `result`/`label`/spilled fields after them and rewrites the
+/// body to `this.result = result; while(true){ r = this.result; <restore spilled>; when(this.label){
+/// states } }`, threading `this` into each suspend call. Returns `false` (skip) for an unmodeled shape.
+fn build_lambda_state_machine(
+    ir: &mut IrFile,
+    fid: u32,
+    class_id: ClassId,
+    field_base: u32,
+) -> bool {
+    let Some(b) = ir.functions[fid as usize].body else {
+        return false;
+    };
+    normalize_block_inits(ir, b);
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return false;
+    };
+    if value.is_some() {
+        return false;
+    }
+    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    let Some(first) = stmts
+        .iter()
+        .position(|&s| expr_calls_suspend(ir, s, &suspend_set))
+    else {
+        return false;
+    };
+    let mut reads: Vec<u32> = Vec::new();
+    for &s in &stmts[first..] {
+        collect_reads(ir, s, &mut reads);
+    }
+    reads.sort_unstable();
+    reads.dedup();
+    let mut spilled: Vec<(u32, IrType)> = Vec::new();
+    for idx in reads {
+        if let Some(ty) = find_local_ty(ir, b, idx) {
+            spilled.push((idx, ty));
+        }
+    }
+
+    // Append `result`, `label`, then one field per spilled local — after the captures/parameters.
+    {
+        let cls = &mut ir.classes[class_id as usize];
+        let mut push = |name: &str, ty: IrType| {
+            cls.fields.push((name.to_string(), ty));
+            cls.field_final.push(false);
+            cls.field_private.push(false);
+            cls.field_type_params.push(None);
+        };
+        push("result", object_ty());
+        push("label", int_ty());
+        for (i, (_, ty)) in spilled.iter().enumerate() {
+            push(&format!("L${i}"), ty.clone());
+        }
+    }
+
+    let base = max_value_index(ir) + 1;
+    let r_v = base;
+    let suspended_v = base + 1;
+
+    let mut flat = Flat {
+        ir,
+        suspend: &suspend_set,
+        cont_v: 0, // `this`
+        r_v,
+        suspended_v,
+        cont_id: class_id,
+        field_base,
+        spilled: spilled.clone(),
+        states: vec![Vec::new()],
+        next_local: base + 2,
+        failed: false,
+    };
+    flat.flatten(&stmts, 0, None);
+    if flat.failed {
+        return false;
+    }
+    let states = std::mem::take(&mut flat.states);
+
+    let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
+    let cint = |ir: &mut IrFile, n: i32| ir.add_expr(IrExpr::Const(IrConst::Int(n)));
+    let getf = |ir: &mut IrFile, recv: ExprId, idx: u32| {
+        ir.add_expr(IrExpr::GetField {
+            receiver: recv,
+            class: class_id,
+            index: field_base + idx,
+        })
+    };
+    let spill_field =
+        |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
+
+    // Prologue: `this.result = result` (the invokeSuspend parameter is value-index 1).
+    let this_p = k(ir, IrExpr::GetValue(0));
+    let result_param = k(ir, IrExpr::GetValue(1));
+    let store_result = k(
+        ir,
+        IrExpr::SetField {
+            receiver: this_p,
+            class: class_id,
+            index: field_base,
+            value: result_param,
+        },
+    );
+    let suspended_call = k(
+        ir,
+        IrExpr::Call {
+            callee: Callee::Static {
+                owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
+                name: "getCOROUTINE_SUSPENDED".to_string(),
+                descriptor: "()Ljava/lang/Object;".to_string(),
+                inline: false,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        },
+    );
+    let var_suspended = k(
+        ir,
+        IrExpr::Variable {
+            index: suspended_v,
+            ty: object_ty(),
+            init: Some(suspended_call),
+        },
+    );
+
+    let mut loop_stmts: Vec<ExprId> = Vec::new();
+    let this_r = k(ir, IrExpr::GetValue(0));
+    let r_init = getf(ir, this_r, 0);
+    loop_stmts.push(k(
+        ir,
+        IrExpr::Variable {
+            index: r_v,
+            ty: object_ty(),
+            init: Some(r_init),
+        },
+    ));
+    for (local, ty) in spilled.clone() {
+        let this_f = k(ir, IrExpr::GetValue(0));
+        let fld = spill_field(local);
+        let init = getf(ir, this_f, fld);
+        loop_stmts.push(k(
+            ir,
+            IrExpr::Variable {
+                index: local,
+                ty,
+                init: Some(init),
+            },
+        ));
+    }
+    let mut branches: Branches = Vec::new();
+    for (i, st) in states.iter().enumerate() {
+        let mut ss = vec![throw_on_failure(ir, r_v)];
+        ss.extend(st.iter().copied());
+        let recv = k(ir, IrExpr::GetValue(0));
+        let lbl = getf(ir, recv, 1);
+        let sc = cint(ir, i as i32);
+        let cond = k(
+            ir,
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: lbl,
+                rhs: sc,
+            },
+        );
+        let block = k(
+            ir,
+            IrExpr::Block {
+                stmts: ss,
+                value: None,
+            },
+        );
+        branches.push((Some(cond), block));
+    }
+    let msg = k(
+        ir,
+        IrExpr::Const(IrConst::String(
+            "call to 'resume' before 'invoke' with coroutine".to_string(),
+        )),
+    );
+    let exc = k(
+        ir,
+        IrExpr::NewExternal {
+            internal: "java/lang/IllegalStateException".to_string(),
+            ctor_desc: "(Ljava/lang/String;)V".to_string(),
+            args: vec![msg],
+        },
+    );
+    let throw = k(ir, IrExpr::Throw { operand: exc });
+    let else_block = k(
+        ir,
+        IrExpr::Block {
+            stmts: vec![throw],
+            value: None,
+        },
+    );
+    branches.push((None, else_block));
+    let dispatch = k(ir, IrExpr::When { branches });
+    loop_stmts.push(dispatch);
+    let loop_body = k(
+        ir,
+        IrExpr::Block {
+            stmts: loop_stmts,
+            value: None,
+        },
+    );
+    let cond_true = k(ir, IrExpr::Const(IrConst::Boolean(true)));
+    let while_loop = k(
+        ir,
+        IrExpr::While {
+            cond: cond_true,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: None,
+        },
+    );
+    let new_body = k(
+        ir,
+        IrExpr::Block {
+            stmts: vec![store_result, var_suspended, while_loop],
+            value: None,
+        },
+    );
+    ir.functions[fid as usize].body = Some(new_body);
+    box_returns(ir, new_body)
+}
+
 /// Flattener: turns the structured suspend-function body into a flat list of states connected by
 /// `label = next` transitions (see [`build_state_machine`]).
 struct Flat<'a> {
@@ -756,6 +993,10 @@ struct Flat<'a> {
     r_v: u32,
     suspended_v: u32,
     cont_id: ClassId,
+    /// Base field index of the state-machine fields (`result`, `label`, spilled `L$…`) on `cont_id`. A
+    /// function's dedicated continuation class puts them at `0..` (`field_base = 0`); a suspend LAMBDA
+    /// reuses its own class, whose captures/parameters occupy the leading fields, so they start after.
+    field_base: u32,
     spilled: Vec<(u32, IrType)>,
     states: Vec<Vec<ExprId>>,
     next_local: u32,
@@ -789,7 +1030,7 @@ impl Flat<'_> {
         let e = self.add(IrExpr::SetField {
             receiver: recv,
             class: self.cont_id,
-            index: idx,
+            index: self.field_base + idx,
             value: val,
         });
         out.push(e);
