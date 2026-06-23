@@ -46,6 +46,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         next_value: 0,
         cur_class: None,
         cur_fn_name: String::new(),
+        cur_fn_suspend: false,
         lambda_seq: 0,
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
@@ -812,6 +813,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
+                lo.cur_fn_suspend = f.is_suspend;
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
@@ -1058,6 +1060,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
                     lo.cur_fn_name = m.name.clone();
+                    lo.cur_fn_suspend = m.is_suspend;
                     lo.lambda_seq = 0;
                     // `this` is value 0.
                     let this_v = lo.fresh_value();
@@ -1873,6 +1876,11 @@ pub(crate) struct Lower<'a> {
     /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
     /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
     cur_fn_name: String,
+    /// Whether the enclosing function is `suspend`. A non-suspend function cannot call a suspend fn, so
+    /// `&&`/`||` short-circuit safely there; inside a suspend body the right operand may carry a
+    /// suspension that the CPS flattener models only at unconditional positions, so `&&`/`||` keep the
+    /// eager (operands-unconditional) form there until the flattener models conditional suspension.
+    cur_fn_suspend: bool,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
@@ -8359,21 +8367,26 @@ impl<'a> Lower<'a> {
                             _ => self.expr(rhs),
                         };
                     }
-                    let l = self.expr(lhs)?;
-                    let r = self.expr(rhs)?;
-                    let konst = |this: &mut Self, b: bool| {
-                        this.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)))
-                    };
-                    let (then_e, else_e) = if op == BinOp::And {
-                        let f = konst(self, false);
-                        (r, f)
-                    } else {
-                        let t = konst(self, true);
-                        (t, r)
-                    };
-                    return Some(self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(l), then_e), (None, else_e)],
-                    }));
+                    // Inside a suspend body the right operand may carry a suspension the CPS flattener
+                    // models only at an unconditional position — keep the eager form (`iand`/`ior`) there;
+                    // a non-suspend body can't call a suspend fn, so the branch short-circuit is safe.
+                    if !self.cur_fn_suspend {
+                        let l = self.expr(lhs)?;
+                        let r = self.expr(rhs)?;
+                        let konst = |this: &mut Self, b: bool| {
+                            this.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)))
+                        };
+                        let (then_e, else_e) = if op == BinOp::And {
+                            let f = konst(self, false);
+                            (r, f)
+                        } else {
+                            let t = konst(self, true);
+                            (t, r)
+                        };
+                        return Some(self.ir.add_expr(IrExpr::When {
+                            branches: vec![(Some(l), then_e), (None, else_e)],
+                        }));
+                    }
                 }
                 // Unsigned `+`/`-`/`*`/`==`/`!=` match the signed two's-complement opcodes, but
                 // `/`/`%`/`<`/`>`/`<=`/`>=` need the JDK unsigned intrinsics kotlinc calls:
