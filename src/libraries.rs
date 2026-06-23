@@ -166,7 +166,7 @@ fn arg_assignable(param: &Ty, arg: &Ty) -> bool {
 /// The best overload named `name` among `candidates` for `args`: an exact-arity exact-`Ty` match,
 /// else an exact-arity match with autoboxing into erased `Any` parameters, else a prefix match (the
 /// loose fallback covering varargs/defaulted trailing parameters).
-fn best_overload<'a>(
+pub(crate) fn best_overload<'a>(
     candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
     name: &str,
     args: &[Ty],
