@@ -40,7 +40,7 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     if !lower_value_classes(&mut ir) {
         return Some("lower: value-class shape not lowered".into());
     }
-    if !krusty::jvm::suspend::lower_suspend(&mut ir) {
+    if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
         return Some("lower: suspend-function shape not lowered".into());
     }
     match emit_all(&ir, &facade, &**cp) {

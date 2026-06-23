@@ -515,6 +515,11 @@ pub struct IrClass {
     /// Per-field `true` when the backing field is immutable (`val`) — emitted `final`. Parallel to
     /// `fields` (empty ⇒ none final, for synthesized classes).
     pub field_final: Vec<bool>,
+    /// Per-field visibility (platform-neutral): `true` = `private` (the default — Kotlin backing fields
+    /// are private, reached via accessors); `false` = non-private, readable/writable cross-class (a
+    /// coroutine continuation's `result`/`label`). Parallel to `fields`; empty ⇒ all private. Each
+    /// backend maps this to its own access representation (the JVM emitter → `ACC_PRIVATE`/`ACC_PUBLIC`).
+    pub field_private: Vec<bool>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
