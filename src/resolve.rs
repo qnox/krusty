@@ -5709,25 +5709,36 @@ impl<'a> Checker<'a> {
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if let Ty::Obj(internal, _) = rt {
-                    if let Some(sig) = self.lookup_method(internal, &name) {
+                    // The user member resolved through the current module as a `SymbolSource`
+                    // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
+                    // overload is the same one hand-rolled lookup would pick. Collected owned so the
+                    // borrow of `syms` ends before the mutating type-checks below.
+                    let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| o.kind == crate::libraries::FnKind::Member);
+                    if let Some(fi) = module_member {
+                        let params = fi.callable.params.clone();
+                        let cs = &fi.call_sig;
                         // Named or omitted arguments (a method with parameter defaults, e.g. data-class
                         // `copy`): map by name/position via the parameter names, honouring `required`.
-                        if (arg_names.is_some() || arg_tys.len() != sig.params.len())
-                            && sig.required < sig.params.len()
-                            && !sig.param_names.is_empty()
+                        if (arg_names.is_some() || arg_tys.len() != params.len())
+                            && cs.required < params.len()
+                            && !cs.param_names.is_empty()
                         {
                             match map_call_args(
                                 args,
                                 arg_names.as_deref(),
-                                &sig.param_names,
-                                sig.required,
-                                &sig.param_defaults,
+                                &cs.param_names,
+                                cs.required,
+                                &cs.param_defaults,
                             ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
                                             self.expect_assignable(
-                                                sig.params[i],
+                                                params[i],
                                                 self.expr_types[a.0 as usize],
                                                 self.span(*a),
                                                 "argument",
@@ -5739,23 +5750,23 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return sig.ret;
+                            return fi.callable.ret;
                         }
-                        if sig.params.len() != arg_tys.len() {
+                        if params.len() != arg_tys.len() {
                             self.diags.error(
                                 span,
                                 format!(
                                     "method '{name}' expects {} args, got {}",
-                                    sig.params.len(),
+                                    params.len(),
                                     arg_tys.len()
                                 ),
                             );
                         } else {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                            for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        return sig.ret;
+                        return fi.callable.ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
                     if let Some(m) = crate::call_resolver::resolve_instance(

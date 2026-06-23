@@ -35,6 +35,46 @@ impl<'a> ModuleSymbols<'a> {
     fn class_by_internal(&self, internal: &str) -> Option<&'a ClassSig> {
         self.syms.classes.values().find(|c| c.internal == internal)
     }
+
+    /// Collect members named `name` over the user hierarchy in DEPTH-FIRST pre-order (self, then each
+    /// interface subtree, then the superclass subtree) — the exact order `Checker::lookup_method` uses,
+    /// so the first collected overload is the one that lookup would return. `rung` is the visit counter.
+    fn collect_members(
+        &self,
+        internal: &str,
+        name: &str,
+        out: &mut Vec<FunctionInfo>,
+        seen: &mut std::collections::HashSet<String>,
+        rung: &mut u32,
+    ) {
+        if !seen.insert(internal.to_string()) {
+            return;
+        }
+        let Some(c) = self.class_by_internal(internal) else {
+            return;
+        };
+        let here = *rung;
+        *rung += 1;
+        if let Some(sig) = c.methods.get(name) {
+            out.push(fn_info(
+                FnKind::Member,
+                sig,
+                None,
+                c.internal.clone(),
+                name,
+                here,
+                Origin::Module {
+                    facade: c.internal.clone(),
+                },
+            ));
+        }
+        for i in &c.interfaces {
+            self.collect_members(i, name, out, seen, rung);
+        }
+        if let Some(s) = &c.super_internal {
+            self.collect_members(s, name, out, seen, rung);
+        }
+    }
 }
 
 /// A JVM method descriptor `(params)ret` synthesized from declared `Ty`s.
@@ -146,39 +186,14 @@ impl SymbolSource for ModuleSymbols<'_> {
                 }
             }
             Some(recv) => {
-                // Instance members of the receiver's user type (own + inherited), breadth-first, each
-                // tagged with its visit rung. `methods` holds one signature per name per class.
+                // Instance members of the receiver's user type (own + inherited), in DEPTH-FIRST
+                // pre-order (self → interfaces → super) — exactly the checker's `lookup_method` walk, so
+                // `overloads[0]` is the same member that hand-rolled lookup picks. Each carries its visit
+                // rung in `receiver_rank`.
                 if let Ty::Obj(internal, _) = recv {
                     let mut seen = std::collections::HashSet::new();
-                    let mut queue = std::collections::VecDeque::new();
-                    queue.push_back(internal.to_string());
                     let mut rung: u32 = 0;
-                    while let Some(cn) = queue.pop_front() {
-                        if !seen.insert(cn.clone()) {
-                            continue;
-                        }
-                        let Some(c) = self.class_by_internal(&cn) else {
-                            continue;
-                        };
-                        if let Some(sig) = c.methods.get(name) {
-                            overloads.push(fn_info(
-                                FnKind::Member,
-                                sig,
-                                None,
-                                c.internal.clone(),
-                                name,
-                                rung,
-                                Origin::Module {
-                                    facade: c.internal.clone(),
-                                },
-                            ));
-                        }
-                        if let Some(s) = &c.super_internal {
-                            queue.push_back(s.clone());
-                        }
-                        queue.extend(c.interfaces.iter().cloned());
-                        rung += 1;
-                    }
+                    self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
                 }
                 // Extension functions, keyed by erased receiver descriptor: the exact receiver (rung 0),
                 // then the generic `Any`/`Object` key (rung 1) for a type-variable-receiver extension —
@@ -347,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn members_walk_user_hierarchy_breadth_first_with_rank() {
+    fn members_walk_user_hierarchy_depth_first_with_rank() {
         let mut st = SymbolTable::default();
         let mut base = class("demo/Base");
         base.methods.insert("greet".into(), sig(vec![], Ty::String));
