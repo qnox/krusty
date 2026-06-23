@@ -180,8 +180,34 @@ fn hoist_stmt(
 ) {
     // Statements the flattener handles directly keep their suspension in place.
     match &ir.exprs[stmt as usize] {
-        // a control-flow statement, a bound suspension, or a bare suspension call — leave as-is.
-        IrExpr::When { .. } | IrExpr::While { .. } => {
+        // An `if`/`when` STATEMENT: its CONDITIONS evaluate unconditionally (before any branch), so a
+        // suspension there (`if (c && check())`) is hoisted to a preceding bound temp; the BODIES stay
+        // for the flattener (`emit_when_stmt`). A `while` keeps its suspension in place.
+        IrExpr::When { branches } => {
+            let branches = branches.clone();
+            let cond_suspends = branches
+                .iter()
+                .any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set)));
+            if !cond_suspends {
+                out.push(stmt);
+                return;
+            }
+            let mut prelude: Vec<ExprId> = Vec::new();
+            let new_branches: Branches = branches
+                .into_iter()
+                .map(|(cond, body)| {
+                    let nc = cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude));
+                    (nc, body)
+                })
+                .collect();
+            out.extend(prelude);
+            let nw = ir.add_expr(IrExpr::When {
+                branches: new_branches,
+            });
+            out.push(nw);
+            return;
+        }
+        IrExpr::While { .. } => {
             out.push(stmt);
             return;
         }

@@ -234,6 +234,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `stmt_cond_suspension` already handles. Proven both branches: `bar(null)` suspends on the elvis RHS
   (→8), `bar(5)` takes the value branch with no suspension (→6)
   (`tests/suspend_e2e.rs::suspend_fun_suspension_on_elvis_rhs`).
+- **`suspend fun` — suspension in an `if`/`when` CONDITION (`if (c && check())`).** A condition is
+  evaluated unconditionally before its branch, so a suspension there is hoisted to a preceding bound
+  temp — `hoist_stmt` now applies `hoist_expr` to a `When`-statement's branch CONDITIONS (the bodies
+  stay for `emit_when_stmt`). Previously the condition's suspend call was left un-threaded
+  (`invokestatic check(Continuation)` with no continuation argument → an operand-stack VerifyError).
+  Proven: `if (c && check()) return 1` drives `bar(true)`→1, `bar(false)`→2
+  (`tests/suspend_e2e.rs::suspend_fun_suspension_in_and_condition`).
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
