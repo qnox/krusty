@@ -12,6 +12,7 @@ use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember, LibrarySeed,
     LibrarySet, LibraryType,
 };
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
@@ -584,7 +585,7 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     out
 }
 
-impl LibrarySet for JvmLibraries {
+impl SymbolSource for JvmLibraries {
     fn seed(&self) -> LibrarySeed {
         let idx = self.cp.scan_types();
         let mut class_names = idx.class_names.clone();
@@ -607,23 +608,6 @@ impl LibrarySet for JvmLibraries {
         LibrarySeed {
             class_names,
             type_aliases: idx.type_aliases.clone(),
-        }
-    }
-
-    fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
-        use crate::jvm::classreader::ConstVal;
-        use crate::libraries::LibConst;
-        // The JVM realizes a primitive's companion as `kotlin/jvm/internal/<Prim>CompanionObject`,
-        // whose `MAX_VALUE`/`MIN_VALUE`/… are `static final` with a `ConstantValue` (kotlinc inlines it).
-        let internal = format!("kotlin/jvm/internal/{prim}CompanionObject");
-        let ci = self.cp.find(&internal)?;
-        let f = ci.fields.iter().find(|f| f.name == field)?;
-        match f.const_value.as_ref()? {
-            ConstVal::Int(v) => Some(LibConst::Int(*v)),
-            ConstVal::Long(v) => Some(LibConst::Long(*v)),
-            ConstVal::Float(v) => Some(LibConst::Float(*v)),
-            ConstVal::Double(v) => Some(LibConst::Double(*v)),
-            ConstVal::Str(_) => None,
         }
     }
 
@@ -682,209 +666,6 @@ impl LibrarySet for JvmLibraries {
             members,
             companion,
         })
-    }
-
-    fn sam_method(&self, internal: &str) -> Option<LibraryMember> {
-        let ci = self.cp.find(internal)?;
-        if !ci.is_interface() {
-            return None;
-        }
-        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
-        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
-        // abstract (0x0400).
-        let mut sam = None;
-        for m in &ci.methods {
-            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
-                continue;
-            }
-            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
-                continue;
-            }
-            if sam.is_some() {
-                return None; // more than one abstract method — not a SAM interface
-            }
-            let (params, ret) = parse_method_desc(&m.descriptor);
-            sam = Some(LibraryMember {
-                name: m.name.clone(),
-                params,
-                ret,
-                descriptor: m.descriptor.clone(),
-            });
-        }
-        sam
-    }
-
-    fn mangled_member(&self, internal: &str, prefix: &str) -> Option<(String, String)> {
-        // The first public instance method whose name starts with `prefix` (`getFirst-…`), searching the
-        // class and its superclass chain — an inline-range getter is declared on the `…Progression`
-        // superclass and inherited by the `…Range`. A mangled member has one such name per logical member,
-        // so the prefix is unambiguous.
-        let mut cur = Some(internal.to_string());
-        let mut seen = std::collections::HashSet::new();
-        while let Some(name) = cur {
-            if !seen.insert(name.clone()) {
-                break;
-            }
-            let ci = self.cp.find(&name)?;
-            if let Some(m) = ci
-                .methods
-                .iter()
-                .find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix))
-            {
-                return Some((m.name.clone(), m.descriptor.clone()));
-            }
-            cur = ci.super_class.clone();
-        }
-        None
-    }
-
-    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
-        let Ty::Obj(start, start_args) = recv else {
-            return None;
-        };
-        if start_args.is_empty() {
-            return None; // no type arguments to propagate — the erased return is already correct
-        }
-        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
-        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
-        // member's generic return under the bindings reached there.
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
-        while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            let Some(ci) = self.cp.find(&internal) else {
-                continue;
-            };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
-            let formals = formals.unwrap_or_default();
-            let binds: std::collections::HashMap<String, Ty> =
-                formals.iter().cloned().zip(targs.iter().copied()).collect();
-            // A member declared here whose parameters match the call.
-            let found = ci
-                .methods
-                .iter()
-                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
-                .find(|m| {
-                    let (params, _) = parse_method_desc(&m.descriptor);
-                    params.len() == args.len()
-                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                });
-            if let Some(m) = found {
-                let sig = m.signature.as_deref()?;
-                let (_, _, rsig) = parse_method_gsig(sig)?;
-                return Some(gsig_to_ty(&rsig, &binds));
-            }
-            // Propagate type arguments up each supertype edge (substituting this class's bindings).
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let GSig::Class(sup_internal, sup_args) = sup {
-                        let sup_targs: Vec<Ty> =
-                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
-                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
-                    }
-                }
-            } else {
-                // No generic class signature — follow raw supertypes (members there are non-generic).
-                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
-                    q.push_back((i.clone(), vec![]));
-                }
-            }
-        }
-        None
-    }
-
-    fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
-        self.cp.builtin_member_ret(internal, name, args)
-    }
-
-    fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        // Dry-run the ONE splicer with each `FunctionN` parameter as a lambda site — branchless
-        // (`let`/`also`) AND branchy (`takeIf`/`takeUnless`) hosts; `splice_unified` relocates host AND
-        // lambda-body frames, so what it accepts here it emits correctly (else it returns `None` and the
-        // call falls back / the file skips — never a miscompile).
-        self.cp
-            .method_code(owner, name, descriptor)
-            .map_or(false, |body| {
-                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                    function_param_indices(descriptor)
-                        .into_iter()
-                        .map(|param_index| crate::jvm::inline::LambdaSplice {
-                            param_index,
-                            body: Vec::new(),
-                        })
-                        .collect();
-                let mut dummy =
-                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
-                    .is_some()
-            })
-    }
-
-    fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
-        self.cp
-            .method_code(owner, name, descriptor)
-            .map_or(false, |body| {
-                // Dry-run the ONE splicer the emitter uses (`splice_unified`) into a throwaway
-                // `ClassWriter`, with each descriptor `Function0` parameter as a zero-arg lambda site.
-                // It covers branchless, branchy, and lambda-bearing hosts, and exercises constant-pool
-                // relocation — so an un-relocatable body (`invokedynamic`, a pool entry `relocate_const`
-                // rejects, …) fails the gate and stays unresolved rather than falling back to an
-                // `invokestatic` on a private method (an `IllegalAccessError`). A branchy body still needs
-                // an empty operand-stack baseline at the call site; a non-empty one skips the file
-                // (`must_inline`), never miscompiles.
-                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
-                    function_param_indices(descriptor)
-                        .into_iter()
-                        .map(|param_index| crate::jvm::inline::LambdaSplice {
-                            param_index,
-                            body: Vec::new(),
-                        })
-                        .collect();
-                let mut dummy =
-                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
-                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
-                    .is_some()
-            })
-    }
-
-    fn resolve_scope_inline(
-        &self,
-        name: &str,
-        receiver: Ty,
-        args: &[Ty],
-    ) -> Option<LibraryCallable> {
-        // The arg-binding RESOLUTION layer over the same candidate metadata `functions` exposes: it binds a
-        // generic return from the ARGUMENTS (`let`'s `R` from the lambda), which the arg-independent
-        // `functions` query can't recover — so it stays its own selector (see the redesign layering note).
-        self.extension_callable(name, receiver, args, &[], true)
-    }
-
-    fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
-        matches!(
-            self.cp.metadata_return_type(owner, name).as_deref(),
-            Some("kotlin/UByte" | "kotlin/UShort" | "kotlin/UInt" | "kotlin/ULong")
-        )
-    }
-
-    fn lambda_return_overload_param(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
-        // `name` resolves by lambda return type iff some facade for the receiver has `@JvmName` overloads
-        // under this Kotlin name. The selector's `it` is the receiver's element type.
-        let is_overloaded = supertype_descriptors(&self.cp, receiver).iter().any(|d| {
-            self.cp
-                .find_extension_owners(d)
-                .iter()
-                .any(|o| self.cp.lambda_return_overloads(o).contains_key(name))
-        });
-        if !is_overloaded {
-            return None;
-        }
-        let elem = receiver
-            .array_elem()
-            .or_else(|| receiver.type_args().first().copied())?;
-        Some(vec![elem])
     }
 
     fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
@@ -1123,6 +904,228 @@ impl LibrarySet for JvmLibraries {
             }
         }
         FunctionSet { overloads }
+    }
+}
+
+impl LibrarySet for JvmLibraries {
+    fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
+        use crate::jvm::classreader::ConstVal;
+        use crate::libraries::LibConst;
+        // The JVM realizes a primitive's companion as `kotlin/jvm/internal/<Prim>CompanionObject`,
+        // whose `MAX_VALUE`/`MIN_VALUE`/… are `static final` with a `ConstantValue` (kotlinc inlines it).
+        let internal = format!("kotlin/jvm/internal/{prim}CompanionObject");
+        let ci = self.cp.find(&internal)?;
+        let f = ci.fields.iter().find(|f| f.name == field)?;
+        match f.const_value.as_ref()? {
+            ConstVal::Int(v) => Some(LibConst::Int(*v)),
+            ConstVal::Long(v) => Some(LibConst::Long(*v)),
+            ConstVal::Float(v) => Some(LibConst::Float(*v)),
+            ConstVal::Double(v) => Some(LibConst::Double(*v)),
+            ConstVal::Str(_) => None,
+        }
+    }
+
+    fn sam_method(&self, internal: &str) -> Option<LibraryMember> {
+        let ci = self.cp.find(internal)?;
+        if !ci.is_interface() {
+            return None;
+        }
+        // The single public abstract instance method that isn't an `Object` method (`equals`/`hashCode`
+        // /`toString`, which a functional interface may redeclare). `default`/`static` methods aren't
+        // abstract (0x0400).
+        let mut sam = None;
+        for m in &ci.methods {
+            if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
+                continue;
+            }
+            if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
+                continue;
+            }
+            if sam.is_some() {
+                return None; // more than one abstract method — not a SAM interface
+            }
+            let (params, ret) = parse_method_desc(&m.descriptor);
+            sam = Some(LibraryMember {
+                name: m.name.clone(),
+                params,
+                ret,
+                descriptor: m.descriptor.clone(),
+            });
+        }
+        sam
+    }
+
+    fn mangled_member(&self, internal: &str, prefix: &str) -> Option<(String, String)> {
+        // The first public instance method whose name starts with `prefix` (`getFirst-…`), searching the
+        // class and its superclass chain — an inline-range getter is declared on the `…Progression`
+        // superclass and inherited by the `…Range`. A mangled member has one such name per logical member,
+        // so the prefix is unambiguous.
+        let mut cur = Some(internal.to_string());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(name) = cur {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let ci = self.cp.find(&name)?;
+            if let Some(m) = ci
+                .methods
+                .iter()
+                .find(|m| m.is_public() && !m.is_static() && m.name.starts_with(prefix))
+            {
+                return Some((m.name.clone(), m.descriptor.clone()));
+            }
+            cur = ci.super_class.clone();
+        }
+        None
+    }
+
+    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
+        let Ty::Obj(start, start_args) = recv else {
+            return None;
+        };
+        if start_args.is_empty() {
+            return None; // no type arguments to propagate — the erased return is already correct
+        }
+        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
+        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
+        // member's generic return under the bindings reached there.
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back((to_jvm_internal(start).to_string(), start_args.to_vec()));
+        while let Some((internal, targs)) = q.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&internal) else {
+                continue;
+            };
+            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            let formals = formals.unwrap_or_default();
+            let binds: std::collections::HashMap<String, Ty> =
+                formals.iter().cloned().zip(targs.iter().copied()).collect();
+            // A member declared here whose parameters match the call.
+            let found = ci
+                .methods
+                .iter()
+                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
+                .find(|m| {
+                    let (params, _) = parse_method_desc(&m.descriptor);
+                    params.len() == args.len()
+                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
+                });
+            if let Some(m) = found {
+                let sig = m.signature.as_deref()?;
+                let (_, _, rsig) = parse_method_gsig(sig)?;
+                return Some(gsig_to_ty(&rsig, &binds));
+            }
+            // Propagate type arguments up each supertype edge (substituting this class's bindings).
+            if let Some(supers) = supers {
+                for sup in supers {
+                    if let GSig::Class(sup_internal, sup_args) = sup {
+                        let sup_targs: Vec<Ty> =
+                            sup_args.iter().map(|a| gsig_to_ty(a, &binds)).collect();
+                        q.push_back((to_jvm_internal(&sup_internal).to_string(), sup_targs));
+                    }
+                }
+            } else {
+                // No generic class signature — follow raw supertypes (members there are non-generic).
+                for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                    q.push_back((i.clone(), vec![]));
+                }
+            }
+        }
+        None
+    }
+
+    fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
+        self.cp.builtin_member_ret(internal, name, args)
+    }
+
+    fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        // Dry-run the ONE splicer with each `FunctionN` parameter as a lambda site — branchless
+        // (`let`/`also`) AND branchy (`takeIf`/`takeUnless`) hosts; `splice_unified` relocates host AND
+        // lambda-body frames, so what it accepts here it emits correctly (else it returns `None` and the
+        // call falls back / the file skips — never a miscompile).
+        self.cp
+            .method_code(owner, name, descriptor)
+            .map_or(false, |body| {
+                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
+                    function_param_indices(descriptor)
+                        .into_iter()
+                        .map(|param_index| crate::jvm::inline::LambdaSplice {
+                            param_index,
+                            body: Vec::new(),
+                        })
+                        .collect();
+                let mut dummy =
+                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
+                    .is_some()
+            })
+    }
+
+    fn can_inline_call(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.cp
+            .method_code(owner, name, descriptor)
+            .map_or(false, |body| {
+                // Dry-run the ONE splicer the emitter uses (`splice_unified`) into a throwaway
+                // `ClassWriter`, with each descriptor `Function0` parameter as a zero-arg lambda site.
+                // It covers branchless, branchy, and lambda-bearing hosts, and exercises constant-pool
+                // relocation — so an un-relocatable body (`invokedynamic`, a pool entry `relocate_const`
+                // rejects, …) fails the gate and stays unresolved rather than falling back to an
+                // `invokestatic` on a private method (an `IllegalAccessError`). A branchy body still needs
+                // an empty operand-stack baseline at the call site; a non-empty one skips the file
+                // (`must_inline`), never miscompiles.
+                let lambdas: Vec<crate::jvm::inline::LambdaSplice> =
+                    function_param_indices(descriptor)
+                        .into_iter()
+                        .map(|param_index| crate::jvm::inline::LambdaSplice {
+                            param_index,
+                            body: Vec::new(),
+                        })
+                        .collect();
+                let mut dummy =
+                    crate::jvm::classfile::ClassWriter::new("Dummy", "java/lang/Object");
+                crate::jvm::inline::splice_unified(&body, descriptor, 1, &lambdas, 0, &mut dummy)
+                    .is_some()
+            })
+    }
+
+    fn resolve_scope_inline(
+        &self,
+        name: &str,
+        receiver: Ty,
+        args: &[Ty],
+    ) -> Option<LibraryCallable> {
+        // The arg-binding RESOLUTION layer over the same candidate metadata `functions` exposes: it binds a
+        // generic return from the ARGUMENTS (`let`'s `R` from the lambda), which the arg-independent
+        // `functions` query can't recover — so it stays its own selector (see the redesign layering note).
+        self.extension_callable(name, receiver, args, &[], true)
+    }
+
+    fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
+        matches!(
+            self.cp.metadata_return_type(owner, name).as_deref(),
+            Some("kotlin/UByte" | "kotlin/UShort" | "kotlin/UInt" | "kotlin/ULong")
+        )
+    }
+
+    fn lambda_return_overload_param(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
+        // `name` resolves by lambda return type iff some facade for the receiver has `@JvmName` overloads
+        // under this Kotlin name. The selector's `it` is the receiver's element type.
+        let is_overloaded = supertype_descriptors(&self.cp, receiver).iter().any(|d| {
+            self.cp
+                .find_extension_owners(d)
+                .iter()
+                .any(|o| self.cp.lambda_return_overloads(o).contains_key(name))
+        });
+        if !is_overloaded {
+            return None;
+        }
+        let elem = receiver
+            .array_elem()
+            .or_else(|| receiver.type_args().first().copied())?;
+        Some(vec![elem])
     }
 
     fn toplevel_lambda_param_types(
