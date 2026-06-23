@@ -37,33 +37,29 @@ fun box(): String {
 }
 "#;
 
-#[test]
-fn destructuring_runs_correctly() {
-    let Ok(java_home) =
-        std::env::var("KRUSTY_REF_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME"))
-    else {
-        eprintln!("skipping destructure_e2e: set JAVA_HOME");
-        return;
-    };
+/// Compile `src` with krusty (kotlin-stdlib on the classpath), run `DestrKt.box()` on a real JVM under
+/// `-Xverify:all`, and return its trimmed stdout. `None` means the environment is unavailable (skip) or
+/// krusty couldn't emit (unsupported IR) — never a test failure, matching the suite's other e2e tests.
+fn run_box(tag: &str, src: &str) -> Option<String> {
+    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
+        .or_else(|_| std::env::var("JAVA_HOME"))
+        .ok()?;
     let java = format!("{java_home}/bin/java");
     let javac = format!("{java_home}/bin/javac");
     if !std::path::Path::new(&javac).exists() {
-        return;
+        return None;
     }
-    // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the runtime classpath.
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping destructure_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath.
+    let stdlib = common::stdlib_jar()?;
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let dir = std::env::temp_dir().join(format!("krusty_destr_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_destr_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let src_path = dir.join("Destr.kt");
-    fs::write(&src_path, SRC).unwrap();
+    fs::write(&src_path, src).unwrap();
     let bin = env!("CARGO_BIN_EXE_krusty");
     let out = Command::new(bin)
-        .args(["-d", dir.to_str().unwrap()])
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
         .arg(&src_path)
         .output()
         .unwrap();
@@ -72,7 +68,7 @@ fn destructuring_runs_correctly() {
             "skip (IR unsupported): {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        return;
+        return None;
     }
     let main = "public class M { public static void main(String[] a) { System.out.println(DestrKt.box()); } }";
     fs::write(dir.join("M.java"), main).unwrap();
@@ -96,8 +92,54 @@ fn destructuring_runs_correctly() {
         "java: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "OK");
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
     let _ = fs::remove_dir_all(&dir);
+    Some(stdout)
+}
+
+#[test]
+fn destructuring_runs_correctly() {
+    if let Some(out) = run_box("decl", SRC) {
+        assert_eq!(out, "OK");
+    }
+}
+
+const LAMBDA_SRC: &str = r#"
+data class P(val a: Int, val b: String)
+fun box(): String {
+    val p = P(7, "hi")
+    // Lambda-parameter destructuring on a scope-function receiver.
+    val r = p.let { (a, b) -> b + a }
+    // Destructuring into a function-typed local.
+    val f: (P) -> String = { (x, _) -> x.toString() }
+    return if (r == "hi7" && f(p) == "7") "OK" else "FAIL"
+}
+"#;
+
+#[test]
+fn lambda_destructuring_runs_correctly() {
+    if let Some(out) = run_box("lambda", LAMBDA_SRC) {
+        assert_eq!(out, "OK");
+    }
+}
+
+#[test]
+fn lambda_destructuring_parses_and_checks() {
+    // A lambda parameter destructured into components: `{ (a, b) -> … }` binds `a`/`b` to
+    // `component1()`/`component2()` of the (synthetic) lambda parameter. Uses an explicit function
+    // type so the parameter's type is known without a stdlib on the classpath (the `check` harness
+    // has none); the JVM-run test below covers `let`-receiver destructuring with the stdlib.
+    let msgs = check(
+        r#"
+data class P(val a: Int, val b: String)
+fun box(): String {
+    val f: (P) -> String = { (a, b) -> b + a.toString() }
+    val p = P(7, "hi")
+    return if (f(p) == "hi7") "OK" else "FAIL"
+}
+"#,
+    );
+    assert!(msgs.is_empty(), "unexpected diags: {msgs:?}");
 }
 
 #[test]
