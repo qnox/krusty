@@ -132,6 +132,12 @@ type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec
 /// Per-class `@Metadata` cache for return-type nullability: class internal name → (function name →
 /// whether its Kotlin return type is nullable `T?`). Used by [`Classpath::metadata_return_nullable`].
 type MetaNullableCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, bool>>>>;
+/// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
+/// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
+/// `@OverloadResolutionByLambdaReturnType` selects (`sumOf` → `sumOfInt`/`sumOfLong`/…).
+/// Kotlin function name → its `@JvmName`-mangled overloads, for one class's `@Metadata`.
+type LambdaReturnOverloads = HashMap<String, Vec<super::metadata::JvmOverload>>;
+type MetaOverloadCache = RefCell<HashMap<String, std::rc::Rc<LambdaReturnOverloads>>>;
 
 #[derive(Default)]
 pub struct Classpath {
@@ -158,6 +164,8 @@ pub struct Classpath {
     /// Cache of each class's `@Metadata` function name → whether its Kotlin return type is nullable
     /// (`takeIf`/`takeUnless` → `T?`). The JVM signature erases this; only `@Metadata` keeps it.
     meta_ret_nullable: MetaNullableCache,
+    /// Cache of each class's `@Metadata` Kotlin-name → `@JvmName` overloads (see [`MetaOverloadCache`]).
+    meta_overloads: MetaOverloadCache,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
     /// `kotlin/collections/collections.kotlin_builtins`), each mapping class internal name → its
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
@@ -197,6 +205,7 @@ impl Classpath {
             meta_returns: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
             meta_ret_nullable: RefCell::new(HashMap::new()),
+            meta_overloads: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
         }
     }
@@ -287,6 +296,55 @@ impl Classpath {
             .borrow_mut()
             .insert(internal.to_string(), rc);
         hit
+    }
+
+    /// A facade class's `@Metadata` Kotlin-name → `@JvmName` overloads, cached (part-merged for a multifile
+    /// facade). See [`MetaOverloadCache`].
+    pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
+        if let Some(m) = self.meta_overloads.borrow().get(internal) {
+            return m.clone();
+        }
+        // Overloads of one Kotlin name are split across the multifile facade's PART classes (the
+        // `Int`/`Long`/`Double` `sumOf` in one part, `UInt`/`ULong` in another). The facade EXTENDS its
+        // parts, so union every class's own metadata up the superclass chain — exactly how the extension
+        // index reaches the part methods (a part isn't listed in the facade's `d1`).
+        let mut map: LambdaReturnOverloads = HashMap::new();
+        let mut cur = Some(internal.to_string());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cn) = cur {
+            if !seen.insert(cn.clone()) {
+                break;
+            }
+            let Some(ci) = self.find(&cn) else { break };
+            for (k, v) in super::metadata::package_lambda_return_overloads(&ci) {
+                map.entry(k).or_default().extend(v);
+            }
+            cur = ci.super_class.clone();
+        }
+        let rc = std::rc::Rc::new(map);
+        self.meta_overloads
+            .borrow_mut()
+            .insert(internal.to_string(), rc.clone());
+        rc
+    }
+
+    /// Every distinct owner (facade) that declares a static method whose first parameter matches
+    /// `receiver_desc` — the facades to consult for a Kotlin-name resolution (`sumOf`).
+    pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<String> {
+        self.ensure_ext_index();
+        let mut owners: Vec<String> = Vec::new();
+        if let Some(idx) = self.ext.borrow().as_ref() {
+            if let Some(by_name) = idx.by_recv.get(receiver_desc) {
+                for cands in by_name.values() {
+                    for c in cands {
+                        if !owners.contains(&c.owner) {
+                            owners.push(c.owner.clone());
+                        }
+                    }
+                }
+            }
+        }
+        owners
     }
 
     /// Shared cache+decode for the per-function `@Metadata` type lookups: decode the class's `Package`

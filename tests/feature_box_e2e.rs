@@ -292,6 +292,31 @@ fun box(): String {
 }
 "#,
     ),
+    // `sumOf { selector }` — `@OverloadResolutionByLambdaReturnType`: the source name `sumOf` has no JVM
+    // method; kotlinc picks `sumOfInt`/`sumOfLong`/`sumOfDouble`/… by the lambda's RETURN type (a
+    // `@JvmName`-mangled, package-private `@InlineOnly` method whose fold-loop body is spliced). Resolved by
+    // deriving `sumOf` + the return type's name and verifying it against the real classpath method.
+    (
+        "SumOfByLambdaReturn",
+        r#"
+class P(val price: Int)
+fun box(): String {
+    val i = listOf(1, 2, 3).sumOf { it * 2 }            // -> sumOfInt
+    if (i != 12) return "f0: $i"
+    val l = listOf(1, 2, 3).sumOf { it.toLong() }       // -> sumOfLong
+    if (l != 6L) return "f1: $l"
+    val d = listOf(1, 2, 3).sumOf { it * 1.5 }          // -> sumOfDouble
+    if (d != 9.0) return "f2: $d"
+    val f = listOf(P(2), P(3)).sumOf { it.price }       // selector over a user property
+    if (f != 5) return "f3: $f"
+    val s = setOf(1, 2, 3).sumOf { it }                 // Set receiver
+    if (s != 6) return "f4: $s"
+    val a = intArrayOf(1, 2, 3).sumOf { it * 2 }        // IntArray (not UIntArray — selector picks it)
+    if (a != 12) return "f5: $a"
+    return "OK"
+}
+"#,
+    ),
     // No-lambda stdlib `@InlineOnly` extensions on a primitive receiver — `Char.isDigit()`/`isLetter()`/
     // `uppercaseChar()`/… inline their real body (`Character.isDigit(this)`/`toUpperCase(this)`). Accepted
     // only for a non-unsigned primitive receiver + primitive/`String` return (an unsigned return like
