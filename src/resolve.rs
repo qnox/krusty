@@ -41,6 +41,9 @@ pub struct Signature {
     /// True for a `final` member (a non-`open` member, or an explicit `final override`). A subclass —
     /// including a `data class` synthesizing `equals`/`hashCode`/`toString` — cannot override it.
     pub is_final: bool,
+    /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
+    /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
+    pub is_suspend: bool,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -631,6 +634,7 @@ pub fn collect_signatures_with_cp(
                         lambda_param_types,
                         is_inline: f.is_inline,
                         is_final: f.is_final,
+                        is_suspend: f.is_suspend,
                     };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (receiver_descriptor, method_name).
@@ -963,6 +967,7 @@ pub fn collect_signatures_with_cp(
                                     lambda_param_types,
                                     is_inline: false,
                                     is_final: m.is_final,
+                                    is_suspend: m.is_suspend,
                                 }
                             })
                         })
@@ -983,6 +988,7 @@ pub fn collect_signatures_with_cp(
                                     lambda_param_types: Vec::new(),
                                     is_inline: false,
                                     is_final: true,
+                                    is_suspend: false,
                                 },
                             );
                         }
@@ -1000,6 +1006,7 @@ pub fn collect_signatures_with_cp(
                                 lambda_param_types: Vec::new(),
                                 is_inline: false,
                                 is_final: true,
+                                is_suspend: false,
                             },
                         );
                     }
@@ -1087,6 +1094,7 @@ pub fn collect_signatures_with_cp(
                                     lambda_param_types,
                                     is_inline: false,
                                     is_final: m.is_final,
+                                    is_suspend: m.is_suspend,
                                 }
                             })
                         })
@@ -7438,6 +7446,7 @@ impl<'a> Checker<'a> {
             lambda_param_types: Vec::new(),
             is_inline: false,
             is_final: false,
+            is_suspend: f.is_suspend,
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.

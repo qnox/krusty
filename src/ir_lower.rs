@@ -8910,7 +8910,7 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&fi.callable.params) {
                             a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                         }
-                        self.ir.add_expr(IrExpr::Call {
+                        let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::CrossFile {
                                 facade,
                                 name: fname.clone(),
@@ -8919,7 +8919,14 @@ impl<'a> Lower<'a> {
                             },
                             dispatch_receiver: None,
                             args: a,
-                        })
+                        });
+                        // A cross-file `suspend fun` call: record it so the coroutine pass threads the
+                        // continuation (the callee, in another file, is absent from this file's
+                        // `suspend_funs`). The logical return type is the source signature's.
+                        if sig.is_suspend {
+                            self.ir.suspend_calls.insert(call, ty_to_ir(sig.ret));
+                        }
+                        call
                     } else if let Some(r) = {
                         // Inside a receiver lambda / extension-fn body (`cur_class` cleared, `this` is the
                         // external receiver), an unqualified call resolves against the implicit `this`
@@ -8969,6 +8976,12 @@ impl<'a> Lower<'a> {
                         // result unboxes instead of landing boxed in a primitive slot.
                         let (call_inline, call_log, call_phys) =
                             (c.is_inline, c.ret, c.physical_ret);
+                        // Is the callee a `suspend fun`? Ask the resolver (the flag flows uniformly from
+                        // the AST for a module/sibling-file fn and from `@Metadata` for a classpath one).
+                        // A suspend call is recorded by `ExprId` so the coroutine pass threads the
+                        // continuation even when the callee lives in another compilation unit (absent from
+                        // this file's `suspend_funs`).
+                        let call_suspend = self.resolver().toplevel_is_suspend(&fname);
                         // A sub-`Int` primitive type argument (`listOf<Short>(1, 2)`) erases its
                         // element to `Object`, so a wider literal would box as `Integer` and a later
                         // narrowing read (`map(::shortFoo)`) throws `ClassCastException`. kotlinc boxes
@@ -9089,6 +9102,9 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: None,
                             args: a,
                         });
+                        if call_suspend {
+                            self.ir.suspend_calls.insert(call, ty_to_ir(call_log));
+                        }
                         // A spliced inline fn leaves its erased return on the stack — coerce to the logical
                         // type (unbox/checkcast). A no-op when they match (the non-generic common case).
                         if call_inline {

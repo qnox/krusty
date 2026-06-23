@@ -160,6 +160,87 @@ public class M {{\n\
     );
 }
 
+/// Like `run_suspend`, but compiles TWO source files in one krusty invocation. The callee lives in a
+/// different file (a separate `IrFile`), so its suspend-ness is NOT in the caller file's
+/// `suspend_funs` — the coroutine pass must learn it from the resolver (`@Metadata`/module symbols).
+/// `call` is `Facade.method`, driven as `Facade.method(k)`.
+fn run_suspend_2(name: &str, lib: &str, user: &str, facade: &str, method: &str, expect: i32) {
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("Lib.kt"), lib).unwrap();
+    fs::write(dir.join("Use.kt"), user).unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "{name}: krusty failed to compile:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = format!(
+        "import kotlin.coroutines.*;\n\
+public class M {{\n\
+  public static void main(String[] a) {{\n\
+    Continuation<Object> k = new Continuation<Object>() {{\n\
+      public CoroutineContext getContext() {{ return EmptyCoroutineContext.INSTANCE; }}\n\
+      public void resumeWith(Object o) {{ }}\n\
+    }};\n\
+    Object r = {facade}.{method}(k);\n\
+    System.out.println(r.equals(Integer.valueOf({expect})) ? \"OK\" : (\"r=\" + r));\n\
+  }}\n\
+}}\n"
+    );
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let jc = Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "{name}: javac driver failed:\n{}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "{name}: wrong result; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn suspend_fun_calls_cross_file_suspend_fun() {
+    // `caller` (Use.kt) suspends on `helper` (Lib.kt) — a different `IrFile`. The pass must recognize
+    // the cross-file suspend call via the resolver (not the local `suspend_funs`). 42 + 1 = 43.
+    run_suspend_2(
+        "xfile",
+        "suspend fun helper(): Int = 42\n",
+        "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
+        "UseKt",
+        "caller",
+        43,
+    );
+}
+
 #[test]
 fn suspend_fun_with_suspension_point_runs_via_continuation() {
     // `bar` calls the suspend `foo` (one suspension point) → a state machine + continuation class.

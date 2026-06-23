@@ -188,6 +188,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `baz` (`val a = foo(); val b = hundred(); return a + b`, `a` live across the second call) drives to
   142 (`tests/suspend_e2e.rs::suspend_fun_two_suspension_points_spills_live_local`). Still skipped:
   suspension inside control flow, suspend lambdas / `suspend` types, builders.
+- **`suspend fun` — cross-unit suspend calls (resolver-driven detection).** A suspend call to a
+  callee in ANOTHER compilation unit (a sibling source file, or a classpath dependency) has no
+  `FunId` in *this* file's `suspend_funs`, so the same-file `suspend_set` can't see it. Detection is
+  instead **resolution-time**: the `suspend` modifier flows uniformly into the resolver — from the AST
+  (`Signature.is_suspend` → `module_symbols` → `FnFlags.suspend`) for a module/sibling fn, and from
+  `@Metadata` (`IS_SUSPEND`, bit 13) for a classpath fn. ir_lower asks the resolver
+  (`CallResolver::toplevel_is_suspend`, or the sibling `Signature.is_suspend`) and records each
+  suspend call's `ExprId` → its *logical* return type in `ir.suspend_calls`. The coroutine pass treats
+  any recorded `ExprId` as a suspension point (`is_suspend_call`) and threads the continuation; for the
+  emitted call it derives the physical CPS shape — a `Callee::Static` descriptor gains the trailing
+  `Continuation` param + `Object` return (`cps_descriptor`), a `Callee::CrossFile` gains the
+  `Continuation` param type + `Object` return. The callee is *resolved by its logical signature* (no
+  continuation, real return); the CPS form is the pass's job, so the classpath parser presents the
+  logical signature. Proven end-to-end: `caller` (Use.kt) suspends on `helper` (Lib.kt, a separate
+  `IrFile`) → 43 (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.

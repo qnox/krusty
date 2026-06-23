@@ -638,6 +638,12 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
     /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
     pub suspend_funs: Vec<u32>,
+    /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
+    /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
+    /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
+    /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
+    /// calls are caught by `suspend_funs`; this is the cross-unit complement.
+    pub suspend_calls: std::collections::HashMap<u32, IrType>,
 }
 
 impl IrFile {

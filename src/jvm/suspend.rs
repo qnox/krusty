@@ -134,7 +134,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if suspend_call_fid(ir, e, suspend_set).is_some() {
+            if is_suspend_call(ir, e, suspend_set) {
                 let tmp = max_value_index(ir) + 1;
                 let var = ir.add_expr(IrExpr::Variable {
                     index: tmp,
@@ -191,9 +191,7 @@ fn hoist_stmt(
             out.push(stmt);
             return;
         }
-        IrExpr::Variable { init: Some(i), .. }
-            if suspend_call_fid(ir, *i, suspend_set).is_some() =>
-        {
+        IrExpr::Variable { init: Some(i), .. } if is_suspend_call(ir, *i, suspend_set) => {
             out.push(stmt);
             return;
         }
@@ -203,7 +201,7 @@ fn hoist_stmt(
             out.push(stmt); // `val a = if/when …` (conditional suspension) — flattener's job
             return;
         }
-        _ if suspend_call_fid(ir, stmt, suspend_set).is_some() => {
+        _ if is_suspend_call(ir, stmt, suspend_set) => {
             out.push(stmt);
             return;
         }
@@ -224,7 +222,7 @@ fn hoist_expr(
     orig_rets: &[IrType],
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
-    if let Some(callee) = suspend_call_fid(ir, e, suspend_set) {
+    if is_suspend_call(ir, e, suspend_set) {
         // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call).
         match ir.exprs[e as usize].clone() {
             IrExpr::Call { args, .. } => {
@@ -254,9 +252,16 @@ fn hoist_expr(
             }
             _ => {}
         }
-        let ty = orig_rets
-            .get(callee as usize)
+        // Logical return type of the suspension: from ir_lower for a cross-unit call, else the callee's
+        // `orig_rets` entry (a same-file callee), else `Object`.
+        let ty = ir
+            .suspend_calls
+            .get(&e)
             .cloned()
+            .or_else(|| {
+                suspend_call_fid(ir, e, suspend_set)
+                    .and_then(|fid| orig_rets.get(fid as usize).cloned())
+            })
             .unwrap_or_else(object_ty);
         let tmp = max_value_index(ir) + 1;
         let var = ir.add_expr(IrExpr::Variable {
@@ -319,9 +324,11 @@ fn hoist_expr(
     }
 }
 
-/// If `e` is a direct call to a suspend function, return its callee `FunId`. Handles a static call
-/// (`Call{Local}`) and a same-file member call (`MethodCall`, whose `FunId` is the class's method at
-/// `index`). The continuation is threaded into the call later via [`append_continuation`].
+/// For a same-file suspend call, the callee `FunId` — used to recover the callee's LOGICAL return type
+/// (its index into `orig_rets`). Handles a static call (`Call{Local}`) and a same-file member call
+/// (`MethodCall`, whose `FunId` is the class's method at `index`). Returns `None` for a cross-unit
+/// suspend call (a `Callee::Static` to another file / the classpath) — that call has no local `FunId`;
+/// its logical type comes from `ir.suspend_calls` instead.
 fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
     match &ir.exprs[e as usize] {
         IrExpr::Call {
@@ -336,10 +343,52 @@ fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Optio
     }
 }
 
+/// Whether `e` is a DIRECT call to a suspend function — same-file (in `suspend_set`, via
+/// [`suspend_call_fid`]) OR cross-unit (an `ExprId` recorded in `ir.suspend_calls` by ir_lower from the
+/// resolver). The flattener threads the continuation into every such call uniformly.
+fn is_suspend_call(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    suspend_call_fid(ir, e, suspend_set).is_some() || ir.suspend_calls.contains_key(&e)
+}
+
+/// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and erase
+/// the return to `Object` — `()I` → `(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`. A
+/// cross-unit suspend callee is *resolved* by its logical signature (no continuation, real return), but
+/// the emitted `invokestatic` must name the callee's physical CPS descriptor.
+fn cps_descriptor(logical: &str) -> String {
+    let close = logical
+        .rfind(')')
+        .unwrap_or(logical.len().saturating_sub(1));
+    format!(
+        "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+        &logical[..close]
+    )
+}
+
 /// Append the continuation `cont` as the trailing argument of suspend call `call_e` (a `Call` or
-/// `MethodCall`) — the CPS parameter the callee now expects. Returns the (unchanged) `ExprId`.
+/// `MethodCall`) — the CPS parameter the callee now expects. For a cross-unit `Callee::Static` (resolved
+/// by its logical signature), also rewrite the descriptor to the physical CPS form so the emitted
+/// `invokestatic` matches the callee. Returns the (unchanged) `ExprId`.
 fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId {
     match &mut ir.exprs[call_e as usize] {
+        IrExpr::Call {
+            args,
+            callee: Callee::Static { descriptor, .. },
+            ..
+        } => {
+            *descriptor = cps_descriptor(descriptor);
+            args.push(cont);
+        }
+        // A sibling-file suspend callee: its CPS signature appends a `Continuation` parameter and erases
+        // the return to `Object` (the JVM backend builds the descriptor from these `IrType`s).
+        IrExpr::Call {
+            args,
+            callee: Callee::CrossFile { params, ret, .. },
+            ..
+        } => {
+            params.push(continuation_ty());
+            *ret = object_ty();
+            args.push(cont);
+        }
         IrExpr::Call { args, .. } => args.push(cont),
         IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
         _ => {}
@@ -350,7 +399,7 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if suspend_call_fid(ir, e, suspend_set).is_some() {
+    if is_suspend_call(ir, e, suspend_set) {
         return true;
     }
     let mut found = false;
@@ -720,9 +769,9 @@ impl Flat<'_> {
                 index,
                 ty,
                 init: Some(init),
-            } => suspend_call_fid(self.ir, *init, self.suspend)
-                .map(|_| (Some((*index, ty.clone())), *init)),
-            _ => suspend_call_fid(self.ir, stmt, self.suspend).map(|_| (None, stmt)),
+            } => is_suspend_call(self.ir, *init, self.suspend)
+                .then(|| (Some((*index, ty.clone())), *init)),
+            _ => is_suspend_call(self.ir, stmt, self.suspend).then_some((None, stmt)),
         }
     }
     /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
@@ -743,13 +792,13 @@ impl Flat<'_> {
         let branches = branches.clone();
         let any_susp = branches
             .iter()
-            .any(|(_, v)| suspend_call_fid(self.ir, *v, self.suspend).is_some());
+            .any(|(_, v)| is_suspend_call(self.ir, *v, self.suspend));
         if !any_susp {
             return None;
         }
         // A branch value must be either a direct suspension or suspension-free.
         for (_, v) in &branches {
-            if suspend_call_fid(self.ir, *v, self.suspend).is_none()
+            if !is_suspend_call(self.ir, *v, self.suspend)
                 && expr_calls_suspend(self.ir, *v, self.suspend)
             {
                 self.failed = true;
@@ -770,7 +819,7 @@ impl Flat<'_> {
         let mut out_branches: Branches = Vec::new();
         for (cond, value) in branches {
             let mut bb: Vec<ExprId> = Vec::new();
-            if suspend_call_fid(self.ir, *value, self.suspend).is_some() {
+            if is_suspend_call(self.ir, *value, self.suspend) {
                 let br_resume = self.new_state();
                 self.emit_call(&mut bb, *value, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();

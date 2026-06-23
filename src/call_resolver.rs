@@ -184,6 +184,25 @@ impl<'a> CallResolver<'a> {
             .any(|o| o.flags.inline)
     }
 
+    /// Whether `name` has a `suspend` top-level overload. The flag flows uniformly from the AST
+    /// (same-module `suspend fun`, via `module_symbols`) and from `@Metadata` (classpath callees).
+    pub fn toplevel_is_suspend(&self, name: &str) -> bool {
+        self.lib
+            .functions(name, None)
+            .overloads
+            .iter()
+            .any(|o| o.flags.suspend)
+    }
+
+    /// Whether `name` has a `suspend` extension overload on `receiver`.
+    pub fn extension_is_suspend(&self, receiver: Ty, name: &str) -> bool {
+        self.lib
+            .functions(name, Some(receiver))
+            .overloads
+            .iter()
+            .any(|o| o.kind == FnKind::Extension && o.flags.suspend)
+    }
+
     /// Whether `name` has a top-level overload that MUST be inlined (`@InlineOnly`, no callable method).
     pub fn toplevel_has_must_inline(&self, name: &str) -> bool {
         self.lib
