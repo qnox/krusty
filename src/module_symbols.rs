@@ -36,6 +36,12 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.classes.values().find(|c| c.internal == internal)
     }
 
+    /// Whether the module declares a top-level function named `name` — the shadow-precedence test (a
+    /// user function hides a library/builtin of the same name). Cheap existence query over the source.
+    pub fn declares_top_level(&self, name: &str) -> bool {
+        self.syms.funs.contains_key(name)
+    }
+
     /// Collect members named `name` over the user hierarchy in DEPTH-FIRST pre-order (self, then each
     /// interface subtree, then the superclass subtree) — the exact order `Checker::lookup_method` uses,
     /// so the first collected overload is the one that lookup would return. `rung` is the visit counter.

@@ -2721,6 +2721,11 @@ impl<'a> Checker<'a> {
     fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
         crate::call_resolver::CallResolver::new(&*self.syms.libraries)
     }
+    /// Whether the current module declares a top-level function `name` (shadow-precedence test) — asked
+    /// through the module source rather than touching `syms.funs` directly.
+    fn module_declares(&self, name: &str) -> bool {
+        crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
+    }
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         self.expr_types[e.0 as usize] = t;
         t
@@ -5246,7 +5251,7 @@ impl<'a> Checker<'a> {
         if arg_names.is_some() {
             let callee_expr = self.file.expr(callee).clone();
             let supports_named = match &callee_expr {
-                Expr::Name(n) => self.syms.funs.contains_key(n),
+                Expr::Name(n) => self.module_declares(n),
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params`.
                     let rt = self.expr(*receiver);
@@ -6135,7 +6140,7 @@ impl<'a> Checker<'a> {
                 }
                 // `with(x) { … }` — `x` is the lambda body's implicit receiver (intercept before the
                 // args are evaluated, since the trailing lambda isn't a normal value).
-                if fname == "with" && args.len() == 2 && !self.syms.funs.contains_key(&fname) {
+                if fname == "with" && args.len() == 2 && !self.module_declares(&fname) {
                     if let Expr::Lambda { params, body } = self.file.expr(args[1]).clone() {
                         if params.is_empty() {
                             let rt = self.expr(args[0]);
@@ -6238,7 +6243,7 @@ impl<'a> Checker<'a> {
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
                 let toplevel_must_inline = self.lookup(&fname).is_none()
-                    && !self.syms.funs.contains_key(&fname)
+                    && !self.module_declares(&fname)
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
@@ -6312,7 +6317,7 @@ impl<'a> Checker<'a> {
                     // The array creators are compiler intrinsics keyed on the resolved stdlib symbol; a
                     // user-defined function of the same name shadows them (as in kotlinc), so only treat
                     // the name as the intrinsic when it isn't a user-declared top-level function.
-                    if !self.syms.funs.contains_key(&fname) {
+                    if !self.module_declares(&fname) {
                         // `arrayOfNulls<T>(n): Array<T?>` — a reified intrinsic; the element is the
                         // explicit type argument (a reference; a primitive would need a boxed `Integer[]`,
                         // not modeled → fall through to skip). Codegen allocates `new T[n]` (`b_arr_nulls`).
@@ -6478,7 +6483,7 @@ impl<'a> Checker<'a> {
                 }
                 // Unqualified call to a sibling instance method: `foo()` → `this.foo()`. Inside an
                 // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
-                if !self.syms.funs.contains_key(&fname) {
+                if !self.module_declares(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let sig = self.lookup_method(internal, &fname).or_else(|| {
                             self.syms
@@ -6499,7 +6504,7 @@ impl<'a> Checker<'a> {
                 // The current module is queried as a `SymbolSource` (ModuleSymbols) and libraries through
                 // the classpath set — the federation precedence (module > implicit-receiver > library) made
                 // explicit, replacing the scattered `syms.funs.contains_key` guards.
-                let user_shadows = self.syms.funs.contains_key(&fname);
+                let user_shadows = self.module_declares(&fname);
                 let module_top: Option<crate::libraries::FunctionInfo> = self
                     .syms
                     .funs
