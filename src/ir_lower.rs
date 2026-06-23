@@ -4507,6 +4507,229 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// `for (x in progression)` over an `IntProgression`/`LongProgression`/`CharProgression` (and the
+    /// unsigned `UInt`/`ULong` variants) value — a counted loop whose increment is the progression's
+    /// `step` (which may be negative, e.g. from `downTo`), so the loop direction is decided at runtime.
+    /// The progression's `getLast()` is already the exact final element (the stdlib computed it via
+    /// `getProgressionLastElement`, including any `step`), so the `i == last` break lands precisely and
+    /// guards against overflowing past a `MAX`/`MIN` bound:
+    ///   i = p.getFirst(); last = p.getLast(); step = p.getStep();
+    ///   while ((step > 0 && i <= last) || (step < 0 && i >= last)) { x = i; …; if (i == last) break; i += step }
+    /// An unsigned progression compares its (sign-bit-spanning) elements via `compareUnsigned`; its
+    /// `step` stays signed, so the direction test is an ordinary signed comparison.
+    fn lower_foreach_progression(
+        &mut self,
+        name: &str,
+        iterable: AstExprId,
+        body: AstExprId,
+        it_ty: Ty,
+        elem: Ty,
+        label: Option<String>,
+    ) -> Option<u32> {
+        let internal = it_ty.obj_internal()?.to_string();
+        let depth = self.scope.len();
+        let elem_ir = ty_to_ir(elem);
+        let is_unsigned = elem.is_unsigned();
+        // `Long`/`ULong` counters and steps use 64-bit arithmetic; `Int`/`Char`/`UInt` use 32-bit.
+        let wide = matches!(elem, Ty::Long | Ty::ULong);
+        // The element's primitive descriptor for the `getFirst`/`getLast` getters (a `Char` reads `C`;
+        // unsigned and the rest erase to the signed primitive).
+        let prim_desc = match elem {
+            Ty::Char => "C",
+            _ if wide => "J",
+            _ => "I",
+        };
+        // `step` is a plain signed `Int`/`Long` (never a value class), so its getter is unmangled.
+        let step_desc = if wide { "J" } else { "I" };
+        // The unsigned progressions' `first`/`last` are mangled inline-class members; signed ones are
+        // the plain `getFirst`/`getLast`.
+        let (gf_name, gf_desc, gl_name, gl_desc) = if is_unsigned {
+            let (gf, gfd) = self.syms.libraries.mangled_member(&internal, "getFirst-")?;
+            let (gl, gld) = self.syms.libraries.mangled_member(&internal, "getLast-")?;
+            (gf, gfd, gl, gld)
+        } else {
+            (
+                "getFirst".to_string(),
+                format!("(){prim_desc}"),
+                "getLast".to_string(),
+                format!("(){prim_desc}"),
+            )
+        };
+        // Evaluate the progression once; the three getters share the one receiver.
+        let rng = self.expr(iterable)?;
+        let r_v = self.fresh_value();
+        let var_r = self.ir.add_expr(IrExpr::Variable {
+            index: r_v,
+            ty: ty_to_ir(it_ty),
+            init: Some(rng),
+        });
+        let getter = |this: &mut Self, gname: &str, gdesc: &str| {
+            let recv = this.ir.add_expr(IrExpr::GetValue(r_v));
+            this.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: internal.clone(),
+                    name: gname.to_string(),
+                    descriptor: gdesc.to_string(),
+                    interface: false,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![],
+            })
+        };
+        // i = p.getFirst()
+        let first = getter(self, &gf_name, &gf_desc);
+        let i_v = self.fresh_value();
+        self.scope.push((name.to_string(), i_v, elem));
+        let var_i = self.ir.add_expr(IrExpr::Variable {
+            index: i_v,
+            ty: elem_ir.clone(),
+            init: Some(first),
+        });
+        // last = p.getLast()  (hoisted)
+        let last = getter(self, &gl_name, &gl_desc);
+        let n_v = self.fresh_value();
+        let var_n = self.ir.add_expr(IrExpr::Variable {
+            index: n_v,
+            ty: elem_ir.clone(),
+            init: Some(last),
+        });
+        // step = p.getStep()  (hoisted)
+        let step = getter(self, "getStep", &format!("(){step_desc}"));
+        let s_v = self.fresh_value();
+        let var_s = self.ir.add_expr(IrExpr::Variable {
+            index: s_v,
+            ty: ty_to_ir(if wide { Ty::Long } else { Ty::Int }),
+            init: Some(step),
+        });
+        // The step zero literal, in the step's own (signed) type.
+        let zero_step = |this: &mut Self| {
+            this.ir.add_expr(IrExpr::Const(if wide {
+                IrConst::Long(0)
+            } else {
+                IrConst::Int(0)
+            }))
+        };
+        // Compare two counter-typed values; an unsigned element orders via `compareUnsigned(a,b) <op> 0`
+        // (a signed opcode would misorder values past the sign bit).
+        let cmp = |this: &mut Self, op: IrBinOp, a: u32, b: u32| -> u32 {
+            let la = this.ir.add_expr(IrExpr::GetValue(a));
+            let lb = this.ir.add_expr(IrExpr::GetValue(b));
+            if is_unsigned {
+                let (owner, prim) = if elem == Ty::UInt {
+                    ("java/lang/Integer", "I")
+                } else {
+                    ("java/lang/Long", "J")
+                };
+                let call = this.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: owner.to_string(),
+                        name: "compareUnsigned".to_string(),
+                        descriptor: format!("({prim}{prim})I"),
+                        inline: false,
+                        must_inline: false,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![la, lb],
+                });
+                let zero = this.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                this.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op,
+                    lhs: call,
+                    rhs: zero,
+                })
+            } else {
+                this.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op,
+                    lhs: la,
+                    rhs: lb,
+                })
+            }
+        };
+        // cond: (step > 0 && i <= last) || (step < 0 && i >= last). A constant step folds to one branch
+        // at the bytecode level; iterating is correct for either direction.
+        let sg1 = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let z1 = zero_step(self);
+        let step_pos = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Gt,
+            lhs: sg1,
+            rhs: z1,
+        });
+        let i_le = cmp(self, IrBinOp::Le, i_v, n_v);
+        let asc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::And,
+            lhs: step_pos,
+            rhs: i_le,
+        });
+        let sg2 = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let z2 = zero_step(self);
+        let step_neg = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Lt,
+            lhs: sg2,
+            rhs: z2,
+        });
+        let i_ge = cmp(self, IrBinOp::Ge, i_v, n_v);
+        let desc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::And,
+            lhs: step_neg,
+            rhs: i_ge,
+        });
+        let cond = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Or,
+            lhs: asc,
+            rhs: desc,
+        });
+        // body (the loop variable is the counter `i`)
+        let mut out = Vec::new();
+        if self.append_body_stmts(body, &mut out).is_none() {
+            self.scope.truncate(depth);
+            return None;
+        }
+        // update (the `continue` target): break exactly at `last`, then `i += step`. Breaking before the
+        // increment keeps a progression ending at `MAX_VALUE`/`MIN_VALUE` from wrapping past it.
+        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let ec = self.ir.add_expr(IrExpr::GetValue(n_v));
+        let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: ic,
+            rhs: ec,
+        });
+        let brk = self.ir.add_expr(IrExpr::Break { label: None });
+        let if_break = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(at_end), brk)],
+        });
+        let gi2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+        let gs = self.ir.add_expr(IrExpr::GetValue(s_v));
+        let inc = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            lhs: gi2,
+            rhs: gs,
+        });
+        let incs = self.ir.add_expr(IrExpr::SetValue {
+            var: i_v,
+            value: inc,
+        });
+        let update = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![if_break, incs],
+            value: None,
+        });
+        let wbody = self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        });
+        let wh = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: wbody,
+            update: Some(update),
+            post_test: false,
+            label,
+        });
+        self.scope.truncate(depth);
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![var_r, var_i, var_n, var_s, wh],
+            value: None,
+        }))
+    }
+
     fn lower_foreach_iterator(
         &mut self,
         name: &str,
@@ -6455,6 +6678,11 @@ impl<'a> Lower<'a> {
         // its `getFirst()`/`getLast()` bounds (step +1), matching kotlinc and avoiding per-element boxing.
         if let Some((elem, prim_desc)) = it_ty.obj_internal().and_then(range_counted_elem) {
             return self.lower_foreach_range(name, iterable, body, it_ty, elem, prim_desc, label);
+        }
+        // A progression value (`IntProgression`/`LongProgression`/…, e.g. from `downTo`/`step`)
+        // iterates as a counted loop reading its `getStep()` — the increment may be negative.
+        if let Some((elem, _)) = it_ty.obj_internal().and_then(progression_counted_elem) {
+            return self.lower_foreach_progression(name, iterable, body, it_ty, elem, label);
         }
         // An array, or a `String` (iterated as its `Char`s), uses an index loop; any other iterable
         // (`List`, `Set`, a progression value, …) uses the iterator protocol.
@@ -11591,6 +11819,24 @@ fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
         // Unsigned ranges erase to the signed primitive; the counted loop uses unsigned comparison.
         "kotlin/ranges/UIntRange" => Some((Ty::UInt, "I")),
         "kotlin/ranges/ULongRange" => Some((Ty::ULong, "J")),
+        _ => None,
+    }
+}
+
+/// The element type + primitive descriptor for a *signed* progression iterated via `getStep()`. A
+/// `…Range` is a `…Progression` subtype, but ranges keep the cheaper unit-step path above; only a
+/// bare progression (the result of `downTo`/`step`/`reversed`) reaches here. Unsigned progressions
+/// need unsigned comparisons and are left to fail rather than miscompile.
+fn progression_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
+    match internal {
+        "kotlin/ranges/IntProgression" => Some((Ty::Int, "I")),
+        "kotlin/ranges/LongProgression" => Some((Ty::Long, "J")),
+        // A `CharProgression`'s counter is a `Char` but its `step` is an `Int`; char arithmetic is
+        // int-based on the JVM, so the counted loop works with an `Int` increment.
+        "kotlin/ranges/CharProgression" => Some((Ty::Char, "C")),
+        // Unsigned progressions erase to the signed primitive; the counted loop compares unsigned.
+        "kotlin/ranges/UIntProgression" => Some((Ty::UInt, "I")),
+        "kotlin/ranges/ULongProgression" => Some((Ty::ULong, "J")),
         _ => None,
     }
 }
