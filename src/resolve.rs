@@ -5955,6 +5955,36 @@ impl<'a> Checker<'a> {
                     self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
                     return c.ret;
                 }
+                // kotlinc adapts an integer LITERAL argument to a wider expected integer type
+                // (`longRange step 3` resolves `LongProgression.step(Long)`, with `3` as `3L`). When the
+                // exact-typed resolution failed, retry with integer-literal `Int` args widened to `Long`.
+                // A non-literal `Int` is NOT widened (kotlinc rejects `longRange step intVar`); and this is
+                // a fallback, so a call that already matched an `Int` overload is unaffected.
+                let has_int_literal = arg_tys
+                    .iter()
+                    .zip(args.iter())
+                    .any(|(t, a)| *t == Ty::Int && matches!(self.file.expr(*a), Expr::IntLit(_)));
+                if has_int_literal {
+                    let widened: Vec<Ty> = arg_tys
+                        .iter()
+                        .zip(args.iter())
+                        .map(|(t, a)| {
+                            if *t == Ty::Int && matches!(self.file.expr(*a), Expr::IntLit(_)) {
+                                Ty::Long
+                            } else {
+                                *t
+                            }
+                        })
+                        .collect();
+                    if let Some(c) =
+                        self.syms
+                            .libraries
+                            .resolve_callable(&name, Some(rt), &widened, &call_targs)
+                    {
+                        self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
+                        return c.ret;
+                    }
+                }
                 // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }: Int`): the `@JvmName`
                 // overload matching the lambda's return is resolved from `@Metadata`; the result is that
                 // return type. (Spliced in lowering — no `ext_call` recorded.)
