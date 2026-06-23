@@ -187,6 +187,19 @@ fn suspend_fun_two_suspension_points_spills_live_local() {
 }
 
 #[test]
+fn suspend_fun_tail_suspension_returns_result() {
+    // `h` returns the result of a suspend call directly (`= foo()` → `return foo()`): a tail-position
+    // suspension. Desugars to `val tmp = foo(); return tmp` and drives to 42.
+    run_suspend(
+        "smt",
+        "suspend fun foo(): Int = 42\n\
+         suspend fun h(): Int = foo()\n",
+        "h",
+        42,
+    );
+}
+
+#[test]
 fn suspend_fun_discarded_suspension_result() {
     // `g` calls the suspend `sink` for effect (result discarded) — a bare suspend-call statement is a
     // suspension point with no bound local. Then `g` returns 7.
