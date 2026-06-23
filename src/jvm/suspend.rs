@@ -734,12 +734,19 @@ impl Flat<'_> {
         });
         let sv = self.gv(self.suspended_v);
         let ret = self.add(IrExpr::Return(Some(sv)));
+        // The branch body must be a `Block` (as in `emit_cond`/`emit_when_stmt`): the When-statement
+        // emitter drops a bare non-`Block` branch body, so a raw `Return` here emits no bytecode —
+        // letting `COROUTINE_SUSPENDED` fall through to the unbox (a `ClassCastException` on suspend).
+        let ret_block = self.add(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
         let empty = self.add(IrExpr::Block {
             stmts: vec![],
             value: None,
         });
         let when = self.add(IrExpr::When {
-            branches: vec![(Some(is), ret), (None, empty)],
+            branches: vec![(Some(is), ret_block), (None, empty)],
         });
         out.push(when);
         let vg = self.gv(vv);
