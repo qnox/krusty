@@ -7,7 +7,10 @@ use super::classpath::Classpath;
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
-use crate::libraries::{LibraryCallable, LibraryMember, LibrarySeed, LibrarySet, LibraryType};
+use crate::libraries::{
+    FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember, LibrarySeed,
+    LibrarySet, LibraryType,
+};
 use crate::types::Ty;
 
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
@@ -1015,6 +1018,101 @@ impl LibrarySet for JvmLibraries {
         Some(vec![elem])
     }
 
+    fn functions(&self, name: &str, receiver: Option<Ty>) -> FunctionSet {
+        let mut overloads = Vec::new();
+        // Slice 1 of the `FunctionSet` consolidation: the `@OverloadResolutionByLambdaReturnType` family
+        // (`sumOf` → `sumOfInt`/`sumOfLong`/…). One query returns every numeric-return overload applicable
+        // to `receiver`, each as a `FunctionInfo` with its real callable + flags; the caller picks by the
+        // lambda's return type. (Plain extensions, members, and top-level functions migrate here next.)
+        if let Some(receiver) = receiver {
+            // The receiver's ELEMENT type — the selector's `it`. Distinguishes `IntArray.sumOf` (`(Int)->R`)
+            // from `UIntArray.sumOf` (`(UInt)->R`), which erase to the same `([I, Function1)` descriptor.
+            let want_elem = receiver
+                .array_elem()
+                .or_else(|| receiver.type_args().first().copied());
+            for recv_desc in supertype_descriptors(&self.cp, receiver) {
+                for owner in self.cp.find_extension_owners(&recv_desc) {
+                    // Gate: `name` genuinely resolves by lambda return type on this facade.
+                    if !self.cp.lambda_return_overloads(&owner).contains_key(name) {
+                        continue;
+                    }
+                    // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` +
+                    // `Int` → `sumOfInt`); DERIVE it per numeric return and VERIFY against the real method.
+                    for ret in [
+                        Ty::Int,
+                        Ty::Long,
+                        Ty::Double,
+                        Ty::Float,
+                        Ty::Byte,
+                        Ty::Short,
+                    ] {
+                        let Some(simple) = kotlin_simple_name_of_ty(ret) else {
+                            continue;
+                        };
+                        let jname = format!("{name}{simple}");
+                        for c in self.cp.find_extensions(&recv_desc, &jname) {
+                            let (params, pret) = parse_method_desc(&c.descriptor);
+                            // A single-selector overload whose receiver is THIS supertype and whose JVM
+                            // return is the wanted primitive.
+                            if params.len() != 2
+                                || !c.descriptor.contains("Lkotlin/jvm/functions/Function")
+                                || params.first().map(|p| p.descriptor()).as_deref()
+                                    != Some(recv_desc.as_str())
+                                || pret.descriptor() != ret.descriptor()
+                            {
+                                continue;
+                            }
+                            // Disambiguate `IntArray.sumOf` from `UIntArray.sumOf` (both erase to
+                            // `([I, Function1)I`) by the SELECTOR parameter type from the generic signature
+                            // == the receiver's element type — so an `Int` lambda never binds a `UInt` body.
+                            if let Some(elem) = want_elem {
+                                let Some((_, psigs, _)) =
+                                    c.signature.as_deref().and_then(parse_method_gsig)
+                                else {
+                                    continue;
+                                };
+                                let mut binds = std::collections::HashMap::new();
+                                if let Some(recv_sig) = psigs.first() {
+                                    unify_gsig(recv_sig, receiver, &mut binds);
+                                }
+                                let selector_matches = psigs
+                                    .get(1)
+                                    .map(|sel| function_input_types(sel, &binds) == vec![elem])
+                                    .unwrap_or(false);
+                                if !selector_matches {
+                                    continue;
+                                }
+                            }
+                            overloads.push(FunctionInfo {
+                                kind: FnKind::Extension,
+                                receiver: Some(receiver),
+                                ret_nullable: false,
+                                flags: FnFlags {
+                                    inline: true,
+                                    inline_only: !c.public,
+                                },
+                                callable: LibraryCallable {
+                                    name: c.name.clone(),
+                                    owner: c.owner.clone(),
+                                    params,
+                                    ret,
+                                    physical_ret: pret,
+                                    descriptor: c.descriptor.clone(),
+                                    is_inline: true,
+                                    default_call: false,
+                                    vararg_elem: None,
+                                    // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
+                                    must_inline: !c.public,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        FunctionSet { overloads }
+    }
+
     fn resolve_lambda_return_overload(
         &self,
         receiver: Ty,
@@ -1022,79 +1120,16 @@ impl LibrarySet for JvmLibraries {
         lambda_ret: Ty,
         arg_tys: &[Ty],
     ) -> Option<LibraryCallable> {
-        // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` + `Int` →
-        // `sumOfInt`) — kotlinc's `@OverloadResolutionByLambdaReturnType` mangling. `@Metadata` carries the
-        // Kotlin name + return per overload but not always the `jvm_sig`, so DERIVE the JVM name and VERIFY
-        // it against the real classpath method (a derived name that isn't a real method is rejected — never
-        // a call/splice to a non-existent or wrong method).
-        let want_simple = kotlin_simple_name_of_ty(lambda_ret)?;
-        let want_ret_desc = lambda_ret.descriptor();
-        // The receiver's ELEMENT type — the selector's `it`. Distinguishes `IntArray.sumOf` (`(Int)->R`)
-        // from `UIntArray.sumOf` (`(UInt)->R`), which erase to the same `([I, Function1)` descriptor.
-        let want_elem = receiver
-            .array_elem()
-            .or_else(|| receiver.type_args().first().copied());
-        for recv_desc in supertype_descriptors(&self.cp, receiver) {
-            for owner in self.cp.find_extension_owners(&recv_desc) {
-                // Gate: `name` is genuinely resolved by lambda return type (it has such overloads in this
-                // facade's metadata) — so the derive+verify only fires for `@OverloadResolutionByLambdaReturnType`.
-                if !self.cp.lambda_return_overloads(&owner).contains_key(name) {
-                    continue;
-                }
-                let jname = format!("{name}{want_simple}");
-                for c in self.cp.find_extensions(&recv_desc, &jname) {
-                    let (params, pret) = parse_method_desc(&c.descriptor);
-                    // A selector-taking overload whose receiver is THIS supertype and whose JVM return is
-                    // the wanted primitive (distinguishes `sumOfInt`:`I` from a same-shaped `sumOfLong`).
-                    if params.len() != arg_tys.len() + 1
-                        || !c.descriptor.contains("Lkotlin/jvm/functions/Function")
-                        || params.first().map(|p| p.descriptor()).as_deref()
-                            != Some(recv_desc.as_str())
-                        || pret.descriptor() != want_ret_desc
-                    {
-                        continue;
-                    }
-                    // The JVM erases `IntArray` and `UIntArray` both to `([I, Function1)I`, so the descriptor
-                    // can't tell `IntArray.sumOf` (`(Int)->R`) from `UIntArray.sumOf` (`(UInt)->R`, whose body
-                    // reads `UInt`s the `Int` lambda can't take → ClassCastException). Disambiguate by the
-                    // SELECTOR's parameter type from the generic signature: it must equal the receiver's
-                    // element type. A candidate with no signature, or a mismatched selector, is rejected.
-                    if let Some(elem) = want_elem {
-                        let Some((_, psigs, _)) =
-                            c.signature.as_deref().and_then(parse_method_gsig)
-                        else {
-                            continue;
-                        };
-                        let mut binds = std::collections::HashMap::new();
-                        if let Some(recv_sig) = psigs.first() {
-                            unify_gsig(recv_sig, receiver, &mut binds);
-                        }
-                        let selector_matches = psigs
-                            .get(arg_tys.len())
-                            .map(|sel| function_input_types(sel, &binds) == vec![elem])
-                            .unwrap_or(false);
-                        if !selector_matches {
-                            continue;
-                        }
-                    }
-                    return Some(LibraryCallable {
-                        name: c.name.clone(),
-                        owner: c.owner.clone(),
-                        params,
-                        ret: lambda_ret,
-                        physical_ret: pret,
-                        descriptor: c.descriptor.clone(),
-                        is_inline: true,
-                        default_call: false,
-                        vararg_elem: None,
-                        // A package-private `@InlineOnly` selector method — splice or skip, never an
-                        // `invokestatic` to it (an `IllegalAccessError`).
-                        must_inline: !c.public,
-                    });
-                }
-            }
+        // A single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the overload
+        // whose return type equals the lambda's return, from the one `functions` query.
+        if arg_tys.len() != 1 {
+            return None;
         }
-        None
+        self.functions(name, Some(receiver))
+            .overloads
+            .into_iter()
+            .find(|o| o.callable.ret == lambda_ret)
+            .map(|o| o.callable)
     }
 
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
