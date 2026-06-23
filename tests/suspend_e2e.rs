@@ -73,6 +73,74 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn suspend_lambda_control_flow_with_capture_runs() {
+    // A `suspend` lambda whose VALUE is a conditional suspension over a captured variable
+    // (`{ if (c) foo() else 7 }`). Only the `c == true` branch suspends. make(true)→42, make(false)→7.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_lamcf_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("S.kt"),
+        "suspend fun foo(): Int = 42\nfun make(c: Boolean): suspend () -> Int = {\n    if (c) foo() else 7\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.jvm.functions.Function1;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = ((Function1) SKt.make(true)).invoke(k());\n\
+    Object r2 = ((Function1) SKt.make(false)).invoke(k());\n\
+    boolean ok = r1.equals(Integer.valueOf(42)) && r2.equals(Integer.valueOf(7));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "control-flow+capture lambda: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn suspend_lambda_param_with_suspension_runs() {
     // A `suspend` lambda with its OWN parameter that ALSO suspends (`{ val a = foo(); it + a }`). The
     // parameter `it` is a field (set by `create`) reloaded into a local each invokeSuspend entry, like

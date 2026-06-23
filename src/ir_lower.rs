@@ -2835,7 +2835,10 @@ impl<'a> Lower<'a> {
             let handroll = is_susp && n_susp == 1 && n_cap == 0 && arity == 0;
             if !handroll {
                 needs_pass_sm = true;
+                // `tmp` goes ABOVE the body's locals (next_value still points past them here).
+                let tmp_idx = self.next_value;
                 self.next_value = saved_next_sm;
+                let body_ty = ty_to_ir(self.info.ty(body));
                 let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
                     IrExpr::Block {
                         stmts,
@@ -2843,9 +2846,18 @@ impl<'a> Lower<'a> {
                     } => (stmts.clone(), *v),
                     _ => (Vec::new(), body_val),
                 };
+                // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
+                // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
+                // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
+                b_stmts.push(self.ir.add_expr(IrExpr::Variable {
+                    index: tmp_idx,
+                    ty: body_ty,
+                    init: Some(b_val),
+                }));
+                let tmpg = self.ir.add_expr(IrExpr::GetValue(tmp_idx));
                 let boxed = self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
-                    arg: b_val,
+                    arg: tmpg,
                     type_operand: object_ir.clone(),
                 });
                 b_stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
