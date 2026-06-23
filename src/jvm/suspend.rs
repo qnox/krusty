@@ -19,9 +19,10 @@
 //! point is spilled to a continuation field. A suspension nested at an unconditional position in an
 //! expression (`foo() + 2`) is hoisted to a temp first (`hoist_suspensions`). The whole thing is ordinary
 //! IR (`while(true){ when(label){…} }`), so the existing emitter produces the bytecode + stack-map
-//! frames; it is runtime-equivalent to kotlinc's `tableswitch` (an `if`-chain dispatch). Shapes not yet
-//! modeled (a suspension under a conditional sub-expression like elvis/`&&`, a `do`-`while`, or a
-//! member/extension suspend fn) cause the pass to skip the file — never miscompile.
+//! frames; it is runtime-equivalent to kotlinc's `tableswitch` (an `if`-chain dispatch). A *leaf* member
+//! suspend fn gets the CPS signature on its instance method; shapes not yet modeled (a suspension under
+//! a conditional sub-expression like elvis/`&&`, a `do`-`while`, an extension suspend fn, or a member
+//! suspend fn WITH a suspension point — its continuation must capture the receiver) skip the file.
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
@@ -84,16 +85,22 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        let is_static = ir.functions[fid as usize].is_static;
+        // The state machine isn't modeled for an instance method yet (its continuation must capture the
+        // receiver) — skip rather than miscompile. A LEAF member suspend fn is fine (just a CPS signature).
+        if has_susp && !is_static {
+            return false;
+        }
         // CPS signature: append the continuation parameter, erase the return to Object.
-        let p_old = ir.functions[fid as usize].params.len() as u32; // original param count
         let f = &mut ir.functions[fid as usize];
         f.params.push(continuation_ty());
         f.param_checks.push(None);
         f.ret = object_ty();
 
-        // ir_lower assigned body locals value-indices starting at `p_old`, which now collides with the
-        // appended continuation parameter (also value-index `p_old`). Shift every body local up by one so
-        // the continuation owns `p_old` and no local aliases its JVM slot.
+        // The continuation parameter's value-index is `params + (this ? 1 : 0)`; ir_lower numbered body
+        // locals from that same index, so shift every body local up by one to make room for it.
+        let p_old =
+            ir.functions[fid as usize].params.len() as u32 - 1 + if is_static { 0 } else { 1 };
         if let Some(b) = body {
             shift_locals(ir, b, p_old);
         }
