@@ -652,8 +652,10 @@ pub struct IrFile {
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
     /// (after its captures/parameters), where the coroutine pass appends the `result`/`label`/spilled
     /// fields. ir_lower builds `invokeSuspend` with the plain body (suspend calls un-threaded); the pass
-    /// flattens it. (Single-suspension lambdas are handled inline by ir_lower instead.)
-    pub suspend_lambda_sm: Vec<(u32, u32, u32)>,
+    /// flattens it. (Single-suspension lambdas are handled inline by ir_lower instead.) `n_cap` is the
+    /// number of leading CAPTURE fields — the pass reloads them into locals `2..2+n_cap` at each
+    /// `invokeSuspend` entry (so a capture survives a re-entry) and excludes them from spilling.
+    pub suspend_lambda_sm: Vec<(u32, u32, u32, u32)>,
 }
 
 impl IrFile {

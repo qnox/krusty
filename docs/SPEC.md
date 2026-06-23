@@ -296,7 +296,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   states } }`. Proven both completion modes incl. spilling a value across a second suspension:
   `{ val a = foo(); val b = bar(); a + b }` → 142 synchronously (`::suspend_lambda_two_suspensions_runs`),
   and `{ val a = suspendOnce(); val b = plain(); a + b }` parks then resumes to 142
-  (`::suspend_lambda_two_suspensions_async_resume`).
+  (`::suspend_lambda_two_suspensions_async_resume`). A lambda that BOTH captures and suspends is handled
+  by the same general machine: a capture is reloaded from its field into its local (value-index `2+i`)
+  in the `invokeSuspend` PROLOGUE at every entry (so it survives a re-entry) and is excluded from
+  spilling. Proven: `make(n: Int): suspend () -> Int = { val a = foo(); n + a }`, `make(10).invoke(k)` →
+  52 (`::suspend_lambda_captures_with_suspension_runs`).
   **Own parameters** (leaf, no captures): a
   parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
   fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
