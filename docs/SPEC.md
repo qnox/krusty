@@ -141,6 +141,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 ## 7. Edge cases tracked (grow as implemented)
 
+- **`suspend fun` (coroutines), slice 1 — the calling convention.** A `suspend fun` lowers to
+  kotlinc's continuation-passing-style (CPS) JVM ABI: an extra `kotlin.coroutines.Continuation`
+  parameter is appended and the return type erases to `java.lang.Object` (the resume value, *boxed* —
+  a primitive return goes through a box, a reference return widens for free). A **leaf** suspend
+  function (no suspension point in its body) needs no state machine: kotlinc emits exactly
+  `public static final Object foo(Continuation)` with the boxed return, and so does krusty
+  (`tests/suspend_e2e.rs::leaf_suspend_fun_has_cps_signature`; krusty boxes via `Integer.valueOf`
+  where kotlinc uses `Boxing.boxInt` — runtime-identical; the generic `<? super …>` signature is
+  erased). Architecture mirrors value classes: **ir_lower keeps the plain function and tags its
+  `FunId` in `ir.suspend_funs`; the JVM-only pass `jvm::suspend::lower_suspend` owns the whole
+  transform** (CPS signature now; the state machine + `Foo$fn$1` continuation class for functions
+  with suspension points is a later slice). Until then, ir_lower's suspend gate skips (never
+  miscompiles) any non-leaf shape: a suspension point, an extension/member suspend fn, or any *call*
+  to a suspend fn (call-site continuation threading isn't modeled yet).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.

@@ -175,17 +175,10 @@ impl<'a> Parser<'a> {
                     self.file.decls.push(id);
                 }
                 TokenKind::KwFun => {
-                    // `suspend` needs a coroutine state machine (Continuation) krusty doesn't emit;
-                    // compiling it as a plain function is unsound — reject so the file skips.
-                    if mods.iter().any(|m| m == "suspend") {
-                        self.diags.error(
-                            self.tok().span,
-                            "krusty: suspend functions are not supported",
-                        );
-                    }
                     let mut d = self.parse_fun(
                         mods.iter().any(|m| m == "inline"),
                         mods.iter().any(|m| m == "final"),
+                        mods.iter().any(|m| m == "suspend"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     let id = self.file.add_decl(Decl::Fun(d));
@@ -655,6 +648,7 @@ impl<'a> Parser<'a> {
                     let mut d = self.parse_fun(
                         mods.iter().any(|m| m == "inline"),
                         mods.iter().any(|m| m == "final"),
+                        mods.iter().any(|m| m == "suspend"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     methods.push(d);
@@ -755,6 +749,7 @@ impl<'a> Parser<'a> {
                             body.push(self.parse_fun(
                                 bmods.iter().any(|m| m == "inline"),
                                 bmods.iter().any(|m| m == "final"),
+                                bmods.iter().any(|m| m == "suspend"),
                             ));
                         } else {
                             self.diags.error(
@@ -793,6 +788,7 @@ impl<'a> Parser<'a> {
                     TokenKind::KwFun => methods.push(self.parse_fun(
                         emods.iter().any(|m| m == "inline"),
                         emods.iter().any(|m| m == "final"),
+                        emods.iter().any(|m| m == "suspend"),
                     )),
                     // Nested type declarations and secondary constructors in an enum body: parse
                     // them through the real grammar (no token-skipping) and discard — krusty doesn't
@@ -925,7 +921,7 @@ impl<'a> Parser<'a> {
         s
     }
 
-    fn parse_fun(&mut self, is_inline: bool, is_final: bool) -> FunDecl {
+    fn parse_fun(&mut self, is_inline: bool, is_final: bool, is_suspend: bool) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -958,6 +954,7 @@ impl<'a> Parser<'a> {
                 is_inline: false,
                 is_final: false,
                 is_private: false,
+                is_suspend: false,
             };
         }
         let (type_params, non_null_type_params, reified_type_params, _type_param_bounds) =
@@ -1044,6 +1041,7 @@ impl<'a> Parser<'a> {
             is_inline,
             is_final,
             is_private: false,
+            is_suspend,
         }
     }
 
@@ -1226,10 +1224,13 @@ impl<'a> Parser<'a> {
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
+                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
+                    TokenKind::KwFun => {
+                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
                         // value); an `abstract` property has no field and is marked accordingly.
@@ -1533,7 +1534,11 @@ impl<'a> Parser<'a> {
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
-                        let f = self.parse_fun(imods.iter().any(|m| m == "inline"), false);
+                        let f = self.parse_fun(
+                            imods.iter().any(|m| m == "inline"),
+                            false,
+                            imods.iter().any(|m| m == "suspend"),
+                        );
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
@@ -1625,9 +1630,12 @@ impl<'a> Parser<'a> {
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
+                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
+                    TokenKind::KwFun => {
+                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
                             lateinit,
@@ -1756,9 +1764,12 @@ impl<'a> Parser<'a> {
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
+                let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => methods.push(self.parse_fun(fun_inline, fun_final)),
+                    TokenKind::KwFun => {
+                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
+                    }
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
                             lateinit,
@@ -2427,7 +2438,9 @@ impl<'a> Parser<'a> {
             TokenKind::KwFor => self.parse_for(start, loop_label),
             // Local function declaration: `fun name(params): Ret { body }` inside a function body.
             TokenKind::KwFun => {
-                let f = self.parse_fun(false, false);
+                // Local functions don't carry a `suspend` modifier through this path; a local
+                // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
+                let f = self.parse_fun(false, false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             _ => {
