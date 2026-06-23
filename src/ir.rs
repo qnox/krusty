@@ -132,6 +132,12 @@ pub enum IrConst {
 #[derive(Clone, Debug)]
 pub enum IrExpr {
     Const(IrConst),
+    /// A class-literal constant — `ldc class <internal>` (a `java.lang.Class`). Used e.g. for the
+    /// `PropertyReference0Impl(Class, …)` argument in delegated-property setup. `internal` is the JVM
+    /// internal name (mapped through the backend's kotlin→java table at emit).
+    ClassConst {
+        internal: String,
+    },
     /// Read a value parameter / variable by its declaration index.
     GetValue(u32),
     /// Assign to a variable (`IrSetValue`).

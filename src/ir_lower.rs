@@ -70,7 +70,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
             Decl::Class(c) if c.is_object && is_simple_object(c) => {}
-            Decl::Property(p) if is_plain_body_prop(p) || is_computed_prop(p) => {}
+            Decl::Property(p)
+                if is_plain_body_prop(p) || is_computed_prop(p) || p.delegate.is_some() => {}
             _ => return None,
         }
     }
@@ -829,10 +830,32 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // any body so a function may read a top-level property as `GetStatic`.
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
-            // A delegated top-level property (`val x by …`) isn't emitted yet — skip the file (it was
-            // already skipped before `by` parsing landed). Removing this bail is the next phase.
+            // A top-level delegated property (`val x: T by Del()`): register a `getX()` accessor so reads
+            // route to it (like a computed property), and RESERVE the two synthetic backing-field static
+            // slots (`x$delegate`, `x$kprop`) in declaration order so later non-delegated statics get the
+            // matching indices. The field initializers + `getX()` body are built in pass 2.
             if p.delegate.is_some() {
-                return None;
+                let ty = lo.delegated_prop_type(p)?;
+                let fid = lo.ir.add_fun(IrFunction {
+                    name: getter_name(&p.name),
+                    params: vec![],
+                    ret: ty_to_ir(ty),
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: vec![],
+                });
+                lo.computed_props.insert(p.name.clone(), (fid, ty));
+                let d_ty = p.delegate.map(|de| info.ty(de)).unwrap_or(Ty::Error);
+                let d_idx = lo.statics.len() as u32;
+                lo.statics
+                    .insert(format!("{}$delegate", p.name), (d_idx, d_ty));
+                let k_idx = lo.statics.len() as u32;
+                lo.statics.insert(
+                    format!("{}$kprop", p.name),
+                    (k_idx, Ty::obj("kotlin/reflect/KProperty")),
+                );
+                continue;
             }
             let ty =
                 p.ty.as_ref()
@@ -1635,7 +1658,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
-                if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
+                if p.delegate.is_some() {
+                    lo.lower_delegated_top_level(p)?;
+                } else if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
                     // A computed property: lower its custom getter into the `getX()` body.
                     lo.cur_fn_name = getter_name(&p.name);
                     lo.lambda_seq = 0;
@@ -1818,6 +1843,37 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
 
 /// A class-body property that is a plain backing field: a normal (non-extension) `val`/`var` with an
 /// initializer and no custom getter/setter and not `lateinit`.
+/// Whether a file-local delegate class's `getValue` references its `KProperty` parameter (its second
+/// parameter) in the body — i.e. uses property reflection. Such delegates need the property reference
+/// to resolve through `@Metadata` (not emitted for delegated properties), so they're skipped. A
+/// library/classpath delegate (not found here) returns `false` — library `getValue`s don't reflect.
+fn delegate_getvalue_uses_property(file: &ast::File, internal: &str) -> bool {
+    for &d in &file.decls {
+        let ast::Decl::Class(c) = file.decl(d) else {
+            continue;
+        };
+        if internal != c.name && !internal.ends_with(&format!("/{}", c.name)) {
+            continue;
+        }
+        for m in &c.methods {
+            if m.name != "getValue" {
+                continue;
+            }
+            let Some(param) = m.params.get(1) else {
+                continue;
+            };
+            let body = match &m.body {
+                ast::FunBody::Expr(e) | ast::FunBody::Block(e) => *e,
+                ast::FunBody::None => continue,
+            };
+            if crate::resolve::expr_uses_name_pub(file, body, &param.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
@@ -2140,6 +2196,113 @@ impl<'a> Lower<'a> {
             return Some(t);
         }
         self.info.ty(call).array_elem()
+    }
+
+    /// The type of a delegated property — the explicit annotation if present, else inferred from the
+    /// delegate's `getValue` return type. `None` if the delegate type isn't a resolvable class with a
+    /// `getValue` member (e.g. an extension-operator delegate — not modeled yet).
+    fn delegated_prop_type(&self, p: &ast::PropDecl) -> Option<Ty> {
+        if let Some(tref) = p.ty.as_ref() {
+            return Some(ty_of(self.afile, tref));
+        }
+        let delegate_ty = self.info.ty(p.delegate?);
+        let internal = delegate_ty.obj_internal()?;
+        Some(self.syms.method_of(internal, "getValue")?.ret)
+    }
+
+    /// Lower a top-level delegated property `val x: T by Del()` (pass 2). Model: two synthetic statics —
+    /// `x$delegate: Del` (init = the delegate expression) and `x$kprop: KProperty` (init = an inline
+    /// `PropertyReference0Impl(Facade::class, "x", "getX()<ret>", 1)`) — plus a `getX()` body that calls
+    /// `x$delegate.getValue(null, x$kprop)`. Reads of `x` route to `getX()` via `computed_props` (set in
+    /// pass 1c). Returns `None` (skips the file) if `getValue` can't be resolved on the delegate type.
+    /// (kotlinc keeps the `KProperty`s in one `$$delegatedProperties` array; the per-prop field here is
+    /// runtime-equivalent — a byte-parity nicety to revisit.)
+    fn lower_delegated_top_level(&mut self, p: &ast::PropDecl) -> Option<()> {
+        let delegate_expr = p.delegate?;
+        let delegate_ty = self.info.ty(delegate_expr);
+        let delegate_internal = delegate_ty.obj_internal()?.to_string();
+        // If the delegate's `getValue` reflects on its `KProperty` parameter (`p.name`, `p.returnType`,
+        // `p.toString()`, …), correctness needs the synthesized property reference to resolve through the
+        // facade's `@Metadata` — which krusty doesn't emit for delegated properties. Skip rather than
+        // miscompile. A `getValue` that ignores the property parameter is unaffected.
+        if delegate_getvalue_uses_property(self.afile, &delegate_internal) {
+            return None;
+        }
+        let gv = self.syms.method_of(&delegate_internal, "getValue")?;
+        let prop_ty = self.delegated_prop_type(p)?;
+
+        // getValue descriptor `(thisRef, KProperty)ret` from the resolved signature.
+        let mut gv_desc = String::from("(");
+        for pt in &gv.params {
+            gv_desc.push_str(&pt.descriptor());
+        }
+        gv_desc.push(')');
+        gv_desc.push_str(&gv.ret.descriptor());
+
+        // x$delegate: Del — init = lowered delegate expression.
+        let delegate_ir = ty_to_ir(delegate_ty);
+        let init_d = self.lower_arg(delegate_expr, &delegate_ir)?;
+        let idx_d = self.ir.statics.len() as u32;
+        self.ir.statics.push(crate::ir::IrStatic {
+            name: format!("{}$delegate", p.name),
+            ty: delegate_ir,
+            init: init_d,
+            is_var: false,
+            is_const: false,
+        });
+
+        // x$kprop: KProperty — init = new PropertyReference0Impl(Facade::class, "x", "getX()<ret>", 1).
+        let facade_cls = self.ir.add_expr(IrExpr::ClassConst {
+            internal: String::new(),
+        });
+        let name_c = self
+            .ir
+            .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
+        let sig_str = format!("{}(){}", getter_name(&p.name), prop_ty.descriptor());
+        let sig_c = self.ir.add_expr(IrExpr::Const(IrConst::String(sig_str)));
+        let flag_c = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let propref = self.ir.add_expr(IrExpr::NewExternal {
+            internal: "kotlin/jvm/internal/PropertyReference0Impl".to_string(),
+            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
+            args: vec![facade_cls, name_c, sig_c, flag_c],
+        });
+        let kprop_ty = ty_to_ir(Ty::obj("kotlin/reflect/KProperty"));
+        let idx_p = self.ir.statics.len() as u32;
+        self.ir.statics.push(crate::ir::IrStatic {
+            name: format!("{}$kprop", p.name),
+            ty: kprop_ty,
+            init: propref,
+            is_var: false,
+            is_const: false,
+        });
+
+        // getX(): return x$delegate.getValue(null, x$kprop).
+        let get_d = self.ir.add_expr(IrExpr::GetStatic(idx_d));
+        let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let get_p = self.ir.add_expr(IrExpr::GetStatic(idx_p));
+        let is_iface = self
+            .syms
+            .class_by_internal(&delegate_internal)
+            .map(|c| c.is_interface)
+            .unwrap_or(false);
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Virtual {
+                owner: delegate_internal,
+                name: "getValue".to_string(),
+                descriptor: gv_desc,
+                interface: is_iface,
+            },
+            dispatch_receiver: Some(get_d),
+            args: vec![null_a, get_p],
+        });
+        let ret = self.ir.add_expr(IrExpr::Return(Some(call)));
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        let (fid, _) = self.computed_props[&p.name];
+        self.ir.functions[fid as usize].body = Some(body);
+        Some(())
     }
 
     /// Destructure a trailing lambda argument into `(parameter names, body)`, or `None` if `arg` is
