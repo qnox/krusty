@@ -214,6 +214,20 @@ fn suspend_fun_suspension_inside_if_not_taken() {
 }
 
 #[test]
+fn suspend_fun_suspension_in_if_statement() {
+    // The suspension `foo()` is a bare statement inside an `if` STATEMENT branch (not a value). The
+    // flattener routes the branch through its own states and converges at the merge. Returns 5.
+    run_suspend(
+        "smifs",
+        "suspend fun foo(): Int = 42\n\
+         val flag = true\n\
+         suspend fun c(): Int {\n    if (flag) {\n        foo()\n    }\n    return 5\n}\n",
+        "c",
+        5,
+    );
+}
+
+#[test]
 fn suspend_chain_calls_state_machine_callee() {
     // `top` calls `bar`, which is itself a state-machine suspend fn (it calls `foo`). Exercises a
     // suspend fn whose suspension callee has its own continuation class. 43 + 1 = 44.
