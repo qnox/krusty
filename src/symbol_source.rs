@@ -116,6 +116,7 @@ mod tests {
             vararg_elem: None,
             must_inline: false,
             signature: None,
+            origin: crate::libraries::Origin::Library,
         }
     }
 
