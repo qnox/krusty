@@ -58,8 +58,11 @@ fn run_box(tag: &str, src: &str) -> Option<String> {
     let src_path = dir.join("Destr.kt");
     fs::write(&src_path, src).unwrap();
     let bin = env!("CARGO_BIN_EXE_krusty");
+    // krusty has no implicit JDK lookup — the jimage (`<jdk>/lib/modules`) must be on its classpath so
+    // a collection's `java.lang.Iterable` supertype (where stdlib `forEach`/`map` are keyed) resolves.
+    let kcp = format!("{stdlib}:{java_home}/lib/modules");
     let out = Command::new(bin)
-        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .args(["-cp", &kcp, "-d", dir.to_str().unwrap()])
         .arg(&src_path)
         .output()
         .unwrap();
@@ -119,6 +122,25 @@ fun box(): String {
 #[test]
 fn lambda_destructuring_runs_correctly() {
     if let Some(out) = run_box("lambda", LAMBDA_SRC) {
+        assert_eq!(out, "OK");
+    }
+}
+
+const FOREACH_SRC: &str = r#"
+data class P(val a: Int, val b: String)
+fun box(): String {
+    val xs = listOf(P(1, "a"), P(2, "b"), P(3, "c"))
+    var sum = 0
+    var s = ""
+    // forEach over a List of data-class elements, with a destructured lambda parameter.
+    xs.forEach { (n, t) -> sum += n; s += t }
+    return if (sum == 6 && s == "abc") "OK" else "FAIL"
+}
+"#;
+
+#[test]
+fn foreach_destructuring_runs_correctly() {
+    if let Some(out) = run_box("foreach", FOREACH_SRC) {
         assert_eq!(out, "OK");
     }
 }
