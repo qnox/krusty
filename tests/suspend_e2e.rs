@@ -73,6 +73,72 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn suspend_lambda_captures_enclosing_variable() {
+    // A `suspend` lambda capturing an enclosing parameter (`{ n + 1 }`). The captured value becomes a
+    // field on the `SuspendLambda` subclass, set at construction and copied into the fresh instance
+    // `invoke` builds. Driven: make(10).invoke(k) -> 10 + 1 = 11.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_lamcap_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("S.kt"),
+        "fun make(n: Int): suspend () -> Int = { n + 1 }\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.jvm.functions.Function1;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Function1 f = SKt.make(10);\n\
+    Object r = f.invoke(k);\n\
+    System.out.println(r.equals(Integer.valueOf(11)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "suspend lambda capture: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn leaf_suspend_lambda_creates_and_invokes() {
     // A leaf `suspend` lambda (`{ 42 }`, no captures, no internal suspension) compiles to a concrete
     // `SuspendLambda` subclass implementing `Function1<Continuation,Object>`, NOT krusty's
