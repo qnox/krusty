@@ -3725,7 +3725,7 @@ impl<'a> Checker<'a> {
                 // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
                 // `Map.get(K)`); the index type is checked against the member's parameter.
                 if let Ty::Obj(internal, _) = at {
-                    if let Some(m) = crate::libraries::resolve_instance(
+                    if let Some(m) = crate::call_resolver::resolve_instance(
                         &*self.syms.libraries,
                         internal,
                         "get",
@@ -4051,7 +4051,7 @@ impl<'a> Checker<'a> {
                                 self.lookup_method(internal, &name)
                                     .map(|s| s.ret)
                                     .or_else(|| {
-                                        crate::libraries::resolve_instance(
+                                        crate::call_resolver::resolve_instance(
                                             &*self.syms.libraries,
                                             internal,
                                             &name,
@@ -4928,9 +4928,12 @@ impl<'a> Checker<'a> {
                     return Some(sig.ret);
                 }
             }
-            if let Some(m) =
-                crate::libraries::resolve_instance(&*self.syms.libraries, internal, name, arg_tys)
-            {
+            if let Some(m) = crate::call_resolver::resolve_instance(
+                &*self.syms.libraries,
+                internal,
+                name,
+                arg_tys,
+            ) {
                 return Some(
                     self.syms
                         .libraries
@@ -5202,9 +5205,12 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .flatten()
             {
-                if let Some(m) =
-                    crate::libraries::resolve_instance(&*self.syms.libraries, internal, &cand, &[])
-                {
+                if let Some(m) = crate::call_resolver::resolve_instance(
+                    &*self.syms.libraries,
+                    internal,
+                    &cand,
+                    &[],
+                ) {
                     if !matches!(m.ret, Ty::Unit | Ty::Error) {
                         return m.ret;
                     }
@@ -5400,7 +5406,7 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) = crate::libraries::resolve_instance(
+                            if let Some(m) = crate::call_resolver::resolve_instance(
                                 &*self.syms.libraries,
                                 &sup,
                                 &name,
@@ -5485,7 +5491,7 @@ impl<'a> Checker<'a> {
                         }
                         if let Some(internal) = self.imports.get(&cls).cloned() {
                             let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
-                            return match crate::libraries::resolve_companion(
+                            return match crate::call_resolver::resolve_companion(
                                 &*self.syms.libraries,
                                 &internal,
                                 &name,
@@ -5751,7 +5757,7 @@ impl<'a> Checker<'a> {
                         return sig.ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = crate::libraries::resolve_instance(
+                    if let Some(m) = crate::call_resolver::resolve_instance(
                         &*self.syms.libraries,
                         internal,
                         &name,
@@ -6409,7 +6415,7 @@ impl<'a> Checker<'a> {
                     }
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
                     if let Some(internal) = self.imports.get(&fname).cloned() {
-                        if crate::libraries::resolve_constructor(
+                        if crate::call_resolver::resolve_constructor(
                             &*self.syms.libraries,
                             &internal,
                             &arg_tys,
@@ -6424,7 +6430,7 @@ impl<'a> Checker<'a> {
                     // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
                     // JVM jimage can't surface) — the resolver no longer special-cases throwables.
                     if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if crate::libraries::resolve_constructor(
+                        if crate::call_resolver::resolve_constructor(
                             &*self.syms.libraries,
                             &internal,
                             &arg_tys,
@@ -6855,7 +6861,7 @@ impl<'a> Checker<'a> {
                                 .method_of(i, &comp)
                                 .map(|sig| sig.ret)
                                 .or_else(|| {
-                                    crate::libraries::resolve_instance(
+                                    crate::call_resolver::resolve_instance(
                                         &*self.syms.libraries,
                                         i,
                                         &comp,
@@ -6880,7 +6886,7 @@ impl<'a> Checker<'a> {
                         // element type from `get(Int)` (which kotlinc inlines the component to).
                         .or_else(|| {
                             internal.and_then(|i| {
-                                crate::libraries::resolve_instance(
+                                crate::call_resolver::resolve_instance(
                                     &*self.syms.libraries,
                                     i,
                                     "get",
@@ -7076,8 +7082,8 @@ impl<'a> Checker<'a> {
                     // `coll[i] = v` on a library type → its `set(index, value)` operator member
                     // (`MutableList.set(Int, E)`, `MutableMap.put(K, V)`).
                     None if matches!(at, Ty::Obj(internal, _)
-                        if crate::libraries::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()
-                            || crate::libraries::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).is_some()) =>
+                        if crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "set", &[it, vt]).is_some()
+                            || crate::call_resolver::resolve_instance(&*self.syms.libraries, internal, "put", &[it, vt]).is_some()) =>
                         {}
                     None => {
                         if at != Ty::Error {
@@ -7221,7 +7227,7 @@ impl<'a> Checker<'a> {
                     // A collection/range value with an `iterator()` — the iterator protocol. The
                     // element is its generic argument (`List<Int>` → `Int`), erased `Any` if absent.
                     Ty::Obj(internal, args)
-                        if crate::libraries::resolve_instance(
+                        if crate::call_resolver::resolve_instance(
                             &*self.syms.libraries,
                             internal,
                             "iterator",

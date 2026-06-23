@@ -11,7 +11,7 @@
 //! generic-signature string into [`GSig`]) live behind the trait; the binding *algorithm* over [`GSig`]
 //! lives here.
 
-use crate::libraries::{FnKind, LibraryCallable, LibrarySet};
+use crate::libraries::{FnKind, LibraryCallable, LibraryMember, LibrarySet};
 use crate::types::Ty;
 
 /// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
@@ -213,4 +213,75 @@ impl<'a> CallResolver<'a> {
             .find(|o| o.callable.ret == lambda_ret)
             .map(|o| o.callable)
     }
+}
+
+// --- Navigation helpers (member/constructor resolution expressed purely against the trait) --------
+// The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
+// this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
+
+/// Resolve a constructor on a library type by argument types (with the type's own widening).
+pub fn resolve_constructor(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
+    lib.resolve_type(internal)?.ctor(args).cloned()
+}
+
+/// Resolve a companion member `Type.name(args)` (the receiver type must be public).
+pub fn resolve_companion(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    name: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
+    let t = lib.resolve_type(internal)?;
+    if !t.is_public {
+        return None;
+    }
+    t.companion_member(name, args).cloned()
+}
+
+/// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
+/// member may be inherited from a (possibly non-public) supertype, so walk the chain breadth-first.
+pub fn resolve_instance(
+    lib: &dyn LibrarySet,
+    internal: &str,
+    name: &str,
+    args: &[Ty],
+) -> Option<LibraryMember> {
+    if !lib.resolve_type(internal)?.is_public {
+        return None;
+    }
+    // A generic method erases its type-parameter arguments to `Any` (`List<E>.add(E)` → `add(Object)`),
+    // so a reference argument matches against an `Any` parameter — try the exact args, then widened.
+    let widened: Vec<Ty> = args
+        .iter()
+        .map(|t| {
+            if t.is_reference() {
+                Ty::obj("kotlin/Any")
+            } else {
+                *t
+            }
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut q = std::collections::VecDeque::new();
+    q.push_back(internal.to_string());
+    while let Some(cur) = q.pop_front() {
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        let Some(t) = lib.resolve_type(&cur) else {
+            continue;
+        };
+        if let Some(m) = t
+            .instance_member(name, args)
+            .or_else(|| t.instance_member(name, &widened))
+        {
+            return Some(m.clone());
+        }
+        q.extend(t.supertypes);
+    }
+    None
 }
