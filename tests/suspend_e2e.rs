@@ -334,11 +334,11 @@ fn suspend_lambda_two_suspensions_async_resume() {
     // The ASYNC path of the general lambda-mode machine: `{ val a = suspendOnce(); val b = plain();
     // a + b }`. The first callee PARKS (returns COROUTINE_SUSPENDED); `a` must be SPILLED across the
     // second suspension. invoke suspends, resumeSaved(42) re-enters → 42 + 100 = 142.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -359,18 +359,18 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
     )
     .unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     fs::write(
         dir.join("Use.kt"),
@@ -664,11 +664,11 @@ fn suspend_lambda_internal_suspension_async_resume() {
     // The ASYNC path for an internal-suspension lambda: `{ suspendOnce() }` where suspendOnce (kotlinc)
     // parks the continuation. The lambda's invokeSuspend returns COROUTINE_SUSPENDED up; a later
     // resumeWith re-enters it (state 1) and delivers the value. make().invoke(k) suspends, then 42.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -688,18 +688,18 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
     )
     .unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     fs::write(
         dir.join("Use.kt"),
@@ -1175,11 +1175,11 @@ fn suspend_fun_calls_classpath_suspend_fun() {
     // `Object helper(Continuation)`). krusty then compiles the caller against `-cp lib.jar`. The
     // classpath parser must resolve `helper()` by its LOGICAL signature (no continuation arg, `Int`
     // return) and mark it suspend; the coroutine pass threads the continuation. 42 + 1 = 43.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -1189,19 +1189,19 @@ fn suspend_fun_calls_classpath_suspend_fun() {
     // 1) kotlinc builds the suspend lib into lib.jar.
     fs::write(dir.join("Lib.kt"), "suspend fun helper(): Int = 42\n").unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
         // kotlinc unavailable/incompatible in this env — skip rather than fail spuriously.
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     // 2) krusty compiles the caller against the lib jar + stdlib.
     fs::write(
@@ -1426,11 +1426,11 @@ fn toplevel_suspend_fun_with_param_survives_async_resume() {
     // ASYNC case for a TOP-LEVEL suspend fn with a live parameter `x` (the `receiver=None` capture
     // path). `caller(5)` suspends on `suspendOnce`; on resume, `x` must be restored from the captured
     // continuation field. 42 + 5 = 47.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -1450,18 +1450,18 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
     )
     .unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     fs::write(
         dir.join("Use.kt"),
@@ -1520,11 +1520,11 @@ fn member_suspend_fun_with_param_survives_async_resume() {
     // suspension/resume. `suspendOnce` (kotlinc) parks the continuation; `m` propagates
     // COROUTINE_SUSPENDED, and on `resumeSaved(42)` re-enters — `x` (and the receiver `base`) must be
     // restored from the continuation's captured fields. new C(100).m(5): 100 + 42 + 5 = 147.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -1544,18 +1544,18 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
     )
     .unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     fs::write(
         dir.join("Use.kt"),
@@ -1793,11 +1793,11 @@ fn suspend_fun_actually_suspends_and_resumes_async() {
     // state and run to completion. `suspendOnce` (kotlinc) parks the continuation; the driver gets
     // `COROUTINE_SUSPENDED` back from `caller`, then resumes with 42 → caller computes 43 and delivers
     // it to the completion. Proves invokeSuspend / label-MIN re-entry actually works.
-    let jh = match java_home() {
+    let _jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
     };
-    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
@@ -1818,18 +1818,18 @@ fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
     )
     .unwrap();
     let libjar = dir.join("lib.jar");
-    let kc = Command::new(&kotlinc)
-        .env("JAVA_HOME", &jh)
-        .args(["-d", libjar.to_str().unwrap()])
-        .arg(dir.join("Lib.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skipping: kotlinc failed:\n{}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
-        return;
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
     }
     // krusty compiles a caller that suspends on the primitive.
     fs::write(
