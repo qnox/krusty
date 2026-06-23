@@ -162,11 +162,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // Pass 1a: register classes (id, fields) and reserve method FunIds.
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
-            // A delegated MEMBER property (`class C { val x by … }`) isn't emitted yet — skip the file
-            // (it parses now that `by` is recognized, but must not reach codegen until handled).
-            if c.body_props.iter().any(|p| p.delegate.is_some()) {
-                return None;
-            }
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             if let Some(s) = class_generic_sig(c) {
@@ -227,7 +222,52 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     (p.name.clone(), ty)
                 })
                 .collect();
-            let fields: Vec<(String, Ty)> = ctor_fields.into_iter().chain(body_fields).collect();
+            // Guard each delegated member property: only the simple shape is modeled — a concrete
+            // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
+            // property type exactly (generic erasure / value-class unboxing would need a cast the inline
+            // accessor doesn't emit). Anything else skips the file rather than miscompile.
+            for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                let dt = info.ty(p.delegate.unwrap());
+                let di = dt.obj_internal()?;
+                let is_value_cls = |internal: &str| {
+                    syms.class_by_internal(internal)
+                        .is_some_and(|cs| cs.value_field.is_some())
+                };
+                if is_value_cls(di) || syms.method_of(di, "provideDelegate").is_some() {
+                    return None;
+                }
+                let gv = syms.method_of(di, "getValue")?;
+                let prop_ty = syms
+                    .classes
+                    .get(&c.name)
+                    .and_then(|cs| {
+                        cs.props
+                            .iter()
+                            .find(|(n, _, _)| n == &p.name)
+                            .map(|(_, t, _)| *t)
+                    })
+                    .unwrap_or(Ty::Error);
+                if gv.ret != prop_ty {
+                    return None;
+                }
+                if prop_ty.obj_internal().is_some_and(is_value_cls) {
+                    return None;
+                }
+            }
+            // Synthetic `x$delegate` instance fields for delegated member properties — one per delegated
+            // body property, in declaration order, placed AFTER the real backing-field props (so the
+            // accessor-synthesis loop, which is driven by `field_props`, never indexes them).
+            let delegate_fields: Vec<(String, Ty)> = c
+                .body_props
+                .iter()
+                .filter(|p| p.delegate.is_some())
+                .map(|p| (format!("{}$delegate", p.name), info.ty(p.delegate.unwrap())))
+                .collect();
+            let fields: Vec<(String, Ty)> = ctor_fields
+                .into_iter()
+                .chain(body_fields)
+                .chain(delegate_fields.iter().cloned())
+                .collect();
             // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
             // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
             // backing-field body props). Neutral metadata for the value-class pass's bound resolution.
@@ -250,6 +290,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .filter(|p| is_backing_field_prop(p))
                     .map(|_| None),
             );
+            // Parallel `None` for each synthetic `x$delegate` field (concrete delegate type, no type-param).
+            field_type_params.extend(delegate_fields.iter().map(|_| None));
             let class_ty = IrType::Class {
                 fq_name: internal.clone(),
                 type_args: vec![],
@@ -372,6 +414,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .filter(|p| is_backing_field_prop(p))
                             .map(|p| !p.is_var),
                     )
+                    // Each `x$delegate` field is final (the delegate instance never changes; `var`
+                    // mutation goes through the delegate's `setValue`).
+                    .chain(delegate_fields.iter().map(|_| true))
                     .collect(),
                 field_private: vec![], // user backing fields are all private (default)
                 secondary_ctors: vec![],
@@ -443,6 +488,48 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 methods.insert(gname, (mi, fid, ty));
                 method_fids.push(fid);
+            }
+            // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
+            // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
+            for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                let prop_ty = syms
+                    .classes
+                    .get(&c.name)
+                    .and_then(|cs| {
+                        cs.props
+                            .iter()
+                            .find(|(n, _, _)| n == &p.name)
+                            .map(|(_, t, _)| *t)
+                    })
+                    .unwrap_or(Ty::Error);
+                let gname = getter_name(&p.name);
+                let mi = method_fids.len() as u32;
+                let fid = lo.ir.add_fun(IrFunction {
+                    name: gname.clone(),
+                    params: vec![],
+                    ret: ty_to_ir(prop_ty),
+                    body: None,
+                    is_static: false,
+                    dispatch_receiver: Some(internal.clone()),
+                    param_checks: vec![],
+                });
+                methods.insert(gname, (mi, fid, prop_ty));
+                method_fids.push(fid);
+                if p.is_var {
+                    let sname = setter_name(&p.name);
+                    let mi = method_fids.len() as u32;
+                    let fid = lo.ir.add_fun(IrFunction {
+                        name: sname.clone(),
+                        params: vec![ty_to_ir(prop_ty)],
+                        ret: IrType::Unit,
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(internal.clone()),
+                        param_checks: vec![],
+                    });
+                    methods.insert(sname, (mi, fid, Ty::Unit));
+                    method_fids.push(fid);
+                }
             }
             // Abstract properties (`abstract val x: T`, and every interface property) → an abstract
             // `getX()` (and `setX()` for a `var`) the implementing class overrides with its field
@@ -1183,6 +1270,116 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
                 }
+                // Delegated body-property accessors → `getX()`/`setX()` calling the delegate's
+                // getValue/setValue, with the `KProperty` passed inline as a `PropertyReference1Impl`.
+                for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                    let class_id = lo.classes[&internal].id;
+                    let delegate_ty = lo.info.ty(p.delegate.unwrap());
+                    let delegate_internal = delegate_ty.obj_internal()?.to_string();
+                    let fname = format!("{}$delegate", p.name);
+                    let field_idx = lo.ir.classes[class_id as usize]
+                        .fields
+                        .iter()
+                        .position(|(n, _)| *n == fname)
+                        .expect("delegate field") as u32;
+                    // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
+                    let gname = getter_name(&p.name);
+                    let (_, get_fid, prop_ty) = lo.classes[&internal].methods[&gname];
+                    let ret_desc = prop_ty.descriptor();
+                    let make_propref = |lo: &mut Lower| {
+                        let cls = lo.ir.add_expr(IrExpr::ClassConst {
+                            internal: internal.clone(),
+                        });
+                        let nm = lo
+                            .ir
+                            .add_expr(IrExpr::Const(IrConst::String(p.name.clone())));
+                        let sigc = lo.ir.add_expr(IrExpr::Const(IrConst::String(format!(
+                            "{}(){}",
+                            gname, ret_desc
+                        ))));
+                        let flag = lo.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                        lo.ir.add_expr(IrExpr::NewExternal {
+                            internal: "kotlin/jvm/internal/PropertyReference1Impl".to_string(),
+                            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+                                .to_string(),
+                            args: vec![cls, nm, sigc, flag],
+                        })
+                    };
+                    // getX(): return this.x$delegate.getValue(this, propref)
+                    let gv = lo.syms.method_of(&delegate_internal, "getValue")?;
+                    let gv_desc = {
+                        let mut s = String::from("(");
+                        for pt in &gv.params {
+                            s.push_str(&pt.descriptor());
+                        }
+                        s.push(')');
+                        s.push_str(&gv.ret.descriptor());
+                        s
+                    };
+                    let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                    let dele = lo.ir.add_expr(IrExpr::GetField {
+                        receiver: this_e,
+                        class: class_id,
+                        index: field_idx,
+                    });
+                    let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
+                    let pref = make_propref(&mut lo);
+                    let call = lo.ir.add_expr(IrExpr::Call {
+                        callee: crate::ir::Callee::Virtual {
+                            owner: delegate_internal.clone(),
+                            name: "getValue".to_string(),
+                            descriptor: gv_desc,
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(dele),
+                        args: vec![this_arg, pref],
+                    });
+                    let ret = lo.ir.add_expr(IrExpr::Return(Some(call)));
+                    let body = lo.ir.add_expr(IrExpr::Block {
+                        stmts: vec![ret],
+                        value: None,
+                    });
+                    lo.ir.functions[get_fid as usize].body = Some(body);
+                    // setX(value): this.x$delegate.setValue(this, propref, value)
+                    if p.is_var {
+                        let sname = setter_name(&p.name);
+                        let (_, set_fid, _) = lo.classes[&internal].methods[&sname];
+                        let sv = lo.syms.method_of(&delegate_internal, "setValue")?;
+                        let sv_desc = {
+                            let mut s = String::from("(");
+                            for pt in &sv.params {
+                                s.push_str(&pt.descriptor());
+                            }
+                            s.push(')');
+                            s.push_str(&sv.ret.descriptor());
+                            s
+                        };
+                        let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let dele = lo.ir.add_expr(IrExpr::GetField {
+                            receiver: this_e,
+                            class: class_id,
+                            index: field_idx,
+                        });
+                        let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
+                        let pref = make_propref(&mut lo);
+                        let value_arg = lo.ir.add_expr(IrExpr::GetValue(1));
+                        let call = lo.ir.add_expr(IrExpr::Call {
+                            callee: crate::ir::Callee::Virtual {
+                                owner: delegate_internal.clone(),
+                                name: "setValue".to_string(),
+                                descriptor: sv_desc,
+                                interface: false,
+                            },
+                            dispatch_receiver: Some(dele),
+                            args: vec![this_arg, pref, value_arg],
+                        });
+                        let body = lo.ir.add_expr(IrExpr::Block {
+                            stmts: vec![call],
+                            value: None,
+                        });
+                        lo.ir.functions[set_fid as usize].body = Some(body);
+                    }
+                }
                 // Companion method bodies — lowered on the synthesized `C$Companion` class.
                 if let Some(comp_fq) = lo.companions.get(&internal).cloned() {
                     for m in &c.companion_methods {
@@ -1292,9 +1489,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // order, with `this` = value 0 and the constructor params as values 1..=N. For a class
                 // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary
                 // constructor instead (lowered there, in that ctor's own value space) — skip here.
-                if !c.init_order.is_empty() && c.has_primary_ctor {
+                let has_delegated = c.body_props.iter().any(|p| p.delegate.is_some());
+                if (!c.init_order.is_empty() || has_delegated) && c.has_primary_ctor {
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
+                    let _ = ctor_count;
                     lo.scope.clear();
                     lo.next_value = 0;
                     lo.cur_class = Some(internal.clone());
@@ -1398,6 +1597,27 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 }
                             }
                         }
+                    }
+                    // Initialize each delegated property's `x$delegate` field: `this.x$delegate = Del()`.
+                    for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                        let fname = format!("{}$delegate", p.name);
+                        let field_idx = lo.ir.classes[class_id as usize]
+                            .fields
+                            .iter()
+                            .position(|(n, _)| *n == fname)
+                            .expect("delegate field registered in pass 1")
+                            as u32;
+                        let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize]
+                            .1
+                            .clone();
+                        let val = lo.lower_arg(p.delegate.unwrap(), &field_ty)?;
+                        let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                        stmts.push(lo.ir.add_expr(IrExpr::SetField {
+                            receiver: recv,
+                            class: class_id,
+                            index: field_idx,
+                            value: val,
+                        }));
                     }
                     let body = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
                     lo.ir.classes[class_id as usize].init_body = Some(body);
@@ -1774,7 +1994,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p))
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || p.delegate.is_some())
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -1933,9 +2153,10 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
 }
 
 /// A body property with a real backing field — neither a computed property (custom getter, no field)
-/// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass).
+/// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass) nor a
+/// delegated one (`by Del()` — its field is the synthetic `x$delegate`, accessor calls `getValue`).
 fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
-    !is_computed_prop(p) && !p.is_abstract
+    !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
 }
 
 /// The JVM accessor name for a property: `x` → `getX`; an `is`-prefixed boolean keeps its name
