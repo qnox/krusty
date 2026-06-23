@@ -2651,37 +2651,7 @@ impl<'a> Parser<'a> {
             // No range operator: a plain iterable. It may still carry trailing infix calls that the
             // bp-9 start didn't consume (`for (x in progression step 2)`, `… step 2 step 0`) — continue
             // them so the whole expression (e.g. `progression.step(2)`) becomes the ForEach iterable.
-            let mut rstart = rstart;
-            while self.at(TokenKind::Ident) {
-                let name = self.text();
-                let next_starts_expr = self
-                    .t
-                    .get(self.i + 1)
-                    .map_or(false, |t| starts_expr(t.kind));
-                if matches!(name, "is" | "as" | "in") || !next_starts_expr {
-                    break;
-                }
-                let name = name.to_string();
-                let lspan = self.file.expr_spans[rstart.0 as usize];
-                self.bump(); // infix function name
-                self.skip_newlines();
-                let rhs = self.parse_bp(9);
-                let rspan = self.file.expr_spans[rhs.0 as usize];
-                let callee = self.file.add_expr(
-                    Expr::Member {
-                        receiver: rstart,
-                        name,
-                    },
-                    Span::new(lspan.lo, rspan.hi),
-                );
-                rstart = self.file.add_expr(
-                    Expr::Call {
-                        callee,
-                        args: vec![rhs],
-                    },
-                    Span::new(lspan.lo, rspan.hi),
-                );
-            }
+            let rstart = self.parse_for_trailing_infix(rstart);
             self.expect(TokenKind::RParen, "')'");
             self.skip_newlines();
             let body = self.parse_branch();
@@ -2830,12 +2800,60 @@ impl<'a> Parser<'a> {
             );
         };
         let rend = self.parse_bp(9);
-        let step = if self.at(TokenKind::Ident) && self.text() == "step" {
-            self.bump();
-            Some(self.parse_expr())
-        } else {
-            None
-        };
+        // A `..`/`until`/`downTo` range may be followed by ordinary infix calls (`step`, or any user
+        // infix), possibly chained (`a..b step 2 step 3`). These are NOT special syntax — recognizing
+        // them here by name would be the hardcode kotlinc avoids. Build the base range value and apply
+        // any trailing infix generically; the result's TYPE (e.g. `IntProgression` from `step`) drives
+        // the loop lowering. A bare range (no trailing infix) keeps the optimized counted `Stmt::For`.
+        if self.at(TokenKind::Ident) && {
+            let next = self.t.get(self.i + 1).is_some_and(|t| starts_expr(t.kind));
+            !matches!(self.text(), "is" | "as" | "in") && next
+        } {
+            let lspan = self.file.expr_spans[rstart.0 as usize];
+            let rspan = self.file.expr_spans[rend.0 as usize];
+            let base_span = Span::new(lspan.lo, rspan.hi);
+            // The base range value: `..`/`until` are `RangeTo`; `downTo` is its infix call form.
+            let base = match kind {
+                RangeKind::DownTo => {
+                    let callee = self.file.add_expr(
+                        Expr::Member {
+                            receiver: rstart,
+                            name: "downTo".to_string(),
+                        },
+                        base_span,
+                    );
+                    self.file.add_expr(
+                        Expr::Call {
+                            callee,
+                            args: vec![rend],
+                        },
+                        base_span,
+                    )
+                }
+                k => self.file.add_expr(
+                    Expr::RangeTo {
+                        lo: rstart,
+                        hi: rend,
+                        kind: k,
+                    },
+                    base_span,
+                ),
+            };
+            let iterable = self.parse_for_trailing_infix(base);
+            self.expect(TokenKind::RParen, "')'");
+            self.skip_newlines();
+            let body = self.parse_branch();
+            let body = self.desugar_destructure_body(&name, destructure, body);
+            return self.finish_stmt(
+                Stmt::ForEach {
+                    name,
+                    iterable,
+                    body,
+                    label,
+                },
+                start,
+            );
+        }
         self.expect(TokenKind::RParen, "')'");
         self.skip_newlines();
         let body = self.parse_branch();
@@ -2846,13 +2864,49 @@ impl<'a> Parser<'a> {
                     start: rstart,
                     end: rend,
                     kind,
-                    step,
+                    step: None,
                 },
                 body,
                 label,
             },
             start,
         )
+    }
+
+    /// Apply trailing infix function calls to a `for`-loop iterable base: each `name rhs` becomes
+    /// `recv.name(rhs)`, chaining left-to-right (`p step 2 step 0` → `(p.step(2)).step(0)`). The
+    /// operand is parsed at additive precedence so a following infix starts a new call rather than
+    /// being swallowed. These are ordinary functions — the loop lowering keys off the resulting
+    /// value's type, never the function name.
+    fn parse_for_trailing_infix(&mut self, mut recv: ExprId) -> ExprId {
+        while self.at(TokenKind::Ident) {
+            let name = self.text();
+            let next_starts_expr = self.t.get(self.i + 1).is_some_and(|t| starts_expr(t.kind));
+            if matches!(name, "is" | "as" | "in") || !next_starts_expr {
+                break;
+            }
+            let name = name.to_string();
+            let lspan = self.file.expr_spans[recv.0 as usize];
+            self.bump(); // infix function name
+            self.skip_newlines();
+            let rhs = self.parse_bp(9);
+            let rspan = self.file.expr_spans[rhs.0 as usize];
+            let callee = self.file.add_expr(
+                Expr::Member {
+                    receiver: recv,
+                    name,
+                },
+                Span::new(lspan.lo, rspan.hi),
+            );
+            recv = self.file.add_expr(
+                Expr::Call {
+                    callee,
+                    args: vec![rhs],
+                },
+                Span::new(lspan.lo, rspan.hi),
+            );
+        }
+        recv
     }
 
     /// Parse an optional `@label` reference after `break`/`continue` (`break@outer`). Returns the label
@@ -4510,8 +4564,20 @@ mod tests {
         let t = tree("fun f(n: Int): Int {\n var s = 0\n for (i in 1..n) s += i\n return s\n}");
         assert!(t.contains("(for i (1 .. n)"), "{t}");
         assert!(t.contains("(set s (+ s i))"), "{t}");
-        assert!(tree("fun g(n: Int) {\n for (i in n downTo 0 step 2) {}\n}")
-            .contains("(for i (n downTo 0 step 2)"));
+        // A range followed by `step` (an ordinary infix function — not special syntax) is iterated as
+        // the progression VALUE it builds: `n downTo 0 step 2` → `(n.downTo(0)).step(2)`, a `for-each`.
+        let g = tree("fun g(n: Int) {\n for (i in n downTo 0 step 2) {}\n}");
+        assert!(
+            g.contains("(for-each i (call (. (call (. n downTo) 0) step) 2)"),
+            "{g}"
+        );
+        // Chained `step` chains the calls left-to-right (the second `step` is NOT swallowed as `2.step`).
+        let c = tree("fun c(n: Int) {\n for (i in 0..6 step 2 step 3) {}\n}");
+        assert!(
+            c.contains("(call (. (call (. (.. 0 6) step) 2) step) 3)"),
+            "{c}"
+        );
+        // A bare range keeps the optimized counted `for`.
         assert!(tree("fun h(n: Int) {\n for (i in 0 until n) {}\n}").contains("(for i (0 until n)"));
     }
 
