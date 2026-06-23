@@ -67,6 +67,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P15 — field `Signature` for type-parameter-typed fields (gate 1491 → 1492, FAIL=0).** A field
+  whose declared type is a bare type parameter (`class Pair<A, B>(val a: A, val b: B)` → fields `a`/`b`)
+  gets a JVM field `Signature` (`TA;`/`TB;`), like kotlinc — verified byte-identical. `ClassWriter` gained
+  `FieldInfo.signature` + `add_field_sig` + serialization (the `Signature` attr name interned when a field
+  OR method uses it). Backend-agnostic (P14 design): `ir_lower::class_field_tparams` records `(field,
+  type-param name)` in `IrFile.field_signatures`; the JVM backend formats `T<name>;`. Also captured
+  `classreader::FieldSig.signature` (already parsed, was discarded). NEXT: synthesized ctor/getter
+  signatures (kotlinc signs `<init>` `(TA;TB;)V`, `getA()` `()TA;`). Tests: `generic_signature_e2e`.
 - **Phase P14 — class-level generic `Signature` + move signature FORMATTING to the JVM backend (gate
   1491, FAIL=0).** (a) ARCHITECTURE FIX (owner-flagged): P12/P13 built JVM descriptor strings inside
   `ir_lower`, coupling the backend-agnostic IR to the JVM target ([[feedback-platform-decouple]]). Now
