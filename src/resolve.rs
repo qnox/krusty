@@ -893,9 +893,12 @@ pub fn collect_signatures_with_cp(
                         };
                         for m in &bc.methods {
                             if let Some(r) = &m.ret {
+                                // The return may reference the METHOD's own type parameters (`fun <U> m(): U`),
+                                // so resolve under class + method params, not just the class's (`ctp`).
+                                let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
                                 local_rets.insert(
                                     m.name.clone(),
-                                    ty_of_ref(r, &class_names, &ctp, diags),
+                                    ty_of_ref(r, &class_names, &mtp, diags),
                                 );
                             }
                         }
@@ -903,8 +906,9 @@ pub fn collect_signatures_with_cp(
                     }
                     for m in &c.methods {
                         if let Some(r) = &m.ret {
+                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
                             local_rets
-                                .insert(m.name.clone(), ty_of_ref(r, &class_names, &ctp, diags));
+                                .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
                         }
                     }
                     let mut methods: HashMap<String, Signature> = c
