@@ -307,6 +307,10 @@ pub struct TypeRef {
     /// but the front end keeps this marker so a lambda passed to such a param binds `fun_params[0]`
     /// as the implicit `this` receiver (member access, and an arity-short `f()` supplies it).
     pub fun_has_receiver: bool,
+    /// For a `suspend` function type `suspend (A) -> R`: `true`. Lowers to `Function{n+1}` with a
+    /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result (kotlinc's
+    /// suspend-lambda ABI), distinct from the plain `Function{n}` of a non-suspend function type.
+    pub fun_suspend: bool,
 }
 
 #[derive(Clone, Debug)]

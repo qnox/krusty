@@ -2455,6 +2455,12 @@ impl<'a> Lower<'a> {
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
         };
+        // A `suspend` lambda needs a `SuspendLambda` subclass with a state-machine `invokeSuspend`, not
+        // krusty's `invokedynamic`/`LambdaMetafactory` path — not yet modeled. Bail (skip the file)
+        // rather than emit a plain `Function0` where a `Function1<Continuation,…>` is expected.
+        if sig.suspend {
+            return None;
+        }
         let arity = sig.params.len();
         // A lambda inside a class method could capture `this`/fields — not modeled yet.
         if self.cur_class.is_some() {
@@ -4085,6 +4091,13 @@ impl<'a> Lower<'a> {
     }
 
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
+        // Passing a value to a `suspend` function-type parameter (a suspend lambda, or a suspend
+        // function value) needs `SuspendLambda` codegen / continuation threading — not yet modeled.
+        // Bail (skip the file) rather than emit a plain `FunctionN` where `Function{n+1}<Continuation>`
+        // is expected.
+        if matches!(target, IrType::Function { suspend: true, .. }) {
+            return None;
+        }
         let at = self.info.ty(arg);
         // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
         // element type (the reified `T`), exactly as kotlinc specializes it, rather than calling the
@@ -10586,7 +10599,11 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
     if !r.fun_params.is_empty() || r.name == "<fun>" {
         let params: Vec<Ty> = r.fun_params.iter().map(|p| ty_of(file, p)).collect();
         let ret = r.arg.as_ref().map(|a| ty_of(file, a)).unwrap_or(Ty::Unit);
-        return Ty::fun(params, ret);
+        return if r.fun_suspend {
+            Ty::fun_suspend(params, ret)
+        } else {
+            Ty::fun(params, ret)
+        };
     }
     if let Some(t) = Ty::from_name(&r.name) {
         // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`), consistent with the
@@ -10809,6 +10826,7 @@ pub(crate) fn ty_to_ir(t: Ty) -> IrType {
             return IrType::Function {
                 params: s.params.iter().map(|t| ty_to_ir(*t)).collect(),
                 ret: Box::new(ty_to_ir(s.ret)),
+                suspend: s.suspend,
             }
         }
         // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers

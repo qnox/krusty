@@ -71,7 +71,7 @@ fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
 fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &IrType) -> bool {
         match t {
-            IrType::Function { params, ret } => {
+            IrType::Function { params, ret, .. } => {
                 params.len() <= 22 && params.iter().all(ty_ok) && ty_ok(ret)
             }
             IrType::Class { type_args, .. } => type_args.iter().all(ty_ok),
@@ -4348,10 +4348,14 @@ pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
             ),
             _ => Ty::obj(fq_name),
         },
-        // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`.
-        IrType::Function { params, .. } => {
-            Ty::obj(&format!("kotlin/jvm/functions/Function{}", params.len()))
-        }
+        // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
+        // function type carries a trailing `Continuation` parameter, so its arity is one greater.
+        IrType::Function {
+            params, suspend, ..
+        } => Ty::obj(&format!(
+            "kotlin/jvm/functions/Function{}",
+            params.len() + usize::from(*suspend)
+        )),
         _ => Ty::Error,
     }
 }
