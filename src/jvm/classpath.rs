@@ -143,6 +143,12 @@ type MetaOverloadCache = RefCell<HashMap<String, std::rc::Rc<LambdaReturnOverloa
 pub struct Classpath {
     entries: Vec<Entry>,
     cache: RefCell<HashMap<String, Option<ClassInfo>>>,
+    /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
+    /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
+    /// entries for kotlin-stdlib). This is the classloader/javac strategy: parse each jar's directory
+    /// once, then read class bytes lazily on demand. Profiling showed the per-read re-parse dominated
+    /// type checking. Lives behind a `RefCell` (one `Classpath` per thread; never shared across threads).
+    archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
     ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
     /// Lazily-built index of the JDK jimage: internal class name → `(file offset, uncompressed size)`,
@@ -200,6 +206,7 @@ impl Classpath {
         Classpath {
             entries,
             cache: RefCell::new(HashMap::new()),
+            archives: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
             jimage: RefCell::new(None),
@@ -410,7 +417,7 @@ impl Classpath {
         let mut map = HashMap::new();
         for e in &self.entries {
             if let Entry::Jar(j) = e {
-                if let Some(bytes) = read_jar_entry(j, path) {
+                if let Some(bytes) = self.jar_entry(j, path) {
                     map = super::metadata::parse_builtins(&bytes);
                     break;
                 }
@@ -565,6 +572,25 @@ impl Classpath {
         *self.jimage.borrow_mut() = Some(entry);
     }
 
+    /// Read one entry's bytes from `jar`, reusing a cached open `ZipArchive` so the central directory is
+    /// parsed once per jar rather than per read. Returns `None` if the jar or entry is absent (an absent
+    /// entry is a cheap hash miss on the already-parsed directory).
+    fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
+        let mut archives = self.archives.borrow_mut();
+        let archive = match archives.get_mut(jar) {
+            Some(a) => a,
+            None => {
+                let f = File::open(jar).ok()?;
+                let a = zip::ZipArchive::new(f).ok()?;
+                archives.entry(jar.to_path_buf()).or_insert(a)
+            }
+        };
+        let mut entry = archive.by_name(name).ok()?;
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    }
+
     pub fn find(&self, internal: &str) -> Option<ClassInfo> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up.
@@ -577,7 +603,7 @@ impl Classpath {
         for e in &self.entries {
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
-                Entry::Jar(j) => read_jar_entry(j, &name),
+                Entry::Jar(j) => self.jar_entry(j, &name),
                 // The JDK jimage stores classes uncompressed — seek-read the class via a one-time
                 // name→(offset,size) index so JDK type members (String, collections, …) resolve.
                 Entry::Jimage(_) => self.jimage_bytes(internal),
@@ -603,7 +629,7 @@ impl Classpath {
         for e in &self.entries {
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
-                Entry::Jar(j) => read_jar_entry(j, &name),
+                Entry::Jar(j) => self.jar_entry(j, &name),
                 Entry::Jimage(_) => self.jimage_bytes(internal),
             };
             if bytes.is_some() {
@@ -938,15 +964,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
         }
         None => "",
     }
-}
-
-fn read_jar_entry(jar: &Path, name: &str) -> Option<Vec<u8>> {
-    let f = File::open(jar).ok()?;
-    let mut archive = zip::ZipArchive::new(f).ok()?;
-    let mut entry = archive.by_name(name).ok()?;
-    let mut buf = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut buf).ok()?;
-    Some(buf)
 }
 
 /// Register `internal` (e.g. `java/lang/StringBuilder`) into the simple-name → internal index,
