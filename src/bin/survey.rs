@@ -147,14 +147,30 @@ fn locate_classpath() -> Vec<PathBuf> {
     paths
 }
 
-/// Newest jar under `~/.gradle` / `~/.m2/repository/org/jetbrains` whose file name starts with
-/// `prefix` (and isn't a sources/js/wasm/excluded variant). Mirrors the gate's `common::find_jar`.
+/// Newest jar whose file name starts with `prefix` (and isn't a sources/js/wasm/excluded variant),
+/// searched across the same locations the conformance gate uses: its Maven-download cache
+/// (`~/.cache/krusty-deps`, where `common::ensure_maven` puts kotlin-test/reflect/coroutines/
+/// annotations), the reference-compiler dist `lib/`, and the local `~/.gradle` / `~/.m2` caches.
+/// `KRUSTY_DEPS_CACHE` overrides the cache dir.
 fn find_jar(prefix: &str, excludes: &[&str]) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let roots = [
+    let deps_cache =
+        std::env::var("KRUSTY_DEPS_CACHE").unwrap_or_else(|_| format!("{home}/.cache/krusty-deps"));
+    let mut roots = vec![
+        deps_cache,
         format!("{home}/.gradle"),
-        format!("{home}/.m2/repository/org/jetbrains"),
+        format!("{home}/.m2/repository"),
     ];
+    // The reference-compiler dist ships the exact jars; `KRUSTY_KOTLINC` points at its `bin/kotlinc`.
+    if let Ok(kc) = std::env::var("KRUSTY_KOTLINC") {
+        if let Some(lib) = std::path::Path::new(&kc)
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("lib"))
+        {
+            roots.insert(0, lib.to_string_lossy().into_owned());
+        }
+    }
     let mut found = Vec::new();
     for r in &roots {
         collect_named_jars(std::path::Path::new(r), prefix, excludes, &mut found, 0);
