@@ -2619,6 +2619,28 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         let n_cap = captures.len() as u32;
+        // Does the lambda body call a `suspend` function? (AST-level, like the file's suspend gate.)
+        // If so its `invokeSuspend` is a state machine with the lambda instance as the continuation —
+        // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
+        // else bails (skip the file) rather than miscompile the continuation threading.
+        let susp_names: std::collections::HashSet<String> = self
+            .afile
+            .decls
+            .iter()
+            .filter_map(|&d| match self.afile.decl(d) {
+                ast::Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let call_names_cell = std::cell::RefCell::new(Vec::new());
+        collect_call_names(self.afile, body, &call_names_cell);
+        let call_names = call_names_cell.into_inner();
+        let body_suspends = call_names
+            .iter()
+            .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
+        if body_suspends && n_cap > 0 {
+            return None;
+        }
         let jvm_arity = arity + 1; // + the trailing continuation
         let internal = class_internal(
             self.afile,
@@ -2631,10 +2653,15 @@ impl<'a> Lower<'a> {
         // Fields: one per captured variable. `<init>(cap0.., Continuation completion)` stores each
         // capture, then `super(jvm_arity, completion)`. Ctor value-indices: this=0, cap_i=1+i,
         // completion=1+n_cap.
-        let fields: Vec<(String, IrType)> = captures
+        let mut fields: Vec<(String, IrType)> = captures
             .iter()
             .map(|(name, _, ty)| (name.clone(), ty_to_ir(*ty)))
             .collect();
+        // A suspending lambda needs a `label` field (its state-machine cursor) after the captures.
+        let label_idx = n_cap;
+        if body_suspends {
+            fields.push(("label".to_string(), ty_to_ir(Ty::Int)));
+        }
         let ctor_args: Vec<(IrType, bool)> = captures
             .iter()
             .map(|(_, _, ty)| (ty_to_ir(*ty), false))
@@ -2687,7 +2714,8 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            field_final: vec![true; n_fields],
+            // Captures are `final`; the `label` state cursor (if present) is mutable.
+            field_final: (0..n_fields).map(|i| i < n_cap as usize).collect(),
             field_private: vec![false; n_fields],
             secondary_ctors: vec![],
             has_primary_ctor: true,
@@ -2700,50 +2728,217 @@ impl<'a> Lower<'a> {
             }
         }
 
-        // invokeSuspend(Object result): throwOnFailure(result); load captures from fields; return
-        // box(<body>). Value-indices: this=0, result=1, capture locals 2..2+n_cap, then body locals.
-        let result_get = self.ir.add_expr(IrExpr::GetValue(1));
-        let tof = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: "kotlin/ResultKt".to_string(),
-                name: "throwOnFailure".to_string(),
-                descriptor: "(Ljava/lang/Object;)V".to_string(),
-                inline: false,
-                must_inline: false,
-            },
-            dispatch_receiver: None,
-            args: vec![result_get],
-        });
-        let mut stmts = vec![tof];
-        let saved_scope = std::mem::take(&mut self.scope);
-        let saved_next = self.next_value;
-        self.next_value = 2; // this=0, result=1
-        for (i, (name, _, ty)) in captures.iter().enumerate() {
-            let lv = self.fresh_value();
-            let this = self.ir.add_expr(IrExpr::GetValue(0));
-            let getf = self.ir.add_expr(IrExpr::GetField {
-                receiver: this,
-                class: class_id,
-                index: i as u32,
+        // invokeSuspend(Object result): either the LEAF form (throwOnFailure; load captures; return
+        // box(<body>)) or, when the body suspends, a TAIL state machine with `this` as the continuation.
+        let throw_on_failure = |s: &mut Self, value_idx: u32| {
+            let v = s.ir.add_expr(IrExpr::GetValue(value_idx));
+            s.ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: "kotlin/ResultKt".to_string(),
+                    name: "throwOnFailure".to_string(),
+                    descriptor: "(Ljava/lang/Object;)V".to_string(),
+                    inline: false,
+                    must_inline: false,
+                },
+                dispatch_receiver: None,
+                args: vec![v],
+            })
+        };
+        let inv_susp_body = if body_suspends {
+            // A single TAIL suspend call (`{ foo() }`), no captures (gated above). The continuation is
+            // `this`: thread it into the call, dispatch on `this.label`. State 0 calls the suspend
+            // callee (returns `COROUTINE_SUSPENDED` up if it suspends, else the value); state 1 (the
+            // async resume) returns the resumed `result`.
+            let body_val = self.expr(body)?;
+            let tail = match &self.ir.exprs[body_val as usize] {
+                IrExpr::Block {
+                    stmts,
+                    value: Some(v),
+                } if stmts.is_empty() => *v,
+                _ => body_val,
+            };
+            let is_susp = matches!(&self.ir.exprs[tail as usize],
+                IrExpr::Call { callee: Callee::Local(fid), .. } if self.ir.suspend_funs.contains(fid))
+                || self.ir.suspend_calls.contains_key(&tail);
+            if !is_susp {
+                return None; // not a clean tail suspend call — don't miscompile
+            }
+            // Thread `this` (as Continuation) as the callee's trailing argument.
+            let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
+            let this_cont = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: this_for_cont,
+                type_operand: cont_ir.clone(),
             });
-            stmts.push(self.ir.add_expr(IrExpr::Variable {
-                index: lv,
-                ty: ty_to_ir(*ty),
-                init: Some(getf),
-            }));
-            self.scope.push((name.clone(), lv, *ty));
-        }
-        let body_val = self.expr(body);
-        self.scope = saved_scope;
-        self.next_value = saved_next;
-        let body_val = body_val?;
-        let boxed = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: body_val,
-            type_operand: object_ir.clone(),
-        });
-        stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
-        let inv_susp_body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
+            // For a same-file callee (`Local`) the CPS descriptor comes from the callee's
+            // pass-rewritten signature; a classpath (`Static`) / sibling (`CrossFile`) callee is
+            // resolved by its LOGICAL signature, so rewrite it to the physical CPS form here (append the
+            // `Continuation` parameter, erase the return to `Object`).
+            let cont_param_ty = cont_ir.clone();
+            let object_ret_ty = object_ir.clone();
+            match &mut self.ir.exprs[tail as usize] {
+                IrExpr::Call { args, callee, .. } => {
+                    match callee {
+                        Callee::Static { descriptor, .. } => {
+                            let close = descriptor.rfind(')').unwrap_or(descriptor.len());
+                            *descriptor = format!(
+                                "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+                                &descriptor[..close]
+                            );
+                        }
+                        Callee::CrossFile { params, ret, .. } => {
+                            params.push(cont_param_ty);
+                            *ret = object_ret_ty;
+                        }
+                        _ => {}
+                    }
+                    args.push(this_cont);
+                }
+                _ => return None,
+            }
+            // SUSPENDED marker into local 2 (this=0, result=1).
+            let susp_call = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
+                    name: "getCOROUTINE_SUSPENDED".to_string(),
+                    descriptor: "()Ljava/lang/Object;".to_string(),
+                    inline: false,
+                    must_inline: false,
+                },
+                dispatch_receiver: None,
+                args: vec![],
+            });
+            let susp_var = self.ir.add_expr(IrExpr::Variable {
+                index: 2,
+                ty: object_ir.clone(),
+                init: Some(susp_call),
+            });
+            // State 0: throwOnFailure(result); this.label = 1; r = call; if r==SUSPENDED return it; return r.
+            let s0_tof = throw_on_failure(self, 1);
+            let this_l = self.ir.add_expr(IrExpr::GetValue(0));
+            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let set_label = self.ir.add_expr(IrExpr::SetField {
+                receiver: this_l,
+                class: class_id,
+                index: label_idx,
+                value: one,
+            });
+            let r_var = self.ir.add_expr(IrExpr::Variable {
+                index: 3,
+                ty: object_ir.clone(),
+                init: Some(tail),
+            });
+            let rg = self.ir.add_expr(IrExpr::GetValue(3));
+            let sg = self.ir.add_expr(IrExpr::GetValue(2));
+            let is_eq = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::RefEq,
+                lhs: rg,
+                rhs: sg,
+            });
+            let sg2 = self.ir.add_expr(IrExpr::GetValue(2));
+            let ret_susp = self.ir.add_expr(IrExpr::Return(Some(sg2)));
+            let ret_susp_b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![ret_susp],
+                value: None,
+            });
+            let empty = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![],
+                value: None,
+            });
+            let susp_when = self.ir.add_expr(IrExpr::When {
+                branches: vec![(Some(is_eq), ret_susp_b), (None, empty)],
+            });
+            let rg2 = self.ir.add_expr(IrExpr::GetValue(3));
+            let ret_r = self.ir.add_expr(IrExpr::Return(Some(rg2)));
+            let s0 = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![s0_tof, set_label, r_var, susp_when, ret_r],
+                value: None,
+            });
+            // State 1 (resume): throwOnFailure(result); return result.
+            let s1_tof = throw_on_failure(self, 1);
+            let rv = self.ir.add_expr(IrExpr::GetValue(1));
+            let s1_ret = self.ir.add_expr(IrExpr::Return(Some(rv)));
+            let s1 = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![s1_tof, s1_ret],
+                value: None,
+            });
+            // Dispatch on `this.label`.
+            let lbl0r = self.ir.add_expr(IrExpr::GetValue(0));
+            let lbl0 = self.ir.add_expr(IrExpr::GetField {
+                receiver: lbl0r,
+                class: class_id,
+                index: label_idx,
+            });
+            let c0 = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            let cond0 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: lbl0,
+                rhs: c0,
+            });
+            let lbl1r = self.ir.add_expr(IrExpr::GetValue(0));
+            let lbl1 = self.ir.add_expr(IrExpr::GetField {
+                receiver: lbl1r,
+                class: class_id,
+                index: label_idx,
+            });
+            let c1 = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let cond1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: lbl1,
+                rhs: c1,
+            });
+            let msg = self.ir.add_expr(IrExpr::Const(IrConst::String(
+                "call to 'resume' before 'invoke' with coroutine".to_string(),
+            )));
+            let exc = self.ir.add_expr(IrExpr::NewExternal {
+                internal: "java/lang/IllegalStateException".to_string(),
+                ctor_desc: "(Ljava/lang/String;)V".to_string(),
+                args: vec![msg],
+            });
+            let throw = self.ir.add_expr(IrExpr::Throw { operand: exc });
+            let else_b = self.ir.add_expr(IrExpr::Block {
+                stmts: vec![throw],
+                value: None,
+            });
+            let dispatch = self.ir.add_expr(IrExpr::When {
+                branches: vec![(Some(cond0), s0), (Some(cond1), s1), (None, else_b)],
+            });
+            self.ir.add_expr(IrExpr::Block {
+                stmts: vec![susp_var, dispatch],
+                value: None,
+            })
+        } else {
+            let mut stmts = vec![throw_on_failure(self, 1)];
+            let saved_scope = std::mem::take(&mut self.scope);
+            let saved_next = self.next_value;
+            self.next_value = 2; // this=0, result=1
+            for (i, (name, _, ty)) in captures.iter().enumerate() {
+                let lv = self.fresh_value();
+                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let getf = self.ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: i as u32,
+                });
+                stmts.push(self.ir.add_expr(IrExpr::Variable {
+                    index: lv,
+                    ty: ty_to_ir(*ty),
+                    init: Some(getf),
+                }));
+                self.scope.push((name.clone(), lv, *ty));
+            }
+            let body_val = self.expr(body);
+            self.scope = saved_scope;
+            self.next_value = saved_next;
+            let body_val = body_val?;
+            let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: body_val,
+                type_operand: object_ir.clone(),
+            });
+            stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+            self.ir.add_expr(IrExpr::Block { stmts, value: None })
+        };
         self.add_synth_method(
             &internal,
             class_id,
@@ -10787,6 +10982,30 @@ fn ref_holder_internal(t: Ty) -> &'static str {
         Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
         _ => "kotlin/jvm/internal/Ref$ObjectRef",
     }
+}
+
+/// Collect the simple (`Name`-callee) function-call names anywhere in `e`'s subtree — used to decide
+/// whether a lambda body calls a `suspend` function (same-file or classpath).
+fn collect_call_names(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<String>>) {
+    if let ast::Expr::Call { callee, .. } = file.expr(e) {
+        if let ast::Expr::Name(n) = file.expr(*callee) {
+            out.borrow_mut().push(n.clone());
+        }
+    }
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_call_names(file, c, out);
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_call_names(file, c, out);
+                false
+            });
+            false
+        },
+    );
 }
 
 fn class_internal(file: &ast::File, name: &str) -> String {
