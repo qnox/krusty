@@ -8922,9 +8922,11 @@ impl<'a> Lower<'a> {
                         });
                         // A cross-file `suspend fun` call: record it so the coroutine pass threads the
                         // continuation (the callee, in another file, is absent from this file's
-                        // `suspend_funs`). The logical return type is the source signature's.
-                        if sig.is_suspend {
-                            self.ir.suspend_calls.insert(call, ty_to_ir(sig.ret));
+                        // `suspend_funs`). The logical return type is the resolved callable's.
+                        if fi.flags.suspend {
+                            self.ir
+                                .suspend_calls
+                                .insert(call, ty_to_ir(fi.callable.ret));
                         }
                         call
                     } else if let Some(r) = {
