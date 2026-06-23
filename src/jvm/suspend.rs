@@ -13,14 +13,15 @@
 //!     `result`/`label` across resumes, and the function body dispatches on `label`, threading its own
 //!     continuation into each suspend call and returning `COROUTINE_SUSPENDED` when a callee suspends.
 //!
-//! The body is *flattened* into a flat state graph (`Flat`): each suspension point — including one
-//! inside an `if`/`when` branch value — ends a state and begins a resume state, control flow becomes
-//! `label = next` transitions, and a local live across a suspension point is spilled to a continuation
-//! field. The whole thing is ordinary IR (`while(true){ when(label){…} }`), so the existing emitter
-//! produces the bytecode + stack-map frames; it is runtime-equivalent to kotlinc's `tableswitch` form
-//! (an `if`-chain dispatch). Shapes the flattener doesn't model yet (a suspension nested deeper than a
-//! branch value, inside a loop, or a member/extension suspend fn) cause the pass to skip the file —
-//! never miscompile.
+//! The body is *flattened* into a flat state graph (`Flat`): each suspension point — including ones
+//! inside an `if`/`when` (branch value or statement) and inside a `while` loop — ends a state and begins
+//! a resume state, control flow becomes `label = next` transitions, and a local live across a suspension
+//! point is spilled to a continuation field. A suspension nested at an unconditional position in an
+//! expression (`foo() + 2`) is hoisted to a temp first (`hoist_suspensions`). The whole thing is ordinary
+//! IR (`while(true){ when(label){…} }`), so the existing emitter produces the bytecode + stack-map
+//! frames; it is runtime-equivalent to kotlinc's `tableswitch` (an `if`-chain dispatch). Shapes not yet
+//! modeled (a suspension under a conditional sub-expression like elvis/`&&`, a `do`-`while`, or a
+//! member/extension suspend fn) cause the pass to skip the file — never miscompile.
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
@@ -64,9 +65,17 @@ fn continuation_ty() -> IrType {
 #[must_use]
 pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
+    // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
+    let orig_rets: Vec<IrType> = ir.functions.iter().map(|f| f.ret.clone()).collect();
     let fids = ir.suspend_funs.clone();
     for fid in fids {
         let body = ir.functions[fid as usize].body;
+        // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
+        // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
+        if let Some(b) = body {
+            hoist_suspensions(ir, b, &suspend_set, &orig_rets);
+        }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
@@ -136,6 +145,145 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
             stmts: new_stmts,
             value,
         };
+    }
+}
+
+/// Hoist each suspension call that sits at an *unconditional* position inside a top-level statement's
+/// expression (e.g. `val a = foo() + 2`, `sum = sum + foo()`) into a preceding `val tmp = foo()`, so the
+/// flattener only meets a suspension as a bound-local / bare statement (the positions it models). A
+/// suspension inside a conditional sub-expression (an `if`/`when`/elvis/loop) is left in place — those
+/// are handled structurally by the flattener (or skip the file if not yet modeled). Order of hoisted
+/// temps follows left-to-right evaluation.
+fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[IrType]) {
+    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+        return;
+    };
+    let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
+    for s in stmts {
+        hoist_stmt(ir, s, suspend_set, orig_rets, &mut out);
+    }
+    ir.exprs[b as usize] = IrExpr::Block { stmts: out, value };
+}
+
+/// Append `stmt` (with unconditional nested suspensions hoisted) plus its hoist temps to `out`.
+fn hoist_stmt(
+    ir: &mut IrFile,
+    stmt: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[IrType],
+    out: &mut Vec<ExprId>,
+) {
+    // Statements the flattener handles directly keep their suspension in place.
+    match &ir.exprs[stmt as usize] {
+        // a control-flow statement, a bound suspension, or a bare suspension call — leave as-is.
+        IrExpr::When { .. } | IrExpr::While { .. } => {
+            out.push(stmt);
+            return;
+        }
+        IrExpr::Variable { init: Some(i), .. }
+            if as_suspend_call(ir, *i, suspend_set).is_some() =>
+        {
+            out.push(stmt);
+            return;
+        }
+        IrExpr::Variable { init: Some(i), .. }
+            if matches!(ir.exprs[*i as usize], IrExpr::When { .. }) =>
+        {
+            out.push(stmt); // `val a = if/when …` (conditional suspension) — flattener's job
+            return;
+        }
+        _ if as_suspend_call(ir, stmt, suspend_set).is_some() => {
+            out.push(stmt);
+            return;
+        }
+        _ => {}
+    }
+    // Hoist suspensions in the statement's unconditional sub-expressions.
+    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, out);
+    out.push(new_stmt);
+}
+
+/// Replace each unconditional suspension call in `e` with a fresh `tmp`, appending `val tmp = <call>` to
+/// `prelude`. Recurses through value nodes that always evaluate their children; stops at conditional
+/// nodes (an inner `if`/`when`/elvis), leaving suspensions there for the flattener (or a later skip).
+fn hoist_expr(
+    ir: &mut IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[IrType],
+    prelude: &mut Vec<ExprId>,
+) -> ExprId {
+    if let Some((callee, args)) = as_suspend_call(ir, e, suspend_set) {
+        // Hoist nested suspensions in the arguments first (they evaluate before the call).
+        let new_args: Vec<ExprId> = args
+            .iter()
+            .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+            .collect();
+        if let IrExpr::Call { args, .. } = &mut ir.exprs[e as usize] {
+            *args = new_args;
+        }
+        let ty = orig_rets
+            .get(callee as usize)
+            .cloned()
+            .unwrap_or_else(object_ty);
+        let tmp = max_value_index(ir) + 1;
+        let var = ir.add_expr(IrExpr::Variable {
+            index: tmp,
+            ty,
+            init: Some(e),
+        });
+        prelude.push(var);
+        return ir.add_expr(IrExpr::GetValue(tmp));
+    }
+    match ir.exprs[e as usize].clone() {
+        // Unconditional value nodes: recurse, rewriting children.
+        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+            let nl = hoist_expr(ir, lhs, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
+                op,
+                lhs: nl,
+                rhs: nr,
+            };
+            e
+        }
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => {
+            let na = hoist_expr(ir, arg, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::TypeOp {
+                op,
+                arg: na,
+                type_operand,
+            };
+            e
+        }
+        IrExpr::Variable { index, ty, init } => {
+            if let Some(i) = init {
+                let ni = hoist_expr(ir, i, suspend_set, orig_rets, prelude);
+                ir.exprs[e as usize] = IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(ni),
+                };
+            }
+            e
+        }
+        IrExpr::SetValue { var, value } => {
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
+            e
+        }
+        IrExpr::Return(Some(v)) => {
+            let nv = hoist_expr(ir, v, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::Return(Some(nv));
+            e
+        }
+        // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
+        // flattener, which restructures it or skips the file).
+        _ => e,
     }
 }
 

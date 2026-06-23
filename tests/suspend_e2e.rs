@@ -214,6 +214,19 @@ fn suspend_fun_suspension_inside_if_not_taken() {
 }
 
 #[test]
+fn suspend_fun_suspension_nested_in_expression() {
+    // The suspension `foo()` sits inside a binary expression (`foo() + 2`) at an unconditional
+    // position, so it is hoisted to a temp before the expression. 40 + 2 = 42.
+    run_suspend(
+        "smexpr",
+        "suspend fun foo(): Int = 40\n\
+         suspend fun e(): Int {\n    val a = foo() + 2\n    return a\n}\n",
+        "e",
+        42,
+    );
+}
+
+#[test]
 fn suspend_fun_suspension_in_while_loop() {
     // A `while` loop whose body suspends each iteration; `sum`/`i` are loop-carried across the
     // suspension (spilled to continuation fields). 1+1+1 = 3.
