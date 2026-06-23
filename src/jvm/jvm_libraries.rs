@@ -1111,10 +1111,35 @@ impl LibrarySet for JvmLibraries {
                 for c in self.cp.find_extensions(&recv_desc, name) {
                     let (params, pret) = parse_method_desc(&c.descriptor);
                     let inline = self.cp.is_inline_method(&c.owner, &c.name);
+                    let ret_nullable = self.cp.metadata_return_nullable(&c.owner, &c.name);
+                    // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
+                    // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
+                    // physical type — an arg-binding selector (`resolve_callable`) refines that.
+                    let ret = c
+                        .signature
+                        .as_deref()
+                        .and_then(parse_method_gsig)
+                        .map(|(_, psigs, rsig)| {
+                            let mut binds = std::collections::HashMap::new();
+                            if let Some(recv_sig) = psigs.first() {
+                                unify_gsig(recv_sig, receiver, &mut binds);
+                            }
+                            gsig_to_ty(&rsig, &binds)
+                        })
+                        .unwrap_or(pret);
+                    // A nullable Kotlin return over a PRIMITIVE receiver erases to the boxed wrapper, so a
+                    // `?:`/null-check on the result is preserved (see `extension_callable`).
+                    let ret = if ret.is_primitive() && ret_nullable {
+                        super::jvm_class_map::wrapper_internal(ret)
+                            .map(crate::types::Ty::obj)
+                            .unwrap_or(ret)
+                    } else {
+                        ret
+                    };
                     overloads.push(FunctionInfo {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
-                        ret_nullable: self.cp.metadata_return_nullable(&c.owner, &c.name),
+                        ret_nullable,
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
@@ -1123,7 +1148,7 @@ impl LibrarySet for JvmLibraries {
                             name: c.name.clone(),
                             owner: c.owner.clone(),
                             params,
-                            ret: pret,
+                            ret,
                             physical_ret: pret,
                             descriptor: c.descriptor.clone(),
                             is_inline: inline,
@@ -1132,6 +1157,43 @@ impl LibrarySet for JvmLibraries {
                             must_inline: inline && !c.public,
                         },
                     });
+                }
+            }
+            // Member functions of the receiver's type (own + inherited) — "functions inside types". A member
+            // wins over an extension; the caller uses `FnKind::Member` for that precedence.
+            if let Ty::Obj(internal, _) = receiver {
+                let mut seen = std::collections::HashSet::new();
+                let mut queue = vec![internal.to_string()];
+                while let Some(cn) = queue.pop() {
+                    if !seen.insert(cn.clone()) {
+                        continue;
+                    }
+                    let Some(t) = self.resolve_type(&cn) else {
+                        continue;
+                    };
+                    for m in &t.members {
+                        if m.name == name {
+                            overloads.push(FunctionInfo {
+                                kind: FnKind::Member,
+                                receiver: Some(receiver),
+                                ret_nullable: false,
+                                flags: FnFlags::default(),
+                                callable: LibraryCallable {
+                                    name: m.name.clone(),
+                                    owner: cn.clone(),
+                                    params: m.params.clone(),
+                                    ret: m.ret,
+                                    physical_ret: m.ret,
+                                    descriptor: m.descriptor.clone(),
+                                    is_inline: false,
+                                    default_call: false,
+                                    vararg_elem: None,
+                                    must_inline: false,
+                                },
+                            });
+                        }
+                    }
+                    queue.extend(t.supertypes);
                 }
             }
         } else {
