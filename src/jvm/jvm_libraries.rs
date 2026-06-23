@@ -202,6 +202,7 @@ impl JvmLibraries {
                 // skip the file (never an `IllegalAccessError`); a PUBLIC one can fall back to a real call.
                 must_inline: !o.public,
                 signature: c.signature.clone(),
+                origin: crate::libraries::Origin::Library,
             });
         }
         None
@@ -758,6 +759,7 @@ impl SymbolSource for JvmLibraries {
                                     // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
                                     must_inline: !c.public,
                                     signature: c.signature.clone(),
+                                    origin: crate::libraries::Origin::Library,
                                 },
                             });
                         }
@@ -821,6 +823,7 @@ impl SymbolSource for JvmLibraries {
                             vararg_elem: None,
                             must_inline: inline && !c.public,
                             signature: c.signature.clone(),
+                            origin: crate::libraries::Origin::Library,
                         },
                     });
                 }
@@ -863,6 +866,7 @@ impl SymbolSource for JvmLibraries {
                                     vararg_elem: None,
                                     must_inline: false,
                                     signature: None,
+                                    origin: crate::libraries::Origin::Library,
                                 },
                             });
                         }
@@ -899,6 +903,7 @@ impl SymbolSource for JvmLibraries {
                         vararg_elem: None,
                         must_inline: inline && !c.public,
                         signature: c.signature.clone(),
+                        origin: crate::libraries::Origin::Library,
                     },
                 });
             }
@@ -1338,6 +1343,7 @@ impl LibrarySet for JvmLibraries {
                         vararg_elem: None,
                         must_inline: false,
                         signature: c.signature.clone(),
+                        origin: crate::libraries::Origin::Library,
                     });
                 }
             }
@@ -1399,6 +1405,7 @@ impl LibrarySet for JvmLibraries {
                         vararg_elem: None,
                         must_inline: true,
                         signature: c.signature.clone(),
+                        origin: crate::libraries::Origin::Library,
                     });
                 }
             }
@@ -1466,6 +1473,7 @@ impl LibrarySet for JvmLibraries {
                 vararg_elem,
                 must_inline: false,
                 signature: c.signature.clone(),
+                origin: crate::libraries::Origin::Library,
             });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
@@ -1545,6 +1553,7 @@ impl LibrarySet for JvmLibraries {
                     vararg_elem: None,
                     must_inline: false,
                     signature: c.signature.clone(),
+                    origin: crate::libraries::Origin::Library,
                 });
             }
         }

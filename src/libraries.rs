@@ -35,6 +35,19 @@ pub struct LibraryMember {
     pub descriptor: String,
 }
 
+/// Which source a resolved callable came from — set by the source that resolves it, read by the
+/// lowerer to choose the emit form: a current-module callable lowers to a same-file `Local`/cross-file
+/// call, a library callable to an `invokestatic`/external call. `facade` is the module callable's
+/// declaring facade internal name (the file/class it belongs to). Defaults to [`Origin::Library`].
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Origin {
+    #[default]
+    Library,
+    Module {
+        facade: String,
+    },
+}
+
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone)]
@@ -74,6 +87,9 @@ pub struct LibraryCallable {
     /// when picking this overload out of a [`FunctionSet`]. `None` when the callable has no generic
     /// signature. The front end never parses it — only the platform's resolution helpers do.
     pub signature: Option<String>,
+    /// Which source produced this callable — the lowerer's cue for the emit form. [`Origin::Library`]
+    /// for a classpath callable; [`Origin::Module`] (with its facade) for a current-/sibling-module one.
+    pub origin: Origin,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
