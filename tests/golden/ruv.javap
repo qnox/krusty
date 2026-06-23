@@ -1,0 +1,21 @@
+public final class BKt {
+public static final java.lang.String box();
+Code:
+iconst_0
+istore_0
+iconst_5
+istore_1
+iconst_0
+istore_2
+iload_2
+iload_1
+if_icmpge 21
+iload_0
+iload_2
+iadd
+istore_0
+iinc 2, 1
+goto 6
+ldc // String OK
+areturn
+}
