@@ -187,6 +187,20 @@ fn suspend_fun_two_suspension_points_spills_live_local() {
 }
 
 #[test]
+fn suspend_chain_calls_state_machine_callee() {
+    // `top` calls `bar`, which is itself a state-machine suspend fn (it calls `foo`). Exercises a
+    // suspend fn whose suspension callee has its own continuation class. 43 + 1 = 44.
+    run_suspend(
+        "smc",
+        "suspend fun foo(): Int = 42\n\
+         suspend fun bar(): Int {\n    val a = foo()\n    return a + 1\n}\n\
+         suspend fun top(): Int {\n    val x = bar()\n    return x + 1\n}\n",
+        "top",
+        44,
+    );
+}
+
+#[test]
 fn suspend_fun_tail_suspension_returns_result() {
     // `h` returns the result of a suspend call directly (`= foo()` → `return foo()`): a tail-position
     // suspension. Desugars to `val tmp = foo(); return tmp` and drives to 42.
