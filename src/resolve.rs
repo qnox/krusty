@@ -5606,6 +5606,26 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
+                // A call selected by lambda RETURN type (`recv.sumOf { … }`): its source name has no JVM
+                // method, so the generic-signature passes above miss it — supply the selector's `it` from
+                // the receiver's element type, at the lambda argument's position.
+                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
+                    let params = self
+                        .syms
+                        .libraries
+                        .lambda_return_overload_param(rt, &name)?;
+                    Some(
+                        args.iter()
+                            .map(|&a| {
+                                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                    params.clone()
+                                } else {
+                                    Vec::new()
+                                }
+                            })
+                            .collect(),
+                    )
+                });
                 // A call to an INLINE extension (`forEach`/`let`/`also`/`apply`/… or any user/stdlib inline
                 // extension) is spliced at the call site, so a mutable variable its lambda captures is an
                 // inline capture (no closure) — permit mutation so the checker doesn't `Ref`-box it. Gated
@@ -5842,6 +5862,24 @@ impl<'a> Checker<'a> {
                 {
                     self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
                     return c.ret;
+                }
+                // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }: Int`): the `@JvmName`
+                // overload matching the lambda's return is resolved from `@Metadata`; the result is that
+                // return type. (Spliced in lowering — no `ext_call` recorded.)
+                if let Some(lam_ret) = arg_tys.iter().find_map(|t| {
+                    if let Ty::Fun(s) = t {
+                        Some(s.ret)
+                    } else {
+                        None
+                    }
+                }) {
+                    if let Some(c) = self
+                        .syms
+                        .libraries
+                        .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
+                    {
+                        return c.ret;
+                    }
                 }
                 // A non-public (`@InlineOnly`) extension the backend SPLICES (no callable method to call):
                 // a lambda-bearing scope fn (`takeIf`/`takeUnless`/…), recovering the receiver-bound return.

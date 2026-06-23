@@ -336,6 +336,28 @@ pub trait LibrarySet {
     fn metadata_return_unsigned(&self, _owner: &str, _name: &str) -> bool {
         false
     }
+
+    /// The lambda parameter types for a Kotlin-name call that resolves by lambda RETURN type
+    /// (`@OverloadResolutionByLambdaReturnType`, e.g. `Iterable<T>.sumOf(selector: (T) -> R)`): `[element]`
+    /// so the selector's `it` types as the receiver's element rather than the erased `Any`. `None` when
+    /// `name` isn't such a function on `receiver`. (Return-type independent — used before the body is typed.)
+    fn lambda_return_overload_param(&self, _receiver: Ty, _name: &str) -> Option<Vec<Ty>> {
+        None
+    }
+
+    /// Resolve a Kotlin-name call selected by lambda RETURN type (`recv.sumOf { … }`) to the
+    /// `@JvmName`-mangled method matching `lambda_ret` (`sumOf` + `Int` → `sumOfInt`). The method is
+    /// `@InlineOnly` (its body is spliced); `None` when no overload matches (e.g. an unsigned return krusty
+    /// can't model). The source name has no JVM method of its own, so this bridges via `@Metadata`.
+    fn resolve_lambda_return_overload(
+        &self,
+        _receiver: Ty,
+        _name: &str,
+        _lambda_ret: Ty,
+        _arg_tys: &[Ty],
+    ) -> Option<LibraryCallable> {
+        None
+    }
 }
 
 // --- Navigation helpers (the front end's resolution logic over the `LibrarySet`) -----------------

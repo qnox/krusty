@@ -10057,23 +10057,24 @@ impl<'a> Lower<'a> {
                         });
                         self.coerce_generic_read(call, e, c.physical_ret)
                     } else if let Some(c) = {
-                        // A private `@InlineOnly` extension (`String.uppercase()` → inlines
-                        // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
-                        // `Callee::Static` so the backend splices its REAL body (no call to the
-                        // package-private method is emitted). Gated on `can_inline_call`, which DRY-RUNS the
-                        // actual splice — so a body the emitter couldn't splice (and would fall back to an
-                        // `invokestatic` on the private method) is never routed; the call simply skips.
+                        // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }`): resolve the
+                        // `@JvmName`-mangled `@InlineOnly` method (`sumOfInt`) matching the lambda's return,
+                        // then splice it (its body is a fold loop). The lambda return comes from the typed
+                        // lambda arg.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        self.syms
-                            .libraries
-                            .resolve_scope_inline(&name, rt, &arg_tys)
-                            .filter(|c| {
-                                c.is_inline
-                                    && self.syms.libraries.can_inline_call(
-                                        &c.owner,
-                                        &c.name,
-                                        &c.descriptor,
-                                    )
+                        arg_tys
+                            .iter()
+                            .find_map(|t| {
+                                if let Ty::Fun(s) = t {
+                                    Some(s.ret)
+                                } else {
+                                    None
+                                }
+                            })
+                            .and_then(|lam_ret| {
+                                self.syms
+                                    .libraries
+                                    .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                             })
                     } {
                         let recv =
@@ -10091,7 +10092,54 @@ impl<'a> Lower<'a> {
                                 name: c.name,
                                 descriptor: c.descriptor,
                                 inline: true,
-                                must_inline: false,
+                                must_inline: c.must_inline,
+                            },
+                            dispatch_receiver: None,
+                            args: a,
+                        });
+                        self.coerce_generic_read(call, e, c.physical_ret)
+                    } else if let Some(c) = {
+                        // A private `@InlineOnly` extension (`String.uppercase()` → inlines
+                        // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
+                        // `Callee::Static` so the backend splices its REAL body (no call to the
+                        // package-private method is emitted). Gated on `can_inline_call`, which DRY-RUNS the
+                        // actual splice — so a body the emitter couldn't splice (and would fall back to an
+                        // `invokestatic` on the private method) is never routed; the call simply skips.
+                        let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
+                        self.syms
+                            .libraries
+                            .resolve_scope_inline(&name, rt, &arg_tys)
+                            .filter(|c| {
+                                // The `@Metadata` `inline` flag is keyed by the Kotlin name; a
+                                // `@JvmName`-mangled method (`sumOf` → `sumOfInt`) loses it, reading back
+                                // `is_inline=false`. A PRIVATE (`must_inline`) extension has no callable
+                                // method regardless, so it MUST be spliced — gate on `can_inline_call`
+                                // (a real splice dry-run), which is the actual correctness condition.
+                                (c.is_inline || c.must_inline)
+                                    && self.syms.libraries.can_inline_call(
+                                        &c.owner,
+                                        &c.name,
+                                        &c.descriptor,
+                                    )
+                            })
+                    } {
+                        let recv =
+                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                        let mut a = vec![recv];
+                        for (i, &arg) in args.iter().enumerate() {
+                            match c.params.get(i + 1) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
+                        }
+                        let must_inline = c.must_inline;
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: c.owner,
+                                name: c.name,
+                                descriptor: c.descriptor,
+                                inline: true,
+                                must_inline,
                             },
                             dispatch_receiver: None,
                             args: a,

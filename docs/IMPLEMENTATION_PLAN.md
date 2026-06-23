@@ -3726,6 +3726,28 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 485 — `sumOf { … }` (`@OverloadResolutionByLambdaReturnType`)  ✅
+- `listOf(1,2,3).sumOf { it*2 }` bailed: there is NO JVM method named `sumOf` — kotlinc emits
+  `sumOfInt`/`sumOfLong`/`sumOfDouble`/… (`@JvmName`-mangled, package-private `@InlineOnly`) and picks one by
+  the lambda's RETURN type. Multiple pieces:
+  - **Splice**: the selector-taking `sumOf<R>` is `private static final` `@InlineOnly` whose `@Metadata`
+    inline flag is lost to the `@JvmName` rename (`is_inline=false`). The lowerer's `@InlineOnly` route now
+    splices when `(is_inline || must_inline) && can_inline_call` (a private method MUST be spliced — gate on
+    the real splice dry-run) and carries `must_inline` through, so the fold-loop body is spliced.
+  - **Metadata**: `package_lambda_return_overloads` reads each Kotlin name's `@JvmName` overloads
+    (`Classpath::lambda_return_overloads`, unioned up the facade's superclass chain — overloads split across
+    multifile parts). A method name/descriptor from `JvmMethodSignature` is a PLAIN string-table entry
+    (`resolve_string`), NOT a class name (`resolve_class_name`'s `$`→`.` / strip-`L;` op mangles it).
+  - **Resolution** (`resolve_lambda_return_overload`): derive `name` + the return type's simple name
+    (`sumOf`+`Int`→`sumOfInt`) and VERIFY against the real classpath method (receiver param = the matched
+    supertype, JVM return = the wanted primitive). Disambiguate `IntArray.sumOf` from `UIntArray.sumOf` (both
+    erase to `([I,Function1)I`) by the SELECTOR parameter type from the generic signature == the receiver's
+    element type — so the `Int` lambda never binds a `UInt`-reading body (which ClassCast'd). Unsigned returns
+    bail (krusty can't model `UInt`).
+- TDD e2e `SumOfByLambdaReturn` (Int/Long/Double selectors, user-property selector, `Set` + `IntArray`
+  receivers). Gate **1354/0** (+2 corpus). Verified under `-Xverify:all` AND a split URLClassLoader (the e2e
+  harness's loader, which surfaces cross-package access faults a single loader hides).
+
 ## Phase 484 — multiple branchy lambda splices per method (per-statement operand-stack reset)  ✅
 - Two `takeIf`/`takeUnless`-with-elvis in ONE method bailed: a branchy lambda splice (`takeIf`'s predicate
   inlined into a body with an internal join) tracks its branches only approximately, leaving the emitter's

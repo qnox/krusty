@@ -282,6 +282,21 @@ enum GSig {
 /// (`<T> T.takeIf(…)`) — the scope-fn family that applies to ANY receiver. A concrete-class receiver
 /// (a value class like `Result.map`, erased to `Object`) would otherwise wrongly match an unrelated
 /// receiver through the erased lookup key, so only a type-variable receiver may match this way.
+/// The Kotlin simple type name of a numeric primitive `Ty` (`Int` → `"Int"`), used to derive the
+/// `@OverloadResolutionByLambdaReturnType` `@JvmName` (`sumOf` + `Int` → `sumOfInt`). `None` for unsigned
+/// (`UInt`/`ULong`) and non-numeric types — krusty can't model an unsigned `sumOf` result, so it bails.
+fn kotlin_simple_name_of_ty(t: Ty) -> Option<&'static str> {
+    Some(match t {
+        Ty::Int => "Int",
+        Ty::Long => "Long",
+        Ty::Double => "Double",
+        Ty::Float => "Float",
+        Ty::Byte => "Byte",
+        Ty::Short => "Short",
+        _ => return None,
+    })
+}
+
 fn nonpublic_ext_receiver_is_typevar(signature: Option<&str>) -> bool {
     signature
         .and_then(parse_method_gsig)
@@ -980,6 +995,106 @@ impl LibrarySet for JvmLibraries {
             self.cp.metadata_return_type(owner, name).as_deref(),
             Some("kotlin/UByte" | "kotlin/UShort" | "kotlin/UInt" | "kotlin/ULong")
         )
+    }
+
+    fn lambda_return_overload_param(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
+        // `name` resolves by lambda return type iff some facade for the receiver has `@JvmName` overloads
+        // under this Kotlin name. The selector's `it` is the receiver's element type.
+        let is_overloaded = supertype_descriptors(&self.cp, receiver).iter().any(|d| {
+            self.cp
+                .find_extension_owners(d)
+                .iter()
+                .any(|o| self.cp.lambda_return_overloads(o).contains_key(name))
+        });
+        if !is_overloaded {
+            return None;
+        }
+        let elem = receiver
+            .array_elem()
+            .or_else(|| receiver.type_args().first().copied())?;
+        Some(vec![elem])
+    }
+
+    fn resolve_lambda_return_overload(
+        &self,
+        receiver: Ty,
+        name: &str,
+        lambda_ret: Ty,
+        arg_tys: &[Ty],
+    ) -> Option<LibraryCallable> {
+        // The `@JvmName`-mangled method is `name` + the return type's simple name (`sumOf` + `Int` →
+        // `sumOfInt`) — kotlinc's `@OverloadResolutionByLambdaReturnType` mangling. `@Metadata` carries the
+        // Kotlin name + return per overload but not always the `jvm_sig`, so DERIVE the JVM name and VERIFY
+        // it against the real classpath method (a derived name that isn't a real method is rejected — never
+        // a call/splice to a non-existent or wrong method).
+        let want_simple = kotlin_simple_name_of_ty(lambda_ret)?;
+        let want_ret_desc = lambda_ret.descriptor();
+        // The receiver's ELEMENT type — the selector's `it`. Distinguishes `IntArray.sumOf` (`(Int)->R`)
+        // from `UIntArray.sumOf` (`(UInt)->R`), which erase to the same `([I, Function1)` descriptor.
+        let want_elem = receiver
+            .array_elem()
+            .or_else(|| receiver.type_args().first().copied());
+        for recv_desc in supertype_descriptors(&self.cp, receiver) {
+            for owner in self.cp.find_extension_owners(&recv_desc) {
+                // Gate: `name` is genuinely resolved by lambda return type (it has such overloads in this
+                // facade's metadata) — so the derive+verify only fires for `@OverloadResolutionByLambdaReturnType`.
+                if !self.cp.lambda_return_overloads(&owner).contains_key(name) {
+                    continue;
+                }
+                let jname = format!("{name}{want_simple}");
+                for c in self.cp.find_extensions(&recv_desc, &jname) {
+                    let (params, pret) = parse_method_desc(&c.descriptor);
+                    // A selector-taking overload whose receiver is THIS supertype and whose JVM return is
+                    // the wanted primitive (distinguishes `sumOfInt`:`I` from a same-shaped `sumOfLong`).
+                    if params.len() != arg_tys.len() + 1
+                        || !c.descriptor.contains("Lkotlin/jvm/functions/Function")
+                        || params.first().map(|p| p.descriptor()).as_deref()
+                            != Some(recv_desc.as_str())
+                        || pret.descriptor() != want_ret_desc
+                    {
+                        continue;
+                    }
+                    // The JVM erases `IntArray` and `UIntArray` both to `([I, Function1)I`, so the descriptor
+                    // can't tell `IntArray.sumOf` (`(Int)->R`) from `UIntArray.sumOf` (`(UInt)->R`, whose body
+                    // reads `UInt`s the `Int` lambda can't take → ClassCastException). Disambiguate by the
+                    // SELECTOR's parameter type from the generic signature: it must equal the receiver's
+                    // element type. A candidate with no signature, or a mismatched selector, is rejected.
+                    if let Some(elem) = want_elem {
+                        let Some((_, psigs, _)) =
+                            c.signature.as_deref().and_then(parse_method_gsig)
+                        else {
+                            continue;
+                        };
+                        let mut binds = std::collections::HashMap::new();
+                        if let Some(recv_sig) = psigs.first() {
+                            unify_gsig(recv_sig, receiver, &mut binds);
+                        }
+                        let selector_matches = psigs
+                            .get(arg_tys.len())
+                            .map(|sel| function_input_types(sel, &binds) == vec![elem])
+                            .unwrap_or(false);
+                        if !selector_matches {
+                            continue;
+                        }
+                    }
+                    return Some(LibraryCallable {
+                        name: c.name.clone(),
+                        owner: c.owner.clone(),
+                        params,
+                        ret: lambda_ret,
+                        physical_ret: pret,
+                        descriptor: c.descriptor.clone(),
+                        is_inline: true,
+                        default_call: false,
+                        vararg_elem: None,
+                        // A package-private `@InlineOnly` selector method — splice or skip, never an
+                        // `invokestatic` to it (an `IllegalAccessError`).
+                        must_inline: !c.public,
+                    });
+                }
+            }
+        }
+        None
     }
 
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
