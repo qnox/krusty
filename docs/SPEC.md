@@ -735,6 +735,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into a `Ref` exactly like a plain captured `var` local (`var [a,b]=A(); val f={a=3}; f()` sees `a==3`).
   Tests: `multiDecl/*` box corpus (+96 gate), `tests/name_based_destructuring_e2e.rs`.
 
+- **Primitive-bounded type parameters (specialization).** kotlinc specializes a type parameter with a
+  primitive upper bound to that primitive — `fun <T: Int> f(t: T): T` compiles to descriptor `(I)I`, not
+  `(Object)Object`. krusty specializes a FUNCTION type parameter whose bound is an INTEGRAL wrappable
+  primitive (`Int`/`Long`/`Short`/`Byte`/`Char`/`Boolean`) via `TParams` (name → erasure `Ty`). NOT
+  specialized (still rejected → the file skips, never miscompiles): CLASS type parameters (the value-class
+  pass owns class-bound handling; naive specialization breaks the Object/value-class boundary →
+  VerifyError), floating bounds (`Double`/`Float` — boxed-vs-primitive `==` differs on −0.0/NaN), and
+  unsigned/value bounds. The generic `Signature` attribute is not emitted (a systemic krusty-generics
+  gap), so byte-parity for generics is not yet achieved; runtime (box) is correct. Tests:
+  `tests/primitive_bound_generic_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

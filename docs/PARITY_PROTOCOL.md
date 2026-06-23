@@ -67,6 +67,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P10 — specialize integral primitive-bounded FUNCTION type parameters (gate 1459 → 1491, +32).**
+  `fun <T: Int> f(t: T): T` is specialized by kotlinc to the primitive (descriptor `(I)I`, not
+  `(Object)Object` — verified). krusty previously REJECTED any primitive bound. Now a FUNCTION type
+  parameter with an INTEGRAL wrappable bound (`Int`/`Long`/`Short`/`Byte`/`Char`/`Boolean`) erases to
+  that primitive. Introduced a `TParams` struct (name → erasure `Ty`) threaded through `ty_of_ref` and
+  the `Checker` (replacing the bare `HashSet<String>`; empty/erased map = exact old behavior, so the
+  1459 existing passes are untouched). `FunDecl` now stores `type_param_bounds` (was discarded). SOUND
+  RESTRICTION (each enforced after a gate FAIL surfaced it): (1) only FUNCTION params specialize — CLASS
+  params stay erased (`TParams::erased`), because the value-class pass owns class-bound handling and
+  naive class specialization VerifyError'd 6 box tests; (2) only INTEGRAL bounds — `Double`/`Float` are
+  rejected (boxed-vs-primitive `==` differs on −0.0/NaN: `eqNullableDoublesWithTP.kt`); (3) unsigned/value
+  bounds stay rejected (`kt27096Generic.kt`). NON-specializable primitive bounds are re-rejected in the
+  parser so the file skips, never miscompiles. NOTE: like all krusty generics, the `Signature` attribute
+  is still not emitted (kotlinc emits it) — a systemic byte-parity gap, separate from this runtime win.
+  Tests: `tests/primitive_bound_generic_e2e.rs` (descriptor `(I)I`, `(C)C`, run; Double rejected).
 - **Phase P9 — language-feature flags + name-based `[a, b]` destructuring (gate 1361 → 1457, +96).**
   A drop-in honors the same feature toggles `kotlinc` does. Added `krusty::features::LangFeatures` (a
   set of enabled `LanguageFeature` names) sourced from `-XXLanguage:+Foo` / `-Xname-based-destructuring`
