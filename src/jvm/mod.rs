@@ -11,6 +11,7 @@ pub mod jvm_class_map;
 pub mod jvm_libraries;
 pub mod metadata;
 pub mod names;
+pub mod suspend;
 pub mod value_classes;
 
 pub use backend::JvmBackend;

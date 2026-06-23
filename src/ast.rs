@@ -352,6 +352,10 @@ pub struct FunDecl {
     /// `private` visibility. Public/internal/protected functions get `Intrinsics.checkNotNullParameter`
     /// guards on their non-null reference parameters (kotlinc does); private ones do not.
     pub is_private: bool,
+    /// `suspend` modifier — a coroutine. Lowered continuation-passing-style: an extra
+    /// `kotlin.coroutines.Continuation` parameter is appended and the return type erases to
+    /// `java.lang.Object` (a leaf function with no suspension point needs no state machine).
+    pub is_suspend: bool,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).

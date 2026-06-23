@@ -74,6 +74,75 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         }
     }
 
+    // --- suspend (coroutines) lowerability gate ---------------------------------------------------
+    // The coroutine transform itself lives in `jvm::suspend`; this only decides whether the file is
+    // lowerable at all. Slice 1 supports a top-level *leaf* `suspend fun` (no suspension point) — it
+    // lowers to the CPS signature with no state machine. Anything else would miscompile, so skip the
+    // whole file (never miscompile): an extension/member suspend fn, a suspend body with a call
+    // (a potential suspension point — call-site continuation threading isn't modeled yet), or any
+    // *call* to a suspend fn (its rewritten arity wouldn't match a plain call).
+    let suspend_fns: Vec<String> = file
+        .decls
+        .iter()
+        .filter_map(|&d| match file.decl(d) {
+            Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+    if !suspend_fns.is_empty() {
+        for &d in &file.decls {
+            match file.decl(d) {
+                Decl::Fun(f) if f.is_suspend => {
+                    if f.receiver.is_some() {
+                        return None; // extension suspend fn — not modeled
+                    }
+                    match &f.body {
+                        FunBody::Expr(e) | FunBody::Block(e) => {
+                            if !suspend_leaf_ok(file, *e) {
+                                return None; // has a call / suspension point
+                            }
+                        }
+                        FunBody::None => return None,
+                    }
+                }
+                Decl::Class(c) if c.methods.iter().any(|m| m.is_suspend) => {
+                    return None; // member suspend fn — not modeled
+                }
+                _ => {}
+            }
+        }
+        // No call site may reference a suspend fn (call-site continuation threading isn't modeled).
+        let mut bodies: Vec<AstExprId> = Vec::new();
+        for &d in &file.decls {
+            match file.decl(d) {
+                // A suspend fn's own body is already gated leaf (call-free) above — skip it here.
+                Decl::Fun(f) if f.is_suspend => {}
+                Decl::Fun(f) => match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => bodies.push(*e),
+                    FunBody::None => {}
+                },
+                Decl::Property(p) => bodies.extend(p.init),
+                Decl::Class(c) => {
+                    for m in &c.methods {
+                        match &m.body {
+                            FunBody::Expr(e) | FunBody::Block(e) => bodies.push(*e),
+                            FunBody::None => {}
+                        }
+                    }
+                    bodies.extend(c.body_props.iter().filter_map(|p| p.init));
+                }
+            }
+        }
+        for e in bodies {
+            if suspend_fns
+                .iter()
+                .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
+            {
+                return None;
+            }
+        }
+    }
+
     // Pass 1a: register classes (id, fields) and reserve method FunIds.
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
@@ -648,6 +717,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.fun_ids
                     .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
+                // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
+                // transform (CPS signature now; state machine later) — ir_lower keeps the plain form,
+                // mirroring how value classes are lowered plain here and transformed in a later pass.
+                if f.is_suspend {
+                    lo.ir.suspend_funs.push(id);
+                }
             }
         }
     }
@@ -10581,6 +10656,45 @@ fn body_declares_local(file: &ast::File, e: AstExprId) -> bool {
         }
     }
     ex(file, e)
+}
+
+/// Whether a `suspend fun` body `e` is a *leaf* the coroutine pass can lower without a state machine:
+/// it has no suspension point. Conservatively (sound by construction): an allowlist of expression forms
+/// that can never be a call — literals, name/property reads, and the structural control-flow nodes
+/// (`if`/`when`/block/elvis/`!!`/`throw`/`is`/`as`/string template) recursed into. ANY other form
+/// (a call, member/index access, operator that may desugar to a user/operator `fun`, lambda, `try`,
+/// range, callable reference) returns `false` → the file skips. Slice 1 keeps the set tight; later
+/// slices (with the state machine + suspension-point detection) relax it.
+fn suspend_leaf_ok(file: &ast::File, e: AstExprId) -> bool {
+    use ast::Expr::*;
+    match file.expr(e) {
+        IntLit(_) | LongLit(_) | UIntLit(_) | ULongLit(_) | DoubleLit(_) | FloatLit(_)
+        | BoolLit(_) | StringLit(_) | CharLit(_) | NullLit | Name(_) => true,
+        If { .. }
+        | When { .. }
+        | Block { .. }
+        | Elvis { .. }
+        | NotNull { .. }
+        | Throw { .. }
+        | Is { .. }
+        | As { .. }
+        | Template(_) => {
+            // OK iff no child expression/statement is non-leaf (i.e. nothing call-like inside).
+            !file.any_child_expr(e, &mut |c| !suspend_leaf_ok(file, c), &mut |s| {
+                !suspend_leaf_stmt_ok(file, s)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Statement form of [`suspend_leaf_ok`]: a `LocalFun` is its own scope (not modeled) → non-leaf;
+/// every other statement is leaf iff each of its child expressions is.
+fn suspend_leaf_stmt_ok(file: &ast::File, s: ast::StmtId) -> bool {
+    match file.stmt(s) {
+        Stmt::LocalFun(_) => false,
+        _ => !file.any_child_stmt(s, &mut |c| !suspend_leaf_ok(file, c)),
+    }
 }
 
 /// Whether `e` contains a `break`/`continue` that escapes past this region (a loop-local one is fine).

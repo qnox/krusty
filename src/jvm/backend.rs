@@ -59,6 +59,17 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
+        // JVM-only IR→IR transform: realize `suspend fun`s as their continuation-passing-style ABI
+        // (the IR keeps them as plain functions so JS / other backends are unaffected). A suspend shape
+        // it can't yet lower → skip the file rather than miscompile.
+        if !crate::jvm::suspend::lower_suspend(&mut ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "krusty: this suspend-function shape is not yet supported by the IR backend"
+                    .to_string(),
+            );
+            return outputs;
+        }
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
         // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
         let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp) else {
