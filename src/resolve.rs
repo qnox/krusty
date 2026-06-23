@@ -4014,32 +4014,38 @@ impl<'a> Checker<'a> {
                 // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
                 // (primitives can never be null), so emit as a direct static call.
                 if !rt.is_reference() {
-                    let recv_desc = rt.descriptor();
-                    if let Some(sig) = self
-                        .syms
-                        .ext_funs
-                        .get(&(recv_desc.clone(), name.clone()))
-                        .cloned()
+                    if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
+                        })
                     {
+                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
                         let arg_tys: Vec<Ty> = match &args {
                             Some(a) => a.iter().map(|x| self.expr(*x)).collect(),
                             None => vec![],
                         };
-                        if sig.params.len() != arg_tys.len() {
+                        if logical.len() != arg_tys.len() {
                             self.diags.error(
                                 self.span(e),
                                 format!(
                                     "extension '{name}' expects {} args, got {}",
-                                    sig.params.len(),
+                                    logical.len(),
                                     arg_tys.len()
                                 ),
                             );
                         }
-                        let pdesc: String = sig.params.iter().map(|t| t.descriptor()).collect();
-                        let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
-                        self.ext_calls
-                            .insert(e, ("$local".to_string(), name.clone(), desc));
-                        return self.set(e, sig.ret);
+                        self.ext_calls.insert(
+                            e,
+                            (
+                                "$local".to_string(),
+                                name.clone(),
+                                fi.callable.descriptor.clone(),
+                            ),
+                        );
+                        return self.set(e, fi.callable.ret);
                     }
                 }
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
@@ -4183,20 +4189,26 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     if let Some(fname) = op_name {
-                        let recv_desc = lt.descriptor();
-                        if let Some(sig) = self
-                            .syms
-                            .ext_funs
-                            .get(&(recv_desc.clone(), fname.to_string()))
-                            .cloned()
+                        if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .functions(fname, Some(lt))
+                            .overloads
+                            .into_iter()
+                            .find(|o| {
+                                o.kind == crate::libraries::FnKind::Extension
+                                    && o.receiver_rank == 0
+                            })
                         {
-                            if sig.params.len() == 1 {
-                                let pdesc: String =
-                                    sig.params.iter().map(|t| t.descriptor()).collect();
-                                let desc = format!("({recv_desc}{pdesc}){}", sig.ret.descriptor());
-                                self.ext_calls
-                                    .insert(e, ("$local".to_string(), fname.to_string(), desc));
-                                return self.set(e, sig.ret);
+                            // logical params (receiver is `callable.params[0]`) — operators take one arg.
+                            if fi.callable.params.len() == 2 {
+                                self.ext_calls.insert(
+                                    e,
+                                    (
+                                        "$local".to_string(),
+                                        fname.to_string(),
+                                        fi.callable.descriptor.clone(),
+                                    ),
+                                );
+                                return self.set(e, fi.callable.ret);
                             }
                         }
                     }
