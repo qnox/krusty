@@ -2164,11 +2164,44 @@ impl<'a> Parser<'a> {
         // Parameter type annotations, parallel to `params` — kept (in a side-table) so a bare-value
         // lambda `{ x: Int -> … }` types its own parameters even without an expected function type.
         let mut param_types: Vec<Option<TypeRef>> = Vec::new();
+        // A destructured lambda parameter `{ (a, b) -> … }` binds ONE (synthetic) parameter, then
+        // `val (a, b) = <synthetic>` is prepended to the body — reusing the `Stmt::Destructure`
+        // machinery. Collected here, spliced after the body statements are parsed.
+        // (synthetic param name, destructured entries `(name, is_var)`, span) per `(a, b)` param.
+        type LambdaDestructure = (String, Vec<(String, bool)>, Span);
+        let mut destructures: Vec<LambdaDestructure> = Vec::new();
         let params = if has_params {
             let mut ps = Vec::new();
             loop {
                 self.skip_newlines();
-                if self.at(TokenKind::Ident) {
+                if self.at(TokenKind::LParen) {
+                    let sp = self.tok().span;
+                    self.bump();
+                    let mut entries = Vec::new();
+                    loop {
+                        let n = self.ident_or_error("variable name");
+                        // A per-entry type annotation (`(a: Int, b) ->`) is tolerated, ignored.
+                        if self.eat(TokenKind::Colon) {
+                            let _ = self.parse_type();
+                        }
+                        entries.push((n, false)); // destructured lambda params are `val`
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        if self.at(TokenKind::RParen) {
+                            break; // trailing comma
+                        }
+                    }
+                    self.expect(TokenKind::RParen, "')'");
+                    // A type annotation on the whole destructured parameter (`(a, b): T ->`) is ignored.
+                    if self.eat(TokenKind::Colon) {
+                        let _ = self.parse_type();
+                    }
+                    let synth = format!("$dstr{}", destructures.len());
+                    ps.push(synth.clone());
+                    param_types.push(None);
+                    destructures.push((synth, entries, sp));
+                } else if self.at(TokenKind::Ident) {
                     ps.push(self.text().to_string());
                     self.bump();
                     if self.at(TokenKind::Colon) {
@@ -2196,6 +2229,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             stmts.push(self.parse_stmt());
+        }
+        // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
+        // first parameter's binding ends up first).
+        for (synth, entries, sp) in destructures.into_iter().rev() {
+            let init = self.file.add_expr(Expr::Name(synth), sp);
+            let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
+            stmts.insert(0, d);
         }
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
