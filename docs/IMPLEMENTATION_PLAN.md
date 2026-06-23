@@ -3921,6 +3921,30 @@ bodies exist only as jar bytecode):
   bails cleanly; `uppercase` is `StringsKt.uppercase` (an extension), not a `java.lang.String` member, so it
   needs the extension-resolution path, not `resolve_instance`. Never miscompiles.)
 
+## LibrarySet → CallResolver redesign (commits "Phase 395–400")  ✅
+Split call resolution into two layers, so the front end depends on a clean seam and a second backend
+(Kotlin/JS) can reuse all the binding logic:
+- **`LibrarySet` (the oracle, `src/libraries.rs` + `src/jvm/jvm_libraries.rs`)** — a pure,
+  *arg-independent* metadata source. `functions(name, receiver) -> FunctionSet` returns every overload
+  (member + extension + top-level) in ONE query, each `FunctionInfo` carrying its flags (`inline`,
+  `inline_only`), `public`, raw `signature`, and — for extensions/members — the receiver-MRO
+  `receiver_rank` it was found at. No overload selection, no type-variable binding.
+- **`CallResolver` (the binding layer, `src/call_resolver.rs`)** — a platform-agnostic struct over
+  `&dyn LibrarySet`. It owns the *arg-dependent* work: overload selection, the `GSig` unify/substitute
+  algorithm, nullable-primitive boxing, the navigation helpers (`resolve_instance`/`resolve_constructor`/
+  `resolve_companion`). The checker/lowerer reach it via a `resolver()` helper.
+- **The three core selectors now enumerate through `functions()`** instead of hitting the classpath
+  index directly: `resolve_callable` (extension path via `extension_callable`, plus top-level/`$default`/
+  `@InlineOnly`), `resolve_scope_inline` (through `extension_callable`), and `resolve_instance` (Member
+  overloads grouped by `receiver_rank`). Receiver precedence (a `List` extension before an `Iterable`
+  one; a subtype's member before a supertype's) is preserved by ranking candidates by the lookup rung —
+  fixing the earlier fold attempt that grouped by `params[0]` and lost 3 type-variable-extension cases.
+- The flag selectors (`extension_is_inline`/`toplevel_is_inline`/`toplevel_has_must_inline`) and
+  `resolve_lambda_return_overload` moved onto `CallResolver` as pure `functions()` consumers; the
+  platform-neutral binding primitives (`GSig`, `unify_gsig`, `gsig_to_ty`, `function_input_types`,
+  `unbox_wrapper`, `arg_fits`) moved to `call_resolver.rs`; only backend signature *parsing*
+  (`parse_method_gsig`, string → `GSig`) stays in the JVM impl. Gate held **1354/0** through every slice.
+
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
