@@ -392,10 +392,7 @@ fn top_level_property_abi_matches_kotlin() {
 
 #[test]
 fn for_in_intarray_is_byte_identical_to_kotlinc() {
-    assert_byte_identical_to_kotlinc(
-        "for_in_intarray",
-        "fun box(): String {\n  for (x in IntArray(5)) {\n    if (x != 0) return \"Fail $x\"\n  }\n  return \"OK\"\n}\n",
-    );
+    assert_diff("for_in_intarray");
 }
 
 /// Normalized javap of `class_file`, optionally sliced to just the method whose disassembly contains
@@ -415,65 +412,119 @@ fn disasm(jh: &str, class_file: &std::path::Path, marker: Option<&str>) -> Strin
     }
 }
 
-/// The kotlinc reference disassembly for `src`'s `class` (optionally sliced to `marker`), CACHED as a
-/// committed golden at `tests/golden/<name>.javap`. kotlinc output is deterministic, so we record it
-/// once instead of launching kotlinc every run. With `KRUSTY_BLESS=1` (+ `KRUSTY_KOTLINC` + `JAVA_HOME`)
-/// it regenerates the golden by running kotlinc — do that only when bumping the reference kotlinc
-/// version. Otherwise it reads the committed golden (NO kotlinc launch). `None` ⇒ no golden, not blessing.
-fn kotlinc_golden(name: &str, src: &str, class: &str, marker: Option<&str>) -> Option<String> {
-    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(format!("{name}.javap"));
-    if env("KRUSTY_BLESS").is_some() {
-        let kotlinc = env("KRUSTY_KOTLINC")?;
-        let jh = java_home()?;
-        let dir = std::env::temp_dir().join(format!("krusty_bless_{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("B.kt"), src).unwrap();
-        let cc = Command::new(&kotlinc)
-            .arg(dir.join("B.kt"))
-            .args(["-d", dir.to_str().unwrap()])
-            .env("JAVA_HOME", &jh)
-            .output()
-            .unwrap();
-        assert!(
-            cc.status.success(),
-            "kotlinc bless {name}: {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let norm = disasm(&jh, &dir.join(format!("{class}.class")), marker);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(golden.parent().unwrap()).unwrap();
-        fs::write(&golden, format!("{norm}\n")).unwrap();
-        return Some(norm);
-    }
-    fs::read_to_string(&golden)
-        .ok()
-        .map(|s| s.trim_end().to_string())
+/// One differential parity case: a uniquely-named source, the class to disassemble, and an optional
+/// method-slice marker. The unique file name gives each its own facade so they all compile together.
+struct DiffCase {
+    name: &'static str,
+    file: &'static str,
+    src: &'static str,
+    class: &'static str,
+    marker: Option<&'static str>,
 }
 
-/// Assert krusty's disassembly of `class` (optionally sliced to `marker`) matches the cached kotlinc
-/// golden for `src`. Skips when no golden exists (and not blessing) or krusty/JAVA_HOME is unavailable.
-fn assert_matches_kotlinc(name: &str, src: &str, class: &str, marker: Option<&str>) {
-    let Some(kc) = kotlinc_golden(name, src, class, marker) else {
-        eprintln!("skip ({name}: no golden — run KRUSTY_BLESS=1 with KRUSTY_KOTLINC to record)");
+/// Every differential parity case. Compiled ALL AT ONCE (one kotlinc + one krusty invocation) — see
+/// `diff_refs`. Add a case here and reference it by `name` from a `#[test]` via `assert_diff`.
+fn diff_cases() -> Vec<DiffCase> {
+    vec![
+        DiffCase { name: "ruc", file: "Ruc.kt", class: "RucKt", marker: None,
+            src: "fun box(): String {\n  var s = 0\n  for (i in 0 until 10) s += i\n  return \"OK\"\n}\n" },
+        DiffCase { name: "rtc", file: "Rtc.kt", class: "RtcKt", marker: None,
+            src: "fun box(): String {\n  var s = 0\n  for (i in 1..10) s += i\n  return \"OK\"\n}\n" },
+        DiffCase { name: "ruv", file: "Ruv.kt", class: "RuvKt", marker: None,
+            src: "fun box(): String {\n  var s = 0\n  val n = 5\n  for (i in 0 until n) s += i\n  return \"OK\"\n}\n" },
+        DiffCase { name: "dtc", file: "Dtc.kt", class: "DtcKt", marker: None,
+            src: "fun box(): String {\n  var s = 0\n  for (i in 10 downTo 2) s += i\n  return \"OK\"\n}\n" },
+        DiffCase { name: "for_in_intarray", file: "ForInIntArray.kt", class: "ForInIntArrayKt", marker: None,
+            src: "fun box(): String {\n  for (x in IntArray(5)) {\n    if (x != 0) return \"Fail $x\"\n  }\n  return \"OK\"\n}\n" },
+        DiffCase { name: "for_in_local_array", file: "ForInLocalArray.kt", class: "ForInLocalArrayKt", marker: None,
+            src: "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return if (s == 0) \"OK\" else \"Fail\"\n}\n" },
+        DiffCase { name: "dc_hash", file: "DcHash.kt", class: "P", marker: Some("int hashCode"),
+            src: "data class P(val b: Byte, val s: Short, val c: Char, val i: Int, val l: Long, val f: Float, val d: Double, val bo: Boolean)\nfun dcHashBox() = \"OK\"\n" },
+        DiffCase { name: "dc_eq", file: "DcEq.kt", class: "D", marker: Some("boolean equals"),
+            src: "data class D(val s: String, val n: Int)\nfun dcEqBox() = \"OK\"\n" },
+    ]
+}
+
+/// Compile ALL differential cases with kotlinc ONCE and krusty ONCE (fresh — so it tracks whatever
+/// kotlinc version/config is configured, no committed goldens to go stale), disassemble each side, and
+/// cache `name → (krusty_disasm, kotlinc_disasm)` for the whole test process. `None` when the kotlinc
+/// differential env is unavailable (the tests then skip).
+fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, String)>> {
+    static CACHE: std::sync::OnceLock<Option<std::collections::HashMap<String, (String, String)>>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let jh = java_home()?;
+            let kotlinc = env("KRUSTY_KOTLINC")?;
+            let cases = diff_cases();
+            let dir = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            let src_dir = dir.join("src");
+            let kref = dir.join("kref");
+            let krout = dir.join("krout");
+            fs::create_dir_all(&src_dir).unwrap();
+            fs::create_dir_all(&kref).unwrap();
+            fs::create_dir_all(&krout).unwrap();
+            let files: Vec<std::path::PathBuf> = cases
+                .iter()
+                .map(|c| {
+                    let p = src_dir.join(c.file);
+                    fs::write(&p, c.src).unwrap();
+                    p
+                })
+                .collect();
+            // kotlinc — one invocation for every case.
+            let cc = Command::new(&kotlinc)
+                .args(&files)
+                .args(["-d", kref.to_str().unwrap()])
+                .env("JAVA_HOME", &jh)
+                .output()
+                .unwrap();
+            if !cc.status.success() {
+                eprintln!(
+                    "skip (kotlinc batch failed): {}",
+                    String::from_utf8_lossy(&cc.stderr)
+                );
+                let _ = fs::remove_dir_all(&dir);
+                return None;
+            }
+            // krusty — one invocation for every case.
+            let kc = Command::new(env!("CARGO_BIN_EXE_krusty"))
+                .args(["-d", krout.to_str().unwrap()])
+                .args(&files)
+                .output()
+                .unwrap();
+            assert!(
+                kc.status.success(),
+                "krusty batch failed: {}",
+                String::from_utf8_lossy(&kc.stderr)
+            );
+            let mut map = std::collections::HashMap::new();
+            for c in &cases {
+                let kr = disasm(&jh, &krout.join(format!("{}.class", c.class)), c.marker);
+                let ko = disasm(&jh, &kref.join(format!("{}.class", c.class)), c.marker);
+                map.insert(c.name.to_string(), (kr, ko));
+            }
+            let _ = fs::remove_dir_all(&dir);
+            Some(map)
+        })
+        .as_ref()
+}
+
+/// Assert the named differential case's krusty disassembly equals the fresh kotlinc one. Skips when the
+/// kotlinc env is unavailable.
+fn assert_diff(name: &str) {
+    let Some(refs) = diff_refs() else {
+        eprintln!("skip ({name}: set KRUSTY_KOTLINC + JAVA_HOME for the differential check)");
         return;
     };
-    let Some((dir, jh)) = krusty_compile(name, src) else {
-        return;
-    };
-    let kr = disasm(&jh, &dir.join(format!("{class}.class")), marker);
-    let _ = fs::remove_dir_all(&dir);
+    let (kr, ko) = refs
+        .get(name)
+        .expect("differential case registered in diff_cases()");
     assert_eq!(
-        kr, kc,
-        "{name}: krusty bytecode must match the kotlinc golden"
+        kr, ko,
+        "{name}: krusty bytecode must match kotlinc (fresh, same version)"
     );
-}
-
-/// Convenience: assert the `BKt` facade is byte-identical to the cached kotlinc golden.
-fn assert_byte_identical_to_kotlinc(name: &str, src: &str) {
-    assert_matches_kotlinc(name, src, "BKt", None);
 }
 
 /// Counted range loops with unit step must be byte-identical to kotlinc: a CONSTANT bound folds to a
@@ -481,18 +532,9 @@ fn assert_byte_identical_to_kotlinc(name: &str, src: &str) {
 /// `0 until 10` → `i < 10`; a variable `until` bound hoists but still needs no guard.
 #[test]
 fn range_until_and_through_loops_byte_identical_to_kotlinc() {
-    assert_byte_identical_to_kotlinc(
-        "ruc",
-        "fun box(): String {\n  var s = 0\n  for (i in 0 until 10) s += i\n  return \"OK\"\n}\n",
-    );
-    assert_byte_identical_to_kotlinc(
-        "rtc",
-        "fun box(): String {\n  var s = 0\n  for (i in 1..10) s += i\n  return \"OK\"\n}\n",
-    );
-    assert_byte_identical_to_kotlinc(
-        "ruv",
-        "fun box(): String {\n  var s = 0\n  val n = 5\n  for (i in 0 until n) s += i\n  return \"OK\"\n}\n",
-    );
+    assert_diff("ruc");
+    assert_diff("rtc");
+    assert_diff("ruv");
 }
 
 /// A constant `downTo` loop folds to an exclusive `(C-1) < i` test (no hoisted bound, no guard),
@@ -500,10 +542,7 @@ fn range_until_and_through_loops_byte_identical_to_kotlinc() {
 /// compare-to-zero divergence and is a documented follow-up).
 #[test]
 fn downto_constant_loop_byte_identical_to_kotlinc() {
-    assert_byte_identical_to_kotlinc(
-        "dtc",
-        "fun box(): String {\n  var s = 0\n  for (i in 10 downTo 2) s += i\n  return \"OK\"\n}\n",
-    );
+    assert_diff("dtc");
 }
 
 /// Shape guard (no kotlinc): a constant-bound `0 until 10` loop must NOT hoist the bound into a local
@@ -535,10 +574,7 @@ fn constant_until_loop_has_no_bound_local_or_guard() {
 /// Byte-identical (normalized) to kotlinc.
 #[test]
 fn for_in_local_array_no_redundant_copy_is_byte_identical_to_kotlinc() {
-    assert_byte_identical_to_kotlinc(
-        "for_in_local_array",
-        "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return if (s == 0) \"OK\" else \"Fail\"\n}\n",
-    );
+    assert_diff("for_in_local_array");
 }
 
 /// Shape guard (no kotlinc): `for (x in localArray)` must NOT re-store the array into a second slot.
@@ -570,12 +606,7 @@ fn for_in_local_array_does_not_copy_array_to_temp() {
 fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
     // Slice just `hashCode` (the access-flag `final` divergence on the Object-overrides is a SEPARATE
     // parity item; the Code attribute asserted here is unaffected).
-    assert_matches_kotlinc(
-        "data_class_primitive_hashcode",
-        "data class P(val b: Byte, val s: Short, val c: Char, val i: Int, val l: Long, val f: Float, val d: Double, val bo: Boolean)\nfun box() = \"OK\"\n",
-        "P",
-        Some("int hashCode"),
-    );
+    assert_diff("dc_hash");
 }
 
 /// A data class `equals` must be byte-identical to kotlinc: the `this === other` identity fast-path, the
@@ -583,10 +614,5 @@ fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
 /// `Intrinsics.areEqual` / `if_icmp` compares.
 #[test]
 fn data_class_equals_is_byte_identical_to_kotlinc() {
-    assert_matches_kotlinc(
-        "data_class_equals",
-        "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n",
-        "D",
-        Some("boolean equals"),
-    );
+    assert_diff("dc_eq");
 }
