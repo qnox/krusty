@@ -82,7 +82,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // to a suspend fn from a NON-suspend function (call-site continuation threading isn't modeled — and
     // calling a suspend fn from a non-suspend context is a Kotlin error anyway). The pass itself skips
     // any suspend *body* shape it can't yet restructure.
-    let suspend_fns: Vec<String> = file
+    let top_suspend: Vec<String> = file
         .decls
         .iter()
         .filter_map(|&d| match file.decl(d) {
@@ -90,46 +90,68 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             _ => None,
         })
         .collect();
-    if !suspend_fns.is_empty() {
+    let member_suspend: Vec<String> = file
+        .decls
+        .iter()
+        .filter_map(|&d| match file.decl(d) {
+            Decl::Class(c) => Some(c),
+            _ => None,
+        })
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| m.is_suspend)
+                .map(|m| m.name.clone())
+        })
+        .collect();
+    if !top_suspend.is_empty() || !member_suspend.is_empty() {
+        // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
+        // instance method; a member suspension point is skipped by the pass.)
         for &d in &file.decls {
-            match file.decl(d) {
-                Decl::Fun(f) if f.is_suspend => {
-                    if f.receiver.is_some() {
-                        return None; // extension suspend fn — not modeled
-                    }
+            if let Decl::Fun(f) = file.decl(d) {
+                if f.is_suspend && f.receiver.is_some() {
+                    return None;
                 }
-                Decl::Class(c) if c.methods.iter().any(|m| m.is_suspend) => {
-                    return None; // member suspend fn — not modeled
-                }
-                _ => {}
             }
         }
-        // A NON-suspend body must not reference a suspend fn (call-site threading isn't modeled).
-        let mut bodies: Vec<AstExprId> = Vec::new();
+        // Each body, tagged by whether its owner is a suspend fn. A NON-suspend body may not call a
+        // top-level suspend fn (call-site threading isn't modeled, and it's a Kotlin error). A *member*
+        // suspend fn may not be called at all yet (the flattener only models static suspend calls).
+        let mut bodies: Vec<(AstExprId, bool)> = Vec::new();
         for &d in &file.decls {
             match file.decl(d) {
-                // A suspend fn's own body is already gated leaf (call-free) above — skip it here.
-                Decl::Fun(f) if f.is_suspend => {}
                 Decl::Fun(f) => match &f.body {
-                    FunBody::Expr(e) | FunBody::Block(e) => bodies.push(*e),
+                    FunBody::Expr(e) | FunBody::Block(e) => bodies.push((*e, f.is_suspend)),
                     FunBody::None => {}
                 },
-                Decl::Property(p) => bodies.extend(p.init),
+                Decl::Property(p) => bodies.extend(p.init.map(|e| (e, false))),
                 Decl::Class(c) => {
                     for m in &c.methods {
                         match &m.body {
-                            FunBody::Expr(e) | FunBody::Block(e) => bodies.push(*e),
+                            FunBody::Expr(e) | FunBody::Block(e) => bodies.push((*e, m.is_suspend)),
                             FunBody::None => {}
                         }
                     }
-                    bodies.extend(c.body_props.iter().filter_map(|p| p.init));
+                    bodies.extend(
+                        c.body_props
+                            .iter()
+                            .filter_map(|p| p.init)
+                            .map(|e| (e, false)),
+                    );
                 }
             }
         }
-        for e in bodies {
-            if suspend_fns
+        for (e, owner_suspend) in bodies {
+            if member_suspend
                 .iter()
                 .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
+            {
+                return None; // a member suspend fn is called somewhere — caller side not modeled
+            }
+            if !owner_suspend
+                && top_suspend
+                    .iter()
+                    .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
             {
                 return None;
             }
@@ -377,6 +399,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir
                         .fn_param_names
                         .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                }
+                // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
+                if m.is_suspend {
+                    lo.ir.suspend_funs.push(fid);
                 }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
