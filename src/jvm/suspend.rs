@@ -611,6 +611,49 @@ impl Flat<'_> {
             branches: out_branches,
         })
     }
+    /// Emit the `when` for an `if`/`when` STATEMENT whose branch body suspends: each branch `goto`s its
+    /// own entry state (which flattens the branch body, converging at `merge`); a missing `else` falls
+    /// through straight to `merge`.
+    fn emit_when_stmt(&mut self, branches: Branches, merge: usize) -> ExprId {
+        let mut out_branches: Branches = Vec::new();
+        let mut has_else = false;
+        for (cond, body) in &branches {
+            has_else |= cond.is_none();
+            let entry = self.new_state();
+            let mut bb: Vec<ExprId> = Vec::new();
+            self.goto(&mut bb, entry);
+            let block = self.add(IrExpr::Block {
+                stmts: bb,
+                value: None,
+            });
+            out_branches.push((*cond, block));
+            let body_stmts = self.block_stmts(*body);
+            self.flatten(&body_stmts, entry, Some(merge));
+        }
+        if !has_else {
+            let mut bb: Vec<ExprId> = Vec::new();
+            self.goto(&mut bb, merge);
+            let block = self.add(IrExpr::Block {
+                stmts: bb,
+                value: None,
+            });
+            out_branches.push((None, block));
+        }
+        self.add(IrExpr::When {
+            branches: out_branches,
+        })
+    }
+    /// The statement list of a branch body (a `Block`'s statements, or the single expression itself).
+    fn block_stmts(&self, body: ExprId) -> Vec<ExprId> {
+        match &self.ir.exprs[body as usize] {
+            IrExpr::Block { stmts, value } => {
+                let mut v = stmts.clone();
+                v.extend(value.iter().copied());
+                v
+            }
+            _ => vec![body],
+        }
+    }
     /// A plain (non-suspending) statement. A `Variable` declaration of a spilled local becomes a
     /// `SetValue` (the local is already declared at the loop top).
     fn rewrite_plain(&mut self, stmt: ExprId) -> ExprId {
@@ -657,6 +700,19 @@ impl Flat<'_> {
                 self.states[cur] = out;
                 self.flatten(&stmts[i + 1..], merge, after);
                 return;
+            }
+            // An `if`/`when` STATEMENT whose branch body suspends: route each branch through its own
+            // entry state (which flattens the branch), all converging at `merge`.
+            if let IrExpr::When { branches } = &self.ir.exprs[stmt as usize] {
+                if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                    let branches = branches.clone();
+                    let merge = self.new_state();
+                    let when = self.emit_when_stmt(branches, merge);
+                    out.push(when);
+                    self.states[cur] = out;
+                    self.flatten(&stmts[i + 1..], merge, after);
+                    return;
+                }
             }
             if expr_calls_suspend(self.ir, stmt, self.suspend) {
                 self.failed = true;
