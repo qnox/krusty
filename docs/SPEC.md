@@ -261,8 +261,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   creation site passes the captured values (`new This(captureValues.., null)`). `invokeSuspend` loads
   each capture field into a local before running the body. Proven: `make(n: Int): suspend () -> Int =
   { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Still skipped
-  (later slices): own parameters, and an internal suspension point (the lambda's `invokeSuspend` would
-  itself be a state machine with the instance as the continuation).
+  (later slices): own parameters. **Internal suspension**: a lambda whose body is a single TAIL suspend
+  call (`{ foo() }`, `{ suspendOnce() }`) compiles its `invokeSuspend` to a state machine with the
+  lambda instance itself as the continuation — a `label` field on the class, dispatch on `this.label`:
+  state 0 threads `this` (cast `Continuation`) into the callee and sets `label=1` (a classpath/sibling
+  callee, resolved by its logical signature, gets its descriptor rewritten to the CPS form here), then
+  returns `COROUTINE_SUSPENDED` up if the callee suspends else the value; state 1 (the async resume,
+  re-entered by the callee's `resumeWith`) returns the resumed `result`. A suspending body that isn't a
+  clean tail call, or that also captures, still bails. The lambda-suspension detection walks the AST for
+  call names resolving to a suspend fn (same-file or, via the resolver, classpath). Proven both
+  completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
+  (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
+  real kotlinc parking primitive suspends then resumes to 42
+  (`::suspend_lambda_internal_suspension_async_resume`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
