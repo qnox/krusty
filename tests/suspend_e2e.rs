@@ -657,3 +657,113 @@ fn suspend_fun_discarded_suspension_result() {
         7,
     );
 }
+
+#[test]
+fn suspend_fun_actually_suspends_and_resumes_async() {
+    // The ASYNC path (not just synchronous completion): a REAL suspending primitive that returns
+    // `COROUTINE_SUSPENDED` and parks its continuation. krusty's caller must propagate
+    // `COROUTINE_SUSPENDED` up, and on a later `resumeWith` re-enter its state machine at the resume
+    // state and run to completion. `suspendOnce` (kotlinc) parks the continuation; the driver gets
+    // `COROUTINE_SUSPENDED` back from `caller`, then resumes with 42 → caller computes 43 and delivers
+    // it to the completion. Proves invokeSuspend / label-MIN re-entry actually works.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_async_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // kotlinc builds the suspending primitive: parks the continuation, returns COROUTINE_SUSPENDED.
+    fs::write(
+        dir.join("Lib.kt"),
+        "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<Int>? = null\n\
+suspend fun suspendOnce(): Int = suspendCoroutineUninterceptedOrReturn { c ->\n\
+    saved = c\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
+    )
+    .unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc = Command::new(&kotlinc)
+        .env("JAVA_HOME", &jh)
+        .args(["-d", libjar.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        eprintln!(
+            "skipping: kotlinc failed:\n{}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    // krusty compiles a caller that suspends on the primitive.
+    fs::write(
+        dir.join("Use.kt"),
+        "suspend fun caller(): Int {\n    val a = suspendOnce()\n    return a + 1\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed to compile async suspend caller:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    // Driver: caller suspends (returns COROUTINE_SUSPENDED); resume with 42; completion receives 43.
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    final Object[] box = new Object[1];\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { box[0] = o; }\n\
+    };\n\
+    Object r = UseKt.caller(k);\n\
+    boolean suspended = (r == IntrinsicsKt.getCOROUTINE_SUSPENDED());\n\
+    LibKt.resumeSaved(42);\n\
+    boolean delivered = Integer.valueOf(43).equals(box[0]);\n\
+    System.out.println(suspended && delivered ? \"OK\" : (\"suspended=\" + suspended + \" box=\" + box[0]));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        libjar.to_str().unwrap(),
+        stdlib
+    );
+    let jc = Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac driver failed:\n{}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "async suspend/resume: wrong result; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
