@@ -200,9 +200,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   emitted call it derives the physical CPS shape — a `Callee::Static` descriptor gains the trailing
   `Continuation` param + `Object` return (`cps_descriptor`), a `Callee::CrossFile` gains the
   `Continuation` param type + `Object` return. The callee is *resolved by its logical signature* (no
-  continuation, real return); the CPS form is the pass's job, so the classpath parser presents the
-  logical signature. Proven end-to-end: `caller` (Use.kt) suspends on `helper` (Lib.kt, a separate
-  `IrFile`) → 43 (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`).
+  continuation, real return); the CPS form is the pass's job. The **classpath parser** enforces this:
+  for a `suspend` top-level method (physical JVM form `Object foo(…, Continuation)`), `jvm_libraries`
+  drops the trailing continuation parameter (`strip_continuation_param`) and recovers the logical
+  return type from `@Metadata` (`Classpath::metadata_return_ty`, e.g. `kotlin/Int` to `Int`), so a
+  normal call resolves and types correctly; the erased `Object` return is kept only as `physical_ret`.
+  Proven end-to-end both ways: `caller` (Use.kt) suspends on `helper` (Lib.kt, a separate `IrFile`),
+  and against a **real** kotlinc-compiled `helper` on the `-cp` classpath, both reaching 43
+  (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`,
+  `::suspend_fun_calls_classpath_suspend_fun`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.

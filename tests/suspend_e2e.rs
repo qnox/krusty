@@ -241,6 +241,118 @@ fn suspend_fun_calls_cross_file_suspend_fun() {
     );
 }
 
+/// Locate the vendored real `kotlinc` launcher (same `.kotlinc/<v>/…` tree as `stdlib_jar`).
+fn kotlinc_bin() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if let Ok(versions) = fs::read_dir(dir.join(".kotlinc")) {
+            for v in versions.flatten() {
+                let bin = v.path().join("kotlinc/bin/kotlinc");
+                if bin.exists() {
+                    return Some(bin.to_string_lossy().into_owned());
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+#[test]
+fn suspend_fun_calls_classpath_suspend_fun() {
+    // The callee is a REAL classpath dependency: `helper` is compiled by kotlinc into a jar (so its
+    // `@Metadata` carries `IS_SUSPEND` + the logical signature, and the physical method is
+    // `Object helper(Continuation)`). krusty then compiles the caller against `-cp lib.jar`. The
+    // classpath parser must resolve `helper()` by its LOGICAL signature (no continuation arg, `Int`
+    // return) and mark it suspend; the coroutine pass threads the continuation. 42 + 1 = 43.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_cp_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // 1) kotlinc builds the suspend lib into lib.jar.
+    fs::write(dir.join("Lib.kt"), "suspend fun helper(): Int = 42\n").unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc = Command::new(&kotlinc)
+        .env("JAVA_HOME", &jh)
+        .args(["-d", libjar.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        // kotlinc unavailable/incompatible in this env — skip rather than fail spuriously.
+        eprintln!(
+            "skipping: kotlinc failed:\n{}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    // 2) krusty compiles the caller against the lib jar + stdlib.
+    fs::write(
+        dir.join("Use.kt"),
+        "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed to compile against classpath suspend dep:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    // 3) drive UseKt.caller(k) → 43.
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Object r = UseKt.caller(k);\n\
+    System.out.println(r.equals(Integer.valueOf(43)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        libjar.to_str().unwrap(),
+        stdlib
+    );
+    let jc = Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac driver failed:\n{}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "classpath suspend call: wrong result; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn suspend_fun_with_suspension_point_runs_via_continuation() {
     // `bar` calls the suspend `foo` (one suspension point) → a state machine + continuation class.
