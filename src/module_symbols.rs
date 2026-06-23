@@ -135,10 +135,9 @@ fn fn_info(
         flags: FnFlags {
             inline: sig.is_inline,
             inline_only: false,
-            // A same-file `suspend fun` is recognized by the coroutine pass via `ir.suspend_funs`
-            // (the AST `is_suspend`), not this resolver path; the classpath suspend flag flows from
-            // `@Metadata` (`jvm_libraries`). The module `Signature` carries no suspend bit yet.
-            suspend: false,
+            // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
+            // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
+            suspend: sig.is_suspend,
         },
         callable: LibraryCallable {
             owner,
@@ -295,6 +294,7 @@ mod tests {
             lambda_param_types: vec![],
             is_inline: false,
             is_final: false,
+            is_suspend: false,
         }
     }
 
