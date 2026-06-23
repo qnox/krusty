@@ -430,6 +430,67 @@ fn for_in_intarray_is_byte_identical_to_kotlinc() {
     );
 }
 
+/// `for (x in localArray)` must iterate on the EXISTING local directly — kotlinc does not snapshot an
+/// already-local iterable into a fresh slot. krusty used to emit a redundant `aload; astore` copy.
+/// Byte-identical (normalized) to kotlinc.
+#[test]
+fn for_in_local_array_no_redundant_copy_is_byte_identical_to_kotlinc() {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
+        return;
+    };
+    let src = "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return if (s == 0) \"OK\" else \"Fail\"\n}\n";
+    let Some((dir, jh)) = krusty_compile("diffloc", src) else {
+        return;
+    };
+    let kdir = dir.join("kref");
+    fs::create_dir_all(&kdir).unwrap();
+    let cc = Command::new(&kotlinc)
+        .arg(dir.join("B.kt"))
+        .args(["-d", kdir.to_str().unwrap()])
+        .env("JAVA_HOME", &jh)
+        .output()
+        .unwrap();
+    if !cc.status.success() {
+        eprintln!(
+            "skip (kotlinc unavailable): {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    let krusty_d = normalize(&javap(&jh, &dir.join("BKt.class")));
+    let kotlinc_d = normalize(&javap(&jh, &kdir.join("BKt.class")));
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        krusty_d, kotlinc_d,
+        "for-in-local-array must be byte-identical to kotlinc (no redundant array copy)"
+    );
+}
+
+/// Shape guard (no kotlinc): `for (x in localArray)` must NOT re-store the array into a second slot.
+/// The array val gets exactly one `astore`; the loop reads it back with `aload` — never an extra
+/// `astore` of the array reference between the val and the loop.
+#[test]
+fn for_in_local_array_does_not_copy_array_to_temp() {
+    let src = "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return \"OK\"\n}\n";
+    let Some((dir, _jh)) = krusty_compile("shapert", src) else {
+        return;
+    };
+    let jh = java_home().unwrap();
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    // The array reference is stored once (the `val a`); a redundant loop copy would be a 2nd astore of
+    // an object slot. After `astore_0` (a) we expect the loop to `aload_0` for arraylength/iaload, not
+    // store the array again.
+    let astore_count = d.matches("astore").count();
+    // slots: a(0). i, n, x are int (istore). sum is int. So exactly ONE astore (the array val `a`).
+    assert_eq!(
+        astore_count, 1,
+        "expected one astore (the array val); a redundant array copy adds another:\n{d}"
+    );
+}
+
 /// The `hashCode` of an all-primitive `data class` must be byte-identical to kotlinc: each field hashed
 /// via its boxed `X.hashCode(prim)` static, folded into a `result` LOCAL (`result = result*31 + h`).
 #[test]
