@@ -5605,20 +5605,31 @@ impl<'a> Checker<'a> {
                     if rt == Ty::Error {
                         return None;
                     }
-                    let has_lam =
-                        |s: &Signature| s.lambda_param_types.iter().any(|v| !v.is_empty());
-                    if let Some(s) = self
-                        .syms
-                        .ext_funs
-                        .get(&(rt.descriptor(), name.clone()))
-                        .filter(|s| has_lam(s))
+                    let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
+                    // Exact-receiver user extension (module source rung 0): its lambda parameter types
+                    // come straight off the call shape.
+                    if let Some(fi) = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
+                        })
                     {
-                        return Some(s.lambda_param_types.clone());
+                        if has_lam(&fi.call_sig.lambda_param_types) {
+                            return Some(fi.call_sig.lambda_param_types);
+                        }
                     }
-                    // Generic receiver: the decl's receiver type param → `rt` in the lambda param types.
-                    let any_desc = Ty::obj("kotlin/Any").descriptor();
-                    let s = self.syms.ext_funs.get(&(any_desc, name.clone()))?;
-                    if !has_lam(s) {
+                    // Generic receiver (rung 1, the `Any` key): the decl's receiver type param → `rt` in
+                    // the lambda param types (the type-param→receiver mapping stays AST-based).
+                    let fi = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 1
+                        })?;
+                    if !has_lam(&fi.call_sig.lambda_param_types) {
                         return None;
                     }
                     let recv_tp = self
@@ -5638,7 +5649,8 @@ impl<'a> Checker<'a> {
                         });
                     let any = Ty::obj("kotlin/Any");
                     Some(
-                        s.lambda_param_types
+                        fi.call_sig
+                            .lambda_param_types
                             .iter()
                             .map(|v| {
                                 v.iter()
@@ -5859,10 +5871,14 @@ impl<'a> Checker<'a> {
                     // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin —
                     // but krusty parses both to the same AST, so it can't tell them apart. When such
                     // an extension exists, reject (skip) rather than risk picking the wrong one.
-                    let user_ext = self
-                        .syms
-                        .ext_funs
-                        .contains_key(&(rt.descriptor(), name.clone()));
+                    // An exact-receiver user extension (module source rung 0) of this operator name.
+                    let user_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .iter()
+                        .any(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 0
+                        });
                     if rt.is_numeric() && !user_ext {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
                         let bin = match name.as_str() {
