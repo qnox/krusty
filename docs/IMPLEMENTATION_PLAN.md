@@ -3961,16 +3961,21 @@ per-jar/multi-module setups are just more sources.
 - **`CallSig`** on `FunctionInfo` (param_names/param_defaults/lambda_param_types/required/vararg) — the
   source call shape the checker needs beyond the erased descriptor. `ModuleSymbols` fills it from the
   `Signature`; JVM defaults it for now.
-- DONE: foundation (16 unit tests, gate 1354/0, not yet wired into the checker/lowerer).
-- REMAINING (high-risk, hot path — do per-site, gate-green, revert-if-regress):
-  1. Enrich JVM `functions()` `call_sig` (vararg/defaults/lambda types) so a library candidate carries
-     the same call shape a module one does — prerequisite for a true single-path collapse.
-  2. A federated selector (composite-level `resolve` over `functions()` + `call_sig` + `receiver_rank`,
-     per-source selection, cross-source precedence) returning a `FunctionInfo` with `origin`.
-  3. Migrate the checker call sites (the `syms.funs.contains_key` guards + `pick_overload` at
-     `resolve.rs:6542`, the `resolve_callable` fallbacks) one at a time to the federated selector.
-  4. Migrate the lowerer to switch on `origin` instead of `syms.funs`/`fun_ids` guards.
-  5. Delete each guard as its site lands; when the last goes, the duplication is gone.
+- DONE: foundation (16 unit tests, gate 1354/0).
+- DONE — checker wiring (commits 407–409), `ModuleSymbols` is LIVE in production resolution:
+  - top-level calls (407): user funs resolve through `ModuleSymbols`; the `syms.funs.contains_key`
+    shadow guards in that tail removed; explicit precedence module > implicit-receiver > library.
+  - member calls (408): `recv.m()` user member through `ModuleSymbols` (its member walk realigned to
+    DFS pre-order to match `lookup_method` exactly).
+  - extension calls (409): exact-receiver user extension through `ModuleSymbols` (rung-0 Extension).
+- REMAINING (lower value / separate concern):
+  - The lowerer still uses its own emit indices (`fun_ids`/`fn_facades`) — an EMIT concern, not
+    resolution duplication. Switching it to share the checker's resolution via `Origin` needs the
+    resolution result threaded through `TypeInfo` (a bigger architectural change, not guard-dedup).
+  - A few upstream `contains_key` guards remain for lambda-mutation TYPING (`6114` `with`, the
+    `toplevel_must_inline` path) — cheap correctness checks, not resolution duplication.
+  - The AST-dependent generic-receiver inline extension (`<T> T.foo()`) stays in the checker (it needs
+    the `Decl::Fun` `is_inline`/type-param shape, not expressible through the erased source query).
 
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
