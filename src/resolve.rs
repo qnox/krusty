@@ -4054,8 +4054,12 @@ impl<'a> Checker<'a> {
                                     .or_else(|| resolve_string_instance(&name, &arg_tys))
                                     .unwrap_or(Ty::Error)
                             } else if let Ty::Obj(internal, _) = rt {
-                                self.lookup_method(internal, &name)
-                                    .map(|s| s.ret)
+                                crate::module_symbols::ModuleSymbols::new(self.syms)
+                                    .functions(&name, Some(rt))
+                                    .overloads
+                                    .into_iter()
+                                    .find(|o| o.kind == crate::libraries::FnKind::Member)
+                                    .map(|fi| fi.callable.ret)
                                     .or_else(|| {
                                         crate::call_resolver::resolve_instance(
                                             &*self.syms.libraries,
@@ -4926,12 +4930,18 @@ impl<'a> Checker<'a> {
             }
         }
         if let Ty::Obj(internal, _) = rt {
-            if let Some(sig) = self.lookup_method(internal, name) {
-                if sig.params.len() == arg_tys.len() {
-                    for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
+            let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
+                .functions(name, Some(rt))
+                .overloads
+                .into_iter()
+                .find(|o| o.kind == crate::libraries::FnKind::Member);
+            if let Some(fi) = module_member {
+                let params = fi.callable.params.clone();
+                if params.len() == arg_tys.len() {
+                    for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
                         self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                     }
-                    return Some(sig.ret);
+                    return Some(fi.callable.ret);
                 }
             }
             if let Some(m) = crate::call_resolver::resolve_instance(
@@ -5253,9 +5263,19 @@ impl<'a> Checker<'a> {
             let supports_named = match &callee_expr {
                 Expr::Name(n) => self.module_declares(n),
                 Expr::Member { receiver, name } => {
-                    // A method with default parameters (e.g. data-class `copy`) — `required < params`.
+                    // A method with default parameters (e.g. data-class `copy`) — `required < params` —
+                    // queried through the module source.
                     let rt = self.expr(*receiver);
-                    matches!(rt, Ty::Obj(i, _) if self.lookup_method(i, name).map_or(false, |s| s.required < s.params.len() && !s.param_names.is_empty()))
+                    matches!(rt, Ty::Obj(_, _))
+                        && crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .functions(name, Some(rt))
+                            .overloads
+                            .into_iter()
+                            .find(|o| o.kind == crate::libraries::FnKind::Member)
+                            .map_or(false, |fi| {
+                                fi.call_sig.required < fi.callable.params.len()
+                                    && !fi.call_sig.param_names.is_empty()
+                            })
                 }
                 _ => false,
             };
@@ -5515,8 +5535,12 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(receiver);
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
-                let method_sig = match rt {
-                    Ty::Obj(internal, _) => self.lookup_method(internal, &name),
+                let method_sig: Option<crate::libraries::FunctionInfo> = match rt {
+                    Ty::Obj(_, _) => crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| o.kind == crate::libraries::FnKind::Member),
                     _ => None,
                 };
                 // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
@@ -5655,11 +5679,12 @@ impl<'a> Checker<'a> {
                     .enumerate()
                     .map(|(i, &a)| {
                         if let Some(ref sig) = method_sig {
-                            if i < sig.lambda_param_types.len()
-                                && !sig.lambda_param_types[i].is_empty()
+                            let lpt = &sig.call_sig.lambda_param_types;
+                            if i < lpt.len()
+                                && !lpt[i].is_empty()
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
-                                let pt = sig.lambda_param_types[i].clone();
+                                let pt = lpt[i].clone();
                                 return self.check_lambda_with_types(a, &pt);
                             }
                         }
@@ -6485,17 +6510,27 @@ impl<'a> Checker<'a> {
                 // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
                 if !self.module_declares(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let sig = self.lookup_method(internal, &fname).or_else(|| {
-                            self.syms
-                                .class_by_internal(internal)
-                                .and_then(|c| c.inner_of.clone())
-                                .and_then(|outer| self.lookup_method(&outer, &fname))
-                        });
-                        if let Some(sig) = sig {
-                            for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                        // The sibling member through the module source; the enclosing-class fallback walks
+                        // `inner_of` (a LEXICAL scope, not the type hierarchy) so it stays on `lookup_method`.
+                        let resolved: Option<(Vec<Ty>, Ty)> =
+                            crate::module_symbols::ModuleSymbols::new(self.syms)
+                                .functions(&fname, Some(Ty::obj(internal)))
+                                .overloads
+                                .into_iter()
+                                .find(|o| o.kind == crate::libraries::FnKind::Member)
+                                .map(|fi| (fi.callable.params.clone(), fi.callable.ret))
+                                .or_else(|| {
+                                    self.syms
+                                        .class_by_internal(internal)
+                                        .and_then(|c| c.inner_of.clone())
+                                        .and_then(|outer| self.lookup_method(&outer, &fname))
+                                        .map(|s| (s.params, s.ret))
+                                });
+                        if let Some((params, ret)) = resolved {
+                            for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
-                            return sig.ret;
+                            return ret;
                         }
                     }
                 }

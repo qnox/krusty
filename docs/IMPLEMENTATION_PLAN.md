@@ -3962,20 +3962,21 @@ per-jar/multi-module setups are just more sources.
   source call shape the checker needs beyond the erased descriptor. `ModuleSymbols` fills it from the
   `Signature`; JVM defaults it for now.
 - DONE: foundation (16 unit tests, gate 1354/0).
-- DONE — checker wiring (commits 407–409), `ModuleSymbols` is LIVE in production resolution:
-  - top-level calls (407): user funs resolve through `ModuleSymbols`; the `syms.funs.contains_key`
-    shadow guards in that tail removed; explicit precedence module > implicit-receiver > library.
-  - member calls (408): `recv.m()` user member through `ModuleSymbols` (its member walk realigned to
-    DFS pre-order to match `lookup_method` exactly).
-  - extension calls (409): exact-receiver user extension through `ModuleSymbols` (rung-0 Extension).
-- REMAINING (lower value / separate concern):
-  - The lowerer still uses its own emit indices (`fun_ids`/`fn_facades`) — an EMIT concern, not
-    resolution duplication. Switching it to share the checker's resolution via `Origin` needs the
-    resolution result threaded through `TypeInfo` (a bigger architectural change, not guard-dedup).
-  - A few upstream `contains_key` guards remain for lambda-mutation TYPING (`6114` `with`, the
-    `toplevel_must_inline` path) — cheap correctness checks, not resolution duplication.
-  - The AST-dependent generic-receiver inline extension (`<T> T.foo()`) stays in the checker (it needs
-    the `Decl::Fun` `is_inline`/type-param shape, not expressible through the erased source query).
+- DONE — full wiring (commits 407–414), `ModuleSymbols` is LIVE; **every call's overload resolution
+  flows through the source federation** (module via `ModuleSymbols`, library via the library source):
+  - top-level calls — checker (407) AND lowerer same-file + cross-file (411), via
+    `ModuleSymbols::resolve_top_level` (the source owns `pick_overload`, 414).
+  - member calls (408): `recv.m()` user member through `ModuleSymbols` (member walk = DFS pre-order,
+    matching `lookup_method`).
+  - extension calls: exact-receiver (409) and generic-receiver (412, rung-1 Any key) through
+    `ModuleSymbols`; the generic-receiver return-type specialization stays AST-based (it maps a return
+    type-param name to the actual receiver/arg — structure the erased `FunctionInfo` doesn't carry).
+  - shadow-precedence existence guards (413): `module_declares` → `ModuleSymbols::declares_top_level`;
+    no direct `syms.funs` access remains in any call-resolution path.
+- Non-resolution remnants (correctly NOT routed through the source): table-building (`fun_ids`/`fn_facades`
+  emit indices, signature collection), a declaration looking up its own registered signature, member-SHAPE
+  queries (`lookup_method` for named-arg eligibility / override checks), and library member resolution
+  (`call_resolver::resolve_instance` over the library source — the library half of the federation).
 
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
