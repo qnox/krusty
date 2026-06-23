@@ -430,6 +430,84 @@ fn for_in_intarray_is_byte_identical_to_kotlinc() {
     );
 }
 
+/// Compile `src` with krusty AND kotlinc, assert the facade class is byte-identical (normalized).
+/// Skips (returns) when the kotlinc differential env is unavailable.
+fn assert_byte_identical_to_kotlinc(name: &str, src: &str) {
+    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
+        eprintln!("skip (set KRUSTY_KOTLINC)");
+        return;
+    };
+    let Some((dir, jh)) = krusty_compile(name, src) else {
+        return;
+    };
+    let kdir = dir.join("kref");
+    fs::create_dir_all(&kdir).unwrap();
+    let cc = Command::new(&kotlinc)
+        .arg(dir.join("B.kt"))
+        .args(["-d", kdir.to_str().unwrap()])
+        .env("JAVA_HOME", &jh)
+        .output()
+        .unwrap();
+    if !cc.status.success() {
+        eprintln!(
+            "skip (kotlinc failed): {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    let kr = normalize(&javap(&jh, &dir.join("BKt.class")));
+    let kc = normalize(&javap(&jh, &kdir.join("BKt.class")));
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        kr, kc,
+        "{name}: krusty bytecode must be byte-identical to kotlinc"
+    );
+}
+
+/// Counted range loops with unit step must be byte-identical to kotlinc: a CONSTANT bound folds to a
+/// single `i < C` exclusive test (no hoisted bound local, no overflow guard) — `1..10` → `i < 11`,
+/// `0 until 10` → `i < 10`; a variable `until` bound hoists but still needs no guard.
+#[test]
+fn range_until_and_through_loops_byte_identical_to_kotlinc() {
+    assert_byte_identical_to_kotlinc(
+        "ruc",
+        "fun box(): String {\n  var s = 0\n  for (i in 0 until 10) s += i\n  return \"OK\"\n}\n",
+    );
+    assert_byte_identical_to_kotlinc(
+        "rtc",
+        "fun box(): String {\n  var s = 0\n  for (i in 1..10) s += i\n  return \"OK\"\n}\n",
+    );
+    assert_byte_identical_to_kotlinc(
+        "ruv",
+        "fun box(): String {\n  var s = 0\n  val n = 5\n  for (i in 0 until n) s += i\n  return \"OK\"\n}\n",
+    );
+}
+
+/// Shape guard (no kotlinc): a constant-bound `0 until 10` loop must NOT hoist the bound into a local
+/// (no `istore` of the bound) and must NOT emit an overflow break (`if_icmpne … goto` guard) — it is a
+/// plain `iload i; bipush 10; if_icmpge exit` counted loop.
+#[test]
+fn constant_until_loop_has_no_bound_local_or_guard() {
+    let Some(d) = facade_disasm(
+        "noguard",
+        "fun box(): String {\n  var s = 0\n  for (i in 0 until 10) s += i\n  return \"OK\"\n}\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    // The constant bound is inlined in the condition (`bipush 10; if_icmpge`), not loaded from a
+    // hoisted slot — and there is no overflow break guard (`if_icmpne … goto`).
+    assert!(
+        n.contains("bipush 10\nif_icmpge"),
+        "the constant bound must be inlined in the loop condition:\n{n}"
+    );
+    assert!(
+        !n.contains("if_icmpne"),
+        "an exclusive constant-bound loop needs no overflow break guard:\n{n}"
+    );
+}
+
 /// `for (x in localArray)` must iterate on the EXISTING local directly — kotlinc does not snapshot an
 /// already-local iterable into a fresh slot. krusty used to emit a redundant `aload; astore` copy.
 /// Byte-identical (normalized) to kotlinc.

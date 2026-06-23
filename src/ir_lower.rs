@@ -5936,24 +5936,65 @@ impl<'a> Lower<'a> {
                     ty: elem_ir.clone(),
                     init: Some(start),
                 });
-                // hoisted bound
-                let end_e = self.lower_arg(range.end, &elem_ir)?;
-                let end_v = self.fresh_value();
-                let var_end = self.ir.add_expr(IrExpr::Variable {
-                    index: end_v,
-                    ty: elem_ir.clone(),
-                    init: Some(end_e),
-                });
-                // condition. Signed/Long use the direct comparison opcode; unsigned compares via the JDK
-                // `compareUnsigned(i, end) <op> 0` (a signed `<=` would misorder values past the sign bit).
+                // The bound. kotlinc folds a CONSTANT bound with unit step into a single `i < C` exclusive
+                // test — no hoisted local, no overflow guard: `1..10` → `i < 11`, `0 until 10` → `i < 10`.
+                // Match that for a literal `Int` bound; every other case hoists the (possibly
+                // side-effecting / non-constant) bound into a temp and keeps the overflow-safe shape.
+                let inline_bound: Option<i32> = if elem == Ty::Int && range.step.is_none() {
+                    match self.afile.expr(range.end) {
+                        Expr::IntLit(v) => {
+                            let v = *v;
+                            match range.kind {
+                                RangeKind::Until if i32::try_from(v).is_ok() => Some(v as i32),
+                                RangeKind::Through if v < i32::MAX as i64 => Some(v as i32 + 1),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                // A bound that is already a plain local (not reassigned in the body) is read directly —
+                // kotlinc does not hoist it into a second slot. Only a complex/reassigned bound is hoisted.
+                let end_local = if inline_bound.is_none() {
+                    self.expr_as_reusable_local(range.end, body)
+                } else {
+                    None
+                };
+                let (var_end, end_v) = if inline_bound.is_some() {
+                    (None, None)
+                } else if let Some(idx) = end_local {
+                    (None, Some(idx))
+                } else {
+                    let end_e = self.lower_arg(range.end, &elem_ir)?;
+                    let ev = self.fresh_value();
+                    let var = self.ir.add_expr(IrExpr::Variable {
+                        index: ev,
+                        ty: elem_ir.clone(),
+                        init: Some(end_e),
+                    });
+                    (Some(var), Some(ev))
+                };
+                // condition. Constant bound: a single `i < C`. Otherwise the form's comparison against the
+                // hoisted bound (unsigned via `compareUnsigned(i, end) <op> 0`, since a signed `<=` would
+                // misorder values past the sign bit).
                 let cmp = match range.kind {
                     RangeKind::Through => IrBinOp::Le,
                     RangeKind::Until => IrBinOp::Lt,
                     RangeKind::DownTo => IrBinOp::Ge,
                 };
-                let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
-                let ge = self.ir.add_expr(IrExpr::GetValue(end_v));
-                let cond = if elem.is_unsigned() {
+                let cond = if let Some(b) = inline_bound {
+                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                    let c = self.ir.add_expr(IrExpr::Const(IrConst::Int(b)));
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Lt,
+                        lhs: gi,
+                        rhs: c,
+                    })
+                } else if elem.is_unsigned() {
+                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                    let ge = self.ir.add_expr(IrExpr::GetValue(end_v.unwrap()));
                     let (owner, prim) = if elem == Ty::UInt {
                         ("java/lang/Integer", "I")
                     } else {
@@ -5977,6 +6018,8 @@ impl<'a> Lower<'a> {
                         rhs: zero,
                     })
                 } else {
+                    let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
+                    let ge = self.ir.add_expr(IrExpr::GetValue(end_v.unwrap()));
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: cmp,
                         lhs: gi,
@@ -6041,74 +6084,85 @@ impl<'a> Lower<'a> {
                 // (`next < i` when ascending / `next > i` when descending detects the overflow) — the
                 // overflow-safe shape, matching kotlinc's `getProgressionLastElement` semantics, without
                 // needing a wider accumulator (so it works for `Long` too).
-                let signed_int_family =
-                    matches!(elem, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte);
-                let at_end = if range.step.is_some() && signed_int_family {
-                    let step_e = |this: &mut Self| match var_step {
-                        Some((_, step_v)) => this.ir.add_expr(IrExpr::GetValue(step_v)),
-                        None => this.ir.add_expr(IrExpr::Const(IrConst::Int(1))),
-                    };
-                    // next = i ± step  (passes `end`?)
-                    let i1 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let s1 = step_e(self);
-                    let next1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: inc_op,
-                        lhs: i1,
-                        rhs: s1,
-                    });
-                    let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
-                    // Through → next > end; Until → next >= end; DownTo → next < end.
-                    let past_op = match range.kind {
-                        RangeKind::Through => IrBinOp::Gt,
-                        RangeKind::Until => IrBinOp::Ge,
-                        RangeKind::DownTo => IrBinOp::Lt,
-                    };
-                    let past_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: past_op,
-                        lhs: next1,
-                        rhs: ec,
-                    });
-                    // wrap-around: ascending `next < i`, descending `next > i`.
-                    let i2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let s2 = step_e(self);
-                    let next2 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: inc_op,
-                        lhs: i2,
-                        rhs: s2,
-                    });
-                    let i3 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let wrap_op = if matches!(range.kind, RangeKind::DownTo) {
-                        IrBinOp::Gt
-                    } else {
-                        IrBinOp::Lt
-                    };
-                    let wrapped = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: wrap_op,
-                        lhs: next2,
-                        rhs: i3,
-                    });
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Or,
-                        lhs: past_end,
-                        rhs: wrapped,
-                    })
+                // Skip the overflow break entirely when the loop can't wrap past its bound: a constant
+                // inline bound (folded to `i < C`), or an exclusive `until` with unit step (the counter
+                // never reaches `end`). kotlinc emits no guard there. Every other form keeps the
+                // overflow-safe break (computed against the hoisted `end` local).
+                let no_guard = inline_bound.is_some()
+                    || (matches!(range.kind, RangeKind::Until) && range.step.is_none());
+                let update = if no_guard {
+                    inc
                 } else {
-                    let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
-                    let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
-                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: ic,
-                        rhs: ec,
+                    let end_v = end_v.unwrap();
+                    let signed_int_family =
+                        matches!(elem, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte);
+                    let at_end = if range.step.is_some() && signed_int_family {
+                        let step_e = |this: &mut Self| match var_step {
+                            Some((_, step_v)) => this.ir.add_expr(IrExpr::GetValue(step_v)),
+                            None => this.ir.add_expr(IrExpr::Const(IrConst::Int(1))),
+                        };
+                        // next = i ± step  (passes `end`?)
+                        let i1 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                        let s1 = step_e(self);
+                        let next1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: inc_op,
+                            lhs: i1,
+                            rhs: s1,
+                        });
+                        let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
+                        // Through → next > end; Until → next >= end; DownTo → next < end.
+                        let past_op = match range.kind {
+                            RangeKind::Through => IrBinOp::Gt,
+                            RangeKind::Until => IrBinOp::Ge,
+                            RangeKind::DownTo => IrBinOp::Lt,
+                        };
+                        let past_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: past_op,
+                            lhs: next1,
+                            rhs: ec,
+                        });
+                        // wrap-around: ascending `next < i`, descending `next > i`.
+                        let i2 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                        let s2 = step_e(self);
+                        let next2 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: inc_op,
+                            lhs: i2,
+                            rhs: s2,
+                        });
+                        let i3 = self.ir.add_expr(IrExpr::GetValue(i_v));
+                        let wrap_op = if matches!(range.kind, RangeKind::DownTo) {
+                            IrBinOp::Gt
+                        } else {
+                            IrBinOp::Lt
+                        };
+                        let wrapped = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: wrap_op,
+                            lhs: next2,
+                            rhs: i3,
+                        });
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Or,
+                            lhs: past_end,
+                            rhs: wrapped,
+                        })
+                    } else {
+                        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
+                        let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
+                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: IrBinOp::Eq,
+                            lhs: ic,
+                            rhs: ec,
+                        })
+                    };
+                    let brk = self.ir.add_expr(IrExpr::Break { label: None });
+                    let if_break = self.ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(at_end), brk)],
+                    });
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![if_break, inc],
+                        value: None,
                     })
                 };
-                let brk = self.ir.add_expr(IrExpr::Break { label: None });
-                let if_break = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(at_end), brk)],
-                });
-                let update = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![if_break, inc],
-                    value: None,
-                });
                 let wbody = self.ir.add_expr(IrExpr::Block {
                     stmts: out,
                     value: None,
@@ -6121,7 +6175,10 @@ impl<'a> Lower<'a> {
                     label,
                 });
                 self.scope.truncate(depth);
-                let mut prologue = vec![var_i, var_end];
+                let mut prologue = vec![var_i];
+                if let Some(ve) = var_end {
+                    prologue.push(ve);
+                }
                 if let Some((vs, _)) = var_step {
                     prologue.push(vs);
                 }
@@ -6175,7 +6232,7 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         // Evaluate the array once. When the iterable is ALREADY a plain (non-boxed) local, iterate on
         // that local directly — kotlinc reuses the existing slot rather than storing a redundant copy.
-        let (arr_v, var_arr) = if let Some(v) = self.iterable_as_local(iterable, body) {
+        let (arr_v, var_arr) = if let Some(v) = self.expr_as_reusable_local(iterable, body) {
             (v, None)
         } else {
             let v = self.fresh_value();
@@ -6277,13 +6334,13 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
     }
 
-    /// If `iterable` is a plain (non-boxed) local variable read that the loop `body` does NOT reassign,
-    /// its IR value index — so `for (x in localArr)` iterates on the existing local directly (no
-    /// redundant array copy), matching kotlinc. `None` otherwise (then it's snapshotted into a fresh
-    /// temp): kotlinc snapshots an iterable whose backing `var` is reassigned in the body, so the loop
-    /// still walks the ORIGINAL array — reusing the live local there would read the new value.
-    fn iterable_as_local(&self, iterable: AstExprId, body: AstExprId) -> Option<u32> {
-        if let Expr::Name(n) = self.afile.expr(iterable) {
+    /// If `e` is a plain (non-boxed) local variable read that the loop `body` does NOT reassign, its IR
+    /// value index — so a loop over it (`for (x in localArr)`, or a counted loop whose bound is a local)
+    /// reads the existing local directly instead of snapshotting a copy, matching kotlinc. `None`
+    /// otherwise (then it's stored into a fresh temp): kotlinc snapshots a value whose backing `var` is
+    /// reassigned in the body so the loop keeps the ORIGINAL — reusing the live local would read the new.
+    fn expr_as_reusable_local(&self, e: AstExprId, body: AstExprId) -> Option<u32> {
+        if let Expr::Name(n) = self.afile.expr(e) {
             let n = n.clone();
             if self.boxed_elem.contains_key(&n) || self.expr_reassigns_name(body, &n) {
                 return None;
