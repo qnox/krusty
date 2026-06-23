@@ -104,6 +104,25 @@ pub enum FnKind {
     TopLevel,
 }
 
+/// The source-level call shape of one overload — the call-site facts the CHECKER needs that the erased
+/// emit `descriptor` drops. Parallel to the LOGICAL parameter list (the receiver is NOT included, even
+/// for an extension whose `callable.params` prepends it). Empty/zero `Default` means "not provided by
+/// this source"; the federated consumer falls back as it did before the consolidation.
+#[derive(Clone, Default)]
+pub struct CallSig {
+    /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
+    pub param_names: Vec<String>,
+    /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
+    pub param_defaults: Vec<bool>,
+    /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
+    /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
+    pub lambda_param_types: Vec<Vec<Ty>>,
+    /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
+    pub required: usize,
+    /// True if the last logical param is `vararg` (callers pack trailing args into its array).
+    pub vararg: bool,
+}
+
 /// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
 /// needs, in ONE place — no follow-up metadata calls. `callable` is the opaque emit handle (the platform
 /// emitter consumes it; the front end never inspects it).
@@ -129,6 +148,9 @@ pub struct FunctionInfo {
     /// `0` for members/top-level (precedence there is by [`FnKind`], not rung); `u32::MAX` marks a
     /// candidate that must never preempt a real rung (the `@OverloadResolutionByLambdaReturnType` family).
     pub receiver_rank: u32,
+    /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
+    /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
+    pub call_sig: CallSig,
 }
 
 /// Function metadata flags, decoded once from `@Metadata`.

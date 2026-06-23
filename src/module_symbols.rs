@@ -8,8 +8,8 @@
 //! so the lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::libraries::{
-    FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember, LibrarySeed,
-    LibraryType, Origin,
+    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember,
+    LibrarySeed, LibraryType, Origin,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -70,6 +70,14 @@ fn fn_info(
         ret_nullable: false,
         public: true,
         receiver_rank: rank,
+        // The call shape mirrors the source Signature, parallel to the LOGICAL params (no receiver).
+        call_sig: CallSig {
+            param_names: sig.param_names.clone(),
+            param_defaults: sig.param_defaults.clone(),
+            lambda_param_types: sig.lambda_param_types.clone(),
+            required: sig.required,
+            vararg: sig.vararg,
+        },
         flags: FnFlags {
             inline: sig.is_inline,
             inline_only: false,
@@ -292,6 +300,23 @@ mod tests {
         assert_eq!(o.kind, FnKind::TopLevel);
         assert_eq!(o.callable.descriptor, "(I)I");
         assert_eq!(o.callable.origin, Origin::Module { facade: "".into() });
+    }
+
+    #[test]
+    fn call_sig_mirrors_the_source_signature() {
+        let mut st = SymbolTable::default();
+        let mut s = sig(vec![Ty::Int, Ty::Int], Ty::Int);
+        s.required = 1;
+        s.param_defaults = vec![false, true];
+        s.param_names = vec!["a".into(), "b".into()];
+        s.vararg = false;
+        st.funs.insert("f".into(), vec![s]);
+        let m = ModuleSymbols::new(&st);
+        let cs = &m.functions("f", None).overloads[0].call_sig;
+        assert_eq!(cs.required, 1);
+        assert_eq!(cs.param_defaults, vec![false, true]);
+        assert_eq!(cs.param_names, vec!["a".to_string(), "b".to_string()]);
+        assert!(!cs.vararg);
     }
 
     #[test]

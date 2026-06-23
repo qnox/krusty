@@ -742,6 +742,7 @@ impl SymbolSource for JvmLibraries {
                                 // The lambda-return family is resolved by return type, never through the
                                 // arg-binding extension selector — mark it so it can't preempt a real rung.
                                 receiver_rank: u32::MAX,
+                                call_sig: crate::libraries::CallSig::default(),
                                 flags: FnFlags {
                                     inline: true,
                                     inline_only: !c.public,
@@ -807,6 +808,7 @@ impl SymbolSource for JvmLibraries {
                         ret_nullable,
                         public: c.public,
                         receiver_rank: rank as u32,
+                        call_sig: crate::libraries::CallSig::default(),
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
@@ -853,6 +855,7 @@ impl SymbolSource for JvmLibraries {
                                 ret_nullable: false,
                                 public: true,
                                 receiver_rank: rung,
+                                call_sig: crate::libraries::CallSig::default(),
                                 flags: FnFlags::default(),
                                 callable: LibraryCallable {
                                     name: m.name.clone(),
@@ -887,6 +890,7 @@ impl SymbolSource for JvmLibraries {
                     ret_nullable: false,
                     public: c.public,
                     receiver_rank: 0,
+                    call_sig: crate::libraries::CallSig::default(),
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,

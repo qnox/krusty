@@ -137,6 +137,7 @@ mod tests {
                         ret_nullable: false,
                         public: true,
                         receiver_rank: 0,
+                        call_sig: crate::libraries::CallSig::default(),
                         flags: FnFlags::default(),
                         callable: callable(&self.owner, name),
                     }],
