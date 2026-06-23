@@ -363,6 +363,19 @@ fn suspend_chain_calls_state_machine_callee() {
 }
 
 #[test]
+fn suspend_fun_calls_member_suspend_fun() {
+    // A top-level suspend fn calls a (leaf) member suspend fn `c.leaf()` — the flattener detects the
+    // member call (a `MethodCall` to a suspend method) and threads its continuation. 100+5+1 = 106.
+    run_suspend(
+        "smmembercall",
+        "class C(val base: Int) {\n    suspend fun leaf(): Int = base + 5\n}\n\
+         suspend fun top(): Int {\n    val c = C(100)\n    val a = c.leaf()\n    return a + 1\n}\n",
+        "top",
+        106,
+    );
+}
+
+#[test]
 fn suspend_fun_tail_suspension_returns_result() {
     // `h` returns the result of a suspend call directly (`= foo()` → `return foo()`): a tail-position
     // suspension. Desugars to `val tmp = foo(); return tmp` and drives to 42.

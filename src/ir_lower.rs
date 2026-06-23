@@ -141,16 +141,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
         }
+        // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
+        // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
+        // context is a Kotlin error). A suspend body may call both — the coroutine pass threads the
+        // continuation into a static (`Call`) or member (`MethodCall`) suspend call.
         for (e, owner_suspend) in bodies {
-            if member_suspend
-                .iter()
-                .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
-            {
-                return None; // a member suspend fn is called somewhere — caller side not modeled
-            }
             if !owner_suspend
                 && top_suspend
                     .iter()
+                    .chain(member_suspend.iter())
                     .any(|n| crate::resolve::expr_uses_name_pub(file, e, n))
             {
                 return None;
