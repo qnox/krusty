@@ -646,6 +646,180 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+// --- Persistent kotlinc compiler server -----------------------------------
+//
+// The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler
+// cold start each time (the dominant cost of the differential e2e). Instead run ONE persistent JVM
+// that invokes the compiler class (`K2JVMCompiler.exec`, which returns an `ExitCode` without
+// `System.exit`) in-process per request — the same thing the Kotlin compile daemon does. Class state
+// from one compile doesn't leak destructively into the next (exec creates+disposes its own
+// environment per call).
+
+const KOTLINC_SERVER_SRC: &str = r#"
+import java.io.*;
+import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler;
+import org.jetbrains.kotlin.cli.common.ExitCode;
+
+public class KotlincServer {
+    public static void main(String[] a) throws Exception {
+        DataInputStream din = new DataInputStream(new BufferedInputStream(System.in, 65536));
+        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
+        System.setOut(System.err);
+        while (true) {
+            int n;
+            try { n = din.readInt(); } catch (EOFException e) { break; }
+            String[] args = new String[n];
+            for (int i = 0; i < n; i++) {
+                int l = din.readUnsignedShort();
+                args[i] = new String(din.readNBytes(l), "UTF-8");
+            }
+            ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+            PrintStream err = new PrintStream(errBuf, true, "UTF-8");
+            int codeNum;
+            try {
+                ExitCode code = new K2JVMCompiler().exec(err, args);
+                codeNum = code.getCode();
+            } catch (Throwable t) {
+                t.printStackTrace(err);
+                codeNum = 2;
+            }
+            byte[] eb = errBuf.toByteArray();
+            dout.writeInt(codeNum);
+            dout.writeInt(eb.length);
+            dout.write(eb);
+            dout.flush();
+        }
+    }
+}
+"#;
+
+/// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries
+/// `K2JVMCompiler`. `None` when no `KRUSTY_KOTLINC` dist is available.
+#[allow(dead_code)]
+pub fn kotlin_compiler_jar() -> Option<PathBuf> {
+    let p = kotlinc_lib_dir()?.join("kotlin-compiler.jar");
+    p.is_file().then_some(p)
+}
+
+/// Compile `KotlincServer.java` once (against the compiler jar) into a stable cache dir; return it.
+fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf> {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in KOTLINC_SERVER_SRC.bytes() {
+        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/kotlinc_server_{hash:016x}"));
+    if dir.join("KotlincServer.class").is_file() {
+        return Some(dir);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let src_path = dir.join("KotlincServer.java");
+    std::fs::write(&src_path, KOTLINC_SERVER_SRC).ok()?;
+    let javac = format!("{java_home}/bin/javac");
+    if !Path::new(&javac).exists() {
+        return None;
+    }
+    let out = Command::new(&javac)
+        .args(["-cp", &compiler_jar.to_string_lossy(), "-d"])
+        .arg(&dir)
+        .arg(&src_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "KotlincServer javac failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return None;
+    }
+    Some(dir)
+}
+
+/// A persistent JVM running `KotlincServer`, fed compiler arg-lists over a pipe.
+struct KotlincServer {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
+impl KotlincServer {
+    fn new(java: &str, cp: &str) -> Option<Self> {
+        let mut child = Command::new(java)
+            .args(["-cp", cp, "KotlincServer"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        Some(KotlincServer {
+            _child: child,
+            stdin,
+            stdout,
+        })
+    }
+
+    fn try_compile(&mut self, args: &[String]) -> std::io::Result<(i32, String)> {
+        self.stdin.write_all(&(args.len() as u32).to_be_bytes())?;
+        for arg in args {
+            self.stdin.write_all(&(arg.len() as u16).to_be_bytes())?;
+            self.stdin.write_all(arg.as_bytes())?;
+        }
+        self.stdin.flush()?;
+        // A compile can take a few seconds (cold) — generous deadline.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let fd = self.stdout.as_raw_fd();
+        let mut i32_buf = [0u8; 4];
+        read_exact_deadline(fd, &mut i32_buf, deadline)?;
+        let code = i32::from_be_bytes(i32_buf);
+        read_exact_deadline(fd, &mut i32_buf, deadline)?;
+        let elen = u32::from_be_bytes(i32_buf) as usize;
+        let mut err = vec![0u8; elen];
+        read_exact_deadline(fd, &mut err, deadline)?;
+        Ok((code, String::from_utf8_lossy(&err).into_owned()))
+    }
+}
+
+/// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
+/// arguments (`["-d", out, "-cp", cp, "Lib.kt"]`). Returns `(exit_code, stderr)` — `exit_code == 0`
+/// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
+/// `kotlinc`). One server JVM is shared across all calls (keyed by the compiler jar).
+#[allow(dead_code)]
+pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
+    static POOL: OnceLock<Mutex<HashMap<String, Mutex<KotlincServer>>>> = OnceLock::new();
+    let java_home = java_home()?;
+    let java = format!("{java_home}/bin/java");
+    if !Path::new(&java).exists() {
+        return None;
+    }
+    let compiler_jar = kotlin_compiler_jar()?;
+    let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
+    let cp = format!(
+        "{}:{}",
+        server_dir.to_string_lossy(),
+        compiler_jar.to_string_lossy()
+    );
+    let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let mut map = pool.lock().unwrap();
+        if !map.contains_key(&cp) {
+            map.insert(cp.clone(), Mutex::new(KotlincServer::new(&java, &cp)?));
+        }
+    }
+    let map = pool.lock().unwrap();
+    let server_mx = map.get(&cp).unwrap();
+    let mut server = server_mx.lock().unwrap();
+    match server.try_compile(args) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            // Server died — restart once and retry.
+            *server = KotlincServer::new(&java, &cp)?;
+            server.try_compile(args).ok()
+        }
+    }
+}
+
 fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 8 || out.len() > 4 {
         return;
