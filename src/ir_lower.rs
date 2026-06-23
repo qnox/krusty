@@ -404,6 +404,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if m.is_suspend {
                     lo.ir.suspend_funs.push(fid);
                 }
+                // A generic member method gets the same JVM `Signature` as a generic top-level function.
+                if let Some(s) = fn_jvm_signature(m, sig) {
+                    lo.ir.signatures.insert(fid, s);
+                }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
                 method_fids.push(fid);
             }

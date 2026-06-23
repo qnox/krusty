@@ -67,6 +67,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P13 — generic member methods: scope own type params + emit `Signature` (gate 1491, FAIL=0).**
+  Two coupled fixes: (1) CORRECTNESS — a member method's return type referencing the method's OWN type
+  parameter (`class Box { fun <U> wrap(u: U): U }`) was rejected "unresolved reference 'U'": the signature
+  collector resolved member-method RETURN types under the class's type params (`ctp`) only, not the method's
+  (`mtp = ctp + method params`) — the params path already used `mtp`, only the return pre-pass didn't. Now
+  generic member methods compile + run. (2) BYTE-PARITY — extended P12's `Signature` emission to member
+  methods (`fun <U> wrap(u: U): U` → `<U:Ljava/lang/Object;>(TU;)TU;`, verified identical to kotlinc). Net
+  gate unchanged (those box tests carry other co-blockers), but member generic methods are now correct +
+  byte-faithful. Tests: `tests/generic_signature_e2e.rs` (member compile+run+signature).
 - **Phase P12 — generic `Signature` attribute emission (byte-parity; gate 1491, FAIL=0).** Closes part of
   the systemic byte-parity gap: krusty emitted NO generic `Signature` attribute; kotlinc emits one for
   every type-parameterized declaration (the descriptor erases type params, the Signature preserves them).

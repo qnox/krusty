@@ -40,6 +40,27 @@ fn generic_function_emits_signature() {
 }
 
 #[test]
+fn generic_member_method_compiles_runs_and_signs() {
+    // A member method with its OWN type parameter (`fun <U> wrap(u: U): U`) — previously rejected with
+    // "unresolved reference 'U'" because the method's type params weren't in scope for its return type.
+    let src = "class Box(val n: Int) {\n  fun <U> wrap(u: U): U = u\n}\nfun box(): String = if (Box(1).wrap(\"OK\") == \"OK\") \"OK\" else \"no\"\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    assert_eq!(
+        method_signature(&cs, "Box", "wrap").as_deref(),
+        Some("<U:Ljava/lang/Object;>(TU;)TU;")
+    );
+    if let Some(box_class) = common::find_box_class(&cs) {
+        let stdlib = common::stdlib_jar().unwrap();
+        assert_eq!(
+            common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
+            Some("OK")
+        );
+    }
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";
