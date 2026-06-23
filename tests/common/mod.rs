@@ -28,8 +28,13 @@ pub fn compile_in_process(
     use krusty::resolve::{check_file, collect_signatures_with_cp};
 
     let mut diags = DiagSink::new();
+    // Language features are taken from the source's `// LANGUAGE:` directives, exactly as the kotlinc
+    // test infrastructure supplies them — so flag-gated syntax compiles iff the test enables it.
+    let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse(src, &toks, &mut diags)];
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
     if diags.has_errors() {
         return None;
     }

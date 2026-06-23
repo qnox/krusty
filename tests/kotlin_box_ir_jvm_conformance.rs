@@ -36,7 +36,6 @@ use krusty::jvm::classreader::parse_class;
 use krusty::jvm::ir_emit;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
-use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 mod common;
@@ -186,11 +185,14 @@ fn compile_source(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
     let t0 = std::time::Instant::now();
     let toks = lex(src, &mut diags);
     T_LEX.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t1 = std::time::Instant::now();
-    let files = vec![parse(src, &toks, &mut diags)];
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
     T_PARSE.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;
@@ -298,11 +300,14 @@ fn compile_multifile(
     }
 
     let mut diags = DiagSink::new();
+    // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
+    // whole source and apply to every block.
+    let features = krusty::features::LangFeatures::from_source(src);
     let files: Vec<_> = blocks
         .iter()
         .map(|(_, content)| {
             let toks = lex(content, &mut diags);
-            parse(content, &toks, &mut diags)
+            krusty::parser::parse_with_features(content, &toks, &mut diags, &features)
         })
         .collect();
     if diags.has_errors() {

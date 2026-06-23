@@ -2435,13 +2435,31 @@ impl<'a> Lower<'a> {
                 });
                 (self.coerce_erased(c, log, m.ret), log)
             };
-            let v = self.fresh_value();
-            self.scope.push((name.clone(), v, log_ty));
-            out.push(self.ir.add_expr(IrExpr::Variable {
-                index: v,
-                ty: ty_to_ir(log_ty),
-                init: Some(call),
-            }));
+            // A `var` component captured AND written by a closure is boxed into a `Ref$XxxRef`, exactly
+            // like a plain mutable local (see the `Stmt::Local` path) — without this the closure mutates
+            // a private copy and the outer read misses it (e.g. `var [a,b]=A(); { a=3 }()`).
+            if self.info.boxed_vars.contains(name) {
+                let elem_ty = self.value_class_underlying(log_ty).unwrap_or(log_ty);
+                let elem = ty_to_ir(elem_ty);
+                let holder = self.fresh_value();
+                let holder_ty = Ty::obj(ref_holder_internal(elem_ty));
+                self.scope.push((name.clone(), holder, holder_ty));
+                self.boxed_elem.insert(name.clone(), elem_ty);
+                let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
+                out.push(self.ir.add_expr(IrExpr::Variable {
+                    index: holder,
+                    ty: ty_to_ir(holder_ty),
+                    init: Some(new_ref),
+                }));
+            } else {
+                let v = self.fresh_value();
+                self.scope.push((name.clone(), v, log_ty));
+                out.push(self.ir.add_expr(IrExpr::Variable {
+                    index: v,
+                    ty: ty_to_ir(log_ty),
+                    init: Some(call),
+                }));
+            }
         }
         Some(())
     }

@@ -10,7 +10,7 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::lexer::lex;
-use krusty::parser::parse;
+use krusty::parser::parse_with_features;
 use krusty::resolve::collect_signatures_with_cp;
 
 fn main() {
@@ -42,7 +42,7 @@ fn main() {
             std::process::exit(1);
         });
         let toks = lex(&src, &mut diags);
-        files.push(parse(&src, &toks, &mut diags));
+        files.push(parse_with_features(&src, &toks, &mut diags, &opts.features));
         stems.push(file_stem(path));
         sources.push(src);
     }
