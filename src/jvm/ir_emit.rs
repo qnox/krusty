@@ -353,6 +353,35 @@ fn emit_class(
     } else {
         c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
     };
+    // For a generic class, the `<init>` carries a `Signature` whose type-parameter params read `T<tp>;`
+    // (`class Box<T>(var a: T)` → `(TT;)V`) — kotlinc does the same. No `<…>` prefix: the constructor
+    // uses the class's type parameters, declares none. `None` (no attr) when no param is type-parameter-typed.
+    let ctor_signature: Option<String> = ir.field_signatures.get(&c.fq_name).and_then(|ftp| {
+        let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+            vec![true; param_tys.len()]
+        } else {
+            c.ctor_args.iter().map(|(_, f)| *f).collect()
+        };
+        let mut sig = String::from("(");
+        let mut any = false;
+        let mut field_i = 0usize;
+        for (i, t) in param_tys.iter().enumerate() {
+            if is_field.get(i).copied().unwrap_or(true) {
+                let fname = c.fields.get(field_i).map(|(n, _)| n.as_str()).unwrap_or("");
+                if let Some((_, tp)) = ftp.iter().find(|(f, _)| f == fname) {
+                    sig.push_str(&format!("T{tp};"));
+                    any = true;
+                } else {
+                    sig.push_str(&t.descriptor());
+                }
+                field_i += 1;
+            } else {
+                sig.push_str(&t.descriptor());
+            }
+        }
+        sig.push_str(")V");
+        any.then_some(sig)
+    });
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -491,11 +520,12 @@ fn emit_class(
         } else {
             0x0001
         };
-        cw.add_method(
+        cw.add_method_sig(
             ctor_access,
             "<init>",
             &method_descriptor(&param_tys, Ty::Unit),
             &ctor,
+            ctor_signature.as_deref(),
         );
     } // end `if c.has_primary_ctor`
 
