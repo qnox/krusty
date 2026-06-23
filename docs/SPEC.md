@@ -286,6 +286,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   runs the same tail. Limited to a SINGLE suspension; the invokeSuspend body is lowered with
   `next_value` reset to 2 (`this`=0, `result`=1) so the bound local can't collide with the machine's
   marker/result temps. Proven: `{ val a = foo(); a + 1 }` → 43 (`::suspend_lambda_non_tail_body_runs`).
+  **Multiple suspensions / control flow** use the GENERAL lambda-mode machine: ir_lower builds
+  `invokeSuspend` with the plain body and registers `(FunId, ClassId, field_base)` in
+  `ir.suspend_lambda_sm`; the coroutine pass's `build_lambda_state_machine` reuses the same `Flat`
+  flattener as functions — the continuation is the lambda instance (`cont_v = this`, value 0), its
+  `result`/`label`/spilled fields are appended to the lambda class after the captures/params
+  (`field_base`; `Flat.setfield` adds it), and `invokeSuspend` stores its `result` parameter into the
+  `result` field at entry, then loops `while(true){ r = this.result; <restore spilled>; when(this.label){
+  states } }`. Proven both completion modes incl. spilling a value across a second suspension:
+  `{ val a = foo(); val b = bar(); a + b }` → 142 synchronously (`::suspend_lambda_two_suspensions_runs`),
+  and `{ val a = suspendOnce(); val b = plain(); a + b }` parks then resumes to 142
+  (`::suspend_lambda_two_suspensions_async_resume`).
   **Own parameters** (leaf, no captures): a
   parameter is a field set when the lambda is invoked — `invoke(Object p.., Object completion)` builds a
   fresh instance `new This(this.cap.., (Continuation)completion)`, stores each `(paramType)p_i` into its
