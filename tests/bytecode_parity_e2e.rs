@@ -484,6 +484,17 @@ fn range_until_and_through_loops_byte_identical_to_kotlinc() {
     );
 }
 
+/// A constant `downTo` loop folds to an exclusive `(C-1) < i` test (no hoisted bound, no guard),
+/// byte-identical to kotlinc — for a bound `C-1 != 0` (a `C-1 == 0`, i.e. `downTo 1`, still hits the
+/// compare-to-zero divergence and is a documented follow-up).
+#[test]
+fn downto_constant_loop_byte_identical_to_kotlinc() {
+    assert_byte_identical_to_kotlinc(
+        "dtc",
+        "fun box(): String {\n  var s = 0\n  for (i in 10 downTo 2) s += i\n  return \"OK\"\n}\n",
+    );
+}
+
 /// Shape guard (no kotlinc): a constant-bound `0 until 10` loop must NOT hoist the bound into a local
 /// (no `istore` of the bound) and must NOT emit an overflow break (`if_icmpne … goto` guard) — it is a
 /// plain `iload i; bipush 10; if_icmpge exit` counted loop.

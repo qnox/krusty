@@ -5940,6 +5940,8 @@ impl<'a> Lower<'a> {
                 // test — no hoisted local, no overflow guard: `1..10` → `i < 11`, `0 until 10` → `i < 10`.
                 // Match that for a literal `Int` bound; every other case hoists the (possibly
                 // side-effecting / non-constant) bound into a temp and keeps the overflow-safe shape.
+                // The exclusive comparison constant: `until C` → `C` (`i < C`); `..C` → `C+1` (`i < C+1`);
+                // `downTo C` → `C-1` (`C-1 < i`, i.e. `i > C-1`). The `±1` folds must not over/underflow.
                 let inline_bound: Option<i32> = if elem == Ty::Int && range.step.is_none() {
                     match self.afile.expr(range.end) {
                         Expr::IntLit(v) => {
@@ -5947,6 +5949,7 @@ impl<'a> Lower<'a> {
                             match range.kind {
                                 RangeKind::Until if i32::try_from(v).is_ok() => Some(v as i32),
                                 RangeKind::Through if v < i32::MAX as i64 => Some(v as i32 + 1),
+                                RangeKind::DownTo if v > i32::MIN as i64 => Some(v as i32 - 1),
                                 _ => None,
                             }
                         }
@@ -5987,10 +5990,17 @@ impl<'a> Lower<'a> {
                 let cond = if let Some(b) = inline_bound {
                     let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
                     let c = self.ir.add_expr(IrExpr::Const(IrConst::Int(b)));
+                    // Descending compares the constant against the counter (`C-1 < i`) so the emitted
+                    // operand order (`iconst C-1; iload i; if_icmpge`) matches kotlinc; ascending is `i < C`.
+                    let (lhs, rhs) = if matches!(range.kind, RangeKind::DownTo) {
+                        (c, gi)
+                    } else {
+                        (gi, c)
+                    };
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: IrBinOp::Lt,
-                        lhs: gi,
-                        rhs: c,
+                        lhs,
+                        rhs,
                     })
                 } else if elem.is_unsigned() {
                     let gi = self.ir.add_expr(IrExpr::GetValue(i_v));
