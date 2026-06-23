@@ -1828,6 +1828,10 @@ pub(crate) struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
+    /// The arg-binding call-resolution layer over this lowerer's [`LibrarySet`]. Cheap to construct.
+    fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
+        crate::call_resolver::CallResolver::new(&*self.syms.libraries)
+    }
     fn fresh_value(&mut self) -> u32 {
         let v = self.next_value;
         self.next_value += 1;
@@ -10072,8 +10076,7 @@ impl<'a> Lower<'a> {
                                 }
                             })
                             .and_then(|lam_ret| {
-                                self.syms
-                                    .libraries
+                                self.resolver()
                                     .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                             })
                     } {
