@@ -40,6 +40,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   by `forIn*VarUpdatedInLoopBody` box tests). Now reuses the local unless the body reassigns it
   (`expr_reassigns_name` AST scan) — for-in-local-array is byte-identical to kotlinc. Gate 1357/0; new
   differential + shape tests in `bytecode_parity_e2e`. Baseline this HEAD (`0be2f77`): 1357 box-OK.
+- **Phase P2/P3 — counted range-loop parity (`until` / `..`, unit step).** kotlinc folds a CONSTANT
+  bound into a single `i < C` exclusive test (no hoisted local, no overflow guard): `1..10` → `i < 11`,
+  `0 until 10` → `i < 10`. A bound that is already a plain local (`0 until n`) is read directly, not
+  hoisted. The overflow break guard is emitted only where the counter can actually wrap (`..`/`downTo`,
+  or any non-unit `step`) — never for exclusive `until` step-1. `for (i in 0 until 10|1..10|0 until n)`
+  is now byte-identical to kotlinc. Gate 1357/0; differential + shape tests in `bytecode_parity_e2e`.
+  STILL DIVERGE (follow-up): `downTo`, `step k` (kotlinc's `getProgressionLastElement` shape).
 - _known next divergences (from `bytediff` over the corpus)_: array-literal init (`intArrayOf(…)` uses
   `dup`-per-element; kotlinc stores to a temp + `aload`-per-element); primitive-array `iterator()` loops
   (krusty ~24 bytes larger); more loop forms (ranges/downTo/step/indices) to audit for kotlinc's
