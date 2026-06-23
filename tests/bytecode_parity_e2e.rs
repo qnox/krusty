@@ -392,77 +392,88 @@ fn top_level_property_abi_matches_kotlin() {
 
 #[test]
 fn for_in_intarray_is_byte_identical_to_kotlinc() {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
-        return;
-    };
-    let src = "fun box(): String {\n  for (x in IntArray(5)) {\n    if (x != 0) return \"Fail $x\"\n  }\n  return \"OK\"\n}\n";
-    let Some((dir, jh)) = krusty_compile("diff", src) else {
-        return;
-    };
-    let stdlib = format!(
-        "{}/../lib/kotlin-stdlib.jar",
-        std::path::Path::new(&kotlinc).parent().unwrap().display()
-    );
-    let kdir = dir.join("kref");
-    fs::create_dir_all(&kdir).unwrap();
-    let cc = Command::new(&kotlinc)
-        .arg(dir.join("B.kt"))
-        .args(["-d", kdir.to_str().unwrap()])
-        .env("JAVA_HOME", &jh)
-        .output()
-        .unwrap();
-    if !cc.status.success() {
-        eprintln!(
-            "skip (kotlinc unavailable/failed): {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let _ = fs::remove_dir_all(&dir);
-        return;
-    }
-    let krusty_d = normalize(&javap(&jh, &dir.join("BKt.class")));
-    let kotlinc_d = normalize(&javap(&jh, &kdir.join("BKt.class")));
-    let _ = fs::remove_dir_all(&dir);
-    let _ = stdlib; // (no stdlib needed to compile this snippet)
-    assert_eq!(
-        krusty_d, kotlinc_d,
-        "krusty bytecode must be byte-identical (normalized) to kotlinc for a counting loop"
+    assert_byte_identical_to_kotlinc(
+        "for_in_intarray",
+        "fun box(): String {\n  for (x in IntArray(5)) {\n    if (x != 0) return \"Fail $x\"\n  }\n  return \"OK\"\n}\n",
     );
 }
 
-/// Compile `src` with krusty AND kotlinc, assert the facade class is byte-identical (normalized).
-/// Skips (returns) when the kotlinc differential env is unavailable.
-fn assert_byte_identical_to_kotlinc(name: &str, src: &str) {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skip (set KRUSTY_KOTLINC)");
+/// Normalized javap of `class_file`, optionally sliced to just the method whose disassembly contains
+/// `marker` (up to the next blank line) — for asserting one synthesized method (`hashCode`/`equals`).
+fn disasm(jh: &str, class_file: &std::path::Path, marker: Option<&str>) -> String {
+    let full = javap(jh, class_file);
+    match marker {
+        Some(m) => {
+            let s = full
+                .find(m)
+                .unwrap_or_else(|| panic!("method marker {m:?} not found"));
+            let rest = &full[s..];
+            let end = rest[1..].find("\n\n").map(|p| p + 1).unwrap_or(rest.len());
+            normalize(&rest[..end])
+        }
+        None => normalize(&full),
+    }
+}
+
+/// The kotlinc reference disassembly for `src`'s `class` (optionally sliced to `marker`), CACHED as a
+/// committed golden at `tests/golden/<name>.javap`. kotlinc output is deterministic, so we record it
+/// once instead of launching kotlinc every run. With `KRUSTY_BLESS=1` (+ `KRUSTY_KOTLINC` + `JAVA_HOME`)
+/// it regenerates the golden by running kotlinc — do that only when bumping the reference kotlinc
+/// version. Otherwise it reads the committed golden (NO kotlinc launch). `None` ⇒ no golden, not blessing.
+fn kotlinc_golden(name: &str, src: &str, class: &str, marker: Option<&str>) -> Option<String> {
+    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(format!("{name}.javap"));
+    if env("KRUSTY_BLESS").is_some() {
+        let kotlinc = env("KRUSTY_KOTLINC")?;
+        let jh = java_home()?;
+        let dir = std::env::temp_dir().join(format!("krusty_bless_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("B.kt"), src).unwrap();
+        let cc = Command::new(&kotlinc)
+            .arg(dir.join("B.kt"))
+            .args(["-d", dir.to_str().unwrap()])
+            .env("JAVA_HOME", &jh)
+            .output()
+            .unwrap();
+        assert!(
+            cc.status.success(),
+            "kotlinc bless {name}: {}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
+        let norm = disasm(&jh, &dir.join(format!("{class}.class")), marker);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(golden.parent().unwrap()).unwrap();
+        fs::write(&golden, format!("{norm}\n")).unwrap();
+        return Some(norm);
+    }
+    fs::read_to_string(&golden)
+        .ok()
+        .map(|s| s.trim_end().to_string())
+}
+
+/// Assert krusty's disassembly of `class` (optionally sliced to `marker`) matches the cached kotlinc
+/// golden for `src`. Skips when no golden exists (and not blessing) or krusty/JAVA_HOME is unavailable.
+fn assert_matches_kotlinc(name: &str, src: &str, class: &str, marker: Option<&str>) {
+    let Some(kc) = kotlinc_golden(name, src, class, marker) else {
+        eprintln!("skip ({name}: no golden — run KRUSTY_BLESS=1 with KRUSTY_KOTLINC to record)");
         return;
     };
     let Some((dir, jh)) = krusty_compile(name, src) else {
         return;
     };
-    let kdir = dir.join("kref");
-    fs::create_dir_all(&kdir).unwrap();
-    let cc = Command::new(&kotlinc)
-        .arg(dir.join("B.kt"))
-        .args(["-d", kdir.to_str().unwrap()])
-        .env("JAVA_HOME", &jh)
-        .output()
-        .unwrap();
-    if !cc.status.success() {
-        eprintln!(
-            "skip (kotlinc failed): {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let _ = fs::remove_dir_all(&dir);
-        return;
-    }
-    let kr = normalize(&javap(&jh, &dir.join("BKt.class")));
-    let kc = normalize(&javap(&jh, &kdir.join("BKt.class")));
+    let kr = disasm(&jh, &dir.join(format!("{class}.class")), marker);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(
         kr, kc,
-        "{name}: krusty bytecode must be byte-identical to kotlinc"
+        "{name}: krusty bytecode must match the kotlinc golden"
     );
+}
+
+/// Convenience: assert the `BKt` facade is byte-identical to the cached kotlinc golden.
+fn assert_byte_identical_to_kotlinc(name: &str, src: &str) {
+    assert_matches_kotlinc(name, src, "BKt", None);
 }
 
 /// Counted range loops with unit step must be byte-identical to kotlinc: a CONSTANT bound folds to a
@@ -524,36 +535,9 @@ fn constant_until_loop_has_no_bound_local_or_guard() {
 /// Byte-identical (normalized) to kotlinc.
 #[test]
 fn for_in_local_array_no_redundant_copy_is_byte_identical_to_kotlinc() {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
-        return;
-    };
-    let src = "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return if (s == 0) \"OK\" else \"Fail\"\n}\n";
-    let Some((dir, jh)) = krusty_compile("diffloc", src) else {
-        return;
-    };
-    let kdir = dir.join("kref");
-    fs::create_dir_all(&kdir).unwrap();
-    let cc = Command::new(&kotlinc)
-        .arg(dir.join("B.kt"))
-        .args(["-d", kdir.to_str().unwrap()])
-        .env("JAVA_HOME", &jh)
-        .output()
-        .unwrap();
-    if !cc.status.success() {
-        eprintln!(
-            "skip (kotlinc unavailable): {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let _ = fs::remove_dir_all(&dir);
-        return;
-    }
-    let krusty_d = normalize(&javap(&jh, &dir.join("BKt.class")));
-    let kotlinc_d = normalize(&javap(&jh, &kdir.join("BKt.class")));
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        krusty_d, kotlinc_d,
-        "for-in-local-array must be byte-identical to kotlinc (no redundant array copy)"
+    assert_byte_identical_to_kotlinc(
+        "for_in_local_array",
+        "fun box(): String {\n  val a = IntArray(5)\n  var s = 0\n  for (x in a) { s += x }\n  return if (s == 0) \"OK\" else \"Fail\"\n}\n",
     );
 }
 
@@ -584,45 +568,13 @@ fn for_in_local_array_does_not_copy_array_to_temp() {
 /// via its boxed `X.hashCode(prim)` static, folded into a `result` LOCAL (`result = result*31 + h`).
 #[test]
 fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
-        return;
-    };
-    let src = "data class P(val b: Byte, val s: Short, val c: Char, val i: Int, val l: Long, val f: Float, val d: Double, val bo: Boolean)\nfun box() = \"OK\"\n";
-    let Some((dir, jh)) = krusty_compile("dchash", src) else {
-        return;
-    };
-    let kdir = dir.join("kref");
-    fs::create_dir_all(&kdir).unwrap();
-    let cc = Command::new(&kotlinc)
-        .arg(dir.join("B.kt"))
-        .args(["-d", kdir.to_str().unwrap()])
-        .env("JAVA_HOME", &jh)
-        .output()
-        .unwrap();
-    if !cc.status.success() {
-        eprintln!(
-            "skip (kotlinc failed): {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let _ = fs::remove_dir_all(&dir);
-        return;
-    }
-    // Slice just the `hashCode` method's disassembly (the access-flag `final` divergence on the
-    // Object-overrides — toString/hashCode/equals — is a SEPARATE parity item; the Code attribute,
-    // which is what this asserts, is unaffected by it).
-    let slice = |full: &str| -> String {
-        let s = full.find("int hashCode").expect("hashCode method");
-        let rest = &full[s..];
-        let end = rest[1..].find("\n\n").map(|p| p + 1).unwrap_or(rest.len());
-        normalize(&rest[..end])
-    };
-    let kr = slice(&javap(&jh, &dir.join("P.class")));
-    let kc = slice(&javap(&jh, &kdir.join("P.class")));
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        kr, kc,
-        "all-primitive data-class hashCode must be byte-identical to kotlinc"
+    // Slice just `hashCode` (the access-flag `final` divergence on the Object-overrides is a SEPARATE
+    // parity item; the Code attribute asserted here is unaffected).
+    assert_matches_kotlinc(
+        "data_class_primitive_hashcode",
+        "data class P(val b: Byte, val s: Short, val c: Char, val i: Int, val l: Long, val f: Float, val d: Double, val bo: Boolean)\nfun box() = \"OK\"\n",
+        "P",
+        Some("int hashCode"),
     );
 }
 
@@ -631,41 +583,10 @@ fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
 /// `Intrinsics.areEqual` / `if_icmp` compares.
 #[test]
 fn data_class_equals_is_byte_identical_to_kotlinc() {
-    let Some(kotlinc) = env("KRUSTY_KOTLINC") else {
-        eprintln!("skip (set KRUSTY_KOTLINC for the differential check)");
-        return;
-    };
-    let src = "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n";
-    let Some((dir, jh)) = krusty_compile("dceq", src) else {
-        return;
-    };
-    let kdir = dir.join("kref");
-    fs::create_dir_all(&kdir).unwrap();
-    let cc = Command::new(&kotlinc)
-        .arg(dir.join("B.kt"))
-        .args(["-d", kdir.to_str().unwrap()])
-        .env("JAVA_HOME", &jh)
-        .output()
-        .unwrap();
-    if !cc.status.success() {
-        eprintln!(
-            "skip (kotlinc failed): {}",
-            String::from_utf8_lossy(&cc.stderr)
-        );
-        let _ = fs::remove_dir_all(&dir);
-        return;
-    }
-    let slice = |full: &str| -> String {
-        let s = full.find("boolean equals").expect("equals method");
-        let rest = &full[s..];
-        let end = rest[1..].find("\n\n").map(|p| p + 1).unwrap_or(rest.len());
-        normalize(&rest[..end])
-    };
-    let kr = slice(&javap(&jh, &dir.join("D.class")));
-    let kc = slice(&javap(&jh, &kdir.join("D.class")));
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        kr, kc,
-        "data-class equals must be byte-identical to kotlinc"
+    assert_matches_kotlinc(
+        "data_class_equals",
+        "data class D(val s: String, val n: Int)\nfun box() = \"OK\"\n",
+        "D",
+        Some("boolean equals"),
     );
 }

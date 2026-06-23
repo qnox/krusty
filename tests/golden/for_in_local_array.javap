@@ -1,0 +1,33 @@
+public final class BKt {
+public static final java.lang.String box();
+Code:
+iconst_5
+newarray int
+astore_0
+iconst_0
+istore_1
+iconst_0
+istore_2
+aload_0
+arraylength
+istore_3
+iload_2
+iload_3
+if_icmpge 32
+aload_0
+iload_2
+iaload
+istore 4
+iload_1
+iload 4
+iadd
+istore_1
+iinc 2, 1
+goto 11
+iload_1
+ifne 41
+ldc // String OK
+goto 43
+ldc // String Fail
+areturn
+}

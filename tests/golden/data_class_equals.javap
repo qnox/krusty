@@ -1,0 +1,33 @@
+boolean equals(java.lang.Object);
+Code:
+aload_0
+aload_1
+if_acmpne 7
+iconst_1
+ireturn
+aload_1
+instanceof // class D
+ifne 16
+iconst_0
+ireturn
+aload_1
+checkcast // class D
+astore_2
+aload_0
+getfield // Field s:Ljava/lang/String;
+aload_2
+getfield // Field s:Ljava/lang/String;
+invokestatic // Method kotlin/jvm/internal/Intrinsics.areEqual:(Ljava/lang/Object;Ljava/lang/Object;)Z
+ifne 37
+iconst_0
+ireturn
+aload_0
+getfield // Field n:I
+aload_2
+getfield // Field n:I
+if_icmpeq 50
+iconst_0
+ireturn
+iconst_1
+ireturn
+}

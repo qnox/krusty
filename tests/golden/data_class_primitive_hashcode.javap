@@ -1,0 +1,64 @@
+int hashCode();
+Code:
+aload_0
+getfield // Field b:B
+invokestatic // Method java/lang/Byte.hashCode:(B)I
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field s:S
+invokestatic // Method java/lang/Short.hashCode:(S)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field c:C
+invokestatic // Method java/lang/Character.hashCode:(C)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field i:I
+invokestatic // Method java/lang/Integer.hashCode:(I)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field l:J
+invokestatic // Method java/lang/Long.hashCode:(J)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field f:F
+invokestatic // Method java/lang/Float.hashCode:(F)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field d:D
+invokestatic // Method java/lang/Double.hashCode:(D)I
+iadd
+istore_1
+iload_1
+bipush 31
+imul
+aload_0
+getfield // Field bo:Z
+invokestatic // Method java/lang/Boolean.hashCode:(Z)I
+iadd
+istore_1
+iload_1
+ireturn
