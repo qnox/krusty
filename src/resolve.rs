@@ -783,21 +783,42 @@ pub fn collect_signatures_with_cp(
                         })
                         .collect();
                     for bp in &c.body_props {
-                        let ty = match (&bp.ty, &bp.getter) {
-                            (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
-                            (None, Some(FunBody::Expr(g))) => {
-                                let locals: HashMap<&str, Ty> = init_scope
-                                    .iter()
-                                    .map(|(n, t, _)| (n.as_str(), *t))
-                                    .collect();
-                                infer_getter_ty(file, *g, &locals)
+                        let ty = if let Some(de) = bp.delegate {
+                            // A delegated member property: type = annotation, else the delegate's
+                            // `getValue` return type.
+                            match &bp.ty {
+                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                None => {
+                                    infer_lit_ty_p(file, de, &class_names, &fun_rets, &init_scope)
+                                        .obj_internal()
+                                        .and_then(|i| table.method_of(i, "getValue"))
+                                        .map(|s| s.ret)
+                                        .unwrap_or(Ty::Error)
+                                }
                             }
-                            (None, _) => bp
-                                .init
-                                .map(|i| {
-                                    infer_lit_ty_p(file, i, &class_names, &fun_rets, &init_scope)
-                                })
-                                .unwrap_or(Ty::Error),
+                        } else {
+                            match (&bp.ty, &bp.getter) {
+                                (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
+                                (None, Some(FunBody::Expr(g))) => {
+                                    let locals: HashMap<&str, Ty> = init_scope
+                                        .iter()
+                                        .map(|(n, t, _)| (n.as_str(), *t))
+                                        .collect();
+                                    infer_getter_ty(file, *g, &locals)
+                                }
+                                (None, _) => bp
+                                    .init
+                                    .map(|i| {
+                                        infer_lit_ty_p(
+                                            file,
+                                            i,
+                                            &class_names,
+                                            &fun_rets,
+                                            &init_scope,
+                                        )
+                                    })
+                                    .unwrap_or(Ty::Error),
+                            }
                         };
                         if ty == Ty::Error && bp.init.is_some() && bp.ty.is_none() {
                             diags.error(bp.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", bp.name));
@@ -2594,6 +2615,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                             let declared = c.resolve_ty(r);
                             c.expect_assignable(declared, it, c.span(init), "property initializer");
                         }
+                    }
+                    // A delegated member property's delegate expression (`by Del()`) — type-check it so
+                    // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
+                    if let Some(de) = bp.delegate {
+                        c.expr(de);
                     }
                     // A property's accessor bodies are checked like methods, with `field` bound to
                     // the backing-field type (the implicit-`this` scope of props is already active).

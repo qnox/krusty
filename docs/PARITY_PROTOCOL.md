@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1361 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1509 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -67,6 +67,30 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P20 — MEMBER delegated properties `class C { val/var x by Del() }` (gate 1495 → 1509, +14, FAIL=0).**
+  A class body `val/var x: T by Delegate()` now compiles. Model (reuses the member computed-property
+  machinery): a synthetic **instance** field `x$delegate: Del` (final, initialized in `<init>` to the
+  delegate expression) + an instance `getX()` (and `setX()` for `var`) calling
+  `this.x$delegate.getValue(this, <KProperty>)` / `setValue(this, <KProperty>, value)`. The `KProperty`
+  is passed **inline** per call as a fresh `new PropertyReference1Impl(C::class, "x", "getX()<ret>", 0)`
+  (member ⇒ `1Impl` + owner = the class; top-level P19 used `0Impl` + facade) — runtime-equal to
+  kotlinc's cached `$$delegatedProperties` array when `getValue` ignores the property; reuses the
+  `IrExpr::ClassConst` node (here with the class internal, not the facade sentinel). Reads/writes of `x`
+  route to the accessors via the existing member-prop accessor routing.
+  - **Sites** (`ir_lower` class pipeline): removed the member bail; `is_backing_field_prop` now excludes
+    delegated props (was the root of an `unwrap()` panic — they'd otherwise enter `body_fields`,
+    `field_props`, `init_order`); synthetic `x$delegate` appended to `fields`/`field_type_params`/
+    `field_final` (kept parallel); `getX`/`setX` registered as instance methods (pass 1) with bodies built
+    in pass 2; the `<init>` init-body builder gained a delegate-field-init step + its gate now also fires
+    when there are delegated props (a class with ONLY a delegated prop has empty `init_order`);
+    `is_simple_class` admits delegated props. Resolver types a member delegated prop from `getValue`'s
+    return; `check_file` type-checks the member delegate expression.
+  - **SOUND SKIPS** (keep FAIL=0; each was a real VerifyError/wrong-result before guarding): a delegate
+    that is a **value class**, defines **`provideDelegate`**, has a **generic `getValue`** whose return
+    type ≠ the property type (erasure needs a cast), or a **value-class property type** — the file skips.
+  - New `delegated_member_prop_e2e` (val + var, `inClassVal`/`inClassVar` shapes). NEXT: local delegation
+    (`fun f(){ val x by .. }`, needs `Stmt::Local` AST change), `provideDelegate`, generic/value-class
+    delegates, and `@Metadata`/`$$delegatedProperties` for reflection-dependent tests (`p.name`, etc.).
 - **Phase P19 — top-level delegated properties `val x by Del()` (gate 1492 → 1495, +3, FAIL=0).**
   A top-level `val x: T by Delegate()` (explicit or inferred type) now compiles. Model (all reuse, no new
   emit path): two synthetic statics `x$delegate: Del` (init = the delegate expression) and `x$kprop:
