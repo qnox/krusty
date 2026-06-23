@@ -228,6 +228,20 @@ impl Classpath {
         )
     }
 
+    /// The LOGICAL Kotlin return type of `internal.fn_name` as a `Ty`, from `@Metadata`. Used for a
+    /// `suspend fun`, whose physical JVM method erases the return to `Object` (the resume value) — only
+    /// `@Metadata` carries the real return (`suspend fun helper(): Int` → `Ty::Int`). A nullable
+    /// primitive return (`Int?`) stays boxed, so it maps to its wrapper object type. `None` if the
+    /// metadata has no class return type recorded.
+    pub fn metadata_return_ty(&self, internal: &str, fn_name: &str) -> Option<Ty> {
+        let name = self.metadata_return_type(internal, fn_name)?;
+        let ty = kotlin_name_to_ty(&name);
+        if ty.is_primitive() && self.metadata_return_nullable(internal, fn_name) {
+            return super::jvm_class_map::wrapper_internal(ty).map(Ty::obj);
+        }
+        Some(ty)
+    }
+
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
     /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
     /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases

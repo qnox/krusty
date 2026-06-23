@@ -540,6 +540,21 @@ fn arg_fits_subtype(cp: &Classpath, p: &Ty, a: &Ty) -> bool {
 }
 
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
+/// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
+/// `kotlin/coroutines/Continuation` parameter kotlinc appends (`(ILkotlin/coroutines/Continuation;)…`
+/// → `(I)…`). The return stays erased (`Object`); the *logical* Kotlin return lives in `@Metadata`. A
+/// suspend callee is resolved by this logical signature; the coroutine pass re-derives the CPS form for
+/// the emitted call. A no-op if the descriptor has no trailing continuation (not a CPS method).
+fn strip_continuation_param(desc: &str) -> String {
+    const CONT: &str = "Lkotlin/coroutines/Continuation;";
+    if let Some(close) = desc.rfind(')') {
+        if let Some(stripped) = desc[1..close].strip_suffix(CONT) {
+            return format!("({}){}", stripped, &desc[close + 1..]);
+        }
+    }
+    desc.to_string()
+}
+
 fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     let close = desc.find(')').unwrap_or(0);
     let mut rest = &desc[1..close];
@@ -884,7 +899,26 @@ impl SymbolSource for JvmLibraries {
             // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
             // its inline/`@InlineOnly` flags in one place.
             for c in self.cp.find_top_level(name) {
-                let (params, ret) = parse_method_desc(&c.descriptor);
+                let suspend = self.cp.is_suspend_method(&c.owner, &c.name);
+                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+                // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
+                // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
+                let descriptor = if suspend {
+                    strip_continuation_param(&c.descriptor)
+                } else {
+                    c.descriptor.clone()
+                };
+                let (params, physical_ret) = parse_method_desc(&descriptor);
+                // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
+                // return type from `@Metadata` (`helper(): Int`), so the call types correctly. The
+                // physical (erased) return stays `Object` for the emit.
+                let ret = if suspend {
+                    self.cp
+                        .metadata_return_ty(&c.owner, &c.name)
+                        .unwrap_or(physical_ret)
+                } else {
+                    physical_ret
+                };
                 let inline = self.cp.is_inline_method(&c.owner, &c.name);
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
@@ -896,15 +930,15 @@ impl SymbolSource for JvmLibraries {
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,
-                        suspend: self.cp.is_suspend_method(&c.owner, &c.name),
+                        suspend,
                     },
                     callable: LibraryCallable {
                         name: c.name.clone(),
                         owner: c.owner.clone(),
                         params,
                         ret,
-                        physical_ret: ret,
-                        descriptor: c.descriptor.clone(),
+                        physical_ret,
+                        descriptor,
                         is_inline: inline,
                         default_call: false,
                         vararg_elem: None,
@@ -1468,6 +1502,9 @@ impl LibrarySet for JvmLibraries {
             // Restore the Kotlin read-only/mutable collection type from `@Metadata` (the JVM signature
             // erased `mutableListOf`'s `MutableList<T>` to `java/util/List<T>`).
             let ret_ty = self.meta_collection_ret(&c.owner, &c.name, ret_ty);
+            // A `suspend fun`'s physical return is erased to `Object`; the overload already carries the
+            // LOGICAL return recovered from `@Metadata` (`helper(): Int`) — use it.
+            let ret_ty = if o.flags.suspend { c.ret } else { ret_ty };
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
