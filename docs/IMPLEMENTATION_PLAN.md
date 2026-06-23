@@ -3726,6 +3726,18 @@ bodies exist only as jar bytecode):
   slot typing + `Ref`-box-for-user-inline-ext interaction — beyond this lambda-param specialization. Not in
   the box corpus.)
 
+## Phase 484 — multiple branchy lambda splices per method (per-statement operand-stack reset)  ✅
+- Two `takeIf`/`takeUnless`-with-elvis in ONE method bailed: a branchy lambda splice (`takeIf`'s predicate
+  inlined into a body with an internal join) tracks its branches only approximately, leaving the emitter's
+  `cur_stack` drifted ABOVE the real (verified-balanced) height; a LATER branchy splice then saw a non-empty
+  baseline (`needs_frames && stack != 0`) and bailed. (Before phase 479 it was a wrong-but-compiling
+  miscompile; phase 479's live elvis turned it into a bail.)
+- Fix in the emitter's two `Block` arms (`emit`/`emit_value`): a statement nets zero on the operand stack
+  (its value is stored/discarded), so after each statement reset `cur_stack` to the pre-statement baseline.
+  This undoes any approximate-splice drift without affecting `max_stack` (already updated during the splice).
+- TDD: `TakeIfNullableResult` rewritten to put all six `takeIf`/`takeUnless`-elvis cases in ONE `box()` (the
+  previously-bailing shape). Gate **1352/0**; full suite green.
+
 ## Phase 483 — chained safe-call scope fns over a nullable-primitive result (`s?.let{}?.let{it+1}`)  ✅
 - A chained `s?.let { it.length }?.let { it + 1 }` mistyped the second `it` as the boxed `java/lang/Integer`
   (the first `?.let`'s `Int?` result), so `it + 1` failed (`operator … 'java/lang/Integer' and 'Int'`). Inside a

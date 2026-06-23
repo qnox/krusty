@@ -269,24 +269,25 @@ fun box(): String {
     // `takeIf`/`takeUnless` return `T?` — a nullable result the JVM signature erases but `@Metadata`
     // keeps. Over a PRIMITIVE receiver the result is the boxed wrapper, so `?: default` must keep its
     // null-check (a primitive-typed result would fold the elvis away and unbox a possibly-null value →
-    // NPE — the bug this fixes). The lambda's `it` is the receiver. (One scope-fn-with-elvis per helper:
-    // two BRANCHY lambda splices in one method is a separate emitter stack-tracking limitation.)
+    // NPE — the bug this fixes). The lambda's `it` is the receiver. MULTIPLE such branchy splices (each a
+    // `takeIf`/`takeUnless` with an elvis) live in ONE method — the emitter resets the operand-stack
+    // baseline per statement, so a later branchy splice isn't blocked by an earlier one's tracker drift.
     (
         "TakeIfNullableResult",
         r#"
-fun takeIfTrue(): Int = 5.takeIf { it > 3 } ?: 0
-fun takeIfFalse(): Int = 5.takeIf { it < 3 } ?: 9
-fun takeUnlessTrue(): Int = 5.takeUnless { it > 3 } ?: 0
-fun takeUnlessFalse(): Int = 5.takeUnless { it < 3 } ?: 7
-fun takeIfRef(): String = "ab".takeIf { it.length > 1 } ?: "x"
-fun takeIfNullable(): Int? = 5.takeIf { it > 3 }
 fun box(): String {
-    if (takeIfTrue() != 5) return "f0: ${takeIfTrue()}"        // predicate true → 5
-    if (takeIfFalse() != 9) return "f1: ${takeIfFalse()}"      // predicate false → null → 9
-    if (takeUnlessTrue() != 0) return "f2: ${takeUnlessTrue()}" // predicate true → null → 0
-    if (takeUnlessFalse() != 5) return "f3: ${takeUnlessFalse()}" // predicate false → 5
-    if (takeIfRef() != "ab") return "f4: ${takeIfRef()}"       // reference receiver
-    if (takeIfNullable() != 5) return "f5: ${takeIfNullable()}" // nullable return type
+    val a = 5.takeIf { it > 3 } ?: 0            // predicate true → 5
+    if (a != 5) return "f0: $a"
+    val b = 5.takeIf { it < 3 } ?: 9            // predicate false → null → 9
+    if (b != 9) return "f1: $b"
+    val c = 5.takeUnless { it > 3 } ?: 0        // predicate true → null → 0
+    if (c != 0) return "f2: $c"
+    val d = 5.takeUnless { it < 3 } ?: 7        // predicate false → 5
+    if (d != 5) return "f3: $d"
+    val s = "ab".takeIf { it.length > 1 } ?: "x"   // reference receiver
+    if (s != "ab") return "f4: $s"
+    val n: Int? = 5.takeIf { it > 3 }           // nullable return type
+    if (n != 5) return "f5: $n"
     return "OK"
 }
 "#,
