@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::libraries::{EmptyLibrarySet, LibrarySet};
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 #[derive(Clone, Debug)]
@@ -6469,18 +6470,121 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Unqualified call to a member of the implicit receiver of a builtin/library type — a
-                // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).
-                if !self.syms.funs.contains_key(&fname) {
+                // Resolve a receiver-less call: a user top-level function shadows everything; otherwise
+                // an implicit-receiver member (receiver-lambda body), then a library top-level function.
+                // The current module is queried as a `SymbolSource` (ModuleSymbols) and libraries through
+                // the classpath set — the federation precedence (module > implicit-receiver > library) made
+                // explicit, replacing the scattered `syms.funs.contains_key` guards.
+                let user_shadows = self.syms.funs.contains_key(&fname);
+                let module_top: Option<crate::libraries::FunctionInfo> = self
+                    .syms
+                    .funs
+                    .get(&fname)
+                    .and_then(|sigs| pick_overload(sigs, &arg_tys))
+                    .map(|i| {
+                        // ModuleSymbols builds overloads in `funs` order, so index `i` aligns.
+                        let mut fs = crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .functions(&fname, None);
+                        fs.overloads.swap_remove(i)
+                    });
+                if module_top.is_none() && !user_shadows {
+                    // Unqualified call to a member of the implicit receiver of a builtin/library type — a
+                    // receiver-lambda body (`"ab".run { uppercase() }`, `sb.apply { append(x) }`).
                     if let Some(rt) = self.this_ty {
                         if let Some(ret) = self.this_member_call_ret(rt, &fname, &arg_tys, args) {
                             return ret;
                         }
                     }
                 }
+                if let Some(fi) = module_top {
+                    let params = &fi.callable.params;
+                    let cs = &fi.call_sig;
+                    let mut ret_ty = fi.callable.ret;
+                    // Inferred return (signature defaulted to Unit) from the inference pass.
+                    if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
+                        ret_ty = inferred;
+                    }
+                    // A user generic call whose return is a type parameter: bind from all arguments.
+                    if user_generic.is_some() {
+                        if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
+                            ret_ty = r;
+                        }
+                    }
+                    if cs.vararg {
+                        let fixed = params.len() - 1;
+                        if arg_tys.len() < fixed {
+                            self.diags.error(
+                                span,
+                                format!(
+                                    "function '{fname}' expects at least {fixed} args, got {}",
+                                    arg_tys.len()
+                                ),
+                            );
+                        } else {
+                            for i in 0..fixed {
+                                self.expect_assignable(
+                                    params[i],
+                                    arg_tys[i],
+                                    self.span(args[i]),
+                                    "argument",
+                                );
+                            }
+                            let elem = params[fixed].array_elem().unwrap_or(Ty::Error);
+                            for i in fixed..arg_tys.len() {
+                                self.expect_assignable(
+                                    elem,
+                                    arg_tys[i],
+                                    self.span(args[i]),
+                                    "vararg argument",
+                                );
+                            }
+                        }
+                    } else if let Some(names) = &arg_names {
+                        match map_call_args(
+                            args,
+                            Some(names),
+                            &cs.param_names,
+                            cs.required,
+                            &cs.param_defaults,
+                        ) {
+                            Ok(slots) => {
+                                for (i, slot) in slots.iter().enumerate() {
+                                    if let Some(a) = slot {
+                                        let aty = self.expr_types[a.0 as usize];
+                                        self.expect_assignable(
+                                            params[i],
+                                            aty,
+                                            self.span(*a),
+                                            "argument",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
+                        }
+                    } else if arg_tys.len() < cs.required || arg_tys.len() > params.len() {
+                        let want = if cs.required == params.len() {
+                            format!("{}", params.len())
+                        } else {
+                            format!("{} to {}", cs.required, params.len())
+                        };
+                        self.diags.error(
+                            span,
+                            format!(
+                                "function '{fname}' expects {want} args, got {}",
+                                arg_tys.len()
+                            ),
+                        );
+                    } else {
+                        for (i, a) in arg_tys.iter().enumerate() {
+                            self.expect_assignable(params[i], *a, self.span(args[i]), "argument");
+                        }
+                    }
+                    return ret_ty;
+                }
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
                 // library set (vararg-aware), checking each argument against the resolved parameters.
-                if !self.syms.funs.contains_key(&fname) {
+                if !user_shadows {
                     let call_targs: Vec<Ty> = self
                         .file
                         .call_type_args
@@ -6518,9 +6622,6 @@ impl<'a> Checker<'a> {
                             }
                         } else {
                             for (i, a) in arg_tys.iter().enumerate() {
-                                // A lambda argument was already typed against the parameter's lambda types
-                                // (`toplevel_lambda_pts`); its `Fun` type is assignable to the erased
-                                // `FunctionN` parameter, so skip the (over-strict) assignability check.
                                 if matches!(self.file.expr(args[i]), Expr::Lambda { .. }) {
                                     continue;
                                 }
@@ -6535,116 +6636,9 @@ impl<'a> Checker<'a> {
                         return c.ret;
                     }
                 }
-                match self
-                    .syms
-                    .funs
-                    .get(&fname)
-                    .and_then(|v| pick_overload(v, &arg_tys).map(|i| v[i].clone()))
-                {
-                    Some(sig) => {
-                        let mut sig = sig;
-                        // Use the inferred return type from the checker's inference pass if the
-                        // signature defaulted to Unit (no explicit return type annotation).
-                        if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
-                            sig.ret = inferred;
-                        }
-                        // A user generic call whose return is a type parameter (`twice(...): T`): use the
-                        // type bound from ALL arguments — value args and lambda parameter/return types
-                        // (`applyFn("ab"){ it.length }: R` → `Int`) — so the call isn't the erased `Any`.
-                        if user_generic.is_some() {
-                            if let Some(ret) = self.user_generic_return(&fname, &arg_tys) {
-                                sig.ret = ret;
-                            }
-                        }
-                        if sig.vararg {
-                            // Fixed params (all but the last) match by position; remaining args must
-                            // match the vararg element type (krusty doesn't support `*spread`).
-                            let fixed = sig.params.len() - 1;
-                            if arg_tys.len() < fixed {
-                                self.diags.error(
-                                    span,
-                                    format!(
-                                        "function '{fname}' expects at least {fixed} args, got {}",
-                                        arg_tys.len()
-                                    ),
-                                );
-                            } else {
-                                for i in 0..fixed {
-                                    self.expect_assignable(
-                                        sig.params[i],
-                                        arg_tys[i],
-                                        self.span(args[i]),
-                                        "argument",
-                                    );
-                                }
-                                let elem = sig.params[fixed].array_elem().unwrap_or(Ty::Error);
-                                for i in fixed..arg_tys.len() {
-                                    self.expect_assignable(
-                                        elem,
-                                        arg_tys[i],
-                                        self.span(args[i]),
-                                        "vararg argument",
-                                    );
-                                }
-                            }
-                        } else if let Some(names) = &arg_names {
-                            // Named arguments: map onto positional slots, then type-check each slot.
-                            match map_call_args(
-                                args,
-                                Some(names),
-                                &sig.param_names,
-                                sig.required,
-                                &sig.param_defaults,
-                            ) {
-                                Ok(slots) => {
-                                    for (i, slot) in slots.iter().enumerate() {
-                                        if let Some(a) = slot {
-                                            let aty = self.expr_types[a.0 as usize];
-                                            self.expect_assignable(
-                                                sig.params[i],
-                                                aty,
-                                                self.span(*a),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(msg) => {
-                                    self.diags.error(span, format!("call to '{fname}': {msg}"))
-                                }
-                            }
-                        } else if arg_tys.len() < sig.required || arg_tys.len() > sig.params.len() {
-                            let want = if sig.required == sig.params.len() {
-                                format!("{}", sig.params.len())
-                            } else {
-                                format!("{} to {}", sig.required, sig.params.len())
-                            };
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "function '{fname}' expects {want} args, got {}",
-                                    arg_tys.len()
-                                ),
-                            );
-                        } else {
-                            // Supplied args match by position; omitted trailing params use their defaults.
-                            for (i, a) in arg_tys.iter().enumerate() {
-                                self.expect_assignable(
-                                    sig.params[i],
-                                    *a,
-                                    self.span(args[i]),
-                                    "argument",
-                                );
-                            }
-                        }
-                        sig.ret
-                    }
-                    None => {
-                        self.diags
-                            .error(span, format!("unresolved function '{fname}'"));
-                        Ty::Error
-                    }
-                }
+                self.diags
+                    .error(span, format!("unresolved function '{fname}'"));
+                Ty::Error
             }
             _ => {
                 // Check if callee is a Fun type (any expression, e.g. a local variable).
