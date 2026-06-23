@@ -745,7 +745,15 @@ struct KotlincServer {
 impl KotlincServer {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut child = Command::new(java)
-            .args(["-cp", cp, "KotlincServer"])
+            // Test compiles aren't perf-critical; favour fast startup over peak codegen throughput
+            // (cap JIT at C1, serial GC) so the one-time JVM+compiler warmup is small.
+            .args([
+                "-XX:TieredStopAtLevel=1",
+                "-XX:+UseSerialGC",
+                "-cp",
+                cp,
+                "KotlincServer",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

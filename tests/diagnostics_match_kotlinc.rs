@@ -4,6 +4,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -21,8 +23,8 @@ fn error_messages_match_kotlinc() {
         eprintln!("skipping diagnostics_match_kotlinc: set KRUSTY_KOTLINC");
         return;
     };
+    let _ = &kotlinc;
     let krusty = env!("CARGO_BIN_EXE_krusty");
-    let jh = env("KRUSTY_REF_JAVA_HOME");
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
     let cases = [
@@ -48,13 +50,17 @@ fn error_messages_match_kotlinc() {
         let kr_msg = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
             .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
 
-        let mut cmd = Command::new(&kotlinc);
-        cmd.arg(&kt).args(["-d", root.join("ko").to_str().unwrap()]);
-        if let Some(j) = &jh {
-            cmd.env("JAVA_HOME", j);
-        }
-        let kc = cmd.output().unwrap();
-        let kc_msg = first_error(&String::from_utf8_lossy(&kc.stderr));
+        // Reference compile via the persistent kotlinc server (one reused JVM, not a CLI spawn/case).
+        let args = vec![
+            kt.to_string_lossy().into_owned(),
+            "-d".to_string(),
+            root.join("ko").to_string_lossy().into_owned(),
+        ];
+        let Some((_, kc_err)) = common::kotlinc_compile(&args) else {
+            eprintln!("skipping diagnostics_match_kotlinc: kotlinc server unavailable");
+            return;
+        };
+        let kc_msg = first_error(&kc_err);
 
         assert_eq!(
             kr_msg, kc_msg,
