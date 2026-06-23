@@ -4,7 +4,6 @@
 //! `Emitter::try_inline_static` → `inline::splice_branchless` path end-to-end.
 
 use std::fs;
-use std::process::Command;
 
 mod common;
 
@@ -26,104 +25,64 @@ fn branchless_inline_fn_is_spliced_not_called() {
         eprintln!("skipping inline_splice_e2e: no kotlin-stdlib jar");
         return;
     };
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    let jdk_modules = format!("{java_home}/lib/modules");
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let stdlib_path = stdlib;
+    let stdlib = stdlib_path.to_str().unwrap().to_string();
+    let _ = (&java_home, &kotlinc);
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let work = std::env::temp_dir().join(format!("krusty_inline_splice_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     let libout = work.join("libout");
-    let mainout = work.join("mainout");
-    let runner = work.join("runner");
-    for d in [&libout, &mainout, &runner] {
-        fs::create_dir_all(d).unwrap();
-    }
+    fs::create_dir_all(&libout).unwrap();
 
-    // 1. A library with a branchless `inline fun`, compiled by the *real* kotlinc.
+    // 1. A library with a branchless `inline fun`, compiled by the *real* kotlinc (persistent server).
     let lib_kt = work.join("Lib.kt");
     fs::write(
         &lib_kt,
         "package lib\ninline fun triple(x: Int): Int = x * 3\ninline fun atLeast(x: Int, lo: Int): Int = if (x < lo) lo else x\ninline fun applyIt(x: Int, f: (Int) -> Int): Int = f(x)\n",
     )
     .unwrap();
-    let kc = Command::new(&kotlinc)
-        .args(["-d", libout.to_str().unwrap(), "-cp", &stdlib])
-        .arg(&lib_kt)
-        .output()
-        .unwrap();
-    assert!(
-        kc.status.success(),
-        "kotlinc(lib): {}",
-        String::from_utf8_lossy(&kc.stderr)
-    );
+    let kc_args = vec![
+        "-d".to_string(),
+        libout.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        stdlib.clone(),
+        lib_kt.to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        Some((_, e)) => panic!("kotlinc(lib): {e}"),
+        None => return,
+    }
 
-    // 2. A caller that uses the inline fn, compiled by krusty with the lib on its classpath.
-    let main_kt = work.join("Main.kt");
-    // `a` is a live caller local across the spliced `triple(a)` call — if the splice clobbered its
-    // slot, `a + b` below would be wrong. Exercises the splice-base (no slot collision).
-    fs::write(
-        &main_kt,
-        "import lib.triple\nimport lib.atLeast\nimport lib.applyIt\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    val e = applyIt(b) { it + 1 }\n    return if (a == 5 && b == 15 && c == 20 && d == 15 && e == 16) \"OK\" else \"fail:a=$a b=$b c=$c d=$d e=$e\"\n}\n",
-    )
-    .unwrap();
-    let compile_cp = format!(
-        "{libout}:{stdlib}:{jdk_modules}",
-        libout = libout.to_str().unwrap()
-    );
-    let kr = Command::new(krusty)
-        .args(["-cp", &compile_cp, "-d", mainout.to_str().unwrap()])
-        .arg(&main_kt)
-        .output()
-        .unwrap();
-    assert!(
-        kr.status.success(),
-        "krusty(main): {}",
-        String::from_utf8_lossy(&kr.stderr)
-    );
+    // 2. A caller that uses the inline fn, compiled by krusty (in-process) with the lib on its
+    // classpath. `a` is a live caller local across the spliced `triple(a)` call — if the splice
+    // clobbered its slot, `a + b` would be wrong. Exercises the splice-base (no slot collision).
+    let main_src = "import lib.triple\nimport lib.atLeast\nimport lib.applyIt\nfun box(): String {\n    val a = 5\n    val b = triple(a)\n    val c = atLeast(b, 20)\n    val d = atLeast(b, 10)\n    val e = applyIt(b) { it + 1 }\n    return if (a == 5 && b == 15 && c == 20 && d == 15 && e == 16) \"OK\" else \"fail:a=$a b=$b c=$c d=$d e=$e\"\n}\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
+        .expect("krusty(main) failed to compile");
 
     // 3. The inline fn was *spliced*, not called: no reference to `triple` survives in MainKt.
-    let main_class = fs::read(mainout.join("MainKt.class")).unwrap();
+    let main_class = &classes
+        .iter()
+        .find(|(n, _)| n == "MainKt")
+        .expect("no MainKt")
+        .1;
     for callee in [&b"triple"[..], &b"atLeast"[..], &b"applyIt"[..]] {
         assert!(
-            !contains(&main_class, callee),
+            !contains(main_class, callee),
             "MainKt still references `{}` — the inline fn was called, not spliced",
             String::from_utf8_lossy(callee)
         );
     }
 
-    // 4. The spliced bytecode verifies and computes the right result.
-    let runner_src = r#"import java.io.File; import java.net.URL; import java.net.URLClassLoader;
-public class BoxRun {
-  public static void main(String[] a) throws Exception {
-    URLClassLoader cl = new URLClassLoader(new URL[]{ new File(a[0]).toURI().toURL() }, BoxRun.class.getClassLoader());
-    System.out.println(Class.forName("MainKt", true, cl).getMethod("box").invoke(null));
-  }
-}"#;
-    fs::write(runner.join("BoxRun.java"), runner_src).unwrap();
-    let jc = Command::new(&javac)
-        .args(["-d", runner.to_str().unwrap()])
-        .arg(runner.join("BoxRun.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac(BoxRun): {}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp"])
-        .arg(format!("{}:{stdlib}", runner.to_str().unwrap()))
-        .args(["BoxRun", mainout.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        run.status.success(),
-        "BoxRun: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let out = String::from_utf8_lossy(&run.stdout);
+    // 4. The spliced bytecode verifies and computes the right result (persistent box JVM). The inline
+    // fns were spliced, so MainKt has no runtime dependency on the lib classes.
+    let Some(out) = common::run_box(&classes, "MainKt", &[stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
 
     let _ = fs::remove_dir_all(&work);
