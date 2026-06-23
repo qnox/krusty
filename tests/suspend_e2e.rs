@@ -185,3 +185,16 @@ fn suspend_fun_two_suspension_points_spills_live_local() {
         142,
     );
 }
+
+#[test]
+fn suspend_fun_discarded_suspension_result() {
+    // `g` calls the suspend `sink` for effect (result discarded) — a bare suspend-call statement is a
+    // suspension point with no bound local. Then `g` returns 7.
+    run_suspend(
+        "smd",
+        "suspend fun sink(): Int = 0\n\
+         suspend fun g(): Int {\n    sink()\n    return 7\n}\n",
+        "g",
+        7,
+    );
+}
