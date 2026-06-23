@@ -70,9 +70,60 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
+        // `@kotlin.Metadata` for the facade: each top-level `suspend fun` is recorded with `IS_SUSPEND`
+        // and its LOGICAL signature, so another krusty/kotlinc compilation resolves a call to it (a
+        // suspend fn's physical method is `Object foo(…, Continuation)` — only `@Metadata` distinguishes
+        // it). Emitted only when the file has top-level suspend functions; non-suspend facades resolve
+        // fine from their physical descriptors, so they keep emitting no `@Metadata` (unchanged).
+        let susp_metas: Vec<crate::metadata::builder::FnMeta> = file
+            .decls
+            .iter()
+            .filter_map(|&d| {
+                let Decl::Fun(f) = file.decl(d) else {
+                    return None;
+                };
+                if !f.is_suspend || f.receiver.is_some() || f.is_inline {
+                    return None;
+                }
+                let sig = syms.funs.get(&f.name)?.iter().find(|s| s.is_suspend)?;
+                let params: Vec<_> = sig
+                    .param_names
+                    .iter()
+                    .cloned()
+                    .zip(sig.params.iter().copied())
+                    .collect();
+                // Physical CPS descriptor: the logical params then a trailing `Continuation`, returning
+                // the erased `Object`.
+                let pdescs: String = sig.params.iter().map(|t| t.descriptor()).collect();
+                let jvm_desc =
+                    format!("({pdescs}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;");
+                Some(crate::metadata::builder::FnMeta {
+                    name: f.name.clone(),
+                    params,
+                    ret: sig.ret,
+                    suspend: true,
+                    jvm_desc: Some(jvm_desc),
+                })
+            })
+            .collect();
+        let metadata = (!susp_metas.is_empty()).then(|| {
+            let (d1_bytes, d2) = crate::metadata::builder::build_package(&susp_metas, &[]);
+            // `d1` is the protobuf payload with one byte per `char` (the constant pool writes it as
+            // modified-UTF-8, which the reader decodes back to the same bytes).
+            let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
+            crate::jvm::ir_emit::KotlinMetadata {
+                k: 2,
+                mv: vec![2, 4, 0],
+                xi: 48,
+                d1: vec![d1],
+                d2,
+            }
+        });
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct (e.g. a function type
         // above the fixed-arity `Function0..22` the JVM stdlib provides) — skip rather than miscompile.
-        let Some(classes) = crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp) else {
+        let Some(classes) =
+            crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp, metadata.as_ref())
+        else {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this construct is not yet supported by the IR backend".to_string(),

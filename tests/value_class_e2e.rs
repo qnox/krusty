@@ -36,7 +36,7 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     assert!(krusty::jvm::value_classes::lower_value_classes(&mut ir));
     let facade = file_class_name("S", None);
     let cp = Classpath::new(vec![]);
-    let classes = emit_all(&ir, &facade, &cp).expect("emit");
+    let classes = emit_all(&ir, &facade, &cp, None).expect("emit");
 
     let (_, bytes) = classes
         .iter()

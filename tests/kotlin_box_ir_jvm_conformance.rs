@@ -241,7 +241,7 @@ fn compile_source(
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None; // value-class shape not yet lowered — skip, don't miscompile
     }
-    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp) {
+    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp, None) {
         Some(o) => o,
         None => {
             T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -361,7 +361,7 @@ fn compile_multifile(
         if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
             return None;
         }
-        let out = ir_emit::emit_all(&ir, &facade, &*cp)?;
+        let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
         all.extend(out);
     }
     if all.is_empty() {

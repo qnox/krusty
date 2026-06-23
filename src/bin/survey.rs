@@ -43,7 +43,7 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     if !krusty::jvm::suspend::lower_suspend(&mut ir, &facade) {
         return Some("lower: suspend-function shape not lowered".into());
     }
-    match emit_all(&ir, &facade, &**cp) {
+    match emit_all(&ir, &facade, &**cp, None) {
         Some(o) if !o.is_empty() => None,
         _ => Some("emit: emit_all bailed (unsupported codegen)".into()),
     }

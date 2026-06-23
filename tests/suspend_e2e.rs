@@ -73,6 +73,94 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn krusty_compiled_suspend_dep_is_consumable() {
+    // The suspend round-trip: krusty compiles a `suspend fun` to a classpath dir (emitting `@Metadata`
+    // with IS_SUSPEND + the logical signature), then krusty compiles a CALLER against that dir. Without
+    // the metadata writer the callee's physical `Object helper(Continuation)` is unresolvable as
+    // `helper()`. Drives UseKt.caller(k) → 43.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_rt_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let lib = dir.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    // 1) krusty compiles the suspend lib (emits @Metadata).
+    fs::write(dir.join("Lib.kt"), "suspend fun helper(): Int = 42\n").unwrap();
+    let kl = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", lib.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kl.status.success(),
+        "krusty failed on lib:\n{}",
+        String::from_utf8_lossy(&kl.stderr)
+    );
+    // 2) krusty compiles the caller against the krusty-compiled lib.
+    fs::write(
+        dir.join("Use.kt"),
+        "suspend fun caller(): Int {\n    val a = helper()\n    return a + 1\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", lib.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed resolving krusty-compiled suspend dep:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Object r = UseKt.caller(k);\n\
+    System.out.println(r.equals(Integer.valueOf(43)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        lib.to_str().unwrap(),
+        stdlib
+    );
+    let jc = Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        jc.status.success(),
+        "javac driver failed:\n{}",
+        String::from_utf8_lossy(&jc.stderr)
+    );
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "suspend round-trip: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn suspend_lambda_control_flow_with_capture_runs() {
     // A `suspend` lambda whose VALUE is a conditional suspension over a captured variable
     // (`{ if (c) foo() else 7 }`). Only the `c == true` branch suspends. make(true)→42, make(false)→7.
