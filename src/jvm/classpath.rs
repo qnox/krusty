@@ -84,6 +84,22 @@ fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sy
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Process-global cache of parsed `ClassInfo` (internal name → parsed class, `None` if absent), keyed
+/// by the classpath. The conformance harness compiles on several rayon worker threads, EACH with its
+/// own `Classpath`; without sharing, every common class (`kotlin/collections/List`, …) was parsed once
+/// per thread. Sharing this — like the type/ext/jimage indexes — parses each class once per process.
+/// `RwLock` because reads (cache hits) dominate; a parse on a miss takes the write lock briefly.
+type ClassCache = std::sync::Arc<std::sync::RwLock<HashMap<String, Option<ClassInfo>>>>;
+fn global_class_cache(key: &[PathBuf]) -> ClassCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ClassCache>>> =
+        std::sync::OnceLock::new();
+    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap();
+    g.entry(key.to_vec())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .clone()
+}
+
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
 /// descriptor, the method name, and the return-type descriptor.
 #[derive(Clone, Debug)]
@@ -142,7 +158,11 @@ type MetaOverloadCache = RefCell<HashMap<String, std::rc::Rc<LambdaReturnOverloa
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
-    cache: RefCell<HashMap<String, Option<ClassInfo>>>,
+    // Two-level parsed-class cache: `local` is a per-thread L1 (cheap `RefCell`, no lock — serves the
+    // hot repeated lookups), backed by `shared` — a process-global L2 (`RwLock`) so a class is PARSED
+    // once across all rayon worker threads, not once per thread. L1 miss → L2 → parse.
+    local_cache: RefCell<HashMap<String, Option<ClassInfo>>>,
+    cache: ClassCache,
     /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
     /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
     /// entries for kotlin-stdlib). This is the classloader/javac strategy: parse each jar's directory
@@ -184,7 +204,7 @@ pub struct Classpath {
 
 impl Classpath {
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
-        let entries = paths
+        let entries: Vec<Entry> = paths
             .into_iter()
             .map(|p| {
                 let is_archive = p
@@ -203,9 +223,11 @@ impl Classpath {
                 }
             })
             .collect();
+        let cache_key: Vec<PathBuf> = entries.iter().map(|e| e.path().to_path_buf()).collect();
         Classpath {
             entries,
-            cache: RefCell::new(HashMap::new()),
+            local_cache: RefCell::new(HashMap::new()),
+            cache: global_class_cache(&cache_key),
             archives: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
@@ -595,8 +617,16 @@ impl Classpath {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up.
         let internal = super::jvm_class_map::to_jvm_internal(internal);
-        if let Some(hit) = self.cache.borrow().get(internal) {
+        // L1: per-thread, no lock.
+        if let Some(hit) = self.local_cache.borrow().get(internal) {
             return hit.clone();
+        }
+        // L2: process-global, shared across threads — a class parsed by ANY thread is reused here.
+        if let Some(hit) = self.cache.read().unwrap().get(internal).cloned() {
+            self.local_cache
+                .borrow_mut()
+                .insert(internal.to_string(), hit.clone());
+            return hit;
         }
         let name = format!("{internal}.class");
         let mut found = None;
@@ -616,6 +646,10 @@ impl Classpath {
             }
         }
         self.cache
+            .write()
+            .unwrap()
+            .insert(internal.to_string(), found.clone());
+        self.local_cache
             .borrow_mut()
             .insert(internal.to_string(), found.clone());
         found
