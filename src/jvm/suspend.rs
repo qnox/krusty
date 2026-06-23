@@ -714,6 +714,63 @@ impl Flat<'_> {
                     return;
                 }
             }
+            // A `while` loop whose body suspends: header (test) → body (back-edge to header) → exit.
+            if let IrExpr::While {
+                cond,
+                body,
+                update,
+                post_test,
+                ..
+            } = &self.ir.exprs[stmt as usize]
+            {
+                if !*post_test && expr_calls_suspend(self.ir, *body, self.suspend) {
+                    let (cond, body, update) = (*cond, *body, *update);
+                    let header = self.new_state();
+                    let body_entry = self.new_state();
+                    let cont = self.new_state();
+                    let exit = self.new_state();
+                    // cur → header
+                    self.goto(&mut out, header);
+                    self.states[cur] = out;
+                    // header: when(cond){ true → body_entry; else → exit }
+                    let mut hs: Vec<ExprId> = Vec::new();
+                    let t_block = {
+                        let mut b = Vec::new();
+                        self.goto(&mut b, body_entry);
+                        self.add(IrExpr::Block {
+                            stmts: b,
+                            value: None,
+                        })
+                    };
+                    let e_block = {
+                        let mut b = Vec::new();
+                        self.goto(&mut b, exit);
+                        self.add(IrExpr::Block {
+                            stmts: b,
+                            value: None,
+                        })
+                    };
+                    let hwhen = self.add(IrExpr::When {
+                        branches: vec![(Some(cond), t_block), (None, e_block)],
+                    });
+                    hs.push(hwhen);
+                    self.states[header] = hs;
+                    // body → cont (back to header after the update)
+                    let body_stmts = self.block_stmts(body);
+                    self.flatten(&body_stmts, body_entry, Some(cont));
+                    // cont: run the loop update (a `for`-loop increment), then back to header
+                    let mut cs: Vec<ExprId> = Vec::new();
+                    if let Some(u) = update {
+                        let u2 = self.rewrite_plain(u);
+                        cs.push(u2);
+                    }
+                    self.goto(&mut cs, header);
+                    self.states[cont] = cs;
+                    // exit: the rest
+                    self.flatten(&stmts[i + 1..], exit, after);
+                    return;
+                }
+            }
             if expr_calls_suspend(self.ir, stmt, self.suspend) {
                 self.failed = true;
                 self.states[cur] = out;

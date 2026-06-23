@@ -214,6 +214,27 @@ fn suspend_fun_suspension_inside_if_not_taken() {
 }
 
 #[test]
+fn suspend_fun_suspension_in_while_loop() {
+    // A `while` loop whose body suspends each iteration; `sum`/`i` are loop-carried across the
+    // suspension (spilled to continuation fields). 1+1+1 = 3.
+    run_suspend(
+        "smwhile",
+        "suspend fun one(): Int = 1\n\
+         suspend fun loopy(): Int {\n\
+         \x20   var sum = 0\n\
+         \x20   var i = 0\n\
+         \x20   while (i < 3) {\n\
+         \x20       val x = one()\n\
+         \x20       sum = sum + x\n\
+         \x20       i = i + 1\n\
+         \x20   }\n\
+         \x20   return sum\n}\n",
+        "loopy",
+        3,
+    );
+}
+
+#[test]
 fn suspend_fun_suspension_in_if_statement() {
     // The suspension `foo()` is a bare statement inside an `if` STATEMENT branch (not a value). The
     // flattener routes the branch through its own states and converges at the merge. Returns 5.
