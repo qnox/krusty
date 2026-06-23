@@ -61,6 +61,26 @@ fn generic_member_method_compiles_runs_and_signs() {
 }
 
 #[test]
+fn generic_class_emits_class_signature() {
+    // `class Box<T>` gets a class-level generic Signature; a non-generic class gets none.
+    let src = "class Box<T>(val n: Int)\nclass Plain(val n: Int)\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    let class_sig = |name: &str| -> Option<String> {
+        cs.iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
+            .and_then(|ci| ci.signature)
+    };
+    assert_eq!(
+        class_sig("Box").as_deref(),
+        Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+    );
+    assert_eq!(class_sig("Plain"), None);
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";

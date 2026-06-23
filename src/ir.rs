@@ -657,10 +657,25 @@ pub struct IrFile {
     /// `invokeSuspend` entry (so a captured/parameter value survives a re-entry), excludes them from
     /// spilling, and places the result/label/spilled fields after them.
     pub suspend_lambda_sm: Vec<(u32, u32, u32)>,
-    /// `FunId` → the method's JVM generic `Signature` attribute string (e.g. a generic function's
-    /// `<T:Ljava/lang/Object;>(TT;)TT;`). Present only for methods that need it (type-parameterized);
-    /// the JVM backend emits a `Signature` attribute, matching kotlinc's byte output for generics.
-    pub signatures: std::collections::HashMap<u32, String>,
+    /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
+    /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
+    pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
+    /// class. The JVM backend formats it into the class `Signature` attribute.
+    pub class_signatures: std::collections::HashMap<String, IrGenericSig>,
+}
+
+/// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
+/// platform's equivalent needs). NO target descriptors here — each backend formats its own.
+#[derive(Clone, Debug)]
+pub struct IrGenericSig {
+    /// Each type parameter: its name and its upper bound as a Kotlin `IrType` (`kotlin/Any` when none).
+    pub type_params: Vec<(String, IrType)>,
+    /// Per value parameter: `Some(name)` when it is a bare type-parameter reference, else `None` (the
+    /// backend uses the parameter's own erased type). Empty for a class signature.
+    pub param_tparams: Vec<Option<String>>,
+    /// `Some(name)` when the return type is a bare type-parameter reference, else `None`.
+    pub ret_tparam: Option<String>,
 }
 
 impl IrFile {

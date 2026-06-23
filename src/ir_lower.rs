@@ -162,6 +162,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
+            // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
+            if let Some(s) = class_generic_sig(c) {
+                lo.ir.class_signatures.insert(internal.clone(), s);
+            }
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
@@ -405,7 +409,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.suspend_funs.push(fid);
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
-                if let Some(s) = fn_jvm_signature(m, sig) {
+                if let Some(s) = fn_generic_sig(m) {
                     lo.ir.signatures.insert(fid, s);
                 }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
@@ -744,7 +748,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
-                if let Some(s) = fn_jvm_signature(f, sig) {
+                if let Some(s) = fn_generic_sig(f) {
                     lo.ir.signatures.insert(id, s);
                 }
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
@@ -11697,64 +11701,79 @@ fn data_array_param(t: &IrType) -> Option<&'static str> {
     })
 }
 
-/// Build a JVM generic `Signature` for a type-parameterized top-level function (e.g. `fun <T> id(t: T):
-/// T` → `<T:Ljava/lang/Object;>(TT;)TT;`), matching kotlinc's byte output. Returns `None` — omitting the
-/// attribute — for a non-generic function or a shape not yet modeled (a type-parameter used inside a
-/// generic argument like `List<T>`, a non-`Object`/non-primitive bound, a vararg). Never emits a wrong
-/// signature: when unsure, it omits, so this can only ADD byte-parity, never break it.
-fn fn_jvm_signature(f: &ast::FunDecl, sig: &crate::resolve::Signature) -> Option<String> {
+/// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
+/// for a non-generic class / one with explicit supertypes (whose generic args aren't modeled yet) / an
+/// unsupported bound. The `jvm` backend formats this into the class `Signature` attribute.
+fn class_generic_sig(c: &ast::ClassDecl) -> Option<crate::ir::IrGenericSig> {
+    if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
+        return None;
+    }
+    Some(crate::ir::IrGenericSig {
+        type_params: type_param_bounds_ir(&c.type_params, &c.type_param_bounds)?,
+        param_tparams: Vec::new(),
+        ret_tparam: None,
+    })
+}
+
+/// Extract the backend-agnostic generic-signature shape of a type-parameterized function, or `None` for
+/// a non-generic function / an unmodeled shape (a type parameter inside a generic argument like
+/// `List<T>`, a vararg, an unsupported bound). Concrete parameter/return types are left to the backend
+/// (which reads them from the `IrFunction`); only the bare-type-parameter positions are recorded.
+fn fn_generic_sig(f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
     if f.type_params.is_empty() {
         return None;
     }
     let tps = &f.type_params;
-    let mut s = String::from("<");
-    for tp in tps {
-        let bound_sig = match f.type_param_bounds.iter().find(|(n, _)| n == tp) {
-            None => "Ljava/lang/Object;".to_string(),
-            Some((_, b)) if b.name == "Any" && !b.nullable => "Ljava/lang/Object;".to_string(),
-            Some((_, b)) => {
-                // A primitive bound's signature uses the boxed wrapper (`<T:Ljava/lang/Integer;>`).
-                match Ty::from_name(&b.name)
-                    .filter(|t| t.is_primitive())
-                    .and_then(crate::resolve::nullable_prim_wrapper)
-                {
-                    Some(w) => format!("L{w};"),
-                    None => return None, // class/generic bound not modeled yet
-                }
-            }
-        };
-        s.push_str(tp);
-        s.push(':');
-        s.push_str(&bound_sig);
-    }
-    s.push('>');
-    s.push('(');
-    for (i, p) in f.params.iter().enumerate() {
+    let mut param_tparams = Vec::with_capacity(f.params.len());
+    for p in &f.params {
         if p.is_vararg {
             return None;
         }
-        s.push_str(&type_ref_signature(&p.ty, tps, sig.params.get(i).copied())?);
+        if ref_is_bare_tparam(&p.ty, tps) {
+            param_tparams.push(Some(p.ty.name.clone()));
+        } else if ref_uses_tparam(&p.ty, tps) {
+            return None;
+        } else {
+            param_tparams.push(None);
+        }
     }
-    s.push(')');
-    match f.ret.as_ref() {
-        Some(r) if ref_is_bare_tparam(r, tps) => s.push_str(&format!("T{};", r.name)),
+    let ret_tparam = match f.ret.as_ref() {
+        Some(r) if ref_is_bare_tparam(r, tps) => Some(r.name.clone()),
         Some(r) if ref_uses_tparam(r, tps) => return None,
-        _ => s.push_str(&sig.ret.descriptor()),
-    }
-    Some(s)
+        _ => None,
+    };
+    Some(crate::ir::IrGenericSig {
+        type_params: type_param_bounds_ir(tps, &f.type_param_bounds)?,
+        param_tparams,
+        ret_tparam,
+    })
 }
 
-/// Signature of one parameter type: `TT;` for a bare type-parameter reference, else the erased JVM
-/// descriptor of its resolved `Ty` — but only when it uses NO type parameter (a generic use like
-/// `List<T>` needs the un-erased structure we don't model yet → `None`).
-fn type_ref_signature(r: &ast::TypeRef, tps: &[String], resolved: Option<Ty>) -> Option<String> {
-    if ref_is_bare_tparam(r, tps) {
-        return Some(format!("T{};", r.name));
+/// Pair each type-parameter name with its upper bound as a Kotlin `IrType` (`kotlin/Any` when none / an
+/// `Any` bound). `None` if a bound is a non-`Any`, non-primitive type (not modeled yet → omit the whole
+/// signature). Backend-agnostic: the bound is a Kotlin type; the JVM backend maps a primitive to its wrapper.
+fn type_param_bounds_ir(
+    names: &[String],
+    bounds: &[(String, ast::TypeRef)],
+) -> Option<Vec<(String, IrType)>> {
+    let any = || IrType::Class {
+        fq_name: "kotlin/Any".to_string(),
+        type_args: vec![],
+        nullable: false,
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for tp in names {
+        let bound = match bounds.iter().find(|(n, _)| n == tp) {
+            None => any(),
+            Some((_, b)) if b.name == "Any" && !b.nullable => any(),
+            Some((_, b)) => match Ty::from_name(&b.name).filter(|t| t.is_primitive()) {
+                Some(t) => ty_to_ir(t),
+                None => return None,
+            },
+        };
+        out.push((tp.clone(), bound));
     }
-    if ref_uses_tparam(r, tps) {
-        return None;
-    }
-    Some(resolved?.descriptor())
+    Some(out)
 }
 
 fn ref_is_bare_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
