@@ -746,6 +746,7 @@ impl SymbolSource for JvmLibraries {
                                 flags: FnFlags {
                                     inline: true,
                                     inline_only: !c.public,
+                                    suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                                 },
                                 callable: LibraryCallable {
                                     name: c.name.clone(),
@@ -812,6 +813,7 @@ impl SymbolSource for JvmLibraries {
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
+                            suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                         },
                         callable: LibraryCallable {
                             name: c.name.clone(),
@@ -894,6 +896,7 @@ impl SymbolSource for JvmLibraries {
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,
+                        suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                     },
                     callable: LibraryCallable {
                         name: c.name.clone(),

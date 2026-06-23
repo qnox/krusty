@@ -155,6 +155,9 @@ pub struct Classpath {
     /// Cache of the `inline` function names declared by a class (from its `@Metadata`), so inline
     /// recognition at a call site doesn't re-decode the metadata per call.
     inline_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
+    /// Cache of the `suspend` function names declared by a class (from its `@Metadata` `IS_SUSPEND`
+    /// flag), so suspension-point recognition at a call site doesn't re-decode the metadata per call.
+    suspend_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
     /// Cache of each class's `@Metadata` function name → Kotlin return-type internal name (decodes the
     /// read-only/mutable distinction the JVM signature erases — `mutableListOf` → `MutableList`).
     meta_returns: MetaTypeCache,
@@ -202,6 +205,7 @@ impl Classpath {
             jimage: RefCell::new(None),
             bodies: RefCell::new(HashMap::new()),
             inline_names: RefCell::new(HashMap::new()),
+            suspend_names: RefCell::new(HashMap::new()),
             meta_returns: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
             meta_ret_nullable: RefCell::new(HashMap::new()),
@@ -661,6 +665,40 @@ impl Classpath {
         let set = std::rc::Rc::new(names);
         let hit = set.contains(name);
         self.inline_names
+            .borrow_mut()
+            .insert(internal.to_string(), set);
+        hit
+    }
+
+    /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
+    /// `IS_SUSPEND` flag (decoded once per class and cached). A call to it is a coroutine suspension
+    /// point. Mirrors [`is_inline_method`](Self::is_inline_method), including the multifile-facade
+    /// part-class superclass walk.
+    pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
+        if let Some(set) = self.suspend_names.borrow().get(internal) {
+            return set.contains(name);
+        }
+        let ci = self.find(internal);
+        let mut names = ci
+            .as_ref()
+            .map(super::metadata::suspend_method_names)
+            .unwrap_or_default();
+        let mut cur = ci.as_ref().and_then(|ci| ci.super_class.clone());
+        while let Some(s) = cur {
+            if s == "java/lang/Object" {
+                break;
+            }
+            match self.find(&s) {
+                Some(pci) => {
+                    names.extend(super::metadata::suspend_method_names(&pci));
+                    cur = pci.super_class.clone();
+                }
+                None => break,
+            }
+        }
+        let set = std::rc::Rc::new(names);
+        let hit = set.contains(name);
+        self.suspend_names
             .borrow_mut()
             .insert(internal.to_string(), set);
         hit

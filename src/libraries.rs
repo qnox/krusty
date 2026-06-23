@@ -159,6 +159,9 @@ pub struct FnFlags {
     pub inline: bool,
     /// Non-public `@InlineOnly` — has no callable method; the emitter MUST splice its body.
     pub inline_only: bool,
+    /// `suspend` — decoded from `@Metadata` (the `IS_SUSPEND` function flag). A call to a suspend
+    /// function is a coroutine suspension point (the JVM lowering threads a `Continuation`).
+    pub suspend: bool,
 }
 
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
