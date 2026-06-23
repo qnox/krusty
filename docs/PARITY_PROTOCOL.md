@@ -30,13 +30,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   - Fast tier (the dev/pre-merge gate): `cargo test --test kotlin_box_ir_jvm_conformance --profile gate`
     = **~38s** (rayon-parallel, ONE persistent JVM runner per thread, ClassLoader+reflection — no
     per-test JVM/javac). Plus lib unit tests (~0.02s). Under 60s. ✓
-  - **Golden-cached differential tests (P6)**: kotlinc output is deterministic, so the bytecode-parity
-    differential tests now compare krusty against a COMMITTED golden (`tests/golden/<name>.javap`)
-    instead of launching kotlinc every run. `bytecode_parity_e2e` differential set: ~47s → **2.4s**.
-    Regenerate goldens only on a kotlinc-version bump: `KRUSTY_BLESS=1 KRUSTY_KOTLINC=… JAVA_HOME=… cargo
-    test --test bytecode_parity_e2e`. Remaining kotlinc-spawning files to convert: `diff_kotlinc`,
-    `diff_class_kotlinc`, `diagnostics_match_kotlinc`, `error_messages_match_kotlinc`, and e2e suites
-    that spawn kotlinc — each a follow-up to bring the full suite under 60s.
+  - **Compile-once differential tests (P7, supersedes the P6 golden cache)**: golden files would go
+    STALE across kotlinc versions/extensions (different output each version), so we generate the
+    reference FRESH but BATCHED — every differential case's source is compiled in ONE kotlinc invocation
+    (and one krusty invocation), cached per test process (`diff_refs`, `OnceLock`); each `#[test]` is
+    `assert_diff("<case>")`. Add a case to `diff_cases()` (unique filename → unique facade). One kotlinc
+    JVM launch for the whole `bytecode_parity_e2e` differential set instead of one-per-test:
+    ~47s → **9.9s** (21 tests). No committed goldens. Other kotlinc-spawning files (`diff_kotlinc`,
+    `diagnostics_match_kotlinc`, …) can adopt the same one-shot batch — follow-up.
   - Heavy tier (~220–290s): the full `cargo test`. PROFILED — the cost is NOT kotlinc (only 1–6 spawns
     across the differential files, now golden-cached) but (a) the conformance gate (~38s, already
     optimal — rayon + persistent JVM runner) and (b) the execution e2e suites that spawn `javac`+`java`
