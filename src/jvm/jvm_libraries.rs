@@ -39,22 +39,37 @@ impl JvmLibraries {
         type_args: &[Ty],
         allow_non_public: bool,
     ) -> Option<LibraryCallable> {
-        for recv_desc in supertype_descriptors(&self.cp, receiver) {
-            // Collect every candidate of this name on this receiver that fits the arguments, then pick the
-            // MOST SPECIFIC by its parameter types — `Iterable.plus(element: T)` and
-            // `Iterable.plus(elements: Iterable<T>)` both accept a `List` argument (the first via the
-            // erased `Object` parameter), but Kotlin selects the more specific `Iterable` overload. Without
-            // this, first-match would resolve `list + list` to the element overload (a nested list).
-            let mut matches: Vec<(crate::jvm::classpath::ExtCandidate, Vec<Ty>, Ty)> = Vec::new();
-            for c in self.cp.find_extensions(&recv_desc, name) {
-                if !c.public && !allow_non_public {
+        // Enumerate candidates through the consolidated `functions` query (the single source of truth for
+        // every overload + its metadata) instead of hitting the classpath index directly. Each Extension
+        // overload carries the receiver-MRO RUNG (`receiver_rank`) it was found at; walking the rungs
+        // most-specific-first and returning the first with a match reproduces the classpath lookup's
+        // receiver precedence (a `List` extension before an `Iterable` one) — `recv_desc` for each rung is
+        // recovered locally from the same supertype walk, so no JVM descriptor leaks into `FunctionInfo`.
+        let descs = supertype_descriptors(&self.cp, receiver);
+        let fs = self.functions(name, Some(receiver));
+        let exts: Vec<&FunctionInfo> = fs
+            .overloads
+            .iter()
+            .filter(|o| o.kind == FnKind::Extension)
+            .collect();
+        for (rank, recv_desc) in descs.iter().enumerate() {
+            let rank = rank as u32;
+            // Collect every candidate at THIS rung that fits the arguments, then pick the MOST SPECIFIC by
+            // its parameter types — `Iterable.plus(element: T)` and `Iterable.plus(elements: Iterable<T>)`
+            // both accept a `List` argument (the first via the erased `Object` parameter), but Kotlin selects
+            // the more specific `Iterable` overload. Without this, first-match would resolve `list + list` to
+            // the element overload (a nested list).
+            let mut matches: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = Vec::new();
+            for o in exts.iter().copied().filter(|o| o.receiver_rank == rank) {
+                let c = &o.callable;
+                if !o.public && !allow_non_public {
                     continue;
                 }
                 // A non-public candidate matched via the ERASED `Object` key must have a type-variable
                 // receiver (`T.takeIf`) — a concrete value-class receiver (`Result.map`, erased to
                 // `Object`) must not match an unrelated receiver this way. (A concrete non-value-class
                 // receiver keys under its own descriptor, so this only affects the `Object` key.)
-                if !c.public
+                if !o.public
                     && recv_desc == "Ljava/lang/Object;"
                     && !nonpublic_ext_receiver_is_typevar(c.signature.as_deref())
                 {
@@ -113,7 +128,7 @@ impl JvmLibraries {
                         }
                     }
                 }
-                matches.push((c, params, ret));
+                matches.push((o, params, ret));
             }
             if matches.is_empty() {
                 continue;
@@ -123,7 +138,7 @@ impl JvmLibraries {
             // indistinguishable here. Prefer the WIDEST (fewest narrowing params): kotlinc resolves an
             // `Int` argument to the `Int` overload, and only that one carries the `MIN_VALUE`/`MAX_VALUE`
             // overflow guard (`2 until Int.MIN_VALUE` must be empty, not wrap to `2..MAX_VALUE`).
-            matches.sort_by_key(|(c, _, _)| descriptor_narrowing(&c.descriptor));
+            matches.sort_by_key(|(o, _, _)| descriptor_narrowing(&o.callable.descriptor));
             // Pick the candidate whose non-receiver parameters are at least as specific as every other's
             // (each parameter a subtype of the corresponding one). When two are incomparable, keep the
             // first — stable, and good enough for the stdlib's overload sets.
@@ -138,7 +153,8 @@ impl JvmLibraries {
                         .all(|j| j == i || specific_over(&matches[i].1[1..], &matches[j].1[1..]))
                 })
                 .unwrap_or(0);
-            let (c, params, ret) = matches.swap_remove(best);
+            let (o, params, ret) = matches.swap_remove(best);
+            let c = &o.callable;
             // Recover a generic extension's parameterized return (`to` → `Pair<A, B>`): the type variables
             // bind from the receiver (the first parameter) and the arguments.
             let ret_ty = c
@@ -183,7 +199,7 @@ impl JvmLibraries {
                 vararg_elem: None,
                 // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
                 // skip the file (never an `IllegalAccessError`); a PUBLIC one can fall back to a real call.
-                must_inline: !c.public,
+                must_inline: !o.public,
                 signature: c.signature.clone(),
             });
         }
@@ -941,6 +957,9 @@ impl LibrarySet for JvmLibraries {
                                 receiver: Some(receiver),
                                 ret_nullable: false,
                                 public: c.public,
+                                // The lambda-return family is resolved by return type, never through the
+                                // arg-binding extension selector — mark it so it can't preempt a real rung.
+                                receiver_rank: u32::MAX,
                                 flags: FnFlags {
                                     inline: true,
                                     inline_only: !c.public,
@@ -965,8 +984,12 @@ impl LibrarySet for JvmLibraries {
                 }
             }
             // Plain extensions of `name` on the receiver (and supertypes) — `uppercase`, `map`, `let`, … —
-            // with their inline/`@InlineOnly` flags and return nullability decoded once.
-            for recv_desc in supertype_descriptors(&self.cp, receiver) {
+            // with their inline/`@InlineOnly` flags and return nullability decoded once. The enumeration
+            // index is the receiver-MRO rung (`receiver_rank`) the arg-binding selector orders candidates by.
+            for (rank, recv_desc) in supertype_descriptors(&self.cp, receiver)
+                .into_iter()
+                .enumerate()
+            {
                 for c in self.cp.find_extensions(&recv_desc, name) {
                     let (params, pret) = parse_method_desc(&c.descriptor);
                     let inline = self.cp.is_inline_method(&c.owner, &c.name);
@@ -1000,6 +1023,7 @@ impl LibrarySet for JvmLibraries {
                         receiver: Some(receiver),
                         ret_nullable,
                         public: c.public,
+                        receiver_rank: rank as u32,
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
@@ -1039,6 +1063,7 @@ impl LibrarySet for JvmLibraries {
                                 receiver: Some(receiver),
                                 ret_nullable: false,
                                 public: true,
+                                receiver_rank: 0,
                                 flags: FnFlags::default(),
                                 callable: LibraryCallable {
                                     name: m.name.clone(),
@@ -1070,6 +1095,7 @@ impl LibrarySet for JvmLibraries {
                     receiver: None,
                     ret_nullable: false,
                     public: c.public,
+                    receiver_rank: 0,
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,

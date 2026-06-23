@@ -105,6 +105,13 @@ pub struct FunctionInfo {
     /// Whether the callee is PUBLIC. A non-public callable has no legal call site (`@InlineOnly`); an
     /// arg-binding selector includes it only when it will SPLICE (never emits an `invokestatic`).
     pub public: bool,
+    /// For an [`FnKind::Extension`] overload, the receiver-MRO RUNG it was found at (0 = the receiver's
+    /// own type, increasing up the supertype chain). An arg-binding selector groups candidates by this
+    /// rank and processes rungs most-specific-first, so a `List` extension wins over an `Iterable` one —
+    /// the same receiver precedence the classpath lookup gives, preserved through the consolidated query.
+    /// `0` for members/top-level (precedence there is by [`FnKind`], not rung); `u32::MAX` marks a
+    /// candidate that must never preempt a real rung (the `@OverloadResolutionByLambdaReturnType` family).
+    pub receiver_rank: u32,
 }
 
 /// Function metadata flags, decoded once from `@Metadata`.
