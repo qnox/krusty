@@ -187,6 +187,33 @@ fn suspend_fun_two_suspension_points_spills_live_local() {
 }
 
 #[test]
+fn suspend_fun_suspension_inside_if_taken() {
+    // The suspension `foo()` is inside the THEN branch of an `if` (`flag` is true). The state machine
+    // must resume into the branch and converge at the merge. 42 + 1 = 43.
+    run_suspend(
+        "smif_t",
+        "suspend fun foo(): Int = 42\n\
+         val flag = true\n\
+         suspend fun cond(): Int {\n    val a = if (flag) foo() else 7\n    return a + 1\n}\n",
+        "cond",
+        43,
+    );
+}
+
+#[test]
+fn suspend_fun_suspension_inside_if_not_taken() {
+    // Same shape, `flag` false: the suspending branch is skipped, the else value (7) flows to the merge.
+    run_suspend(
+        "smif_f",
+        "suspend fun foo(): Int = 42\n\
+         val flag = false\n\
+         suspend fun cond(): Int {\n    val a = if (flag) foo() else 7\n    return a + 1\n}\n",
+        "cond",
+        8,
+    );
+}
+
+#[test]
 fn suspend_chain_calls_state_machine_callee() {
     // `top` calls `bar`, which is itself a state-machine suspend fn (it calls `foo`). Exercises a
     // suspend fn whose suspension callee has its own continuation class. 43 + 1 = 44.

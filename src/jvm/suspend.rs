@@ -13,10 +13,14 @@
 //!     `result`/`label` across resumes, and the function body dispatches on `label`, threading its own
 //!     continuation into each suspend call and returning `COROUTINE_SUSPENDED` when a callee suspends.
 //!
-//! The state machine is built as ordinary IR (the existing emitter produces the bytecode + frames), in
-//! a form that is *runtime-equivalent* to kotlinc's (an `if`-chain dispatch rather than a fall-through
-//! `tableswitch`). Shapes not yet handled (multiple suspension points, suspension inside control flow,
-//! cross-suspension locals needing field spilling) cause the pass to skip the file — never miscompile.
+//! The body is *flattened* into a flat state graph (`Flat`): each suspension point — including one
+//! inside an `if`/`when` branch value — ends a state and begins a resume state, control flow becomes
+//! `label = next` transitions, and a local live across a suspension point is spilled to a continuation
+//! field. The whole thing is ordinary IR (`while(true){ when(label){…} }`), so the existing emitter
+//! produces the bytecode + stack-map frames; it is runtime-equivalent to kotlinc's `tableswitch` form
+//! (an `if`-chain dispatch). Shapes the flattener doesn't model yet (a suspension nested deeper than a
+//! branch value, inside a loop, or a member/extension suspend fn) cause the pass to skip the file —
+//! never miscompile.
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
@@ -25,8 +29,10 @@ use crate::ir::{
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
-/// A suspension point whose result is discarded (a bare `suspendCall()` statement) binds no local.
-const NO_LOCAL: u32 = u32::MAX;
+/// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
+type Branches = Vec<(Option<ExprId>, ExprId)>;
+/// A direct suspension at a statement: `(optional bound local + type, callee FunId, call args)`.
+type Suspension = (Option<(u32, IrType)>, u32, Vec<ExprId>);
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -68,14 +74,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         if let Some(b) = body {
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
-        let points = match body {
-            Some(b) => suspension_points(ir, b, &suspend_set),
-            None => Some(Vec::new()),
-        };
-        let mut points = match points {
-            Some(p) => p,
-            None => return false, // a suspend call in a position this pass can't restructure
-        };
+        let has_susp = body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
         // CPS signature: append the continuation parameter, erase the return to Object.
         let p_old = ir.functions[fid as usize].params.len() as u32; // original param count
         let f = &mut ir.functions[fid as usize];
@@ -89,94 +88,19 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         if let Some(b) = body {
             shift_locals(ir, b, p_old);
         }
-        for pt in &mut points {
-            if pt.local != NO_LOCAL && pt.local >= p_old {
-                pt.local += 1;
-            }
-        }
 
-        if points.is_empty() {
+        if !has_susp {
             // Leaf: just box the returns (no state machine).
             if let Some(b) = body {
                 if !box_returns(ir, b) {
                     return false;
                 }
             }
-        } else if !build_state_machine(ir, facade, fid, body.unwrap(), &points) {
+        } else if !build_state_machine(ir, facade, fid, body.unwrap()) {
             return false;
         }
     }
     true
-}
-
-/// A suspension point: the body statement index (in the top-level block) plus the bound-local index and
-/// type and the suspend call's `(FunId, args)`. Slice: the suspension is `val x = <suspend call>(...)`.
-struct Point {
-    stmt: usize,
-    local: u32,
-    local_ty: IrType,
-    callee: u32,
-    args: Vec<ExprId>,
-}
-
-/// Identify the suspension points in body `b`. Returns `None` if the body contains a suspend call in a
-/// shape this pass can't yet restructure (anything other than a top-level `val x = <suspend call>` whose
-/// before-statements declare no locals, and with no suspend call hidden in any other expression). An
-/// empty `Vec` means "leaf" (no suspension point).
-fn suspension_points(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> Option<Vec<Point>> {
-    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
-        // Not a block body — only acceptable if it contains no suspend call at all (leaf).
-        return if expr_calls_suspend(ir, b, suspend_set) {
-            None
-        } else {
-            Some(Vec::new())
-        };
-    };
-    if value.is_some_and(|v| expr_calls_suspend(ir, v, suspend_set)) {
-        return None;
-    }
-    let mut points = Vec::new();
-    for (i, &s) in stmts.iter().enumerate() {
-        match &ir.exprs[s as usize] {
-            IrExpr::Variable {
-                index,
-                ty,
-                init: Some(init),
-            } => {
-                if let Some((callee, args)) = as_suspend_call(ir, *init, suspend_set) {
-                    points.push(Point {
-                        stmt: i,
-                        local: *index,
-                        local_ty: ty.clone(),
-                        callee,
-                        args,
-                    });
-                    continue;
-                }
-                // A non-suspension local: it must not itself hide a suspend call.
-                if expr_calls_suspend(ir, *init, suspend_set) {
-                    return None;
-                }
-            }
-            _ => {
-                // A bare `suspendCall()` statement: a suspension point whose result is discarded.
-                if let Some((callee, args)) = as_suspend_call(ir, s, suspend_set) {
-                    points.push(Point {
-                        stmt: i,
-                        local: NO_LOCAL,
-                        local_ty: object_ty(),
-                        callee,
-                        args,
-                    });
-                    continue;
-                }
-                if expr_calls_suspend(ir, s, suspend_set) {
-                    return None;
-                }
-            }
-        }
-    }
-    Some(points)
 }
 
 /// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
@@ -249,63 +173,40 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
-/// Build the coroutine state machine for `fid` (whose body `b` is a top-level block) with the suspension
-/// points `points`. Generalizes to N straight-line suspension points: the body is split into per-state
-/// segments and rewritten as `while(true){ r = cont.result; <restore spilled>; when(label){states} }`.
-/// A suspension-result local that is read in a later state is spilled to a continuation field (restored
-/// at the loop top so its slot is frame-consistent on every dispatch path). A *non-suspension* local
-/// that crosses a suspension point isn't modeled yet → skip (never miscompile).
-fn build_state_machine(
-    ir: &mut IrFile,
-    facade: &str,
-    fid: u32,
-    b: ExprId,
-    points: &[Point],
-) -> bool {
+/// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
+/// flattened into a state graph: each suspension point (including one inside an `if`/`when` branch value)
+/// ends a state and starts a resume state, and control flow becomes `label = next` transitions through a
+/// `while(true){ r = cont.result; <restore spilled>; when(label){ states } else throw }` dispatch loop. A
+/// local live across any suspension point is spilled to a continuation field (restored at the loop top so
+/// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
+/// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
+fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bool {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return false;
     };
     if value.is_some() {
         return false; // a block trailing-value body isn't modeled (suspend bodies use `return`)
     }
-    let n = points.len();
+    let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
 
-    // Per-state segments. State 0 runs the statements before the first suspension call; state k
-    // (1..n-1) runs those between points[k-1] and points[k]; state n runs the tail. Entering state k
-    // (1..=n) binds `points[k-1].local` (the previous suspension's result).
-    let mut segs: Vec<Vec<ExprId>> = Vec::with_capacity(n + 1);
-    segs.push(stmts[..points[0].stmt].to_vec());
-    for w in 1..n {
-        segs.push(stmts[points[w - 1].stmt + 1..points[w].stmt].to_vec());
+    // Spilled locals: any local read at or after the first statement that contains a suspension — a
+    // sound over-approximation of "live across a suspension point". Each maps to its declared type.
+    let Some(first) = stmts
+        .iter()
+        .position(|&s| expr_calls_suspend(ir, s, &suspend_set))
+    else {
+        return false; // caller guarantees a suspension exists
+    };
+    let mut reads: Vec<u32> = Vec::new();
+    for &s in &stmts[first..] {
+        collect_reads(ir, s, &mut reads);
     }
-    segs.push(stmts[points[n - 1].stmt + 1..].to_vec());
-
-    // A suspension-result local bound entering state k that is read in a LATER state must be spilled.
+    reads.sort_unstable();
+    reads.dedup();
     let mut spilled: Vec<(u32, IrType)> = Vec::new();
-    for k in 1..=n {
-        let local = points[k - 1].local;
-        let later_used = segs[k + 1..]
-            .iter()
-            .flatten()
-            .any(|&s| expr_uses_value(ir, s, local));
-        if later_used {
-            spilled.push((local, points[k - 1].local_ty.clone()));
-        }
-    }
-    // A plain (non-suspension) local declared in a segment and read after a later suspension point isn't
-    // modeled yet — skip rather than miscompile.
-    for si in 0..segs.len() {
-        for idx in 0..segs[si].len() {
-            let s = segs[si][idx];
-            if let IrExpr::Variable { index, .. } = ir.exprs[s as usize] {
-                let later = segs[si + 1..]
-                    .iter()
-                    .flatten()
-                    .any(|&t| expr_uses_value(ir, t, index));
-                if later {
-                    return false;
-                }
-            }
+    for idx in reads {
+        if let Some(ty) = find_local_ty(ir, b, idx) {
+            spilled.push((idx, ty));
         }
     }
 
@@ -318,22 +219,33 @@ fn build_state_machine(
     };
     let completion_idx = (ir.functions[fid as usize].params.len() - 1) as u32;
 
-    let mut next = max_value_index(ir) + 1;
-    let mut fresh = || {
-        let v = next;
-        next += 1;
-        v
-    };
-    let cont_v = fresh();
-    let r_v = fresh();
-    let suspended_v = fresh();
+    let base = max_value_index(ir) + 1;
+    let cont_v = base;
+    let r_v = base + 1;
+    let suspended_v = base + 2;
 
     let cont_id = build_continuation_class(ir, &cont_internal, fid, &spilled);
-    // Continuation field indices: result = 0, label = 1, then each spilled local in order.
-    let spilled_idx = spilled.clone();
-    let spill_field =
-        move |local: u32| 2 + spilled_idx.iter().position(|(l, _)| *l == local).unwrap() as u32;
 
+    // Flatten the body into a state graph.
+    let mut flat = Flat {
+        ir,
+        suspend: &suspend_set,
+        cont_v,
+        r_v,
+        suspended_v,
+        cont_id,
+        spilled: spilled.clone(),
+        states: vec![Vec::new()],
+        next_local: base + 3,
+        failed: false,
+    };
+    flat.flatten(&stmts, 0, None);
+    if flat.failed {
+        return false;
+    }
+    let states = std::mem::take(&mut flat.states);
+
+    // --- assemble: prologue + while(true){ r=cont.result; restore spilled; when(label){states} } ---
     let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
     let cint = |ir: &mut IrFile, n: i32| ir.add_expr(IrExpr::Const(IrConst::Int(n)));
     let getf = |ir: &mut IrFile, recv: ExprId, idx: u32| {
@@ -343,8 +255,9 @@ fn build_state_machine(
             index: idx,
         })
     };
+    let spill_field =
+        |local: u32| 2 + spilled.iter().position(|(l, _)| *l == local).unwrap() as u32;
 
-    // --- prologue: var cont = get-or-create; var suspended = COROUTINE_SUSPENDED ---
     let get_or_create = build_get_or_create(ir, completion_idx, &cont_ty, cont_id);
     let var_cont = k(
         ir,
@@ -377,7 +290,6 @@ fn build_state_machine(
         },
     );
 
-    // --- loop body: r = cont.result; restore each spilled local from its field; dispatch(label) ---
     let mut loop_stmts: Vec<ExprId> = Vec::new();
     let cont_for_r = k(ir, IrExpr::GetValue(cont_v));
     let r_init = getf(ir, cont_for_r, 0);
@@ -403,154 +315,21 @@ fn build_state_machine(
         ));
     }
 
-    // --- per-state branches ---
-    let mut branches: Vec<(Option<ExprId>, ExprId)> = Vec::new();
-    for state in 0..=n {
-        let mut ss: Vec<ExprId> = Vec::new();
-        ss.push(throw_on_failure(ir, r_v));
-        // Bind the previous suspension's result (states 1..=n) — unless it was discarded.
-        if state >= 1 && points[state - 1].local != NO_LOCAL {
-            let local = points[state - 1].local;
-            let ty = points[state - 1].local_ty.clone();
-            let r_get = k(ir, IrExpr::GetValue(r_v));
-            let unb = unbox(ir, r_get, &ty);
-            if spilled.iter().any(|(l, _)| *l == local) {
-                // Already declared (restored) at the loop top — reassign.
-                ss.push(k(
-                    ir,
-                    IrExpr::SetValue {
-                        var: local,
-                        value: unb,
-                    },
-                ));
-            } else {
-                ss.push(k(
-                    ir,
-                    IrExpr::Variable {
-                        index: local,
-                        ty,
-                        init: Some(unb),
-                    },
-                ));
-            }
-        }
-        ss.extend(segs[state].iter().copied());
-        if state < n {
-            // Spill every already-bound spilled local before the next suspension call.
-            for (local, _) in spilled.clone() {
-                let binding_state = points.iter().position(|p| p.local == local).unwrap() + 1;
-                if binding_state <= state {
-                    let recv = k(ir, IrExpr::GetValue(cont_v));
-                    let v = k(ir, IrExpr::GetValue(local));
-                    let fld = spill_field(local);
-                    ss.push(k(
-                        ir,
-                        IrExpr::SetField {
-                            receiver: recv,
-                            class: cont_id,
-                            index: fld,
-                            value: v,
-                        },
-                    ));
-                }
-            }
-            // cont.label = state + 1
-            let recv = k(ir, IrExpr::GetValue(cont_v));
-            let nextlbl = cint(ir, state as i32 + 1);
-            ss.push(k(
-                ir,
-                IrExpr::SetField {
-                    receiver: recv,
-                    class: cont_id,
-                    index: 1,
-                    value: nextlbl,
-                },
-            ));
-            // v = callee(args..., (Continuation)cont)
-            let cont_arg_recv = k(ir, IrExpr::GetValue(cont_v));
-            let cont_arg = k(
-                ir,
-                IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: cont_arg_recv,
-                    type_operand: continuation_ty(),
-                },
-            );
-            let mut args = points[state].args.clone();
-            args.push(cont_arg);
-            let call = k(
-                ir,
-                IrExpr::Call {
-                    callee: Callee::Local(points[state].callee),
-                    dispatch_receiver: None,
-                    args,
-                },
-            );
-            let v_v = fresh();
-            ss.push(k(
-                ir,
-                IrExpr::Variable {
-                    index: v_v,
-                    ty: object_ty(),
-                    init: Some(call),
-                },
-            ));
-            // if (v === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED  (two-branch `when`: a single-
-            // branch `when` statement drops its body, so the else branch is an explicit empty block).
-            let v_r = k(ir, IrExpr::GetValue(v_v));
-            let susp_r = k(ir, IrExpr::GetValue(suspended_v));
-            let is_susp = k(
-                ir,
-                IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::RefEq,
-                    lhs: v_r,
-                    rhs: susp_r,
-                },
-            );
-            let susp_val = k(ir, IrExpr::GetValue(suspended_v));
-            let ret_susp = k(ir, IrExpr::Return(Some(susp_val)));
-            let empty = k(
-                ir,
-                IrExpr::Block {
-                    stmts: vec![],
-                    value: None,
-                },
-            );
-            ss.push(k(
-                ir,
-                IrExpr::When {
-                    branches: vec![(Some(is_susp), ret_susp), (None, empty)],
-                },
-            ));
-            // cont.result = v  (store the synchronous result for the next loop iteration)
-            let recv = k(ir, IrExpr::GetValue(cont_v));
-            let v_g = k(ir, IrExpr::GetValue(v_v));
-            ss.push(k(
-                ir,
-                IrExpr::SetField {
-                    receiver: recv,
-                    class: cont_id,
-                    index: 0,
-                    value: v_g,
-                },
-            ));
-        }
-        // dispatch: label == state for a non-final state; the final state is the `else`.
-        let cond = if state < n {
-            let recv = k(ir, IrExpr::GetValue(cont_v));
-            let lbl = getf(ir, recv, 1);
-            let sc = cint(ir, state as i32);
-            Some(k(
-                ir,
-                IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: lbl,
-                    rhs: sc,
-                },
-            ))
-        } else {
-            None
-        };
+    let mut branches: Branches = Vec::new();
+    for (i, st) in states.iter().enumerate() {
+        let mut ss = vec![throw_on_failure(ir, r_v)];
+        ss.extend(st.iter().copied());
+        let recv = k(ir, IrExpr::GetValue(cont_v));
+        let lbl = getf(ir, recv, 1);
+        let sc = cint(ir, i as i32);
+        let cond = k(
+            ir,
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: lbl,
+                rhs: sc,
+            },
+        );
         let block = k(
             ir,
             IrExpr::Block {
@@ -558,8 +337,33 @@ fn build_state_machine(
                 value: None,
             },
         );
-        branches.push((cond, block));
+        branches.push((Some(cond), block));
     }
+    // default: `throw IllegalStateException(...)` (an unreachable resume label) — matches kotlinc.
+    let msg = k(
+        ir,
+        IrExpr::Const(IrConst::String(
+            "call to 'resume' before 'invoke' with coroutine".to_string(),
+        )),
+    );
+    let exc = k(
+        ir,
+        IrExpr::NewExternal {
+            internal: "java/lang/IllegalStateException".to_string(),
+            ctor_desc: "(Ljava/lang/String;)V".to_string(),
+            args: vec![msg],
+        },
+    );
+    let throw = k(ir, IrExpr::Throw { operand: exc });
+    let else_block = k(
+        ir,
+        IrExpr::Block {
+            stmts: vec![throw],
+            value: None,
+        },
+    );
+    branches.push((None, else_block));
+
     let dispatch = k(ir, IrExpr::When { branches });
     loop_stmts.push(dispatch);
     let loop_body = k(
@@ -580,7 +384,6 @@ fn build_state_machine(
             label: None,
         },
     );
-
     let new_body = k(
         ir,
         IrExpr::Block {
@@ -590,6 +393,308 @@ fn build_state_machine(
     );
     ir.functions[fid as usize].body = Some(new_body);
     box_returns(ir, new_body)
+}
+
+/// Flattener: turns the structured suspend-function body into a flat list of states connected by
+/// `label = next` transitions (see [`build_state_machine`]).
+struct Flat<'a> {
+    ir: &'a mut IrFile,
+    suspend: &'a HashSet<u32>,
+    cont_v: u32,
+    r_v: u32,
+    suspended_v: u32,
+    cont_id: ClassId,
+    spilled: Vec<(u32, IrType)>,
+    states: Vec<Vec<ExprId>>,
+    next_local: u32,
+    failed: bool,
+}
+
+impl Flat<'_> {
+    fn add(&mut self, e: IrExpr) -> ExprId {
+        self.ir.add_expr(e)
+    }
+    fn gv(&mut self, i: u32) -> ExprId {
+        self.add(IrExpr::GetValue(i))
+    }
+    fn fresh(&mut self) -> u32 {
+        let v = self.next_local;
+        self.next_local += 1;
+        v
+    }
+    fn new_state(&mut self) -> usize {
+        self.states.push(Vec::new());
+        self.states.len() - 1
+    }
+    fn is_spilled(&self, l: u32) -> bool {
+        self.spilled.iter().any(|(x, _)| *x == l)
+    }
+    fn spill_field(&self, l: u32) -> u32 {
+        2 + self.spilled.iter().position(|(x, _)| *x == l).unwrap() as u32
+    }
+    fn setfield(&mut self, out: &mut Vec<ExprId>, idx: u32, val: ExprId) {
+        let recv = self.gv(self.cont_v);
+        let e = self.add(IrExpr::SetField {
+            receiver: recv,
+            class: self.cont_id,
+            index: idx,
+            value: val,
+        });
+        out.push(e);
+    }
+    fn set_label(&mut self, out: &mut Vec<ExprId>, target: usize) {
+        let v = self.add(IrExpr::Const(IrConst::Int(target as i32)));
+        self.setfield(out, 1, v);
+    }
+    fn spill_all(&mut self, out: &mut Vec<ExprId>) {
+        for (l, _) in self.spilled.clone() {
+            let f = self.spill_field(l);
+            let v = self.gv(l);
+            self.setfield(out, f, v);
+        }
+    }
+    fn goto(&mut self, out: &mut Vec<ExprId>, target: usize) {
+        self.spill_all(out);
+        self.set_label(out, target);
+    }
+    /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
+    /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
+    /// resume re-enters at `resume`).
+    fn emit_call(&mut self, out: &mut Vec<ExprId>, callee: u32, args: &[ExprId], resume: usize) {
+        self.spill_all(out);
+        self.set_label(out, resume);
+        let cont_arg = {
+            let c = self.gv(self.cont_v);
+            self.add(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: c,
+                type_operand: continuation_ty(),
+            })
+        };
+        let mut a = args.to_vec();
+        a.push(cont_arg);
+        let call = self.add(IrExpr::Call {
+            callee: Callee::Local(callee),
+            dispatch_receiver: None,
+            args: a,
+        });
+        let vv = self.fresh();
+        let var = self.add(IrExpr::Variable {
+            index: vv,
+            ty: object_ty(),
+            init: Some(call),
+        });
+        out.push(var);
+        let vr = self.gv(vv);
+        let sr = self.gv(self.suspended_v);
+        let is = self.add(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::RefEq,
+            lhs: vr,
+            rhs: sr,
+        });
+        let sv = self.gv(self.suspended_v);
+        let ret = self.add(IrExpr::Return(Some(sv)));
+        let empty = self.add(IrExpr::Block {
+            stmts: vec![],
+            value: None,
+        });
+        let when = self.add(IrExpr::When {
+            branches: vec![(Some(is), ret), (None, empty)],
+        });
+        out.push(when);
+        let vg = self.gv(vv);
+        self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
+    }
+    /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
+    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &IrType) {
+        let rg = self.gv(self.r_v);
+        let unb = unbox(self.ir, rg, ty);
+        if self.is_spilled(local) {
+            out.push(self.add(IrExpr::SetValue {
+                var: local,
+                value: unb,
+            }));
+        } else {
+            out.push(self.add(IrExpr::Variable {
+                index: local,
+                ty: ty.clone(),
+                init: Some(unb),
+            }));
+        }
+    }
+    /// If `stmt` is a (possibly result-discarding) direct suspension, return `(bound local, callee, args)`.
+    fn stmt_suspension(&self, stmt: ExprId) -> Option<Suspension> {
+        match &self.ir.exprs[stmt as usize] {
+            IrExpr::Variable {
+                index,
+                ty,
+                init: Some(init),
+            } => as_suspend_call(self.ir, *init, self.suspend)
+                .map(|(c, a)| (Some((*index, ty.clone())), c, a)),
+            _ => as_suspend_call(self.ir, stmt, self.suspend).map(|(c, a)| (None, c, a)),
+        }
+    }
+    /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
+    /// `(L, ty, branches)`. Sets `failed` if a branch hides a suspension the flattener can't lift.
+    fn stmt_cond_suspension(&mut self, stmt: ExprId) -> Option<(u32, IrType, Branches)> {
+        let IrExpr::Variable {
+            index,
+            ty,
+            init: Some(init),
+        } = &self.ir.exprs[stmt as usize]
+        else {
+            return None;
+        };
+        let (index, ty, init) = (*index, ty.clone(), *init);
+        let IrExpr::When { branches } = &self.ir.exprs[init as usize] else {
+            return None;
+        };
+        let branches = branches.clone();
+        let any_susp = branches
+            .iter()
+            .any(|(_, v)| as_suspend_call(self.ir, *v, self.suspend).is_some());
+        if !any_susp {
+            return None;
+        }
+        // A branch value must be either a direct suspension or suspension-free.
+        for (_, v) in &branches {
+            if as_suspend_call(self.ir, *v, self.suspend).is_none()
+                && expr_calls_suspend(self.ir, *v, self.suspend)
+            {
+                self.failed = true;
+                return None;
+            }
+        }
+        Some((index, ty, branches))
+    }
+    /// Emit the `when` for a conditional suspension binding `L`; every branch computes `L` and `goto`s
+    /// `merge`. A suspending branch routes through its own resume state.
+    fn emit_cond(
+        &mut self,
+        local: u32,
+        ty: &IrType,
+        branches: &[(Option<ExprId>, ExprId)],
+        merge: usize,
+    ) -> ExprId {
+        let mut out_branches: Branches = Vec::new();
+        for (cond, value) in branches {
+            let mut bb: Vec<ExprId> = Vec::new();
+            if let Some((callee, args)) = as_suspend_call(self.ir, *value, self.suspend) {
+                let br_resume = self.new_state();
+                self.emit_call(&mut bb, callee, &args, br_resume);
+                let mut rs: Vec<ExprId> = Vec::new();
+                self.bind_from_r(&mut rs, local, ty);
+                self.goto(&mut rs, merge);
+                self.states[br_resume] = rs;
+            } else {
+                if self.is_spilled(local) {
+                    bb.push(self.add(IrExpr::SetValue {
+                        var: local,
+                        value: *value,
+                    }));
+                } else {
+                    bb.push(self.add(IrExpr::Variable {
+                        index: local,
+                        ty: ty.clone(),
+                        init: Some(*value),
+                    }));
+                }
+                self.goto(&mut bb, merge);
+            }
+            let block = self.add(IrExpr::Block {
+                stmts: bb,
+                value: None,
+            });
+            out_branches.push((*cond, block));
+        }
+        self.add(IrExpr::When {
+            branches: out_branches,
+        })
+    }
+    /// A plain (non-suspending) statement. A `Variable` declaration of a spilled local becomes a
+    /// `SetValue` (the local is already declared at the loop top).
+    fn rewrite_plain(&mut self, stmt: ExprId) -> ExprId {
+        if let IrExpr::Variable {
+            index,
+            init: Some(init),
+            ..
+        } = self.ir.exprs[stmt as usize]
+        {
+            if self.is_spilled(index) {
+                return self.add(IrExpr::SetValue {
+                    var: index,
+                    value: init,
+                });
+            }
+        }
+        stmt
+    }
+    /// Flatten `stmts` into state `cur`, transferring to `after` (if any) when the sequence falls through.
+    fn flatten(&mut self, stmts: &[ExprId], cur: usize, after: Option<usize>) {
+        let mut out: Vec<ExprId> = std::mem::take(&mut self.states[cur]);
+        for i in 0..stmts.len() {
+            if self.failed {
+                self.states[cur] = out;
+                return;
+            }
+            let stmt = stmts[i];
+            if let Some((bind, callee, args)) = self.stmt_suspension(stmt) {
+                let resume = self.new_state();
+                self.emit_call(&mut out, callee, &args, resume);
+                self.states[cur] = out;
+                let mut rs: Vec<ExprId> = Vec::new();
+                if let Some((local, ty)) = bind {
+                    self.bind_from_r(&mut rs, local, &ty);
+                }
+                self.states[resume] = rs;
+                self.flatten(&stmts[i + 1..], resume, after);
+                return;
+            }
+            if let Some((local, ty, when_branches)) = self.stmt_cond_suspension(stmt) {
+                let merge = self.new_state();
+                let when = self.emit_cond(local, &ty, &when_branches, merge);
+                out.push(when);
+                self.states[cur] = out;
+                self.flatten(&stmts[i + 1..], merge, after);
+                return;
+            }
+            if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                self.failed = true;
+                self.states[cur] = out;
+                return;
+            }
+            let s2 = self.rewrite_plain(stmt);
+            out.push(s2);
+        }
+        if let Some(a) = after {
+            self.goto(&mut out, a);
+        }
+        self.states[cur] = out;
+    }
+}
+
+/// Collect the value-indices read (`GetValue`) anywhere in `e`'s subtree.
+fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
+    if let IrExpr::GetValue(i) = ir.exprs[e as usize] {
+        out.push(i);
+    }
+    for_each_child(ir, e, &mut |c| collect_reads(ir, c, out));
+}
+
+/// The declared type of local `idx`, from its `Variable` declaration somewhere in `b`'s subtree.
+fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<IrType> {
+    if let IrExpr::Variable { index, ty, .. } = &ir.exprs[b as usize] {
+        if *index == idx {
+            return Some(ty.clone());
+        }
+    }
+    let mut found = None;
+    for_each_child(ir, b, &mut |c| {
+        if found.is_none() {
+            found = find_local_ty(ir, c, idx);
+        }
+    });
+    found
 }
 
 /// Build the get-or-create prologue: `$completion instanceof Cont && (label & MIN_VALUE) != 0` ⇒ reuse
@@ -877,7 +982,9 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
         IrExpr::GetField { receiver, .. } => box_returns(ir, receiver),
         IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
-        IrExpr::New { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
+        IrExpr::New { args, .. } | IrExpr::NewExternal { args, .. } => {
+            args.into_iter().all(|a| box_returns(ir, a))
+        }
         IrExpr::While {
             cond, body, update, ..
         } => {
@@ -905,21 +1012,6 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     for c in kids {
         shift_locals(ir, c, threshold);
     }
-}
-
-/// Whether `e`'s subtree reads the local/parameter value index `idx` (used to decide which
-/// suspension-result locals are live across a later suspension point and must be spilled).
-fn expr_uses_value(ir: &IrFile, e: ExprId, idx: u32) -> bool {
-    if matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(ir, e, &mut |c| {
-        if expr_uses_value(ir, c, idx) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals
