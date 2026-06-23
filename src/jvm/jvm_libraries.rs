@@ -1093,25 +1093,6 @@ impl LibrarySet for JvmLibraries {
         FunctionSet { overloads }
     }
 
-    fn resolve_lambda_return_overload(
-        &self,
-        receiver: Ty,
-        name: &str,
-        lambda_ret: Ty,
-        arg_tys: &[Ty],
-    ) -> Option<LibraryCallable> {
-        // A single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the overload
-        // whose return type equals the lambda's return, from the one `functions` query.
-        if arg_tys.len() != 1 {
-            return None;
-        }
-        self.functions(name, Some(receiver))
-            .overloads
-            .into_iter()
-            .find(|o| o.callable.ret == lambda_ret)
-            .map(|o| o.callable)
-    }
-
     fn toplevel_lambda_param_types(
         &self,
         name: &str,

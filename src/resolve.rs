@@ -5878,8 +5878,7 @@ impl<'a> Checker<'a> {
                     }
                 }) {
                     if let Some(c) = self
-                        .syms
-                        .libraries
+                        .resolver()
                         .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                     {
                         return c.ret;

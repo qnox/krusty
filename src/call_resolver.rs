@@ -11,7 +11,7 @@
 //! generic-signature string into [`GSig`]) live behind the trait; the binding *algorithm* over [`GSig`]
 //! lives here.
 
-use crate::libraries::{FnKind, LibrarySet};
+use crate::libraries::{FnKind, LibraryCallable, LibrarySet};
 use crate::types::Ty;
 
 /// A parsed generic-signature node, platform neutral. A backend parses its own signature format into
@@ -191,5 +191,26 @@ impl<'a> CallResolver<'a> {
             .overloads
             .iter()
             .any(|o| o.flags.inline_only)
+    }
+
+    /// Resolve a single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the
+    /// overload on `receiver` whose return type equals the lambda's return type. The candidate set (with
+    /// its per-overload disambiguation) comes entirely from the one `functions` query.
+    pub fn resolve_lambda_return_overload(
+        &self,
+        receiver: Ty,
+        name: &str,
+        lambda_ret: Ty,
+        arg_tys: &[Ty],
+    ) -> Option<LibraryCallable> {
+        if arg_tys.len() != 1 {
+            return None;
+        }
+        self.lib
+            .functions(name, Some(receiver))
+            .overloads
+            .into_iter()
+            .find(|o| o.callable.ret == lambda_ret)
+            .map(|o| o.callable)
     }
 }
