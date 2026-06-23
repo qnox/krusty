@@ -471,6 +471,274 @@ public class M {\n\
 }
 
 #[test]
+fn state_machine_member_suspend_fun_with_param_runs() {
+    // A member suspend fn that SUSPENDS and has its OWN parameter `x`, live across the suspension:
+    // the continuation `C$m$1` must capture the receiver AND spill `x` (restored on resume). Driven:
+    // new C(100).m(5, k) -> 100 + 42 + 5 = 147.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_smmemp_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("S.kt"),
+        "suspend fun foo(): Int = 42\n\
+         class C(val base: Int) {\n    suspend fun m(x: Int): Int {\n        val a = foo()\n        return base + a + x\n    }\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Object r = new C(100).m(5, k);\n\
+    System.out.println(r.equals(Integer.valueOf(147)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn toplevel_suspend_fun_with_param_survives_async_resume() {
+    // ASYNC case for a TOP-LEVEL suspend fn with a live parameter `x` (the `receiver=None` capture
+    // path). `caller(5)` suspends on `suspendOnce`; on resume, `x` must be restored from the captured
+    // continuation field. 42 + 5 = 47.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_tlp_async_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Lib.kt"),
+        "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<Int>? = null\n\
+suspend fun suspendOnce(): Int = suspendCoroutineUninterceptedOrReturn { c ->\n\
+    saved = c\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
+    )
+    .unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc = Command::new(&kotlinc)
+        .env("JAVA_HOME", &jh)
+        .args(["-d", libjar.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        eprintln!(
+            "skipping: kotlinc failed:\n{}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    fs::write(
+        dir.join("Use.kt"),
+        "suspend fun caller(x: Int): Int {\n    val a = suspendOnce()\n    return a + x\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    final Object[] box = new Object[1];\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { box[0] = o; }\n\
+    };\n\
+    Object r = UseKt.caller(5, k);\n\
+    boolean suspended = (r == IntrinsicsKt.getCOROUTINE_SUSPENDED());\n\
+    LibKt.resumeSaved(42);\n\
+    boolean delivered = Integer.valueOf(47).equals(box[0]);\n\
+    System.out.println(suspended && delivered ? \"OK\" : (\"suspended=\" + suspended + \" box=\" + box[0]));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        libjar.to_str().unwrap(),
+        stdlib
+    );
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "async toplevel-param: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn member_suspend_fun_with_param_survives_async_resume() {
+    // The ASYNC case for a member suspend fn with a live parameter: `x` must survive a real
+    // suspension/resume. `suspendOnce` (kotlinc) parks the continuation; `m` propagates
+    // COROUTINE_SUSPENDED, and on `resumeSaved(42)` re-enters — `x` (and the receiver `base`) must be
+    // restored from the continuation's captured fields. new C(100).m(5): 100 + 42 + 5 = 147.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let (Some(stdlib), Some(kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_memp_async_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Lib.kt"),
+        "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<Int>? = null\n\
+suspend fun suspendOnce(): Int = suspendCoroutineUninterceptedOrReturn { c ->\n\
+    saved = c\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun resumeSaved(v: Int) { saved!!.resumeWith(Result.success(v)) }\n",
+    )
+    .unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc = Command::new(&kotlinc)
+        .env("JAVA_HOME", &jh)
+        .args(["-d", libjar.to_str().unwrap()])
+        .arg(dir.join("Lib.kt"))
+        .output()
+        .unwrap();
+    if !kc.status.success() {
+        eprintln!(
+            "skipping: kotlinc failed:\n{}",
+            String::from_utf8_lossy(&kc.stderr)
+        );
+        return;
+    }
+    fs::write(
+        dir.join("Use.kt"),
+        "class C(val base: Int) {\n    suspend fun m(x: Int): Int {\n        val a = suspendOnce()\n        return base + a + x\n    }\n}\n",
+    )
+    .unwrap();
+    let cp_compile = format!("{}:{}", libjar.to_str().unwrap(), stdlib);
+    let ku = Command::new(krusty)
+        .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("Use.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        ku.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&ku.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.coroutines.intrinsics.IntrinsicsKt;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    final Object[] box = new Object[1];\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { box[0] = o; }\n\
+    };\n\
+    Object r = new C(100).m(5, k);\n\
+    boolean suspended = (r == IntrinsicsKt.getCOROUTINE_SUSPENDED());\n\
+    LibKt.resumeSaved(42);\n\
+    boolean delivered = Integer.valueOf(147).equals(box[0]);\n\
+    System.out.println(suspended && delivered ? \"OK\" : (\"suspended=\" + suspended + \" box=\" + box[0]));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!(
+        "{}:{}:{}",
+        dir.to_str().unwrap(),
+        libjar.to_str().unwrap(),
+        stdlib
+    );
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "async member-param: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn leaf_member_suspend_fun_runs() {
     // A leaf `suspend` member function: it gets the CPS signature on the instance method (`Object
     // m(Continuation)`), no state machine. A Java driver creates the instance and calls it: 100+5=105.
