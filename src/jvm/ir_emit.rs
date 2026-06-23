@@ -1806,11 +1806,15 @@ impl<'a> Emitter<'a> {
                 let saved = self.slots.clone();
                 let mut dead = false;
                 for s in stmts {
+                    // See the value-context `Block` arm: a statement nets zero, so reset the tracked
+                    // height afterward to undo an approximate branchy-splice drift.
+                    let base = code.stack_height();
                     self.emit(s, code);
                     if self.diverges(s) {
                         dead = true;
                         break;
                     } // rest of the block is unreachable
+                    code.set_stack(base.max(0) as u16);
                 }
                 if !dead {
                     if let Some(v) = value {
@@ -2448,11 +2452,18 @@ impl<'a> Emitter<'a> {
                 let saved = self.slots.clone();
                 let mut dead = false;
                 for s in stmts {
+                    // A statement nets zero on the operand stack (its value is stored/discarded). Reset
+                    // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
+                    // tracks its internal branches only approximately and can leave `cur_stack` drifted
+                    // above the real (verified-balanced) height, which would make a LATER branchy splice
+                    // in the same block falsely see a non-empty baseline and bail.
+                    let base = code.stack_height();
                     self.emit(*s, code);
                     if self.diverges(*s) {
                         dead = true;
                         break;
                     }
+                    code.set_stack(base.max(0) as u16);
                 }
                 if !dead {
                     if let Some(v) = value {
