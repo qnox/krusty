@@ -738,6 +738,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 lo.fun_ids
                     .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
+                // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
+                // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
+                if let Some(s) = fn_jvm_signature(f, sig) {
+                    lo.ir.signatures.insert(id, s);
+                }
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
                 // transform (CPS signature now; state machine later) — ir_lower keeps the plain form,
                 // mirroring how value classes are lowered plain here and transformed in a later pass.
@@ -11686,6 +11691,77 @@ fn data_array_param(t: &IrType) -> Option<&'static str> {
         "kotlin/Array" => "[Ljava/lang/Object;",
         _ => return None,
     })
+}
+
+/// Build a JVM generic `Signature` for a type-parameterized top-level function (e.g. `fun <T> id(t: T):
+/// T` → `<T:Ljava/lang/Object;>(TT;)TT;`), matching kotlinc's byte output. Returns `None` — omitting the
+/// attribute — for a non-generic function or a shape not yet modeled (a type-parameter used inside a
+/// generic argument like `List<T>`, a non-`Object`/non-primitive bound, a vararg). Never emits a wrong
+/// signature: when unsure, it omits, so this can only ADD byte-parity, never break it.
+fn fn_jvm_signature(f: &ast::FunDecl, sig: &crate::resolve::Signature) -> Option<String> {
+    if f.type_params.is_empty() {
+        return None;
+    }
+    let tps = &f.type_params;
+    let mut s = String::from("<");
+    for tp in tps {
+        let bound_sig = match f.type_param_bounds.iter().find(|(n, _)| n == tp) {
+            None => "Ljava/lang/Object;".to_string(),
+            Some((_, b)) if b.name == "Any" && !b.nullable => "Ljava/lang/Object;".to_string(),
+            Some((_, b)) => {
+                // A primitive bound's signature uses the boxed wrapper (`<T:Ljava/lang/Integer;>`).
+                match Ty::from_name(&b.name)
+                    .filter(|t| t.is_primitive())
+                    .and_then(crate::resolve::nullable_prim_wrapper)
+                {
+                    Some(w) => format!("L{w};"),
+                    None => return None, // class/generic bound not modeled yet
+                }
+            }
+        };
+        s.push_str(tp);
+        s.push(':');
+        s.push_str(&bound_sig);
+    }
+    s.push('>');
+    s.push('(');
+    for (i, p) in f.params.iter().enumerate() {
+        if p.is_vararg {
+            return None;
+        }
+        s.push_str(&type_ref_signature(&p.ty, tps, sig.params.get(i).copied())?);
+    }
+    s.push(')');
+    match f.ret.as_ref() {
+        Some(r) if ref_is_bare_tparam(r, tps) => s.push_str(&format!("T{};", r.name)),
+        Some(r) if ref_uses_tparam(r, tps) => return None,
+        _ => s.push_str(&sig.ret.descriptor()),
+    }
+    Some(s)
+}
+
+/// Signature of one parameter type: `TT;` for a bare type-parameter reference, else the erased JVM
+/// descriptor of its resolved `Ty` — but only when it uses NO type parameter (a generic use like
+/// `List<T>` needs the un-erased structure we don't model yet → `None`).
+fn type_ref_signature(r: &ast::TypeRef, tps: &[String], resolved: Option<Ty>) -> Option<String> {
+    if ref_is_bare_tparam(r, tps) {
+        return Some(format!("T{};", r.name));
+    }
+    if ref_uses_tparam(r, tps) {
+        return None;
+    }
+    Some(resolved?.descriptor())
+}
+
+fn ref_is_bare_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
+    r.fun_params.is_empty() && r.targs.is_empty() && !r.nullable && tps.iter().any(|t| t == &r.name)
+}
+
+fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
+    tps.iter().any(|t| t == &r.name)
+        || r.targs.iter().any(|a| ref_uses_tparam(a, tps))
+        || r.fun_params.iter().any(|a| ref_uses_tparam(a, tps))
+        || r.arg.as_ref().is_some_and(|a| ref_uses_tparam(a, tps))
 }
 
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {

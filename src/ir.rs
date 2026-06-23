@@ -657,6 +657,10 @@ pub struct IrFile {
     /// `invokeSuspend` entry (so a captured/parameter value survives a re-entry), excludes them from
     /// spilling, and places the result/label/spilled fields after them.
     pub suspend_lambda_sm: Vec<(u32, u32, u32)>,
+    /// `FunId` → the method's JVM generic `Signature` attribute string (e.g. a generic function's
+    /// `<T:Ljava/lang/Object;>(TT;)TT;`). Present only for methods that need it (type-parameterized);
+    /// the JVM backend emits a `Signature` attribute, matching kotlinc's byte output for generics.
+    pub signatures: std::collections::HashMap<u32, String>,
 }
 
 impl IrFile {

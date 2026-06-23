@@ -238,6 +238,8 @@ struct MethodInfo {
     exceptions: Vec<(u16, u16, u16, u16)>,
     /// Pre-built StackMapTable attribute body (after name+length fields). `None` if no frames.
     stackmap: Option<Vec<u8>>,
+    /// `Signature` attribute: constant-pool UTF8 index of the generic signature string, or `None`.
+    signature: Option<u16>,
 }
 
 struct FieldInfo {
@@ -304,6 +306,7 @@ impl ClassWriter {
             code: None,
             exceptions: Vec::new(),
             stackmap: None,
+            signature: None,
         });
     }
 
@@ -440,8 +443,21 @@ impl ClassWriter {
     }
 
     pub fn add_method(&mut self, access: u16, name: &str, desc: &str, code: &CodeBuilder) {
+        self.add_method_sig(access, name, desc, code, None);
+    }
+
+    /// Like [`add_method`], plus an optional generic `Signature` attribute string.
+    pub fn add_method_sig(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        code: &CodeBuilder,
+        signature: Option<&str>,
+    ) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
+        let sig = signature.map(|s| self.cp.utf8(s));
         let stackmap = code.build_stackmap();
         self.methods.push(MethodInfo {
             access,
@@ -452,12 +468,20 @@ impl ClassWriter {
             code: Some(code.bytes.clone()),
             exceptions: code.resolved_exceptions(),
             stackmap,
+            signature: sig,
         });
     }
 
     pub fn finish(mut self) -> Vec<u8> {
         let code_attr_name = self.cp.utf8("Code");
         let stackmap_attr_name = self.cp.utf8("StackMapTable");
+        // Intern the `Signature` attribute name only if a method actually carries one — an unused
+        // constant-pool entry would diverge from kotlinc's output for non-generic classes.
+        let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some()) {
+            Some(self.cp.utf8("Signature"))
+        } else {
+            None
+        };
         // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
         // remaining indices must already be interned). All handle/argument indices were interned
         // when `add_bootstrap` ran during code emission.
@@ -498,10 +522,11 @@ impl ClassWriter {
             u2(&mut out, m.access);
             u2(&mut out, m.name);
             u2(&mut out, m.desc);
+            let sig_attr: u16 = if m.signature.is_some() { 1 } else { 0 };
             match &m.code {
-                None => u2(&mut out, 0), // abstract method: no attributes
+                None => u2(&mut out, sig_attr), // abstract method: only an optional Signature
                 Some(code) => {
-                    u2(&mut out, 1); // attributes: Code
+                    u2(&mut out, 1 + sig_attr); // Code [+ Signature]
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
                     let sm_overhead = match &m.stackmap {
@@ -531,6 +556,12 @@ impl ClassWriter {
                         out.extend_from_slice(sm);
                     }
                 }
+            }
+            // `Signature` attribute (after `Code`): name_index, length=2, signature UTF8 index.
+            if let Some(si) = m.signature {
+                u2(&mut out, signature_attr_name.unwrap());
+                u4(&mut out, 2);
+                u2(&mut out, si);
             }
         }
         u2(&mut out, self.class_attributes.len() as u16);
