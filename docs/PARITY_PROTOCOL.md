@@ -67,6 +67,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P12 — generic `Signature` attribute emission (byte-parity; gate 1491, FAIL=0).** Closes part of
+  the systemic byte-parity gap: krusty emitted NO generic `Signature` attribute; kotlinc emits one for
+  every type-parameterized declaration (the descriptor erases type params, the Signature preserves them).
+  Now a type-parameterized top-level FUNCTION emits a JVM `Signature` — `fun <T> id(t: T): T` →
+  `<T:Ljava/lang/Object;>(TT;)TT;`, `fun <T: Int> idi(t: T): T` → `<T:Ljava/lang/Integer;>(TT;)TT;`
+  (bound uses the boxed wrapper even though the descriptor is specialized `(I)I` from P10/P11) — VERIFIED
+  byte-identical to kotlinc's signature strings. ClassWriter (`classfile.rs`) gained `MethodInfo.signature`
+  + `add_method_sig` + serialization (the `Signature` attr name is interned only when used, so non-generic
+  classes are unchanged). The signature string is generated in `ir_lower::fn_jvm_signature` from the AST
+  (type params + bounds + param/return refs) and carried via `IrFile.signatures` (fid→string); `emit_method`
+  writes it. Conservative: returns `None` (omits the attr, kotlinc-divergent but never WRONG) for shapes not
+  yet modeled — a type param used inside a generic argument (`List<T>`), a non-Object/non-primitive bound,
+  a vararg, member/extension/local functions. ZERO runtime risk (Signature is advisory metadata) → gate
+  unchanged at 1491/0. Tests: `tests/generic_signature_e2e.rs`. NEXT for full generic byte-parity: nested
+  generic args (`List<T>`), class/field Signatures, member/extension functions.
 - **Phase P11 — RESTORE P10's lost source + spread operator `*arr` (gate 1491, FAIL=0).** CORRECTION:
   the P10 commit `a3b10f8` was HOLLOW — it captured only `docs/` + the test file; the actual source
   (the `TParams` refactor, `is_specializable_bound`, `FunDecl.type_param_bounds`) was reverted by tooling

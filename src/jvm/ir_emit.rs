@@ -1266,7 +1266,13 @@ fn emit_method(
     } else {
         0x0019 // PUBLIC | STATIC | FINAL
     };
-    e.cw.add_method(access, &f.name, &method_descriptor(&param_tys, ret), &code);
+    e.cw.add_method_sig(
+        access,
+        &f.name,
+        &method_descriptor(&param_tys, ret),
+        &code,
+        ir.signatures.get(&fid).map(|s| s.as_str()),
+    );
 }
 
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
