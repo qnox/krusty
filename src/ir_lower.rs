@@ -166,6 +166,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             if let Some(s) = class_generic_sig(c) {
                 lo.ir.class_signatures.insert(internal.clone(), s);
             }
+            // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
+            // (`TA;`); record the (field, type-param) pairs for the JVM backend to format.
+            let field_sigs = class_field_tparams(c);
+            if !field_sigs.is_empty() {
+                lo.ir.field_signatures.insert(internal.clone(), field_sigs);
+            }
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
@@ -11713,6 +11719,31 @@ fn class_generic_sig(c: &ast::ClassDecl) -> Option<crate::ir::IrGenericSig> {
         param_tparams: Vec::new(),
         ret_tparam: None,
     })
+}
+
+/// For a generic class, list `(field name, type-parameter name)` for each property whose declared type
+/// is a bare type-parameter reference (`class Pair<A, B>(val a: A, val b: B)` → `[("a","A"),("b","B")]`).
+/// The JVM backend emits a field `Signature` (`TA;`) for each. Empty for a non-generic class.
+fn class_field_tparams(c: &ast::ClassDecl) -> Vec<(String, String)> {
+    if c.type_params.is_empty() {
+        return Vec::new();
+    }
+    let tps = &c.type_params;
+    let mut out = Vec::new();
+    // Constructor `val`/`var` properties (backing fields), then class-body backing-field properties.
+    for p in c.props.iter().filter(|p| p.is_property) {
+        if ref_is_bare_tparam(&p.ty, tps) {
+            out.push((p.name.clone(), p.ty.name.clone()));
+        }
+    }
+    for p in c.body_props.iter().filter(|p| is_backing_field_prop(p)) {
+        if let Some(ty) = &p.ty {
+            if ref_is_bare_tparam(ty, tps) {
+                out.push((p.name.clone(), ty.name.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// Extract the backend-agnostic generic-signature shape of a type-parameterized function, or `None` for

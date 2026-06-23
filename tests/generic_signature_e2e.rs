@@ -81,6 +81,30 @@ fn generic_class_emits_class_signature() {
 }
 
 #[test]
+fn type_parameter_fields_get_field_signatures() {
+    // A field declared with a bare type parameter (`val a: A`) carries a field `Signature` (`TA;`).
+    let src = "class Pair2<A, B>(val a: A, val b: B)\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    let ci = cs
+        .iter()
+        .find(|(n, _)| n == "Pair2")
+        .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
+        .expect("Pair2");
+    let field_sig = |name: &str| {
+        ci.fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .signature
+            .clone()
+    };
+    assert_eq!(field_sig("a").as_deref(), Some("TA;"));
+    assert_eq!(field_sig("b").as_deref(), Some("TB;"));
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";

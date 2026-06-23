@@ -37,6 +37,8 @@ pub struct FieldSig {
     /// The compile-time `ConstantValue` of a `static final` field, if present (e.g.
     /// `IntCompanionObject.MAX_VALUE` → `Int(2147483647)`). What kotlinc inlines at a use site.
     pub const_value: Option<ConstVal>,
+    /// The field's generic `Signature` attribute (`TA;` for a type-parameter field), if present.
+    pub signature: Option<String>,
 }
 
 /// A field's compile-time constant value (from the `ConstantValue` attribute).
@@ -341,12 +343,15 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
 
     let fields = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, _, const_value)| FieldSig {
-            access,
-            name,
-            descriptor,
-            const_value,
-        })
+        .map(
+            |(access, name, descriptor, signature, const_value)| FieldSig {
+                access,
+                name,
+                descriptor,
+                const_value,
+                signature,
+            },
+        )
         .collect();
     let methods = read_members(&mut r)?
         .into_iter()

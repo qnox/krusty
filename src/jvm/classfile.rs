@@ -246,6 +246,9 @@ struct FieldInfo {
     access: u16,
     name: u16,
     desc: u16,
+    /// `Signature` attribute: constant-pool UTF8 index of the generic signature (e.g. a type-parameter
+    /// field `val a: A` → `TA;`), or `None`.
+    signature: Option<u16>,
 }
 
 pub struct ClassWriter {
@@ -321,12 +324,20 @@ impl ClassWriter {
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
     pub fn add_field(&mut self, access: u16, name: &str, desc: &str) {
+        self.add_field_sig(access, name, desc, None);
+    }
+
+    /// Like [`add_field`], plus an optional generic `Signature` attribute string (`TA;` for a field
+    /// typed by a type parameter).
+    pub fn add_field_sig(&mut self, access: u16, name: &str, desc: &str, signature: Option<&str>) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
+        let sig = signature.map(|s| self.cp.utf8(s));
         self.fields.push(FieldInfo {
             access,
             name: n,
             desc: d,
+            signature: sig,
         });
     }
 
@@ -486,7 +497,9 @@ impl ClassWriter {
         let stackmap_attr_name = self.cp.utf8("StackMapTable");
         // Intern the `Signature` attribute name only if a method actually carries one — an unused
         // constant-pool entry would diverge from kotlinc's output for non-generic classes.
-        let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some()) {
+        let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some())
+            || self.fields.iter().any(|f| f.signature.is_some())
+        {
             Some(self.cp.utf8("Signature"))
         } else {
             None
@@ -524,7 +537,15 @@ impl ClassWriter {
             u2(&mut out, f.access);
             u2(&mut out, f.name);
             u2(&mut out, f.desc);
-            u2(&mut out, 0); // field attributes
+            match f.signature {
+                None => u2(&mut out, 0), // no field attributes
+                Some(si) => {
+                    u2(&mut out, 1); // one attribute: Signature
+                    u2(&mut out, signature_attr_name.unwrap());
+                    u4(&mut out, 2);
+                    u2(&mut out, si);
+                }
+            }
         }
         u2(&mut out, self.methods.len() as u16);
         for m in &self.methods {

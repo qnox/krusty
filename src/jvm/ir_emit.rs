@@ -328,7 +328,18 @@ fn emit_class(
             } else {
                 0
             };
-        cw.add_field(acc, name, &ir_ty_to_jvm(ty).descriptor());
+        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`), like kotlinc.
+        let field_sig = ir
+            .field_signatures
+            .get(&c.fq_name)
+            .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
+            .map(|(_, tp)| format!("T{tp};"));
+        cw.add_field_sig(
+            acc,
+            name,
+            &ir_ty_to_jvm(ty).descriptor(),
+            field_sig.as_deref(),
+        );
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
