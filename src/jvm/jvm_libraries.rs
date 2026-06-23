@@ -972,6 +972,9 @@ impl LibrarySet for JvmLibraries {
         receiver: Ty,
         args: &[Ty],
     ) -> Option<LibraryCallable> {
+        // The arg-binding RESOLUTION layer over the same candidate metadata `functions` exposes: it binds a
+        // generic return from the ARGUMENTS (`let`'s `R` from the lambda), which the arg-independent
+        // `functions` query can't recover — so it stays its own selector (see the redesign layering note).
         self.extension_callable(name, receiver, args, &[], true)
     }
 
