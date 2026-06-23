@@ -2603,15 +2603,22 @@ impl<'a> Lower<'a> {
     /// `Function{n+1}`, captures the free variables as fields (set in `<init>`, copied into the fresh
     /// instance `invoke` builds), and carries `invokeSuspend(Object)` (the body, result boxed) plus the
     /// erased `invoke(Object)` (`new This(captures.., (Continuation)arg).invokeSuspend(Unit)`).
-    fn lower_suspend_lambda(&mut self, body: AstExprId, arity: usize) -> Option<u32> {
-        // `this`/own-parameter capture and own parameters aren't modeled yet.
-        if self.cur_class.is_some() || arity != 0 {
+    fn lower_suspend_lambda(
+        &mut self,
+        body: AstExprId,
+        params: &[Ty],
+        bind_names: Vec<String>,
+    ) -> Option<u32> {
+        let arity = params.len();
+        if self.cur_class.is_some() {
             return None;
         }
-        // Captured free variables: enclosing locals/parameters the body reads (the lambda binds none).
+        // Captured free variables: enclosing locals/parameters the body reads but the lambda doesn't
+        // bind as one of its own parameters.
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
-            if !captures.iter().any(|(n, _, _)| n == name)
+            if !bind_names.contains(name)
+                && !captures.iter().any(|(n, _, _)| n == name)
                 && crate::resolve::expr_uses_name_pub(self.afile, body, name)
             {
                 captures.push((name.clone(), *v, *ty));
@@ -2619,6 +2626,11 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         let n_cap = captures.len() as u32;
+        // Own parameters are modeled only for a LEAF lambda (no captures, no internal suspension) for
+        // now — a param + capture/suspension combination needs the general lambda-mode machine.
+        if arity > 0 && n_cap > 0 {
+            return None;
+        }
         // Does the lambda body call a `suspend` function? (AST-level, like the file's suspend gate.)
         // If so its `invokeSuspend` is a state machine with the lambda instance as the continuation —
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
@@ -2638,7 +2650,7 @@ impl<'a> Lower<'a> {
         let body_suspends = call_names
             .iter()
             .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
-        if body_suspends && n_cap > 0 {
+        if body_suspends && (n_cap > 0 || arity > 0) {
             return None;
         }
         let jvm_arity = arity + 1; // + the trailing continuation
@@ -2657,8 +2669,14 @@ impl<'a> Lower<'a> {
             .iter()
             .map(|(name, _, ty)| (name.clone(), ty_to_ir(*ty)))
             .collect();
-        // A suspending lambda needs a `label` field (its state-machine cursor) after the captures.
-        let label_idx = n_cap;
+        // Own parameters become fields after the captures — set by `create(value.., completion)` (NOT
+        // the constructor / creation site). `param_field_base` is their first field index.
+        let param_field_base = n_cap;
+        for (name, ty) in bind_names.iter().zip(params.iter()) {
+            fields.push((name.clone(), ty_to_ir(*ty)));
+        }
+        // A suspending lambda needs a `label` field (its state-machine cursor) after the params.
+        let label_idx = n_cap + arity as u32;
         if body_suspends {
             fields.push(("label".to_string(), ty_to_ir(Ty::Int)));
         }
@@ -2714,8 +2732,10 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            // Captures are `final`; the `label` state cursor (if present) is mutable.
-            field_final: (0..n_fields).map(|i| i < n_cap as usize).collect(),
+            // Captures and own parameters are `final`; only the `label` state cursor is mutable.
+            field_final: (0..n_fields)
+                .map(|i| i < (n_cap + arity as u32) as usize)
+                .collect(),
             field_private: vec![false; n_fields],
             secondary_ctors: vec![],
             has_primary_ctor: true,
@@ -2927,6 +2947,24 @@ impl<'a> Lower<'a> {
                 }));
                 self.scope.push((name.clone(), lv, *ty));
             }
+            // Own parameters: load each from its field and bind it in the body's scope. The source
+            // `Ty` comes from the type checker (the lambda parameter's declared/inferred type).
+            for (i, name) in bind_names.iter().enumerate() {
+                let pty = params[i];
+                let lv = self.fresh_value();
+                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let getf = self.ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: param_field_base + i as u32,
+                });
+                stmts.push(self.ir.add_expr(IrExpr::Variable {
+                    index: lv,
+                    ty: ty_to_ir(pty),
+                    init: Some(getf),
+                }));
+                self.scope.push((name.clone(), lv, pty));
+            }
             let body_val = self.expr(body);
             self.scope = saved_scope;
             self.next_value = saved_next;
@@ -2949,7 +2987,15 @@ impl<'a> Lower<'a> {
             true,
         )?; // invokeSuspend is method index 0.
 
-        // invoke(Object arg): new This(this.cap0.., (Continuation)arg).invokeSuspend(Unit.INSTANCE).
+        // invoke(Object p0.., Object completion): `r = new This(this.cap.., (Continuation)completion);
+        // r.param_i = (paramType)p_i; return r.invokeSuspend(Unit.INSTANCE)`. Value-indices: this=0,
+        // params 1..=arity, completion=arity+1, the fresh `r` local at arity+2.
+        let lambda_ty = IrType::Class {
+            fq_name: internal.clone(),
+            type_args: vec![],
+            nullable: false,
+        };
+        let completion_idx = arity as u32 + 1;
         let mut new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
                 let this = self.ir.add_expr(IrExpr::GetValue(0));
@@ -2960,10 +3006,10 @@ impl<'a> Lower<'a> {
                 })
             })
             .collect();
-        let arg_get = self.ir.add_expr(IrExpr::GetValue(1));
+        let comp_get = self.ir.add_expr(IrExpr::GetValue(completion_idx));
         new_args.push(self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
-            arg: arg_get,
+            arg: comp_get,
             type_operand: cont_ir.clone(),
         }));
         let new_inst = self.ir.add_expr(IrExpr::New {
@@ -2971,23 +3017,46 @@ impl<'a> Lower<'a> {
             args: new_args,
             ctor_params: None,
         });
+        let r_idx = arity as u32 + 2;
+        let mut inv_stmts = vec![self.ir.add_expr(IrExpr::Variable {
+            index: r_idx,
+            ty: lambda_ty.clone(),
+            init: Some(new_inst),
+        })];
+        // Store each own parameter (coerced from the erased `Object` argument) into its field.
+        for (i, pty) in params.iter().enumerate() {
+            let pv = self.ir.add_expr(IrExpr::GetValue(1 + i as u32));
+            let coerced = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: pv,
+                type_operand: ty_to_ir(*pty),
+            });
+            let rg = self.ir.add_expr(IrExpr::GetValue(r_idx));
+            inv_stmts.push(self.ir.add_expr(IrExpr::SetField {
+                receiver: rg,
+                class: class_id,
+                index: param_field_base + i as u32,
+                value: coerced,
+            }));
+        }
+        let rg2 = self.ir.add_expr(IrExpr::GetValue(r_idx));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
         let call_is = self.ir.add_expr(IrExpr::MethodCall {
             class: class_id,
             index: 0,
-            receiver: new_inst,
+            receiver: rg2,
             args: vec![Some(unit)],
         });
-        let inv_ret = self.ir.add_expr(IrExpr::Return(Some(call_is)));
+        inv_stmts.push(self.ir.add_expr(IrExpr::Return(Some(call_is))));
         let inv_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![inv_ret],
+            stmts: inv_stmts,
             value: None,
         });
         self.add_synth_method(
             &internal,
             class_id,
             "invoke",
-            vec![object_ir.clone()],
+            vec![object_ir.clone(); arity + 1],
             Ty::obj("kotlin/Any"),
             inv_body,
             true,
@@ -4514,8 +4583,27 @@ impl<'a> Lower<'a> {
                 body,
             } = self.afile.expr(arg).clone()
             {
-                if lparams.is_empty() {
-                    return self.lower_suspend_lambda(body, params.len());
+                // Bind names: explicit, or the implicit single `it`, or none (arity 0).
+                let bind_names: Vec<String> = if !lparams.is_empty() {
+                    lparams.clone()
+                } else if params.len() == 1 {
+                    vec!["it".to_string()]
+                } else if params.is_empty() {
+                    vec![]
+                } else {
+                    return None;
+                };
+                // Parameter `Ty`s come from the lambda's checked type (the expected suspend type drives
+                // them); fall back to the erased IR param types only if absent.
+                let ty_params: Vec<Ty> = self
+                    .info
+                    .ty(arg)
+                    .fun_params()
+                    .map(|p| p.to_vec())
+                    .filter(|p| p.len() == params.len())
+                    .unwrap_or_else(|| params.iter().map(|_| Ty::obj("kotlin/Any")).collect());
+                if bind_names.len() == params.len() {
+                    return self.lower_suspend_lambda(body, &ty_params, bind_names);
                 }
             }
             return None;
