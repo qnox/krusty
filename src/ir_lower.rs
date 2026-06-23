@@ -2598,15 +2598,27 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a `suspend` lambda literal to a concrete `kotlin/coroutines/jvm/internal/SuspendLambda`
-    /// subclass (kotlinc's representation), returning a `New` of that class with a `null` completion.
-    /// LEAF only for now: arity 0, no captures, no internal suspension. The class implements
-    /// `Function{n+1}` and carries `invokeSuspend(Object)` (the body, result boxed) plus the erased
-    /// `invoke(Object)` (`new This((Continuation)arg).invokeSuspend(Unit)`).
+    /// subclass (kotlinc's representation), returning a `New` of that class with the captured values and
+    /// a `null` completion. Arity 0 with no INTERNAL suspension for now: the class implements
+    /// `Function{n+1}`, captures the free variables as fields (set in `<init>`, copied into the fresh
+    /// instance `invoke` builds), and carries `invokeSuspend(Object)` (the body, result boxed) plus the
+    /// erased `invoke(Object)` (`new This(captures.., (Continuation)arg).invokeSuspend(Unit)`).
     fn lower_suspend_lambda(&mut self, body: AstExprId, arity: usize) -> Option<u32> {
-        // Captures (`this`/enclosing locals) and own parameters aren't modeled yet.
+        // `this`/own-parameter capture and own parameters aren't modeled yet.
         if self.cur_class.is_some() || arity != 0 {
             return None;
         }
+        // Captured free variables: enclosing locals/parameters the body reads (the lambda binds none).
+        let mut captures: Vec<(String, u32, Ty)> = Vec::new();
+        for (name, v, ty) in self.scope.iter().rev() {
+            if !captures.iter().any(|(n, _, _)| n == name)
+                && crate::resolve::expr_uses_name_pub(self.afile, body, name)
+            {
+                captures.push((name.clone(), *v, *ty));
+            }
+        }
+        captures.reverse();
+        let n_cap = captures.len() as u32;
         let jvm_arity = arity + 1; // + the trailing continuation
         let internal = class_internal(
             self.afile,
@@ -2616,22 +2628,51 @@ impl<'a> Lower<'a> {
         let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
         let object_ir = ty_to_ir(Ty::obj("kotlin/Any"));
 
-        // Class shell: `final class … extends SuspendLambda implements Function{n+1}`, `<init>(Continuation
-        // completion)` → `super(jvm_arity, completion)`.
+        // Fields: one per captured variable. `<init>(cap0.., Continuation completion)` stores each
+        // capture, then `super(jvm_arity, completion)`. Ctor value-indices: this=0, cap_i=1+i,
+        // completion=1+n_cap.
+        let fields: Vec<(String, IrType)> = captures
+            .iter()
+            .map(|(name, _, ty)| (name.clone(), ty_to_ir(*ty)))
+            .collect();
+        let ctor_args: Vec<(IrType, bool)> = captures
+            .iter()
+            .map(|(_, _, ty)| (ty_to_ir(*ty), false))
+            .chain(std::iter::once((cont_ir.clone(), false)))
+            .collect();
+        let init_stores: Vec<u32> = (0..n_cap)
+            .map(|i| {
+                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                let val = self.ir.add_expr(IrExpr::GetValue(1 + i));
+                self.ir.add_expr(IrExpr::SetField {
+                    receiver: this,
+                    class: 0, // patched after add_class (class_id known then)
+                    index: i,
+                    value: val,
+                })
+            })
+            .collect();
+        let init_body = (!init_stores.is_empty()).then(|| {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: init_stores.clone(),
+                value: None,
+            })
+        });
         let arity_const = self
             .ir
             .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
-        let completion_get = self.ir.add_expr(IrExpr::GetValue(1)); // <init>: this=0, completion=1
+        let completion_get = self.ir.add_expr(IrExpr::GetValue(1 + n_cap));
+        let n_fields = fields.len();
         let class = IrClass {
             fq_name: internal.clone(),
             is_value: false,
             type_param_bounds: vec![],
-            field_type_params: vec![],
+            field_type_params: vec![None; n_fields],
             supertypes: vec![],
-            fields: vec![],
+            fields,
             ctor_param_count: 0,
-            ctor_args: vec![(cont_ir.clone(), false)],
-            init_body: None,
+            ctor_args,
+            init_body,
             methods: vec![],
             is_interface: false,
             superclass: "kotlin/coroutines/jvm/internal/SuspendLambda".to_string(),
@@ -2646,15 +2687,22 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            field_final: vec![],
-            field_private: vec![],
+            field_final: vec![true; n_fields],
+            field_private: vec![false; n_fields],
             secondary_ctors: vec![],
             has_primary_ctor: true,
         };
         let class_id = self.ir.add_class(class);
+        // Patch the `<init>` field stores with the now-known class id.
+        for &s in &init_stores {
+            if let IrExpr::SetField { class, .. } = &mut self.ir.exprs[s as usize] {
+                *class = class_id;
+            }
+        }
 
-        // invokeSuspend(Object result): ResultKt.throwOnFailure(result); return box(<body>).
-        let result_get = self.ir.add_expr(IrExpr::GetValue(1)); // this=0, result=1
+        // invokeSuspend(Object result): throwOnFailure(result); load captures from fields; return
+        // box(<body>). Value-indices: this=0, result=1, capture locals 2..2+n_cap, then body locals.
+        let result_get = self.ir.add_expr(IrExpr::GetValue(1));
         let tof = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: "kotlin/ResultKt".to_string(),
@@ -2666,17 +2714,36 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             args: vec![result_get],
         });
-        let body_val = self.expr(body)?;
+        let mut stmts = vec![tof];
+        let saved_scope = std::mem::take(&mut self.scope);
+        let saved_next = self.next_value;
+        self.next_value = 2; // this=0, result=1
+        for (i, (name, _, ty)) in captures.iter().enumerate() {
+            let lv = self.fresh_value();
+            let this = self.ir.add_expr(IrExpr::GetValue(0));
+            let getf = self.ir.add_expr(IrExpr::GetField {
+                receiver: this,
+                class: class_id,
+                index: i as u32,
+            });
+            stmts.push(self.ir.add_expr(IrExpr::Variable {
+                index: lv,
+                ty: ty_to_ir(*ty),
+                init: Some(getf),
+            }));
+            self.scope.push((name.clone(), lv, *ty));
+        }
+        let body_val = self.expr(body);
+        self.scope = saved_scope;
+        self.next_value = saved_next;
+        let body_val = body_val?;
         let boxed = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: body_val,
             type_operand: object_ir.clone(),
         });
-        let ret = self.ir.add_expr(IrExpr::Return(Some(boxed)));
-        let inv_susp_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![tof, ret],
-            value: None,
-        });
+        stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+        let inv_susp_body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
         self.add_synth_method(
             &internal,
             class_id,
@@ -2687,16 +2754,26 @@ impl<'a> Lower<'a> {
             true,
         )?; // invokeSuspend is method index 0.
 
-        // invoke(Object arg): return new This((Continuation)arg).invokeSuspend(Unit.INSTANCE).
-        let arg_get = self.ir.add_expr(IrExpr::GetValue(1)); // this=0, arg=1
-        let arg_cont = self.ir.add_expr(IrExpr::TypeOp {
+        // invoke(Object arg): new This(this.cap0.., (Continuation)arg).invokeSuspend(Unit.INSTANCE).
+        let mut new_args: Vec<u32> = (0..n_cap)
+            .map(|i| {
+                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                self.ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: i,
+                })
+            })
+            .collect();
+        let arg_get = self.ir.add_expr(IrExpr::GetValue(1));
+        new_args.push(self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: arg_get,
             type_operand: cont_ir.clone(),
-        });
+        }));
         let new_inst = self.ir.add_expr(IrExpr::New {
             class: class_id,
-            args: vec![arg_cont],
+            args: new_args,
             ctor_params: None,
         });
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
@@ -2706,9 +2783,9 @@ impl<'a> Lower<'a> {
             receiver: new_inst,
             args: vec![Some(unit)],
         });
-        let ret2 = self.ir.add_expr(IrExpr::Return(Some(call_is)));
+        let inv_ret = self.ir.add_expr(IrExpr::Return(Some(call_is)));
         let inv_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret2],
+            stmts: vec![inv_ret],
             value: None,
         });
         self.add_synth_method(
@@ -2721,11 +2798,15 @@ impl<'a> Lower<'a> {
             true,
         )?;
 
-        // Creation site: `new This((Continuation) null)` (the completion is supplied at invoke time).
-        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        // Creation site: `new This(captures.., (Continuation) null)`.
+        let mut site_args: Vec<u32> = captures
+            .iter()
+            .map(|(_, v, _)| self.ir.add_expr(IrExpr::GetValue(*v)))
+            .collect();
+        site_args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
         Some(self.ir.add_expr(IrExpr::New {
             class: class_id,
-            args: vec![null],
+            args: site_args,
             ctor_params: None,
         }))
     }

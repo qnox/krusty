@@ -255,9 +255,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   invoked). `lower_arg` routes a lambda bound for an `IrType::Function{suspend:true}` parameter to
   `lower_suspend_lambda`; any non-lambda suspend value still bails. Proven end-to-end:
   `make(): suspend () -> Int = { 42 }` returns a `Function1` a Java driver invokes with a continuation →
-  boxed 42 (`tests/suspend_e2e.rs::leaf_suspend_lambda_creates_and_invokes`). Still skipped (later
-  slices): captures, own parameters, and an internal suspension point (the lambda's `invokeSuspend`
-  would itself be a state machine with the instance as the continuation).
+  boxed 42 (`tests/suspend_e2e.rs::leaf_suspend_lambda_creates_and_invokes`). **Captures**: a free
+  variable the lambda reads becomes a `final` field set in `<init>(cap.., Continuation completion)` and
+  copied into the fresh instance `invoke` builds (`new This(this.cap.., (Continuation)arg)`); the
+  creation site passes the captured values (`new This(captureValues.., null)`). `invokeSuspend` loads
+  each capture field into a local before running the body. Proven: `make(n: Int): suspend () -> Int =
+  { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Still skipped
+  (later slices): own parameters, and an internal suspension point (the lambda's `invokeSuspend` would
+  itself be a state machine with the instance as the continuation).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
