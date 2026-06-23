@@ -70,6 +70,52 @@ pub struct LibraryCallable {
     pub must_inline: bool,
 }
 
+/// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
+/// wins over an extension, both over a top-level function).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FnKind {
+    /// A member of the receiver's type (or an inherited one).
+    Member,
+    /// An extension function on the receiver's type.
+    Extension,
+    /// A receiver-less top-level function.
+    TopLevel,
+}
+
+/// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
+/// needs, in ONE place — no follow-up metadata calls. `callable` is the opaque emit handle (the platform
+/// emitter consumes it; the front end never inspects it).
+#[derive(Clone)]
+pub struct FunctionInfo {
+    pub kind: FnKind,
+    /// The extension/member receiver type; `None` for a top-level function.
+    pub receiver: Option<Ty>,
+    /// Whether the Kotlin return type is nullable (`T?`) — the JVM signature erases this.
+    pub ret_nullable: bool,
+    /// `inline`, `@InlineOnly` (`inline_only`), and friends — from `@Metadata`.
+    pub flags: FnFlags,
+    /// The opaque platform callable (owner/name/descriptor on JVM) + its resolved `params`/`ret`. Reuses
+    /// [`LibraryCallable`]; the front end reads `params`/`ret` and passes the whole thing to the emitter.
+    pub callable: LibraryCallable,
+}
+
+/// Function metadata flags, decoded once from `@Metadata`.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct FnFlags {
+    pub inline: bool,
+    /// Non-public `@InlineOnly` — has no callable method; the emitter MUST splice its body.
+    pub inline_only: bool,
+}
+
+/// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one
+/// query, each tagged with its [`FnKind`] so the caller applies Kotlin precedence and picks (e.g. by the
+/// lambda's return type for `@OverloadResolutionByLambdaReturnType`). The consolidation that replaces the
+/// scattered `resolve_callable` / `is_inline` / return-overload / nullable lookups.
+#[derive(Clone, Default)]
+pub struct FunctionSet {
+    pub overloads: Vec<FunctionInfo>,
+}
+
 /// The shape of a library type: enough for the front end to resolve member accesses against it
 /// (publicness, kind, supertypes, constructors, instance members, and companion members) without
 /// knowing the target ABI.
@@ -188,6 +234,16 @@ pub trait LibrarySet {
     /// The seed type universe (classpath/klib types + intrinsic built-in mappings).
     fn seed(&self) -> LibrarySeed {
         LibrarySeed::default()
+    }
+
+    /// ALL overloads of function `name` applicable to a call — members + extensions (`receiver = Some`) or
+    /// top-level functions (`receiver = None`) — in ONE query, each tagged with its [`FnKind`] and carrying
+    /// full metadata (inline/`@InlineOnly`, return nullability). The consolidated replacement for the
+    /// scattered `resolve_callable`/`is_inline`/return-overload/nullable lookups; the caller applies Kotlin
+    /// precedence and picks (e.g. by the lambda's return type). Empty for a platform that doesn't implement
+    /// it yet. (Function BODY fetch stays separate — see the platform emitter's `MethodBodies`.)
+    fn functions(&self, _name: &str, _receiver: Option<Ty>) -> FunctionSet {
+        FunctionSet::default()
     }
 
     /// The compile-time value of a primitive companion constant (`Int.MAX_VALUE`, `Double.NaN`, …),
