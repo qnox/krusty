@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use crate::features::LangFeatures;
+
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
     pub dest: PathBuf,
@@ -14,6 +16,8 @@ pub struct Options {
     pub sources: Vec<String>,
     /// Module name → `<module>.kotlin_module` (kotlinc `-module-name`, default `main`).
     pub module_name: String,
+    /// Language features enabled via `-XXLanguage:+Foo` / `-X<feature>` (drop-in `kotlinc` flags).
+    pub features: LangFeatures,
     /// Options accepted for compatibility but not acted on (reported once).
     pub ignored: Vec<String>,
     /// `-version` / `-help` requested (handled before compiling).
@@ -28,6 +32,7 @@ impl Default for Options {
             classpath: Vec::new(),
             sources: Vec::new(),
             module_name: "main".to_string(),
+            features: LangFeatures::new(),
             ignored: Vec::new(),
             print_version: false,
             print_help: false,
@@ -129,6 +134,9 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 opts.ignored.push(flag.to_string());
             }
             flag if IGNORED_FLAGS.contains(&flag) => opts.ignored.push(flag.to_string()),
+            // Language-feature flags (`-XXLanguage:+Foo,-Bar`, `-Xname-based-destructuring=…`) — a
+            // drop-in honors the same toggles kotlinc does so flag-gated syntax compiles.
+            flag if opts.features.apply_cli_arg(flag) => {}
             // Unknown option: ignore it (don't mistake it for a source file). kotlinc's `-X...` and
             // `-P...` advanced flags land here.
             flag if flag.starts_with('-') => opts.ignored.push(flag.to_string()),

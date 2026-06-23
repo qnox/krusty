@@ -67,6 +67,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P9 — language-feature flags + name-based `[a, b]` destructuring (gate 1361 → 1457, +96).**
+  A drop-in honors the same feature toggles `kotlinc` does. Added `krusty::features::LangFeatures` (a
+  set of enabled `LanguageFeature` names) sourced from `-XXLanguage:+Foo` / `-Xname-based-destructuring`
+  CLI flags (via `cli::Options.features`) and from the test infra's `// LANGUAGE:` directives (the gate,
+  survey, and `compile_in_process` read them). Parser gains `parse_with_features` (`parse` stays a
+  zero-feature wrapper — no caller churn). First feature: `NameBasedDestructuring` — `for ([a, b] in …)`
+  and `val [a, b] = …` parse exactly like the `(a, b)` forms (same positional `componentN`; proven
+  byte-identical to kotlinc with `-Xname-based-destructuring=complete`). WITHOUT the flag krusty rejects
+  `[a, b]`, matching default `kotlinc` ("experimental … enable explicitly"). Fixed a latent bug this
+  surfaced: `lower_destructure` never boxed a mutable destructured component captured+written by a
+  closure (`var [a,b]=A(); { a=3 }()`) — now boxes into a `Ref` like any captured `var` local.
+  Tests: `tests/name_based_destructuring_e2e.rs` (enabled→OK, var-capture→OK, disabled→rejected) +
+  `features` unit tests. KEY LEARNING (user): experimental syntax must be flag-gated, NOT supported
+  unconditionally — but a drop-in DOES support every flag kotlinc accepts (so the gate enables them per
+  the `// LANGUAGE:` directive). The survey/gate now parse under per-file features, de-noising the
+  histogram (the old "expected loop variable" 141 was mostly `+NameBasedDestructuring`).
 - **Phase P8 — persistent JVM box-runner for the execution e2e (test-time <60s work).** Added
   `tests/common::{compile_and_run_box, run_box, find_box_class, java_home}` — a shared persistent-JVM
   `BoxRunner` (the conformance gate's in-process-compile + ClassLoader/reflection pattern) so execution

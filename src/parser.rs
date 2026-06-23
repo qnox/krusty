@@ -4,15 +4,29 @@
 
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
+use crate::features::LangFeatures;
 use crate::token::{Token, TokenKind};
 
+/// Parse with the default (no experimental flags) language feature set.
 pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
+    parse_with_features(src, tokens, diags, &LangFeatures::default())
+}
+
+/// Parse under an explicit language-feature set — flag-gated syntax (e.g. name-based `[a, b]`
+/// destructuring) is accepted only when its feature is enabled, matching a drop-in `kotlinc`.
+pub fn parse_with_features(
+    src: &str,
+    tokens: &[Token],
+    diags: &mut DiagSink,
+    features: &LangFeatures,
+) -> File {
     let mut p = Parser {
         src,
         t: tokens,
         i: 0,
         file: File::default(),
         diags,
+        name_based_destructuring: features.has("NameBasedDestructuring"),
     };
     p.parse_file();
     fixup_parenless_base_classes(&mut p.file);
@@ -65,6 +79,8 @@ struct Parser<'a> {
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
+    /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
+    name_based_destructuring: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -2364,8 +2380,16 @@ impl<'a> Parser<'a> {
             TokenKind::KwVal | TokenKind::KwVar => {
                 let is_var = self.at(TokenKind::KwVar);
                 self.bump();
-                // Destructuring declaration: `val (a, b, …) = init`.
-                if self.at(TokenKind::LParen) {
+                // Destructuring declaration: `val (a, b, …) = init`, or the name-based `val [a, b] =
+                // init` under `+NameBasedDestructuring` (both desugar to positional `componentN`).
+                let close = if self.at(TokenKind::LParen) {
+                    Some(TokenKind::RParen)
+                } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
+                    Some(TokenKind::RBracket)
+                } else {
+                    None
+                };
+                if let Some(close) = close {
                     self.bump();
                     let mut entries = Vec::new();
                     loop {
@@ -2378,11 +2402,18 @@ impl<'a> Parser<'a> {
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
-                        if self.at(TokenKind::RParen) {
+                        if self.at(close) {
                             break;
                         } // trailing comma
                     }
-                    self.expect(TokenKind::RParen, "')'");
+                    self.expect(
+                        close,
+                        if close == TokenKind::RParen {
+                            "')'"
+                        } else {
+                            "']'"
+                        },
+                    );
                     self.expect(TokenKind::Eq, "'='");
                     self.skip_newlines();
                     let init = self.parse_expr();
@@ -2605,9 +2636,18 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self, start: Span, label: Option<String>) -> StmtId {
         self.bump(); // 'for'
         self.expect(TokenKind::LParen, "'('");
-        // A destructuring loop variable — `for ((a, b) in pairs)` — desugars to a synthetic temp plus
-        // `val (a, b) = temp` prepended to the body (reusing the `Stmt::Destructure` machinery).
-        let destructure: Option<Vec<(String, bool)>> = if self.at(TokenKind::LParen) {
+        // A destructuring loop variable — `for ((a, b) in pairs)`, or the name-based `for ([a, b] in
+        // pairs)` under `+NameBasedDestructuring` — desugars to a synthetic temp plus `val (a, b) =
+        // temp` prepended to the body (reusing the `Stmt::Destructure` machinery; both forms lower to
+        // the same positional `componentN` calls, so the bytecode matches kotlinc's either way).
+        let close = if self.at(TokenKind::LParen) {
+            Some(TokenKind::RParen)
+        } else if self.name_based_destructuring && self.at(TokenKind::LBracket) {
+            Some(TokenKind::RBracket)
+        } else {
+            None
+        };
+        let destructure: Option<Vec<(String, bool)>> = if let Some(close) = close {
             self.bump();
             let mut entries = Vec::new();
             loop {
@@ -2619,11 +2659,18 @@ impl<'a> Parser<'a> {
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
-                if self.at(TokenKind::RParen) {
+                if self.at(close) {
                     break;
                 }
             }
-            self.expect(TokenKind::RParen, "')'");
+            self.expect(
+                close,
+                if close == TokenKind::RParen {
+                    "')'"
+                } else {
+                    "']'"
+                },
+            );
             Some(entries)
         } else {
             None

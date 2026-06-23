@@ -723,6 +723,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `feature_box_e2e::CollectionPlusAssign` and `tests/metadata_return_types.rs` (hierarchy parse, subtyping,
   `plusAssign` receiver).
 
+- **Language-feature flags (`-XXLanguage:` / `// LANGUAGE:`) + name-based `[a, b]` destructuring.** A
+  drop-in honors kotlinc's feature toggles: `krusty::features::LangFeatures` holds the enabled
+  `LanguageFeature` names, sourced from `-XXLanguage:+Foo`/`-Xname-based-destructuring` CLI flags and (in
+  the test harness/gate/survey) from `// LANGUAGE:` directives. Default = no experimental features, so
+  default-flags behavior matches kotlinc. First gated feature, `NameBasedDestructuring`: `for ([a, b] in
+  e)` and `val/var [a, b] = e` are accepted ONLY when enabled, parsing identically to the `(a, b)` forms
+  — both desugar to positional `component1()/component2()` calls, byte-identical to kotlinc (verified vs
+  `-Xname-based-destructuring=complete`). Without the flag, `[a, b]` is rejected (kotlinc errors that the
+  feature is experimental). A `var` destructured component captured and written by a closure is boxed
+  into a `Ref` exactly like a plain captured `var` local (`var [a,b]=A(); val f={a=3}; f()` sees `a==3`).
+  Tests: `multiDecl/*` box corpus (+96 gate), `tests/name_based_destructuring_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

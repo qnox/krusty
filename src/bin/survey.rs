@@ -6,7 +6,6 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::jvm::value_classes::lower_value_classes;
 use krusty::lexer::lex;
-use krusty::parser::parse;
 use krusty::resolve::{check_file, collect_signatures_with_cp};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,8 +17,11 @@ use std::rc::Rc;
 /// silent lower/emit bailouts that carry no diagnostic).
 fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let mut d = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
     let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut d, &features,
+    )];
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
     }

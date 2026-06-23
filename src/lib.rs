@@ -10,6 +10,7 @@ pub mod backend;
 pub mod call_resolver;
 pub mod cli;
 pub mod diag;
+pub mod features;
 pub mod ir;
 pub mod ir_lower;
 pub mod js;
