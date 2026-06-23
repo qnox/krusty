@@ -987,10 +987,10 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn toplevel_is_inline(&self, name: &str) -> bool {
-        self.cp
-            .find_top_level(name)
+        self.functions(name, None)
+            .overloads
             .iter()
-            .any(|c| self.cp.is_inline_method(&c.owner, &c.name))
+            .any(|o| o.flags.inline)
     }
 
     fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
@@ -1109,6 +1109,34 @@ impl LibrarySet for JvmLibraries {
                     }
                 }
             }
+        } else {
+            // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
+            // its inline/`@InlineOnly` flags in one place.
+            for c in self.cp.find_top_level(name) {
+                let (params, ret) = parse_method_desc(&c.descriptor);
+                let inline = self.cp.is_inline_method(&c.owner, &c.name);
+                overloads.push(FunctionInfo {
+                    kind: FnKind::TopLevel,
+                    receiver: None,
+                    ret_nullable: false,
+                    flags: FnFlags {
+                        inline,
+                        inline_only: inline && !c.public,
+                    },
+                    callable: LibraryCallable {
+                        name: c.name.clone(),
+                        owner: c.owner.clone(),
+                        params,
+                        ret,
+                        physical_ret: ret,
+                        descriptor: c.descriptor.clone(),
+                        is_inline: inline,
+                        default_call: false,
+                        vararg_elem: None,
+                        must_inline: inline && !c.public,
+                    },
+                });
+            }
         }
         FunctionSet { overloads }
     }
@@ -1133,10 +1161,10 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn toplevel_has_must_inline(&self, name: &str) -> bool {
-        self.cp
-            .find_top_level(name)
+        self.functions(name, None)
+            .overloads
             .iter()
-            .any(|c| !c.public && self.cp.is_inline_method(&c.owner, &c.name))
+            .any(|o| o.flags.inline_only)
     }
 
     fn toplevel_lambda_param_types(
