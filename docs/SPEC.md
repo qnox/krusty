@@ -175,6 +175,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `super(args)` descriptor from the argument types. Still skipped (later slices): >1 suspension point
   (N states + local field spilling), suspension inside control flow, suspend lambdas / `suspend`
   function types, builders.
+- **`suspend fun` slice 3 — N suspension points + local spilling.** A suspend function with multiple
+  suspension points lowers to a `while(true){ val r = cont.result; <restore spilled>; when(label){…} }`
+  dispatch loop: state 0 runs the prologue segment and calls the first suspend callee; each later state
+  binds the previous result from `cont.result`, runs its segment, and calls the next callee; the final
+  state runs the tail. A suspension-result local read in a later state is **spilled** to a synthesized
+  continuation field (`L$0`, …) and restored at the loop top (its slot stays frame-consistent on every
+  dispatch path). Two fixes this needed: the CPS continuation parameter's value-index collided with the
+  body's first local (ir_lower numbers locals from the original param count) — `jvm::suspend` now shifts
+  body locals up by one so the continuation owns that index; and `emit_cond_branch` folds a constant
+  condition (`while(true)`) so the loop emits no spurious branch to method-end. Proven end-to-end:
+  `baz` (`val a = foo(); val b = hundred(); return a + b`, `a` live across the second call) drives to
+  142 (`tests/suspend_e2e.rs::suspend_fun_two_suspension_points_spills_live_local`). Still skipped:
+  suspension inside control flow, suspend lambdas / `suspend` types, builders.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
