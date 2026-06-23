@@ -101,6 +101,104 @@ fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// Build the survey's `-classpath`: the kotlin-stdlib family jars + the JDK `lib/modules` jimage,
+/// located the same way the conformance gate locates them. `KRUSTY_SURVEY_STDLIB` (`:`-separated)
+/// and `KRUSTY_SURVEY_JDK_MODULES` override the located stdlib jars / JDK image respectively.
+fn locate_classpath() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    match std::env::var("KRUSTY_SURVEY_STDLIB") {
+        Ok(p) if !p.is_empty() => {
+            for part in p.split(':').filter(|s| !s.is_empty()) {
+                paths.push(PathBuf::from(part));
+            }
+        }
+        // Auto-locate the same family the gate compiles against. Each prefix is optional: a missing
+        // jar just means tests needing it stay (correctly) blocked, not falsely so for the others.
+        _ => {
+            for (prefix, excludes) in [
+                ("kotlin-stdlib-", &["jdk7", "jdk8"][..]),
+                ("kotlin-stdlib-jdk8", &[][..]),
+                ("kotlin-test-", &["junit", "testng", "annotations"][..]),
+                ("kotlin-reflect-", &[][..]),
+                ("kotlinx-coroutines-core", &["jdk8"][..]),
+                ("annotations-", &[][..]),
+            ] {
+                if let Some(j) = find_jar(prefix, excludes) {
+                    paths.push(j);
+                }
+            }
+        }
+    }
+    // JDK bootclasspath jimage: explicit override, else derive from the running/reference JDK home.
+    let jdk_modules = std::env::var("KRUSTY_SURVEY_JDK_MODULES")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let home = std::env::var("JAVA_HOME")
+                .or_else(|_| std::env::var("KRUSTY_REF_JAVA_HOME"))
+                .ok()?;
+            let p = PathBuf::from(home).join("lib").join("modules");
+            p.is_file().then_some(p)
+        });
+    if let Some(p) = jdk_modules {
+        paths.push(p);
+    }
+    paths
+}
+
+/// Newest jar under `~/.gradle` / `~/.m2/repository/org/jetbrains` whose file name starts with
+/// `prefix` (and isn't a sources/js/wasm/excluded variant). Mirrors the gate's `common::find_jar`.
+fn find_jar(prefix: &str, excludes: &[&str]) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let roots = [
+        format!("{home}/.gradle"),
+        format!("{home}/.m2/repository/org/jetbrains"),
+    ];
+    let mut found = Vec::new();
+    for r in &roots {
+        collect_named_jars(std::path::Path::new(r), prefix, excludes, &mut found, 0);
+    }
+    // Prefer the shortest name (the plain `<prefix><version>.jar`, not `-junit`/`-jvm`/…).
+    found.sort_by_key(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.len())
+            .unwrap_or(usize::MAX)
+    });
+    found.into_iter().next()
+}
+
+fn collect_named_jars(
+    dir: &std::path::Path,
+    prefix: &str,
+    excludes: &[&str],
+    out: &mut Vec<PathBuf>,
+    depth: usize,
+) {
+    if depth > 9 || out.len() > 8 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_named_jars(&p, prefix, excludes, out, depth + 1);
+        } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            let bad = ["sources", "javadoc", "-js", "wasm", "common", "metadata"];
+            if name.starts_with(prefix)
+                && name.ends_with(".jar")
+                && !bad.iter().any(|b| name.contains(b))
+                && !excludes.iter().any(|b| name.contains(b))
+            {
+                out.push(p);
+            }
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let box_dir = args
@@ -112,21 +210,12 @@ fn main() {
         None
     };
 
-    // Real classpath: stdlib jar (KRUSTY_SURVEY_STDLIB) + JDK lib/modules (KRUSTY_SURVEY_JDK_MODULES).
-    // Mirrors the conformance harness so WITH_STDLIB tests resolve `mutableListOf`/`ArrayList`/etc.
-    let mut cp_paths: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("KRUSTY_SURVEY_STDLIB") {
-        // `:`-separated so the survey can mirror the gate's full classpath (stdlib + kotlin-test +
-        // annotations), not just the stdlib jar — else `kotlin.test.*` shows up as a false blocker.
-        for part in p.split(':').filter(|s| !s.is_empty()) {
-            cp_paths.push(PathBuf::from(part));
-        }
-    }
-    if let Ok(p) = std::env::var("KRUSTY_SURVEY_JDK_MODULES") {
-        if !p.is_empty() {
-            cp_paths.push(PathBuf::from(p));
-        }
-    }
+    // Real classpath: the full kotlin-stdlib family + JDK `lib/modules`, so skip reasons match the
+    // conformance gate (which puts stdlib + kotlin-test + reflect + coroutines + annotations on the
+    // compile classpath). The survey LOCATES these itself — relying on a hand-set env var meant a
+    // partial classpath turned resolvable references (`kotlin.test.*`, coroutines) into false blockers.
+    // Env vars stay as explicit overrides for a pinned/reproducible run.
+    let cp_paths = locate_classpath();
     let cp = Rc::new(Classpath::new(cp_paths));
 
     let mut errors: HashMap<String, Vec<String>> = HashMap::new();
