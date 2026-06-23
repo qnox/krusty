@@ -22,7 +22,8 @@
 //! frames; it is runtime-equivalent to kotlinc's `tableswitch` (an `if`-chain dispatch). A *leaf* member
 //! suspend fn gets the CPS signature on its instance method; shapes not yet modeled (a suspension under
 //! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn WITH a
-//! suspension point — its continuation must capture the receiver) skip the file.
+//! suspension point — its continuation must capture the receiver) skip the file. A suspend body may call
+//! a (static or member) suspend fn — the continuation is threaded into the `Call`/`MethodCall`.
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
@@ -33,8 +34,9 @@ use std::collections::HashSet;
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
-/// A direct suspension at a statement: `(optional bound local + type, callee FunId, call args)`.
-type Suspension = (Option<(u32, IrType)>, u32, Vec<ExprId>);
+/// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
+/// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_call`.
+type Suspension = (Option<(u32, IrType)>, ExprId);
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -130,7 +132,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if as_suspend_call(ir, e, suspend_set).is_some() {
+            if suspend_call_fid(ir, e, suspend_set).is_some() {
                 let tmp = max_value_index(ir) + 1;
                 let var = ir.add_expr(IrExpr::Variable {
                     index: tmp,
@@ -188,7 +190,7 @@ fn hoist_stmt(
             return;
         }
         IrExpr::Variable { init: Some(i), .. }
-            if as_suspend_call(ir, *i, suspend_set).is_some() =>
+            if suspend_call_fid(ir, *i, suspend_set).is_some() =>
         {
             out.push(stmt);
             return;
@@ -199,7 +201,7 @@ fn hoist_stmt(
             out.push(stmt); // `val a = if/when …` (conditional suspension) — flattener's job
             return;
         }
-        _ if as_suspend_call(ir, stmt, suspend_set).is_some() => {
+        _ if suspend_call_fid(ir, stmt, suspend_set).is_some() => {
             out.push(stmt);
             return;
         }
@@ -220,14 +222,35 @@ fn hoist_expr(
     orig_rets: &[IrType],
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
-    if let Some((callee, args)) = as_suspend_call(ir, e, suspend_set) {
-        // Hoist nested suspensions in the arguments first (they evaluate before the call).
-        let new_args: Vec<ExprId> = args
-            .iter()
-            .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
-            .collect();
-        if let IrExpr::Call { args, .. } = &mut ir.exprs[e as usize] {
-            *args = new_args;
+    if let Some(callee) = suspend_call_fid(ir, e, suspend_set) {
+        // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call).
+        match ir.exprs[e as usize].clone() {
+            IrExpr::Call { args, .. } => {
+                let na: Vec<ExprId> = args
+                    .iter()
+                    .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+                    .collect();
+                if let IrExpr::Call { args, .. } = &mut ir.exprs[e as usize] {
+                    *args = na;
+                }
+            }
+            IrExpr::MethodCall { receiver, args, .. } => {
+                let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+                let na: Vec<Option<ExprId>> = args
+                    .iter()
+                    .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
+                    .collect();
+                if let IrExpr::MethodCall {
+                    receiver: r,
+                    args: a,
+                    ..
+                } = &mut ir.exprs[e as usize]
+                {
+                    *r = nr;
+                    *a = na;
+                }
+            }
+            _ => {}
         }
         let ty = orig_rets
             .get(callee as usize)
@@ -294,29 +317,38 @@ fn hoist_expr(
     }
 }
 
-/// If `e` is a direct call to a suspend function, return its `(FunId, args)`.
-fn as_suspend_call(
-    ir: &IrFile,
-    e: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> Option<(u32, Vec<ExprId>)> {
-    if let IrExpr::Call {
-        callee: Callee::Local(fid),
-        args,
-        ..
-    } = &ir.exprs[e as usize]
-    {
-        if suspend_set.contains(fid) {
-            return Some((*fid, args.clone()));
+/// If `e` is a direct call to a suspend function, return its callee `FunId`. Handles a static call
+/// (`Call{Local}`) and a same-file member call (`MethodCall`, whose `FunId` is the class's method at
+/// `index`). The continuation is threaded into the call later via [`append_continuation`].
+fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
+    match &ir.exprs[e as usize] {
+        IrExpr::Call {
+            callee: Callee::Local(fid),
+            ..
+        } if suspend_set.contains(fid) => Some(*fid),
+        IrExpr::MethodCall { class, index, .. } => {
+            let fid = *ir.classes[*class as usize].methods.get(*index as usize)?;
+            suspend_set.contains(&fid).then_some(fid)
         }
+        _ => None,
     }
-    None
+}
+
+/// Append the continuation `cont` as the trailing argument of suspend call `call_e` (a `Call` or
+/// `MethodCall`) — the CPS parameter the callee now expects. Returns the (unchanged) `ExprId`.
+fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId {
+    match &mut ir.exprs[call_e as usize] {
+        IrExpr::Call { args, .. } => args.push(cont),
+        IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
+        _ => {}
+    }
+    call_e
 }
 
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if as_suspend_call(ir, e, suspend_set).is_some() {
+    if suspend_call_fid(ir, e, suspend_set).is_some() {
         return true;
     }
     let mut found = false;
@@ -615,7 +647,7 @@ impl Flat<'_> {
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
-    fn emit_call(&mut self, out: &mut Vec<ExprId>, callee: u32, args: &[ExprId], resume: usize) {
+    fn emit_call(&mut self, out: &mut Vec<ExprId>, call: ExprId, resume: usize) {
         self.spill_all(out);
         self.set_label(out, resume);
         let cont_arg = {
@@ -626,13 +658,9 @@ impl Flat<'_> {
                 type_operand: continuation_ty(),
             })
         };
-        let mut a = args.to_vec();
-        a.push(cont_arg);
-        let call = self.add(IrExpr::Call {
-            callee: Callee::Local(callee),
-            dispatch_receiver: None,
-            args: a,
-        });
+        // Thread the continuation into the call (a static `Call` or a member `MethodCall`) — the CPS
+        // parameter the callee now expects.
+        append_continuation(self.ir, call, cont_arg);
         let vv = self.fresh();
         let var = self.add(IrExpr::Variable {
             index: vv,
@@ -677,16 +705,16 @@ impl Flat<'_> {
             }));
         }
     }
-    /// If `stmt` is a (possibly result-discarding) direct suspension, return `(bound local, callee, args)`.
+    /// If `stmt` is a (possibly result-discarding) direct suspension, return `(bound local, call ExprId)`.
     fn stmt_suspension(&self, stmt: ExprId) -> Option<Suspension> {
         match &self.ir.exprs[stmt as usize] {
             IrExpr::Variable {
                 index,
                 ty,
                 init: Some(init),
-            } => as_suspend_call(self.ir, *init, self.suspend)
-                .map(|(c, a)| (Some((*index, ty.clone())), c, a)),
-            _ => as_suspend_call(self.ir, stmt, self.suspend).map(|(c, a)| (None, c, a)),
+            } => suspend_call_fid(self.ir, *init, self.suspend)
+                .map(|_| (Some((*index, ty.clone())), *init)),
+            _ => suspend_call_fid(self.ir, stmt, self.suspend).map(|_| (None, stmt)),
         }
     }
     /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
@@ -707,13 +735,13 @@ impl Flat<'_> {
         let branches = branches.clone();
         let any_susp = branches
             .iter()
-            .any(|(_, v)| as_suspend_call(self.ir, *v, self.suspend).is_some());
+            .any(|(_, v)| suspend_call_fid(self.ir, *v, self.suspend).is_some());
         if !any_susp {
             return None;
         }
         // A branch value must be either a direct suspension or suspension-free.
         for (_, v) in &branches {
-            if as_suspend_call(self.ir, *v, self.suspend).is_none()
+            if suspend_call_fid(self.ir, *v, self.suspend).is_none()
                 && expr_calls_suspend(self.ir, *v, self.suspend)
             {
                 self.failed = true;
@@ -734,9 +762,9 @@ impl Flat<'_> {
         let mut out_branches: Branches = Vec::new();
         for (cond, value) in branches {
             let mut bb: Vec<ExprId> = Vec::new();
-            if let Some((callee, args)) = as_suspend_call(self.ir, *value, self.suspend) {
+            if suspend_call_fid(self.ir, *value, self.suspend).is_some() {
                 let br_resume = self.new_state();
-                self.emit_call(&mut bb, callee, &args, br_resume);
+                self.emit_call(&mut bb, *value, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
                 self.bind_from_r(&mut rs, local, ty);
                 self.goto(&mut rs, merge);
@@ -836,9 +864,9 @@ impl Flat<'_> {
                 return;
             }
             let stmt = stmts[i];
-            if let Some((bind, callee, args)) = self.stmt_suspension(stmt) {
+            if let Some((bind, call)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
-                self.emit_call(&mut out, callee, &args, resume);
+                self.emit_call(&mut out, call, resume);
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
                 if let Some((local, ty)) = bind {
@@ -1251,6 +1279,9 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
         IrExpr::GetField { receiver, .. } => box_returns(ir, receiver),
         IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
+        IrExpr::MethodCall { receiver, args, .. } => {
+            box_returns(ir, receiver) && args.into_iter().flatten().all(|a| box_returns(ir, a))
+        }
         IrExpr::New { args, .. } | IrExpr::NewExternal { args, .. } => {
             args.into_iter().all(|a| box_returns(ir, a))
         }
