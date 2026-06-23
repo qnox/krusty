@@ -7,6 +7,7 @@ use super::classpath::Classpath;
 use super::jvm_class_map::{
     kotlin_builtin_to_internal, to_jvm_internal, to_kotlin_internal, BUILTIN_MAPPED_NAMES,
 };
+use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig, GSig};
 use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember, LibrarySeed,
     LibrarySet, LibraryType,
@@ -183,6 +184,7 @@ impl JvmLibraries {
                 // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
                 // skip the file (never an `IllegalAccessError`); a PUBLIC one can fall back to a real call.
                 must_inline: !c.public,
+                signature: c.signature.clone(),
             });
         }
         None
@@ -268,17 +270,6 @@ fn split_one(s: &str) -> Option<(&str, &str)> {
         }
         _ => Some((&s[..i + 1], &s[i + 1..])),
     }
-}
-
-/// A node of a parsed JVM generic *type signature* (the grammar behind the `Signature` attribute):
-/// a type variable (`TT;`), a class type with type arguments (`Ljava/util/List<TT;>;`), an array, or
-/// a primitive. Enough to recover a generic method's parameterized return from its erased descriptor.
-#[derive(Clone, Debug)]
-enum GSig {
-    Var(String),
-    Class(String, Vec<GSig>),
-    Arr(Box<GSig>),
-    Prim(Ty),
 }
 
 /// Whether a non-public (`@InlineOnly`) extension's generic-signature RECEIVER is a type variable
@@ -442,100 +433,6 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<GSig>)> {
     Some((formals, supers))
 }
 
-/// Bind type variables by unifying a parameter signature node with an actual argument `Ty`.
-fn unify_gsig(sig: &GSig, actual: Ty, binds: &mut std::collections::HashMap<String, Ty>) {
-    match sig {
-        GSig::Var(n) => {
-            binds.entry(n.clone()).or_insert(actual);
-        }
-        GSig::Arr(inner) => {
-            if let Some(elem) = actual.array_elem() {
-                unify_gsig(inner, elem, binds);
-            }
-        }
-        GSig::Class(internal, args) if internal.starts_with("kotlin/jvm/functions/Function") => {
-            // A function parameter (`Function1<T, R>`) unifies against a lambda argument (`Ty::Fun`):
-            // the leading type arguments bind the lambda's parameters, the last binds its return —
-            // so `map`'s `R` binds from the lambda body's type (`{ it * 2 }` → `Int`).
-            if let Ty::Fun(fsig) = actual {
-                if let Some((ret_sig, in_sigs)) = args.split_last() {
-                    for (a, p) in in_sigs.iter().zip(fsig.params.iter()) {
-                        unify_gsig(a, *p, binds);
-                    }
-                    unify_gsig(ret_sig, fsig.ret, binds);
-                }
-            }
-        }
-        GSig::Class(_, args) => {
-            // Unify the type arguments positionally against the actual's carried arguments, if any.
-            if let Ty::Obj(_, targs) = actual {
-                for (a, t) in args.iter().zip(targs.iter()) {
-                    unify_gsig(a, *t, binds);
-                }
-            }
-        }
-        GSig::Prim(_) => {}
-    }
-}
-
-/// Realize a signature node to a `Ty` under the current bindings — an unbound variable erases to
-/// `Any`, a class becomes `Ty::obj_args` carrying its (substituted) type arguments.
-fn gsig_to_ty(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Ty {
-    match sig {
-        GSig::Var(n) => binds
-            .get(n)
-            .copied()
-            .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-        GSig::Prim(t) => *t,
-        GSig::Arr(inner) => Ty::array(gsig_to_ty(inner, binds)),
-        GSig::Class(internal, args) => {
-            if args.is_empty() {
-                Ty::obj(internal)
-            } else {
-                let targs: Vec<Ty> = args.iter().map(|a| gsig_to_ty(a, binds)).collect();
-                Ty::obj_args(internal, &targs)
-            }
-        }
-    }
-}
-
-/// If `sig` is a `kotlin/jvm/functions/FunctionN` type, the (substituted) types of its lambda
-/// parameters — its first N type arguments (the last is the return type). Empty for anything else.
-fn function_input_types(sig: &GSig, binds: &std::collections::HashMap<String, Ty>) -> Vec<Ty> {
-    if let GSig::Class(internal, targs) = sig {
-        if internal.starts_with("kotlin/jvm/functions/Function") && !targs.is_empty() {
-            // A `FunctionN` is generic, so a primitive-typed lambda parameter appears boxed in the
-            // signature (`(index: Int, …)` → `Function2<Integer, …>`). The Kotlin lambda parameter is
-            // the *unboxed* primitive, so map a known wrapper type argument back to it.
-            return targs[..targs.len() - 1]
-                .iter()
-                .map(|a| unbox_wrapper(gsig_to_ty(a, binds)))
-                .collect();
-        }
-    }
-    Vec::new()
-}
-
-/// Map a JVM boxed-primitive wrapper type back to its primitive (`java/lang/Integer` → `Int`); a no-op
-/// for any other type. Recovers unboxed Kotlin lambda-parameter types from an erased `FunctionN`
-/// signature (whose type arguments are always boxed).
-fn unbox_wrapper(t: Ty) -> Ty {
-    match t.obj_internal() {
-        Some("java/lang/Integer") => Ty::Int,
-        Some("java/lang/Long") => Ty::Long,
-        Some("java/lang/Short") => Ty::Short,
-        Some("java/lang/Byte") => Ty::Byte,
-        Some("java/lang/Character") => Ty::Char,
-        Some("java/lang/Boolean") => Ty::Boolean,
-        Some("java/lang/Double") => Ty::Double,
-        Some("java/lang/Float") => Ty::Float,
-        _ => t,
-    }
-}
-
-/// Whether argument `a` can be passed where parameter `p` is expected, in erased Kotlin terms: an
-/// exact match, any argument into an erased `Any` parameter, or the *same erased class* (a parameter
-/// `Pair` accepts an argument `Pair<Int, String>` — generic parameters erase to the raw type).
 /// Parameter indices whose descriptor type is a `kotlin/jvm/functions/FunctionN` — the lambda parameters
 /// the unified splicer inlines (`require`'s `lazyMessage: () -> Any`, `let`'s `block: (T) -> R`, …).
 fn function_param_indices(descriptor: &str) -> Vec<usize> {
@@ -581,35 +478,6 @@ fn function_param_indices(descriptor: &str) -> Vec<usize> {
         }
     }
     out
-}
-
-fn arg_fits(p: &Ty, a: &Ty) -> bool {
-    if p == a || *p == Ty::obj("kotlin/Any") {
-        return true;
-    }
-    // A lambda (`Ty::Fun`) is passed where a `kotlin/jvm/functions/FunctionN` is expected.
-    if let (Ty::Obj(pi, _), Ty::Fun(_)) = (p, a) {
-        return pi.starts_with("kotlin/jvm/functions/Function");
-    }
-    // A property reference (`C::n` → `KProperty1`, `obj::n` → `KProperty0`) is itself a function:
-    // `PropertyReference{1,0}Impl` implements the matching `FunctionN` (`invoke = get`). Accept it for
-    // a `FunctionN` parameter of the matching arity (`Function1` ← `KProperty1`, `Function0` ← `KProperty0`).
-    if let (Ty::Obj(pi, _), Ty::Obj(ai, _)) = (p, a) {
-        if let Some(arity) = pi
-            .strip_prefix("kotlin/jvm/functions/Function")
-            .and_then(|n| n.parse::<usize>().ok())
-        {
-            let prop_arity = match *ai {
-                "kotlin/reflect/KProperty1" | "kotlin/reflect/KMutableProperty1" => Some(1),
-                "kotlin/reflect/KProperty0" | "kotlin/reflect/KMutableProperty0" => Some(0),
-                _ => None,
-            };
-            if prop_arity == Some(arity) {
-                return true;
-            }
-        }
-    }
-    matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
 /// Whether a parameter signature node is compatible with an actual `Ty`, used to disambiguate
@@ -978,20 +846,6 @@ impl LibrarySet for JvmLibraries {
         self.extension_callable(name, receiver, args, &[], true)
     }
 
-    fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
-        self.functions(name, Some(receiver))
-            .overloads
-            .iter()
-            .any(|o| o.kind == FnKind::Extension && o.flags.inline)
-    }
-
-    fn toplevel_is_inline(&self, name: &str) -> bool {
-        self.functions(name, None)
-            .overloads
-            .iter()
-            .any(|o| o.flags.inline)
-    }
-
     fn metadata_return_unsigned(&self, owner: &str, name: &str) -> bool {
         matches!(
             self.cp.metadata_return_type(owner, name).as_deref(),
@@ -1086,6 +940,7 @@ impl LibrarySet for JvmLibraries {
                                 kind: FnKind::Extension,
                                 receiver: Some(receiver),
                                 ret_nullable: false,
+                                public: c.public,
                                 flags: FnFlags {
                                     inline: true,
                                     inline_only: !c.public,
@@ -1102,6 +957,7 @@ impl LibrarySet for JvmLibraries {
                                     vararg_elem: None,
                                     // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
                                     must_inline: !c.public,
+                                    signature: c.signature.clone(),
                                 },
                             });
                         }
@@ -1143,6 +999,7 @@ impl LibrarySet for JvmLibraries {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
                         ret_nullable,
+                        public: c.public,
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
@@ -1158,6 +1015,7 @@ impl LibrarySet for JvmLibraries {
                             default_call: false,
                             vararg_elem: None,
                             must_inline: inline && !c.public,
+                            signature: c.signature.clone(),
                         },
                     });
                 }
@@ -1180,6 +1038,7 @@ impl LibrarySet for JvmLibraries {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
                                 ret_nullable: false,
+                                public: true,
                                 flags: FnFlags::default(),
                                 callable: LibraryCallable {
                                     name: m.name.clone(),
@@ -1192,6 +1051,7 @@ impl LibrarySet for JvmLibraries {
                                     default_call: false,
                                     vararg_elem: None,
                                     must_inline: false,
+                                    signature: None,
                                 },
                             });
                         }
@@ -1209,6 +1069,7 @@ impl LibrarySet for JvmLibraries {
                     kind: FnKind::TopLevel,
                     receiver: None,
                     ret_nullable: false,
+                    public: c.public,
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,
@@ -1224,6 +1085,7 @@ impl LibrarySet for JvmLibraries {
                         default_call: false,
                         vararg_elem: None,
                         must_inline: inline && !c.public,
+                        signature: c.signature.clone(),
                     },
                 });
             }
@@ -1248,13 +1110,6 @@ impl LibrarySet for JvmLibraries {
             .into_iter()
             .find(|o| o.callable.ret == lambda_ret)
             .map(|o| o.callable)
-    }
-
-    fn toplevel_has_must_inline(&self, name: &str) -> bool {
-        self.functions(name, None)
-            .overloads
-            .iter()
-            .any(|o| o.flags.inline_only)
     }
 
     fn toplevel_lambda_param_types(
@@ -1458,6 +1313,7 @@ impl LibrarySet for JvmLibraries {
                         default_call: true,
                         vararg_elem: None,
                         must_inline: false,
+                        signature: c.signature.clone(),
                     });
                 }
             }
@@ -1517,6 +1373,7 @@ impl LibrarySet for JvmLibraries {
                         default_call: false,
                         vararg_elem: None,
                         must_inline: true,
+                        signature: c.signature.clone(),
                     });
                 }
             }
@@ -1582,6 +1439,7 @@ impl LibrarySet for JvmLibraries {
                 default_call: false,
                 vararg_elem,
                 must_inline: false,
+                signature: c.signature.clone(),
             });
         };
         // Try the receiver type and its supertypes, most specific first — the extension's declared
@@ -1660,6 +1518,7 @@ impl LibrarySet for JvmLibraries {
                     default_call: true,
                     vararg_elem: None,
                     must_inline: false,
+                    signature: c.signature.clone(),
                 });
             }
         }

@@ -2716,6 +2716,10 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
+    /// The arg-binding call-resolution layer over this checker's [`LibrarySet`]. Cheap to construct.
+    fn resolver(&self) -> crate::call_resolver::CallResolver<'_> {
+        crate::call_resolver::CallResolver::new(&*self.syms.libraries)
+    }
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         self.expr_types[e.0 as usize] = t;
         t
@@ -5633,7 +5637,7 @@ impl<'a> Checker<'a> {
                 // Permit for this call only; the lowering must inline (or bail), never form a closure.
                 let prev_allow_mut = self.allow_lambda_mutation;
                 self.allow_lambda_mutation =
-                    ext_lambda_pts.is_some() && self.syms.libraries.extension_is_inline(rt, &name);
+                    ext_lambda_pts.is_some() && self.resolver().extension_is_inline(rt, &name);
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -6208,7 +6212,7 @@ impl<'a> Checker<'a> {
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
-                    && self.syms.libraries.toplevel_has_must_inline(&fname);
+                    && self.resolver().toplevel_has_must_inline(&fname);
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -6225,7 +6229,7 @@ impl<'a> Checker<'a> {
                                 // variable the lambda captures is an inline capture (no `Ref` box).
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
-                                    self.syms.libraries.toplevel_is_inline(&fname);
+                                    self.resolver().toplevel_is_inline(&fname);
                                 let t = self.check_lambda_with_types(a, &pts[i]);
                                 self.allow_lambda_mutation = prev;
                                 return t;

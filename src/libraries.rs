@@ -68,6 +68,11 @@ pub struct LibraryCallable {
     /// `invokestatic` fallback. If the emitter can't splice such a call (e.g. a branchy body on a
     /// non-empty operand stack), it skips the whole file (never a miscompile / `IllegalAccessError`).
     pub must_inline: bool,
+    /// The callee's generic `Signature` (an opaque backend token), kept so an arg-binding SELECTOR can
+    /// recover the substituted return (`fold`'s `R` from the initial value, `let`'s `R` from the lambda)
+    /// when picking this overload out of a [`FunctionSet`]. `None` when the callable has no generic
+    /// signature. The front end never parses it — only the platform's resolution helpers do.
+    pub signature: Option<String>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
@@ -97,6 +102,9 @@ pub struct FunctionInfo {
     /// The opaque platform callable (owner/name/descriptor on JVM) + its resolved `params`/`ret`. Reuses
     /// [`LibraryCallable`]; the front end reads `params`/`ret` and passes the whole thing to the emitter.
     pub callable: LibraryCallable,
+    /// Whether the callee is PUBLIC. A non-public callable has no legal call site (`@InlineOnly`); an
+    /// arg-binding selector includes it only when it will SPLICE (never emits an `invokestatic`).
+    pub public: bool,
 }
 
 /// Function metadata flags, decoded once from `@Metadata`.
@@ -334,14 +342,6 @@ pub trait LibrarySet {
         None
     }
 
-    /// Whether a top-level function named `name` is a NON-public (`@InlineOnly`) inline function — one
-    /// that MUST be inlined (no callable method exists). A lambda argument to such a callee is always
-    /// inlined or the file is skipped, so the checker may treat a mutable capture as an inline (raw, not
-    /// `Ref`-boxed) capture safely. `false` for non-JVM platforms / no such candidate.
-    fn toplevel_has_must_inline(&self, _name: &str) -> bool {
-        false
-    }
-
     /// Whether the platform can splice (truly inline) the lambda-taking `inline fun` `owner.name desc`
     /// at a call site — i.e. its compiled body is shaped for the lambda-argument splice. The front end
     /// routes a call to the inliner only when this is true, so an un-spliceable (e.g. `@InlineOnly`,
@@ -368,20 +368,6 @@ pub trait LibrarySet {
         _args: &[Ty],
     ) -> Option<LibraryCallable> {
         None
-    }
-
-    /// Whether ANY extension function named `name` on `receiver` (or a supertype) is `inline`. The lambda
-    /// argument of such a call is spliced at the call site, so a mutable variable it captures is an INLINE
-    /// capture (no closure) — the checker then must not `Ref`-box that variable. `false` for non-JVM.
-    fn extension_is_inline(&self, _receiver: Ty, _name: &str) -> bool {
-        false
-    }
-
-    /// Whether ANY receiver-less top-level function named `name` is `inline` (`run`, `repeat`, `with`, …).
-    /// Like [`extension_is_inline`](Self::extension_is_inline) but for a top-level call: its lambda is
-    /// spliced, so a mutable variable it captures is an inline capture, not a `Ref` box. `false` for non-JVM.
-    fn toplevel_is_inline(&self, _name: &str) -> bool {
-        false
     }
 
     /// Whether the Kotlin return type of `owner.name` is an unsigned type (`UByte`/`UShort`/`UInt`/
