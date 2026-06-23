@@ -21,8 +21,8 @@
 //! IR (`while(true){ when(label){…} }`), so the existing emitter produces the bytecode + stack-map
 //! frames; it is runtime-equivalent to kotlinc's `tableswitch` (an `if`-chain dispatch). A *leaf* member
 //! suspend fn gets the CPS signature on its instance method; shapes not yet modeled (a suspension under
-//! a conditional sub-expression like elvis/`&&`, a `do`-`while`, an extension suspend fn, or a member
-//! suspend fn WITH a suspension point — its continuation must capture the receiver) skip the file.
+//! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn WITH a
+//! suspension point — its continuation must capture the receiver) skip the file.
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
@@ -869,7 +869,8 @@ impl Flat<'_> {
                     return;
                 }
             }
-            // A `while` loop whose body suspends: header (test) → body (back-edge to header) → exit.
+            // A `while`/`do`-`while` loop whose body suspends: header (test) ↔ body ↔ exit. A pre-test
+            // loop enters at the header; a post-test (`do`-`while`) enters at the body (runs once first).
             if let IrExpr::While {
                 cond,
                 body,
@@ -878,14 +879,14 @@ impl Flat<'_> {
                 ..
             } = &self.ir.exprs[stmt as usize]
             {
-                if !*post_test && expr_calls_suspend(self.ir, *body, self.suspend) {
-                    let (cond, body, update) = (*cond, *body, *update);
+                if expr_calls_suspend(self.ir, *body, self.suspend) {
+                    let (cond, body, update, post_test) = (*cond, *body, *update, *post_test);
                     let header = self.new_state();
                     let body_entry = self.new_state();
                     let cont = self.new_state();
                     let exit = self.new_state();
-                    // cur → header
-                    self.goto(&mut out, header);
+                    // cur → header (pre-test) or → body (post-test runs the body once before testing)
+                    self.goto(&mut out, if post_test { body_entry } else { header });
                     self.states[cur] = out;
                     // header: when(cond){ true → body_entry; else → exit }
                     let mut hs: Vec<ExprId> = Vec::new();
