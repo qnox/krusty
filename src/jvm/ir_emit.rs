@@ -3407,6 +3407,18 @@ impl<'a> Emitter<'a> {
         jump_when_true: bool,
         code: &mut CodeBuilder,
     ) {
+        // A constant condition folds: `while (true)` (a `Boolean(true)` pre-test, jump-out-when-false)
+        // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
+        // stack-map frame. An always-taken branch becomes an unconditional `goto`.
+        if let IrExpr::Const(IrConst::Boolean(b)) = *self.ir.expr(cond) {
+            // Frame the target regardless (callers — `when`/loop emission — rely on the branch target
+            // having a stack-map frame), but only emit the jump when the constant actually takes it.
+            self.frame(target, vec![], code);
+            if b == jump_when_true {
+                code.goto(target);
+            }
+            return;
+        }
         if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
             use IrBinOp::*;
             if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {

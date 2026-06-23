@@ -92,12 +92,11 @@ fn leaf_suspend_fun_has_cps_signature() {
     );
 }
 
-#[test]
-fn suspend_fun_with_suspension_point_runs_via_continuation() {
-    // `bar` calls the suspend `foo` (a suspension point) so it gets a state machine + continuation
-    // class. `foo` completes synchronously (returns a value, never COROUTINE_SUSPENDED), so driving
-    // `bar` with a trivial Java `Continuation` runs the whole machine to completion and yields 43.
-    // This is the end-to-end proof that the state machine executes correctly.
+/// Compile `src` with krusty, then run a Java driver that calls the top-level suspend `fn`(Continuation)
+/// with a trivial `Continuation` and asserts the (synchronously-completing) result equals `expect`.
+/// The suspend callees complete synchronously (never COROUTINE_SUSPENDED), so the whole state machine
+/// runs to completion under `-Xverify:all`. Skips if javac / kotlin-stdlib is unavailable.
+fn run_suspend(name: &str, src: &str, call: &str, expect: i32) {
     let jh = match java_home() {
         Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
         _ => return,
@@ -107,11 +106,9 @@ fn suspend_fun_with_suspension_point_runs_via_continuation() {
         return;
     };
     let krusty = env!("CARGO_BIN_EXE_krusty");
-    let dir = std::env::temp_dir().join(format!("krusty_susp_sm_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let src = "suspend fun foo(): Int = 42\n\
-               suspend fun bar(): Int {\n    val a = foo()\n    return a + 1\n}\n";
     fs::write(dir.join("S.kt"), src).unwrap();
     let kc = Command::new(krusty)
         .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
@@ -120,29 +117,24 @@ fn suspend_fun_with_suspension_point_runs_via_continuation() {
         .unwrap();
     assert!(
         kc.status.success(),
-        "krusty failed to compile suspend state machine:\n{}",
+        "{name}: krusty failed to compile:\n{}",
         String::from_utf8_lossy(&kc.stderr)
     );
-    // The continuation class must exist.
-    assert!(
-        dir.join("SKt$bar$1.class").exists(),
-        "missing continuation class SKt$bar$1.class"
-    );
-    // A Java driver: a minimal Continuation whose resumeWith captures the result; call bar(driver).
-    let driver = "import kotlin.coroutines.Continuation;\n\
+    let driver = format!(
+        "import kotlin.coroutines.Continuation;\n\
 import kotlin.coroutines.CoroutineContext;\n\
 import kotlin.coroutines.EmptyCoroutineContext;\n\
-public class M {\n\
-  static Object captured = null;\n\
-  public static void main(String[] a) {\n\
-    Continuation<Object> k = new Continuation<Object>() {\n\
-      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
-      public void resumeWith(Object o) { captured = o; }\n\
-    };\n\
-    Object r = SKt.bar(k);\n\
-    System.out.println(r.equals(Integer.valueOf(43)) ? \"OK\" : (\"r=\" + r));\n\
-  }\n\
-}\n";
+public class M {{\n\
+  public static void main(String[] a) {{\n\
+    Continuation<Object> k = new Continuation<Object>() {{\n\
+      public CoroutineContext getContext() {{ return EmptyCoroutineContext.INSTANCE; }}\n\
+      public void resumeWith(Object o) {{ }}\n\
+    }};\n\
+    Object r = SKt.{call}(k);\n\
+    System.out.println(r.equals(Integer.valueOf({expect})) ? \"OK\" : (\"r=\" + r));\n\
+  }}\n\
+}}\n"
+    );
     fs::write(dir.join("M.java"), driver).unwrap();
     let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
     let jc = Command::new(format!("{jh}/bin/javac"))
@@ -152,7 +144,7 @@ public class M {\n\
         .unwrap();
     assert!(
         jc.status.success(),
-        "javac driver failed:\n{}",
+        "{name}: javac driver failed:\n{}",
         String::from_utf8_lossy(&jc.stderr)
     );
     let run = Command::new(format!("{jh}/bin/java"))
@@ -163,7 +155,33 @@ public class M {\n\
     assert_eq!(
         String::from_utf8_lossy(&run.stdout).trim(),
         "OK",
-        "state machine produced wrong result; stderr={}",
+        "{name}: wrong result; stderr={}",
         String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn suspend_fun_with_suspension_point_runs_via_continuation() {
+    // `bar` calls the suspend `foo` (one suspension point) → a state machine + continuation class.
+    run_suspend(
+        "sm1",
+        "suspend fun foo(): Int = 42\n\
+         suspend fun bar(): Int {\n    val a = foo()\n    return a + 1\n}\n",
+        "bar",
+        43,
+    );
+}
+
+#[test]
+fn suspend_fun_two_suspension_points_spills_live_local() {
+    // `baz` has TWO suspension points; `a` (the first result) is live across the second call, so it
+    // must be spilled to a continuation field and restored. Drives to 42 + 100 = 142.
+    run_suspend(
+        "sm2",
+        "suspend fun foo(): Int = 42\n\
+         suspend fun hundred(): Int = 100\n\
+         suspend fun baz(): Int {\n    val a = foo()\n    val b = hundred()\n    return a + b\n}\n",
+        "baz",
+        142,
     );
 }
