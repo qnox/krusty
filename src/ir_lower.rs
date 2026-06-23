@@ -6392,7 +6392,7 @@ impl<'a> Lower<'a> {
                 // side-effecting / non-constant) bound into a temp and keeps the overflow-safe shape.
                 // The exclusive comparison constant: `until C` → `C` (`i < C`); `..C` → `C+1` (`i < C+1`);
                 // `downTo C` → `C-1` (`C-1 < i`, i.e. `i > C-1`). The `±1` folds must not over/underflow.
-                let inline_bound: Option<i32> = if elem == Ty::Int && range.step.is_none() {
+                let inline_bound: Option<i32> = if elem == Ty::Int {
                     match self.afile.expr(range.end) {
                         Expr::IntLit(v) => {
                             let v = *v;
@@ -6492,29 +6492,9 @@ impl<'a> Lower<'a> {
                     self.scope.truncate(depth);
                     return None;
                 }
-                // The step is evaluated ONCE (after the bounds, before the loop), not per iteration — a
-                // side-effecting `step` (`a step logged(2)`) must run a single time. Hoist it to a temp.
-                let var_step = match range.step {
-                    Some(e) => {
-                        // Coerce the step to the counter's type — `0L..n step 3` adapts the `Int` step `3`
-                        // to `Long`, else an `int` would be stored into a `long` slot (a verify error).
-                        let sv = self.lower_arg(e, &elem_ir)?;
-                        let step_v = self.fresh_value();
-                        Some((
-                            self.ir.add_expr(IrExpr::Variable {
-                                index: step_v,
-                                ty: elem_ir.clone(),
-                                init: Some(sv),
-                            }),
-                            step_v,
-                        ))
-                    }
-                    None => None,
-                };
-                let step = match var_step {
-                    Some((_, step_v)) => self.ir.add_expr(IrExpr::GetValue(step_v)),
-                    None => self.ir.add_expr(IrExpr::Const(one)),
-                };
+                // The counted `Stmt::For` is always unit-step: a range with a `step` (or any trailing
+                // infix) is parsed as a progression value and lowered by `lower_foreach_progression`.
+                let step = self.ir.add_expr(IrExpr::Const(one));
                 let inc_op = if matches!(range.kind, RangeKind::DownTo) {
                     IrBinOp::Sub
                 } else {
@@ -6536,84 +6516,21 @@ impl<'a> Lower<'a> {
                 // the increment — so `0..Int.MAX_VALUE` / `x downTo Int.MIN_VALUE` don't wrap past it and
                 // loop forever. The break + increment are the loop `update` (the `continue` target), so a
                 // `continue` also hits the bound check instead of skipping to the wrapping increment.
-                // For an exclusive `until` the counter never equals `end`, and a non-1 `step` may skip it
-                // — harmless either way (the `cond` ends the loop).
-                // A non-unit `step` on a signed `Int`/`Long`-family range may never land exactly on `end`,
-                // so the `i == end` break can't fire and `i ± step` would wrap PAST `end` and loop forever
-                // (e.g. `MaxI-5..MaxI step 3`). Break when the NEXT value would pass `end` OR wraps around
-                // (`next < i` when ascending / `next > i` when descending detects the overflow) — the
-                // overflow-safe shape, matching kotlinc's `getProgressionLastElement` semantics, without
-                // needing a wider accumulator (so it works for `Long` too).
                 // Skip the overflow break entirely when the loop can't wrap past its bound: a constant
-                // inline bound (folded to `i < C`), or an exclusive `until` with unit step (the counter
-                // never reaches `end`). kotlinc emits no guard there. Every other form keeps the
-                // overflow-safe break (computed against the hoisted `end` local).
-                let no_guard = inline_bound.is_some()
-                    || (matches!(range.kind, RangeKind::Until) && range.step.is_none());
+                // inline bound (folded to `i < C`), or an exclusive `until` (the counter never reaches
+                // `end`). kotlinc emits no guard there. Every other form keeps the `i == end` break.
+                let no_guard = inline_bound.is_some() || matches!(range.kind, RangeKind::Until);
                 let update = if no_guard {
                     inc
                 } else {
                     let end_v = end_v.unwrap();
-                    let signed_int_family =
-                        matches!(elem, Ty::Int | Ty::Long | Ty::Char | Ty::Short | Ty::Byte);
-                    let at_end = if range.step.is_some() && signed_int_family {
-                        let step_e = |this: &mut Self| match var_step {
-                            Some((_, step_v)) => this.ir.add_expr(IrExpr::GetValue(step_v)),
-                            None => this.ir.add_expr(IrExpr::Const(IrConst::Int(1))),
-                        };
-                        // next = i ± step  (passes `end`?)
-                        let i1 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                        let s1 = step_e(self);
-                        let next1 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: inc_op,
-                            lhs: i1,
-                            rhs: s1,
-                        });
-                        let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
-                        // Through → next > end; Until → next >= end; DownTo → next < end.
-                        let past_op = match range.kind {
-                            RangeKind::Through => IrBinOp::Gt,
-                            RangeKind::Until => IrBinOp::Ge,
-                            RangeKind::DownTo => IrBinOp::Lt,
-                        };
-                        let past_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: past_op,
-                            lhs: next1,
-                            rhs: ec,
-                        });
-                        // wrap-around: ascending `next < i`, descending `next > i`.
-                        let i2 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                        let s2 = step_e(self);
-                        let next2 = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: inc_op,
-                            lhs: i2,
-                            rhs: s2,
-                        });
-                        let i3 = self.ir.add_expr(IrExpr::GetValue(i_v));
-                        let wrap_op = if matches!(range.kind, RangeKind::DownTo) {
-                            IrBinOp::Gt
-                        } else {
-                            IrBinOp::Lt
-                        };
-                        let wrapped = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: wrap_op,
-                            lhs: next2,
-                            rhs: i3,
-                        });
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Or,
-                            lhs: past_end,
-                            rhs: wrapped,
-                        })
-                    } else {
-                        let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
-                        let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Eq,
-                            lhs: ic,
-                            rhs: ec,
-                        })
-                    };
+                    let ic = self.ir.add_expr(IrExpr::GetValue(i_v));
+                    let ec = self.ir.add_expr(IrExpr::GetValue(end_v));
+                    let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Eq,
+                        lhs: ic,
+                        rhs: ec,
+                    });
                     let brk = self.ir.add_expr(IrExpr::Break { label: None });
                     let if_break = self.ir.add_expr(IrExpr::When {
                         branches: vec![(Some(at_end), brk)],
@@ -6638,9 +6555,6 @@ impl<'a> Lower<'a> {
                 let mut prologue = vec![var_i];
                 if let Some(ve) = var_end {
                     prologue.push(ve);
-                }
-                if let Some((vs, _)) = var_step {
-                    prologue.push(vs);
                 }
                 prologue.push(wh);
                 Some(self.ir.add_expr(IrExpr::Block {
@@ -11823,10 +11737,10 @@ fn range_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     }
 }
 
-/// The element type + primitive descriptor for a *signed* progression iterated via `getStep()`. A
-/// `…Range` is a `…Progression` subtype, but ranges keep the cheaper unit-step path above; only a
-/// bare progression (the result of `downTo`/`step`/`reversed`) reaches here. Unsigned progressions
-/// need unsigned comparisons and are left to fail rather than miscompile.
+/// The element type + primitive descriptor for a progression iterated via `getStep()`. A `…Range` is
+/// a `…Progression` subtype, but ranges keep the cheaper unit-step path above; only a bare
+/// progression (the result of `downTo`/`step`/`reversed`) reaches here. Unsigned progressions are
+/// handled too — their elements compare via `compareUnsigned` (see `lower_foreach_progression`).
 fn progression_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     match internal {
         "kotlin/ranges/IntProgression" => Some((Ty::Int, "I")),

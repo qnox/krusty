@@ -2676,7 +2676,6 @@ impl<'a> Parser<'a> {
                         start: zero,
                         end: size,
                         kind: RangeKind::Until,
-                        step: None,
                     };
                     return self.finish_stmt(
                         Stmt::For {
@@ -2771,7 +2770,6 @@ impl<'a> Parser<'a> {
                                         start: s,
                                         end: en,
                                         kind,
-                                        step: None,
                                     };
                                     return self.finish_stmt(
                                         Stmt::For {
@@ -2864,7 +2862,6 @@ impl<'a> Parser<'a> {
                     start: rstart,
                     end: rend,
                     kind,
-                    step: None,
                 },
                 body,
                 label,

@@ -1492,10 +1492,7 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
             v(*cond) || bc_complex_e(file, *body, false)
         }
         Stmt::For { range, body, .. } => {
-            v(range.start)
-                || v(range.end)
-                || range.step.map_or(false, |s| v(s))
-                || bc_complex_e(file, *body, false)
+            v(range.start) || v(range.end) || bc_complex_e(file, *body, false)
         }
         Stmt::ForEach { iterable, body, .. } => v(*iterable) || bc_complex_e(file, *body, false),
         // A local function is a separate body — `break`/`continue` in it would be non-local.
@@ -1601,9 +1598,7 @@ fn lambda_body_writes_outer(
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
                 r(*cond) || r(*body)
             }
-            Stmt::For { range, body, .. } => {
-                r(range.start) || r(range.end) || range.step.map_or(false, |s| r(s)) || r(*body)
-            }
+            Stmt::For { range, body, .. } => r(range.start) || r(range.end) || r(*body),
             Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
             Stmt::Expr(e) => r(*e),
             Stmt::LocalFun(_) => false,
@@ -1719,9 +1714,6 @@ fn collect_lambda_outer_writes(
             Stmt::For { range, body, .. } => {
                 ce(file, range.start, outer, out);
                 ce(file, range.end, outer, out);
-                if let Some(st) = range.step {
-                    ce(file, st, outer, out);
-                }
                 ce(file, *body, outer, out);
             }
             Stmt::ForEach { iterable, body, .. } => {
@@ -7286,17 +7278,6 @@ impl<'a> Checker<'a> {
                     self.expect_assignable(Ty::Int, et, self.span(range.end), "range end");
                     Ty::Int
                 };
-                if let Some(step) = range.step {
-                    let stp = self.expr(step);
-                    // The progression `step` is always `Int` (`Long` for a `Long`/`ULong` progression) —
-                    // NOT the element type, so a `Char`/`Byte`/`Short` range steps by an `Int`.
-                    let step_ty = if matches!(elem, Ty::Long | Ty::ULong) {
-                        Ty::Long
-                    } else {
-                        Ty::Int
-                    };
-                    self.expect_assignable(step_ty, stp, self.span(step), "range step");
-                }
                 self.push_scope();
                 self.declare(&name, elem, true); // loop variable (mutated by the lowering)
                 if let Some(l) = &label {

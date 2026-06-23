@@ -283,7 +283,6 @@ pub struct ForRange {
     pub start: ExprId,
     pub end: ExprId,
     pub kind: RangeKind,
-    pub step: Option<ExprId>,
 }
 
 /// A syntactic type reference. v0: just a simple name (`Int`, `String`, ...).
@@ -679,12 +678,7 @@ impl File {
             Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
                 fe(*cond) || fe(*body)
             }
-            Stmt::For { range, body, .. } => {
-                fe(range.start)
-                    || fe(range.end)
-                    || range.step.map_or(false, |st| fe(st))
-                    || fe(*body)
-            }
+            Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || fe(*body),
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
         }
@@ -1112,10 +1106,6 @@ impl File {
                 self.write_expr(range.start, out);
                 out.push_str(&format!(" {op} "));
                 self.write_expr(range.end, out);
-                if let Some(s) = range.step {
-                    out.push_str(" step ");
-                    self.write_expr(s, out);
-                }
                 out.push_str(") ");
                 self.write_expr(*body, out);
                 out.push(')');
