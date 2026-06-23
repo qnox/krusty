@@ -5997,14 +5997,18 @@ impl<'a> Checker<'a> {
                 // return: a return naming the receiver type param (`T`) → the actual receiver type `rt`;
                 // one naming a value-param type param → that argument's type; else the declared return.
                 if rt.descriptor() != Ty::obj("kotlin/Any").descriptor() {
-                    let any_desc = Ty::obj("kotlin/Any").descriptor();
-                    if let Some(sig) = self
-                        .syms
-                        .ext_funs
-                        .get(&(any_desc.clone(), name.clone()))
-                        .cloned()
-                    {
-                        if sig.params.len() == arg_tys.len() {
+                    // The generic-receiver extension keys under the `Any` descriptor — rung 1 in the
+                    // module source's extension lookup (rung 0 is the exact receiver, handled above).
+                    let module_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .find(|o| {
+                            o.kind == crate::libraries::FnKind::Extension && o.receiver_rank == 1
+                        });
+                    if let Some(fi) = module_ext {
+                        let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
+                        if logical.len() == arg_tys.len() {
                             if let Some(decl) =
                                 self.file
                                     .decls
@@ -6026,7 +6030,7 @@ impl<'a> Checker<'a> {
                                         _ => None,
                                     })
                             {
-                                for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+                                for (i, (p, a)) in logical.iter().zip(&arg_tys).enumerate() {
                                     self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                                 }
                                 let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
@@ -6038,7 +6042,7 @@ impl<'a> Checker<'a> {
                                         .zip(&arg_tys)
                                         .find(|(p, _)| p.ty.name == r.name)
                                         .map(|(_, a)| *a)
-                                        .unwrap_or(sig.ret),
+                                        .unwrap_or(fi.callable.ret),
                                     None => Ty::Unit,
                                 };
                                 // Inline only (the body is spliced — no `ext_call` to emit).
