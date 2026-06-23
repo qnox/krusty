@@ -105,6 +105,36 @@ impl ClassSig {
     }
 }
 
+/// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
+/// type universe — tens of thousands of stdlib+JDK names, identical for every file on a classpath) and
+/// a small per-file `user` overlay (the file's own classes + type aliases). Lookups check `user` first
+/// (a user class shadows a classpath type of the same name), then the shared `base`. This avoids
+/// cloning the whole base map per compilation — the dominant `collect_signatures` cost before — by
+/// sharing it via `Rc`.
+#[derive(Clone, Default)]
+pub struct ClassNames {
+    base: std::rc::Rc<HashMap<String, String>>,
+    user: HashMap<String, String>,
+}
+
+impl ClassNames {
+    pub fn new(base: std::rc::Rc<HashMap<String, String>>) -> ClassNames {
+        ClassNames {
+            base,
+            user: HashMap::new(),
+        }
+    }
+    pub fn get(&self, k: &str) -> Option<&String> {
+        self.user.get(k).or_else(|| self.base.get(k))
+    }
+    pub fn contains_key(&self, k: &str) -> bool {
+        self.user.contains_key(k) || self.base.contains_key(k)
+    }
+    pub fn insert(&mut self, k: String, v: String) -> Option<String> {
+        self.user.insert(k, v)
+    }
+}
+
 pub struct SymbolTable {
     /// Top-level functions by name. A name maps to ALL its overloads (Kotlin allows same-name functions
     /// distinguished by parameter signature); a call selects one via [`pick_overload`]. Most names have
@@ -133,7 +163,7 @@ pub struct SymbolTable {
     /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
-    pub class_names: HashMap<String, String>,
+    pub class_names: ClassNames,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -159,7 +189,7 @@ impl Default for SymbolTable {
             libraries: Box::new(EmptyLibrarySet),
             ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
-            class_names: HashMap::new(),
+            class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             prop_facades: HashMap::new(),
         }
@@ -443,11 +473,13 @@ pub fn collect_signatures_with_cp(
     diags: &mut DiagSink,
 ) -> SymbolTable {
     // The library set's type universe: importable names + type aliases (and intrinsic built-in maps).
-    let seed = libraries.seed();
+    // The (large) class-name base is shared by `Rc` — NOT cloned per compilation; only the small
+    // per-file overlay (user classes + aliases) is owned here.
+    let (base_class_names, base_aliases) = libraries.seed_shared();
 
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe).
     // Pre-seed from the library type index so imports/stdlib types are visible.
-    let mut class_names: HashMap<String, String> = seed.class_names;
+    let mut class_names = ClassNames::new(base_class_names);
     // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
     // user's own declarations is a conflict, so track which names the user has defined.
@@ -474,7 +506,7 @@ pub fn collect_signatures_with_cp(
     //
     // Seed from classpath type aliases (read from @kotlin.Metadata in *TypeAliasesKt.class files)
     // then from any user-defined typealiases in the input files.
-    let mut alias_map: HashMap<String, String> = seed.type_aliases;
+    let mut alias_map: HashMap<String, String> = (*base_aliases).clone();
     for file in files {
         for (alias, target) in &file.type_aliases {
             alias_map.insert(alias.clone(), target.clone());
@@ -1871,7 +1903,7 @@ fn assign_op_name(op: BinOp) -> Option<&'static str> {
 fn infer_lit_ty(
     file: &File,
     e: ExprId,
-    class_names: &HashMap<String, String>,
+    class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
 ) -> Ty {
     infer_lit_ty_p(file, e, class_names, fun_rets, &[])
@@ -1898,7 +1930,7 @@ fn prim_conversion_ret(name: &str) -> Option<Ty> {
 fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
-    class_names: &HashMap<String, String>,
+    class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
 ) -> Ty {
@@ -2087,12 +2119,7 @@ impl TParams {
 
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `java/lang/Object`).
-fn ty_of_ref(
-    r: &TypeRef,
-    classes: &HashMap<String, String>,
-    tparams: &TParams,
-    diags: &mut DiagSink,
-) -> Ty {
+fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
     // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
     if !r.fun_params.is_empty() || r.name == "<fun>" {
         let params: Vec<Ty> = r
