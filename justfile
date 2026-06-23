@@ -94,7 +94,10 @@ test *ARGS:
     # conformance + box e2e tests run rather than fail on a missing env. Honor any ambient overrides.
     export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    cargo test {{ARGS}}
+    # The `gate` profile (opt-level 0, but overflow-checks + debuginfo OFF) is the intended test profile:
+    # krusty relies on wrapping arithmetic, so overflow-checks are pure overhead on its (arithmetic-heavy)
+    # compile, and dropping debuginfo links faster. Same fast build as dev, ~1.5-2x faster run.
+    cargo test --profile gate {{ARGS}}
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
 # (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked
