@@ -6173,14 +6173,20 @@ impl<'a> Lower<'a> {
             return self.lower_foreach_iterator(name, iterable, body, it_ty, None, label);
         };
         let depth = self.scope.len();
-        // Evaluate the array once into a temp.
-        let arr_v = self.fresh_value();
-        let arr_val = self.expr(iterable)?;
-        let var_arr = self.ir.add_expr(IrExpr::Variable {
-            index: arr_v,
-            ty: ty_to_ir(it_ty),
-            init: Some(arr_val),
-        });
+        // Evaluate the array once. When the iterable is ALREADY a plain (non-boxed) local, iterate on
+        // that local directly — kotlinc reuses the existing slot rather than storing a redundant copy.
+        let (arr_v, var_arr) = if let Some(v) = self.iterable_as_local(iterable, body) {
+            (v, None)
+        } else {
+            let v = self.fresh_value();
+            let arr_val = self.expr(iterable)?;
+            let var = self.ir.add_expr(IrExpr::Variable {
+                index: v,
+                ty: ty_to_ir(it_ty),
+                init: Some(arr_val),
+            });
+            (v, Some(var))
+        };
         // i = 0
         let i_v = self.fresh_value();
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
@@ -6263,10 +6269,47 @@ impl<'a> Lower<'a> {
             label,
         });
         self.scope.truncate(depth);
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![var_arr, var_i, var_n, wh],
-            value: None,
-        }))
+        let mut stmts = Vec::new();
+        if let Some(va) = var_arr {
+            stmts.push(va);
+        }
+        stmts.extend([var_i, var_n, wh]);
+        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
+    }
+
+    /// If `iterable` is a plain (non-boxed) local variable read that the loop `body` does NOT reassign,
+    /// its IR value index — so `for (x in localArr)` iterates on the existing local directly (no
+    /// redundant array copy), matching kotlinc. `None` otherwise (then it's snapshotted into a fresh
+    /// temp): kotlinc snapshots an iterable whose backing `var` is reassigned in the body, so the loop
+    /// still walks the ORIGINAL array — reusing the live local there would read the new value.
+    fn iterable_as_local(&self, iterable: AstExprId, body: AstExprId) -> Option<u32> {
+        if let Expr::Name(n) = self.afile.expr(iterable) {
+            let n = n.clone();
+            if self.boxed_elem.contains_key(&n) || self.expr_reassigns_name(body, &n) {
+                return None;
+            }
+            return self.lookup(&n).map(|(v, _)| v);
+        }
+        None
+    }
+
+    /// Whether `name` is reassigned (`name = …`) anywhere in the expression subtree `e`.
+    fn expr_reassigns_name(&self, e: AstExprId, name: &str) -> bool {
+        self.afile
+            .any_child_expr(e, &mut |x| self.expr_reassigns_name(x, name), &mut |s| {
+                self.stmt_reassigns_name(s, name)
+            })
+    }
+
+    /// Whether statement `s` (or a nested expression) reassigns `name`.
+    fn stmt_reassigns_name(&self, s: crate::ast::StmtId, name: &str) -> bool {
+        if let Stmt::Assign { name: n, .. } = self.afile.stmt(s) {
+            if n == name {
+                return true;
+            }
+        }
+        self.afile
+            .any_child_stmt(s, &mut |x| self.expr_reassigns_name(x, name))
     }
 
     /// Substitute a reified type-parameter reference (`is T`/`as T`/`T::class` inside an expanded
