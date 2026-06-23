@@ -12,6 +12,7 @@
 //! companion-object member; a top-level/extension call is a package-level callable). The JVM
 //! realization of those (invokestatic on a facade, `@JvmStatic`, descriptors) lives in the impl.
 
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 use std::collections::HashMap;
 
@@ -240,34 +241,16 @@ pub enum LibConst {
     Double(f64),
 }
 
-pub trait LibrarySet {
-    /// The seed type universe (classpath/klib types + intrinsic built-in mappings).
-    fn seed(&self) -> LibrarySeed {
-        LibrarySeed::default()
-    }
-
-    /// ALL overloads of function `name` applicable to a call — members + extensions (`receiver = Some`) or
-    /// top-level functions (`receiver = None`) — in ONE query, each tagged with its [`FnKind`] and carrying
-    /// full metadata (inline/`@InlineOnly`, return nullability). The consolidated replacement for the
-    /// scattered `resolve_callable`/`is_inline`/return-overload/nullable lookups; the caller applies Kotlin
-    /// precedence and picks (e.g. by the lambda's return type). Empty for a platform that doesn't implement
-    /// it yet. (Function BODY fetch stays separate — see the platform emitter's `MethodBodies`.)
-    fn functions(&self, _name: &str, _receiver: Option<Ty>) -> FunctionSet {
-        FunctionSet::default()
-    }
-
+/// A compiled-library source: a [`SymbolSource`] (its type universe, overloads, and type shapes) PLUS
+/// the JVM-emit extras the backend needs (mangled members, inline-body splice checks, companion
+/// constants, `@Metadata` queries). The federatable half is `SymbolSource`; these extras are consulted
+/// only by the JVM emitter, never across the source federation.
+pub trait LibrarySet: SymbolSource {
     /// The compile-time value of a primitive companion constant (`Int.MAX_VALUE`, `Double.NaN`, …),
     /// read from the library (e.g. the JVM `IntCompanionObject.MAX_VALUE` `ConstantValue`). The
     /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a
     /// known constant / not in the library.
     fn prim_companion_const(&self, _prim: &str, _field: &str) -> Option<LibConst> {
-        None
-    }
-
-    /// The shape of the library type named `internal`, or `None` if the library has no such type.
-    /// The single entry point for resolving constructors, member functions, companion members,
-    /// interface-ness, and annotation members — the front end navigates the returned [`LibraryType`].
-    fn resolve_type(&self, _internal: &str) -> Option<LibraryType> {
         None
     }
 
@@ -393,4 +376,5 @@ pub trait LibrarySet {
 /// A library set with no external libraries — compiling a self-contained source set with no classpath.
 pub struct EmptyLibrarySet;
 
+impl SymbolSource for EmptyLibrarySet {}
 impl LibrarySet for EmptyLibrarySet {}
