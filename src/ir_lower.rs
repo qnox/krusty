@@ -161,6 +161,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // Pass 1a: register classes (id, fields) and reserve method FunIds.
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
+            // A delegated MEMBER property (`class C { val x by … }`) isn't emitted yet — skip the file
+            // (it parses now that `by` is recognized, but must not reach codegen until handled).
+            if c.body_props.iter().any(|p| p.delegate.is_some()) {
+                return None;
+            }
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             if let Some(s) = class_generic_sig(c) {
@@ -824,6 +829,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // any body so a function may read a top-level property as `GetStatic`.
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
+            // A delegated top-level property (`val x by …`) isn't emitted yet — skip the file (it was
+            // already skipped before `by` parsing landed). Removing this bail is the next phase.
+            if p.delegate.is_some() {
+                return None;
+            }
             let ty =
                 p.ty.as_ref()
                     .map(|r| ty_of(file, r))

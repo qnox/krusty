@@ -507,6 +507,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        // `val x: T by <expr>` — a delegated property (in place of `= init`). Reads/writes route through
+        // the delegate's `getValue`/`setValue` operators.
+        let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.text() == "by" {
+            self.bump(); // 'by'
+            self.skip_newlines();
+            Some(self.parse_expr())
+        } else {
+            None
+        };
         // Optional custom accessors: `get() = expr` / `get() { … }` and/or `[private] set(v) { … }`
         // / `private set`. Either order; at most one of each. An accessor begins with `get`/`set`
         // (optionally preceded by a visibility modifier) — anything else ends the property.
@@ -560,6 +569,7 @@ impl<'a> Parser<'a> {
         // (or an abstract/interface property); an extension property always has a getter, so it is
         // exempt.
         if init.is_none()
+            && delegate.is_none()
             && getter.is_none()
             && setter.is_none()
             && !is_lateinit
@@ -584,6 +594,7 @@ impl<'a> Parser<'a> {
             setter,
             is_const,
             is_abstract,
+            delegate,
             span: Span::new(start.lo, end.hi),
         }
     }

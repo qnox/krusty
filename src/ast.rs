@@ -509,6 +509,9 @@ pub struct PropDecl {
     /// `true` if declared `abstract` — no backing field; emitted as an abstract `getX()` accessor that
     /// a subclass overrides.
     pub is_abstract: bool,
+    /// `val x: T by <expr>` — a DELEGATED property. The expression is the delegate; reads route through
+    /// `delegate.getValue(thisRef, property)` (and writes through `setValue`). `None` for a plain property.
+    pub delegate: Option<ExprId>,
     pub span: Span,
 }
 
