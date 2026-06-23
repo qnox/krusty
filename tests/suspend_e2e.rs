@@ -73,6 +73,75 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn suspend_fun_suspension_in_and_condition() {
+    // A suspension on the RHS of `&&` in an `if` CONDITION (`if (c && check())`). The condition is
+    // evaluated (and suspends) before the branch; only the `c == true` path calls `check()`. Drives:
+    // bar(true) → check() true → 1; bar(false) → short-circuits (no suspension) → 2.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_andcond_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("S.kt"),
+        "suspend fun check(): Boolean = true\n\
+         suspend fun bar(c: Boolean): Int {\n    if (c && check()) return 1\n    return 2\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+public class M {\n\
+  static Continuation<Object> k() {\n\
+    return new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+  }\n\
+  public static void main(String[] a) {\n\
+    Object r1 = SKt.bar(true, k());\n\
+    Object r2 = SKt.bar(false, k());\n\
+    boolean ok = r1.equals(Integer.valueOf(1)) && r2.equals(Integer.valueOf(2));\n\
+    System.out.println(ok ? \"OK\" : (\"r1=\" + r1 + \" r2=\" + r2));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "&& condition suspension: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn suspend_lambda_internal_suspension_async_resume() {
     // The ASYNC path for an internal-suspension lambda: `{ suspendOnce() }` where suspendOnce (kotlinc)
     // parks the continuation. The lambda's invokeSuspend returns COROUTINE_SUSPENDED up; a later
