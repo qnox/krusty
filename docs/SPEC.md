@@ -234,6 +234,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `stmt_cond_suspension` already handles. Proven both branches: `bar(null)` suspends on the elvis RHS
   (→8), `bar(5)` takes the value branch with no suspension (→6)
   (`tests/suspend_e2e.rs::suspend_fun_suspension_on_elvis_rhs`).
+- **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
+  `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
+  trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
+  modifier on a function type and emitted `Function{n}` (a miscompile). Now `TypeRef.fun_suspend` (the
+  parser already consumed but discarded `suspend` before a function type) flows to `FnSig.suspend` and
+  `IrType::Function.suspend`, and the descriptor adds one to the arity (`suspend () -> Int` →
+  `Function1`). A suspend-lambda LITERAL or any value passed to a suspend-function-type parameter still
+  needs `SuspendLambda` codegen / continuation threading (not yet modeled), so those bail (skip the
+  file) — never the prior `Function0`-vs-`Function1` miscompile. Proven by an ABI signature diff:
+  `take(block: suspend () -> Int)` lowers to `void take(Function1)`
+  (`tests/suspend_e2e.rs::suspend_function_type_lowers_to_function1_continuation`).
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.

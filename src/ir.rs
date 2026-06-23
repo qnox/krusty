@@ -32,6 +32,9 @@ pub enum IrType {
     Function {
         params: Vec<IrType>,
         ret: Box<IrType>,
+        /// A `suspend` function type — the JVM realizes it as `Function{n+1}` (a trailing
+        /// `kotlin/coroutines/Continuation` parameter, `Object`-erased result).
+        suspend: bool,
     },
     /// `kotlin.Unit` / `kotlin.Nothing` — special-cased so control flow needn't synthesize them.
     Unit,

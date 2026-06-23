@@ -55,6 +55,9 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// A `suspend` function type (`suspend (A) -> R`). Its JVM representation is `Function{n+1}` with a
+    /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result.
+    pub suspend: bool,
 }
 
 /// Intern a `FnSig` to a canonical `&'static FnSig` (leaked; the compiler is short-lived).
@@ -147,7 +150,25 @@ impl Ty {
 
     /// A function type `(params) -> ret`.
     pub fn fun(params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::Fun(intern_fnsig(FnSig { params, ret }))
+        Ty::Fun(intern_fnsig(FnSig {
+            params,
+            ret,
+            suspend: false,
+        }))
+    }
+
+    /// A `suspend` function type `suspend (params) -> ret`.
+    pub fn fun_suspend(params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::Fun(intern_fnsig(FnSig {
+            params,
+            ret,
+            suspend: true,
+        }))
+    }
+
+    /// Whether this is a `suspend` function type.
+    pub fn is_suspend_fun(self) -> bool {
+        matches!(self, Ty::Fun(s) if s.suspend)
     }
 
     /// Arity of a function type.
@@ -310,7 +331,12 @@ impl Ty {
             Ty::Nothing => obj_desc("kotlin/Any"),
             Ty::Array(elem) => format!("[{}", elem.descriptor()),
             Ty::Error => obj_desc("kotlin/Any"),
-            Ty::Fun(s) => format!("Lkotlin/jvm/functions/Function{};", s.params.len()),
+            // A `suspend` function type carries a trailing `Continuation` parameter, so its arity is one
+            // greater than the logical parameter count (`suspend () -> R` → `Function1`).
+            Ty::Fun(s) => format!(
+                "Lkotlin/jvm/functions/Function{};",
+                s.params.len() + usize::from(s.suspend)
+            ),
         }
     }
 

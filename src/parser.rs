@@ -474,6 +474,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,
+                    fun_suspend: false,
                 };
                 (Some(recv), self.ident_or_error("property name"))
             } else {
@@ -998,6 +999,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,
+                    fun_suspend: false,
                 };
                 let fun_name = if self.at(TokenKind::Ident) {
                     let n = self.text().to_string();
@@ -1858,8 +1860,10 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> TypeRef {
         let span = self.tok().span;
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
+        let mut fun_suspend = false;
         if self.at(TokenKind::Ident) && self.text() == "suspend" {
             self.bump(); // 'suspend'
+            fun_suspend = true;
         }
         // Function type: `(A, B) -> R` — starts with `(`.
         if self.at(TokenKind::LParen) {
@@ -1894,6 +1898,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params,
                     fun_has_receiver: false,
+                    fun_suspend,
                 }
             } else {
                 // Parenthesized type (rare) — just return error; krusty doesn't support tuple types.
@@ -1906,6 +1911,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params: Vec::new(),
                     fun_has_receiver: false,
+                    fun_suspend: false,
                 }
             }
         } else if self.at(TokenKind::Ident) {
@@ -1940,6 +1946,7 @@ impl<'a> Parser<'a> {
                         span,
                         fun_params: Vec::new(),
                         fun_has_receiver: false,
+                        fun_suspend: false,
                     }
                 } else {
                     self.parse_type()
@@ -1959,6 +1966,7 @@ impl<'a> Parser<'a> {
                 span,
                 fun_params: Vec::new(),
                 fun_has_receiver: false,
+                fun_suspend: false,
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -2001,6 +2009,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params,
                     fun_has_receiver: true,
+                    fun_suspend,
                 };
             }
             base
@@ -2014,6 +2023,7 @@ impl<'a> Parser<'a> {
                 span,
                 fun_params: Vec::new(),
                 fun_has_receiver: false,
+                fun_suspend: false,
             }
         }
     }
@@ -2047,6 +2057,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params: Vec::new(),
                     fun_has_receiver: false,
+                    fun_suspend: false,
                 });
             } else {
                 args.push(self.parse_type());

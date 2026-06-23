@@ -2035,7 +2035,11 @@ fn ty_of_ref(
             .as_ref()
             .map(|a| ty_of_ref(a, classes, tparams, diags))
             .unwrap_or(Ty::Unit);
-        return Ty::fun(params, ret);
+        return if r.fun_suspend {
+            Ty::fun_suspend(params, ret)
+        } else {
+            Ty::fun(params, ret)
+        };
     }
     let base = if let Some(t) = Ty::from_name(&r.name) {
         t
@@ -2825,7 +2829,11 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .map(|a| self.resolve_ty(a))
                 .unwrap_or(Ty::Unit);
-            return Ty::fun(params, ret);
+            return if r.fun_suspend {
+                Ty::fun_suspend(params, ret)
+            } else {
+                Ty::fun(params, ret)
+            };
         }
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
@@ -3147,7 +3155,11 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .map(|a| self.resolve_ty_no_diag(a))
                 .unwrap_or(Ty::Unit);
-            return Ty::fun(params, ret);
+            return if r.fun_suspend {
+                Ty::fun_suspend(params, ret)
+            } else {
+                Ty::fun(params, ret)
+            };
         }
         if let Some(t) = Ty::from_name(&r.name) {
             t

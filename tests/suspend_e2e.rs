@@ -73,6 +73,24 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn suspend_function_type_lowers_to_function1_continuation() {
+    // A `suspend () -> Int` parameter type must lower to kotlinc's representation
+    // `Function1<? super Continuation<? super Integer>, ? extends Object>` — the suspend arity is the
+    // logical arity PLUS one (the trailing continuation), with the body's value erased to Object. krusty
+    // historically erased the `suspend` modifier and emitted `Function0` (a miscompile vs kotlinc).
+    let Some((dir, jh)) = krusty_compile("susfty", "fun take(block: suspend () -> Int) {}\n")
+    else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("SKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        text.contains("void take(kotlin.jvm.functions.Function1"),
+        "suspend `() -> Int` param must lower to Function1<Continuation,…>, got:\n{text}"
+    );
+}
+
+#[test]
 fn suspend_fun_suspension_on_elvis_rhs() {
     // A suspension on the RHS of an elvis (`x ?: fallback()`) — a CONDITIONAL suspension (only the
     // null case suspends). Drives both: `bar(null)` takes the suspending branch → 7+1=8; `bar(5)`
