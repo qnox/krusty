@@ -965,6 +965,7 @@ impl<'a> Parser<'a> {
                 ret: None,
                 body: FunBody::None,
                 type_params: vec![],
+                type_param_bounds: Vec::new(),
                 non_null_type_params: Default::default(),
                 reified_type_params: Default::default(),
                 span: start,
@@ -974,7 +975,7 @@ impl<'a> Parser<'a> {
                 is_suspend: false,
             };
         }
-        let (type_params, non_null_type_params, reified_type_params, _type_param_bounds) =
+        let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
             if self.at(TokenKind::Lt) {
                 self.parse_type_params()
             } else {
@@ -1053,6 +1054,7 @@ impl<'a> Parser<'a> {
             ret,
             body,
             type_params,
+            type_param_bounds,
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
@@ -2138,13 +2140,17 @@ impl<'a> Parser<'a> {
                 if bound.name == "Any" && !bound.nullable && !tname.is_empty() {
                     non_null.insert(tname.clone());
                 }
-                // A primitive upper bound (`T: Double`) is *specialized* by kotlinc (e.g. it emits a
-                // primitive `==`/IEEE-754 comparison), not erased to Object. krusty only erases type
-                // parameters, so it would miscompile such code — reject it instead.
-                if crate::types::Ty::from_name(&bound.name).map_or(false, |t| t.is_primitive()) {
+                // A primitive upper bound (`T: Int`) is *specialized* by kotlinc (descriptor `(I)I`, not
+                // `(Object)Object`); the resolver specializes a FUNCTION param to an integral bound. A
+                // NON-specializable primitive bound (floating `Double`/`Float`, unsigned, value) is still
+                // rejected — krusty would otherwise miscompile the boxed/primitive `==` or unsigned path.
+                if !bound.nullable
+                    && crate::types::Ty::from_name(&bound.name)
+                        .is_some_and(|t| t.is_primitive() && !t.is_specializable_bound())
+                {
                     self.diags.error(
                         bound.span,
-                        "krusty: type parameter with a primitive upper bound is not supported"
+                        "krusty: type parameter with this primitive upper bound is not supported"
                             .to_string(),
                     );
                 }
@@ -3512,7 +3518,13 @@ impl<'a> Parser<'a> {
                         } else {
                             names.push(None);
                         }
-                        args.push(self.parse_expr());
+                        // Spread operator `*expr` — the argument is an array spread into a `vararg`.
+                        let spread = self.eat(TokenKind::Star);
+                        let arg = self.parse_expr();
+                        if spread {
+                            self.file.spread_arg_ids.insert(arg.0);
+                        }
+                        args.push(arg);
                         self.skip_newlines();
                         if !self.eat(TokenKind::Comma) {
                             break;

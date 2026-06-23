@@ -2324,6 +2324,73 @@ impl<'a> Lower<'a> {
     /// Lower `val (a, b, …) = init` into `out`: a temp bound to `init`, then one local per component
     /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
     /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
+    /// Lower a single-spread call `foo(*a)` to a top-level `vararg` function: pass the array through
+    /// `Arrays.copyOf(a, a.size)` + `checkcast`, exactly as kotlinc does, instead of packing the array
+    /// as one element. Returns `None` (→ the file skips) for any shape this doesn't handle: more than one
+    /// argument, a non-spread sole argument, a non-`Name` (non-reusable) spread expression, a primitive
+    /// element type, or a callee that isn't a single-`vararg`-parameter top-level function in this file.
+    fn lower_single_spread_call(
+        &mut self,
+        callee: AstExprId,
+        args: &[AstExprId],
+    ) -> Option<ExprId> {
+        if args.len() != 1 || !self.afile.is_spread_arg(args[0]) {
+            return None; // only `foo(*a)` (one spread arg, no fixed/mixed args)
+        }
+        let spread = args[0];
+        // kotlinc loads the spread twice (`aload a; aload a; arraylength`); only a simple reusable name
+        // (a local/parameter) is safe to lower twice — a complex expression would need a temp we don't
+        // emit, so skip it.
+        if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
+            return None;
+        }
+        let ast::Expr::Name(fname) = self.afile.expr(callee).clone() else {
+            return None;
+        };
+        let decl = self.top_fun_decl(&fname)?;
+        if decl.params.len() != 1 || !decl.params[0].is_vararg {
+            return None;
+        }
+        let elem = ty_of(self.afile, &decl.params[0].ty);
+        if !elem.is_reference() {
+            return None; // primitive-array spread uses different `copyOf` overloads — not yet handled
+        }
+        let array_ty = Ty::array(elem);
+        let key: String = array_ty.descriptor();
+        let fid = *self.fun_ids.get(&(fname.clone(), key))?;
+        let array_ir = ty_to_ir(array_ty);
+
+        // `Arrays.copyOf(a, a.size)` → a fresh `Object[]`, then `checkcast` to the element array type.
+        let a0 = self.lower_arg(spread, &array_ir)?;
+        let a1 = self.lower_arg(spread, &array_ir)?;
+        let size = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/Array.size".to_string()),
+            dispatch_receiver: Some(a1),
+            args: vec![],
+        });
+        let copy = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: "java/util/Arrays".to_string(),
+                name: "copyOf".to_string(),
+                descriptor: "([Ljava/lang/Object;I)[Ljava/lang/Object;".to_string(),
+                inline: false,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![a0, size],
+        });
+        let cast = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: copy,
+            type_operand: array_ir,
+        });
+        Some(self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(fid),
+            dispatch_receiver: None,
+            args: vec![cast],
+        }))
+    }
+
     fn lower_destructure(
         &mut self,
         entries: &[(String, bool)],
@@ -9667,6 +9734,14 @@ impl<'a> Lower<'a> {
             Expr::Call { .. } if self.info.receiver_lambdas.contains_key(&e) => {
                 let rl = self.info.receiver_lambdas[&e];
                 self.lower_receiver_lambda(rl)?
+            }
+            // A call with a spread argument (`foo(*a)`). Only the single-spread-to-a-top-level-vararg
+            // form is handled (the array is passed through via `Arrays.copyOf`, like kotlinc); ANY other
+            // shape (mixed spreads, fixed args, member/library callee, primitive element, complex spread
+            // expr) returns `None` → the file skips, never miscompiles. The guard ensures a spread arg
+            // never reaches the normal vararg-packing paths below.
+            Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
+                self.lower_single_spread_call(callee, &args)?
             }
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
