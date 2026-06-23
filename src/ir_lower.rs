@@ -8337,6 +8337,44 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
+                // `&&` / `||` SHORT-CIRCUIT: the right operand must not be evaluated when the left
+                // already decides the result (`x != 0 && 10 / x > 0` must not divide when `x == 0`).
+                // Lower to a branch — `a && b` → `if (a) b else false`, `a || b` → `if (a) true else b`
+                // — never the eager `iand`/`ior` (which evaluates both, a miscompile for a side-effecting
+                // or throwing right operand). This is also the control-flow shape kotlinc emits.
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    // Constant-fold a literal left operand (kotlinc folds these; a `const val` initializer
+                    // must stay a constant, not a branch): `false && _` → false, `true && b` → b,
+                    // `true || _` → true, `false || b` → b.
+                    if let Expr::BoolLit(lv) = self.afile.expr(lhs) {
+                        let lv = *lv;
+                        return match (op, lv) {
+                            (BinOp::And, false) => {
+                                Some(self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false))))
+                            }
+                            (BinOp::Or, true) => {
+                                Some(self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true))))
+                            }
+                            // `true && b` / `false || b` → the right operand.
+                            _ => self.expr(rhs),
+                        };
+                    }
+                    let l = self.expr(lhs)?;
+                    let r = self.expr(rhs)?;
+                    let konst = |this: &mut Self, b: bool| {
+                        this.ir.add_expr(IrExpr::Const(IrConst::Boolean(b)))
+                    };
+                    let (then_e, else_e) = if op == BinOp::And {
+                        let f = konst(self, false);
+                        (r, f)
+                    } else {
+                        let t = konst(self, true);
+                        (t, r)
+                    };
+                    return Some(self.ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(l), then_e), (None, else_e)],
+                    }));
+                }
                 // Unsigned `+`/`-`/`*`/`==`/`!=` match the signed two's-complement opcodes, but
                 // `/`/`%`/`<`/`>`/`<=`/`>=` need the JDK unsigned intrinsics kotlinc calls:
                 // `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`). A comparison is

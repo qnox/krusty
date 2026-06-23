@@ -60,6 +60,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `0` hits krusty's compare-to-zero opt → `ifle`, while kotlinc keeps `iconst_0; if_icmpge`; needs a
   loop-bound-specific suppression that source `0 < x` comparisons must NOT get) and negative bounds
   (const-encoding). Gate 1357/0; differential test added.
+- **Phase P5 — `&&` / `||` short-circuit (CORRECTNESS + parity).** krusty lowered `a && b` (value
+  context) to eager `iand`/`ior` — both operands evaluated. A real MISCOMPILE: `x != 0 && 10 / x > 0`
+  threw `ArithmeticException` for `x == 0` (kotlinc short-circuits). Now lowered to a branch
+  (`a && b` → `if (a) b else false`, `a || b` → `if (a) true else b`); a literal left operand is
+  constant-folded (kotlinc folds `const val`s; a branch in a field initializer would otherwise produce
+  an unverifiable frame — was the 1 gate FAIL the fix first introduced, now resolved). Gate 1357/0; new
+  `short_circuit_e2e` runtime tests. PARITY follow-up: kotlinc re-normalizes the right operand through a
+  SHARED false-target (`iload a; ifeq F; iload b; ifeq F; iconst_1; goto E; F: iconst_0`); krusty's
+  nested-`When` returns `b` directly — value-equal, shape differs. Needs a shared-label boolean
+  construct.
 - _known next divergences (from `bytediff` over the corpus)_: array-literal init (`intArrayOf(…)` uses
   `dup`-per-element; kotlinc stores to a temp + `aload`-per-element); primitive-array `iterator()` loops
   (krusty ~24 bytes larger); more loop forms (ranges/downTo/step/indices) to audit for kotlinc's
