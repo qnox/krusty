@@ -2442,6 +2442,21 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                // `val/var x (: T)? by <delegate>` — a local delegated property.
+                if self.at(TokenKind::Ident) && self.text() == "by" {
+                    self.bump(); // 'by'
+                    self.skip_newlines();
+                    let delegate = self.parse_expr();
+                    return self.finish_stmt(
+                        Stmt::LocalDelegate {
+                            is_var,
+                            name,
+                            ty,
+                            delegate,
+                        },
+                        start,
+                    );
+                }
                 // `var x: T` with no initializer (deferred assignment) → synthesize the type's default
                 // value (`0`/`false`/`null`); a later `x = …` assigns it. Only for `var` with a type
                 // annotation (a `val` deferred-init needs assign-once tracking krusty lacks → rejected).

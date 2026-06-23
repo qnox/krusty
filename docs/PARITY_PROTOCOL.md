@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1509 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1515 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -67,6 +67,23 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P21 — LOCAL delegated properties `fun f(){ val/var x by Del() }` (gate 1509 → 1515, +6, FAIL=0).**
+  A function-body `val/var x: T by Delegate()` now compiles. New `Stmt::LocalDelegate { is_var, name, ty,
+  delegate }` AST variant (avoids changing the 29 `Stmt::Local` sites). The lowering declares a synthetic
+  `x$delegate` local holding the delegate; reads of `x` route to `x$delegate.getValue(null, propref)` and
+  a `var`'s writes to `setValue(null, propref, value)` (the `KProperty` passed inline as a fresh
+  `PropertyReference0Impl(<facade>::class, …)`, reusing `IrExpr::ClassConst`'s facade sentinel). The
+  interception is in the lowerer's `Expr::Name`/`Stmt::Assign` arms, keyed by a `local_delegated` map
+  (cleared per function in `lower_body`); it resolves the `$delegate` slot via the CURRENT scope (so a
+  capture-remapped value space is honored, else it bails — avoids an out-of-range slot panic).
+  - **Sites**: AST variant + parser (`by` in the local-stmt path) + `check_file` (types the delegate, declares
+    the name at the `getValue`-return type) + lowerer (`LocalDelegate` stmt + the two interceptions +
+    `make_local_propref`). Exhaustiveness arms added in 5 `Stmt`-match helpers (treat `delegate` like `init`).
+  - **SOUND SKIPS** (same as member, keep FAIL=0): value-class / `provideDelegate` delegate, generic
+    `getValue` return ≠ property type, value-class property type, and `getValue` reflecting on its
+    `KProperty` param (no `@Metadata`). New `delegated_local_prop_e2e` (val + var, explicit + inferred).
+  Delegated properties now span top-level + member + local (Phases P19–P21, **+23 gate tests total**, FAIL=0).
+  NEXT: `provideDelegate`, generic/value-class delegates, `@Metadata`/`$$delegatedProperties` for reflection.
 - **Phase P20 — MEMBER delegated properties `class C { val/var x by Del() }` (gate 1495 → 1509, +14, FAIL=0).**
   A class body `val/var x: T by Delegate()` now compiles. Model (reuses the member computed-property
   machinery): a synthetic **instance** field `x$delegate: Del` (final, initialized in `<init>` to the

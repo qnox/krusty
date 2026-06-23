@@ -54,6 +54,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         try_finally_stack: Vec::new(),
         companions: HashMap::new(),
         computed_props: HashMap::new(),
+        local_delegated: HashMap::new(),
         expr_depth: 0,
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
@@ -2186,6 +2187,22 @@ fn setter_name(prop: &str) -> String {
 /// parameter types, the inline fn's name — the implicit label for a `return@<fn>` local return)`.
 type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
 
+/// Lowering info for a local delegated property (`val x by Del()` in a function body). Reads compile to
+/// `<delegate>.getValue(null, propref)`, a `var`'s writes to `setValue(null, propref, value)`.
+#[derive(Clone)]
+struct LocalDelegate {
+    /// JVM internal name of the delegate type (owner of `getValue`/`setValue`).
+    delegate_internal: String,
+    /// `getValue(Object, KProperty)ret` descriptor.
+    getvalue_desc: String,
+    /// `setValue(Object, KProperty, value)V` descriptor — `None` for a `val`.
+    setvalue_desc: Option<String>,
+    /// The property name (for the inline `PropertyReference0Impl` metadata).
+    name: String,
+    /// The property type's JVM descriptor (for the property-reference signature string).
+    ret_desc: String,
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
@@ -2232,6 +2249,10 @@ pub(crate) struct Lower<'a> {
     /// Top-level computed property name → (its synthesized `getX()` `FunId`, property type). A read of
     /// the property compiles to a call to the getter (there is no backing field).
     computed_props: HashMap<String, (u32, Ty)>,
+    /// Local delegated property name → its delegate info. A read of the name compiles to the delegate's
+    /// `getValue` (a `var`'s write to `setValue`); there is no value slot for the property itself, only
+    /// the synthesized `$delegate` local (its value index is held here).
+    local_delegated: HashMap<String, LocalDelegate>,
     /// Current expression-lowering recursion depth — guards against a stack overflow on a pathologically
     /// deep expression (a stress test with thousands of nested operators): past the limit, lowering
     /// bails (the file is skipped, never miscompiled or crashed).
@@ -2429,6 +2450,29 @@ impl<'a> Lower<'a> {
         let delegate_ty = self.info.ty(p.delegate?);
         let internal = delegate_ty.obj_internal()?;
         Some(self.syms.method_of(internal, "getValue")?.ret)
+    }
+
+    /// Build a fresh `PropertyReference0Impl(<facade>::class, name, "name()<ret>", 0)` for a local
+    /// delegated property's `getValue`/`setValue` call (the `KProperty` argument). The enclosing facade
+    /// is the empty-internal `ClassConst` sentinel (resolved to `self.facade` at emit).
+    fn make_local_propref(&mut self, ld: &LocalDelegate) -> ExprId {
+        let cls = self.ir.add_expr(IrExpr::ClassConst {
+            internal: String::new(),
+        });
+        let nm = self
+            .ir
+            .add_expr(IrExpr::Const(IrConst::String(ld.name.clone())));
+        let sig = self.ir.add_expr(IrExpr::Const(IrConst::String(format!(
+            "{}(){}",
+            getter_name(&ld.name),
+            ld.ret_desc
+        ))));
+        let flag = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        self.ir.add_expr(IrExpr::NewExternal {
+            internal: "kotlin/jvm/internal/PropertyReference0Impl".to_string(),
+            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
+            args: vec![cls, nm, sig, flag],
+        })
     }
 
     /// Lower a top-level delegated property `val x: T by Del()` (pass 2). Model: two synthetic statics —
@@ -6057,6 +6101,8 @@ impl<'a> Lower<'a> {
         // Defensive: the stack is push/pop-balanced within a body, but a bail mid-lowering of a previous
         // body must not leak an enclosing `finally` into this one.
         self.try_finally_stack.clear();
+        // Local delegated properties are function-scoped — don't leak into the next body.
+        self.local_delegated.clear();
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
@@ -6449,6 +6495,73 @@ impl<'a> Lower<'a> {
                     init: Some(it),
                 }))
             }
+            Stmt::LocalDelegate {
+                is_var,
+                name,
+                ty,
+                delegate,
+            } => {
+                let delegate_ty = self.info.ty(delegate);
+                let delegate_internal = delegate_ty.obj_internal()?.to_string();
+                // Same soundness guards as member delegation: only a concrete (non-value-class, no
+                // `provideDelegate`) delegate whose `getValue` return matches the property type.
+                let is_value_cls = |s: &str| {
+                    self.syms
+                        .class_by_internal(s)
+                        .is_some_and(|cs| cs.value_field.is_some())
+                };
+                if is_value_cls(&delegate_internal)
+                    || self
+                        .syms
+                        .method_of(&delegate_internal, "provideDelegate")
+                        .is_some()
+                    || delegate_getvalue_uses_property(self.afile, &delegate_internal)
+                {
+                    return None;
+                }
+                let gv = self.syms.method_of(&delegate_internal, "getValue")?;
+                let prop_ty = ty.as_ref().map(|r| ty_of(self.afile, r)).unwrap_or(gv.ret);
+                if gv.ret != prop_ty || prop_ty.obj_internal().is_some_and(is_value_cls) {
+                    return None;
+                }
+                let desc_of = |sig: &crate::resolve::Signature| {
+                    let mut s = String::from("(");
+                    for pt in &sig.params {
+                        s.push_str(&pt.descriptor());
+                    }
+                    s.push(')');
+                    s.push_str(&sig.ret.descriptor());
+                    s
+                };
+                let getvalue_desc = desc_of(&gv);
+                let setvalue_desc = if is_var {
+                    Some(desc_of(
+                        &self.syms.method_of(&delegate_internal, "setValue")?,
+                    ))
+                } else {
+                    None
+                };
+                // Lower the delegate into a fresh `$delegate` local.
+                let dv = self.fresh_value();
+                let init = self.lower_arg(delegate, &ty_to_ir(delegate_ty))?;
+                self.scope
+                    .push((format!("{name}$delegate"), dv, delegate_ty));
+                self.local_delegated.insert(
+                    name.clone(),
+                    LocalDelegate {
+                        delegate_internal,
+                        getvalue_desc,
+                        setvalue_desc,
+                        name: name.clone(),
+                        ret_desc: prop_ty.descriptor(),
+                    },
+                );
+                Some(self.ir.add_expr(IrExpr::Variable {
+                    index: dv,
+                    ty: ty_to_ir(delegate_ty),
+                    init: Some(init),
+                }))
+            }
             Stmt::Destructure { entries, init } => {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
                 // `append_stmt` instead so the component locals live in the enclosing scope.
@@ -6460,6 +6573,27 @@ impl<'a> Lower<'a> {
                 }))
             }
             Stmt::Assign { name, value } => {
+                // A local delegated `var`: write through the delegate's `setValue(null, propref, value)`.
+                if let Some(ld) = self.local_delegated.get(&name).cloned() {
+                    let setvalue_desc = ld.setvalue_desc.clone()?;
+                    let sv = self.syms.method_of(&ld.delegate_internal, "setValue")?;
+                    let value_ty = sv.params.last().copied().unwrap_or(Ty::Error);
+                    let val = self.lower_arg(value, &ty_to_ir(value_ty))?;
+                    let (dslot, _) = self.lookup(&format!("{name}$delegate"))?;
+                    let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
+                    let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let pref = self.make_local_propref(&ld);
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: crate::ir::Callee::Virtual {
+                            owner: ld.delegate_internal.clone(),
+                            name: "setValue".to_string(),
+                            descriptor: setvalue_desc,
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(dele),
+                        args: vec![null_a, pref, val],
+                    }));
+                }
                 // A boxed mutable-capture local: write through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
@@ -8654,6 +8788,26 @@ impl<'a> Lower<'a> {
                 }));
             }
             Expr::Name(n) => {
+                // A local delegated property: read through the delegate's `getValue(null, propref)`.
+                if let Some(ld) = self.local_delegated.get(&n).cloned() {
+                    // Resolve the `$delegate` slot via the CURRENT scope (so a capture-remapped value
+                    // space is honored); bail if it isn't reachable here (e.g. captured into a closure we
+                    // don't thread the delegate through).
+                    let (dslot, _) = self.lookup(&format!("{n}$delegate"))?;
+                    let dele = self.ir.add_expr(IrExpr::GetValue(dslot));
+                    let null_a = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let pref = self.make_local_propref(&ld);
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: crate::ir::Callee::Virtual {
+                            owner: ld.delegate_internal.clone(),
+                            name: "getValue".to_string(),
+                            descriptor: ld.getvalue_desc.clone(),
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(dele),
+                        args: vec![null_a, pref],
+                    }));
+                }
                 // A boxed mutable-capture local: read through its `Ref` holder's `element`.
                 if let Some(elem) = self.boxed_elem.get(&n).cloned() {
                     let (holder, _) = self.lookup(&n)?;
