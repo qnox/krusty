@@ -70,6 +70,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   SHARED false-target (`iload a; ifeq F; iload b; ifeq F; iconst_1; goto E; F: iconst_0`); krusty's
   nested-`When` returns `b` directly — value-equal, shape differs. Needs a shared-label boolean
   construct.
+  - SUSPEND interaction: the short-circuit `When` is applied only in NON-suspend bodies. The CPS
+    flattener models a suspension on the `&&`/`||` RHS only at an UNCONDITIONAL position (the old eager
+    `iand` made it unconditional); the branch form makes it conditional, which the flattener doesn't
+    model yet (its own doc). A non-suspend body can't call a suspend fn, so short-circuit is always safe
+    there; suspend bodies keep the eager form (`cur_fn_suspend` guard) until the flattener handles
+    conditional suspension. Both `short_circuit_e2e` and the suspend `&&`-condition test pass.
 - _known next divergences (from `bytediff` over the corpus)_: array-literal init (`intArrayOf(…)` uses
   `dup`-per-element; kotlinc stores to a temp + `aload`-per-element); primitive-array `iterator()` loops
   (krusty ~24 bytes larger); more loop forms (ranges/downTo/step/indices) to audit for kotlinc's
