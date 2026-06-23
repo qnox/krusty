@@ -123,6 +123,20 @@ fn type_parameter_accessors_get_signatures() {
 }
 
 #[test]
+fn generic_class_constructor_gets_signature() {
+    // The synthesized `<init>` of a generic class carries a `Signature` whose type-parameter params
+    // read `T<tp>;` (`class Pair2<A, B>(val a: A, val b: B)` → `(TA;TB;)V`) — no `<…>` prefix.
+    let src = "class Pair2<A, B>(val a: A, val b: B)\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    assert_eq!(
+        method_signature(&cs, "Pair2", "<init>").as_deref(),
+        Some("(TA;TB;)V")
+    );
+}
+
+#[test]
 fn primitive_bounded_type_param_signature_uses_wrapper() {
     // `<T: Int>` is specialized to descriptor `(I)I`, but its Signature bound is the boxed wrapper.
     let src = "fun <T : Int> idi(t: T): T = t\n";

@@ -67,6 +67,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P17 — synthesized constructor `Signature` (gate 1492, FAIL=0). Generic-class byte-parity now
+  COMPLETE.** The synthesized `<init>` of a generic class carries a `Signature` whose type-parameter
+  params read `T<tp>;` — `class Pair2<A, B>(val a: A, val b: B)` → `(TA;TB;)V`, `class Box<T>(var a: T)`
+  → `(TT;)V` (no `<…>` prefix; the ctor uses the class's type params, declares none). Computed at the
+  primary-`<init>` emit by mapping each ctor param → its field → the `field_signatures` type-param entry.
+  With this, a generic class now matches kotlinc on ALL its signatures — class + field + ctor + getter +
+  setter (verified `class Box<T>(var a: T)` byte-identical: `TT;`, `(TT;)V`, `()TT;`, `(TT;)V`,
+  `<T:Ljava/lang/Object;>Ljava/lang/Object;`). Tests: `generic_signature_e2e`. NEXT byte-parity frontier:
+  generic SUPERTYPES (`class C<T> : List<T>`) and nested generic args (`fun f(): List<T>`).
 - **Phase P16 — synthesized accessor `Signature`s for type-parameter properties (gate 1492, FAIL=0).** A
   generic class's synthesized property accessors over a type-parameter field now carry their JVM
   `Signature`: `getA()` → `()TT;`, `setA(T)` → `(TT;)V` (no `<…>` prefix — they USE the class's `T` but
