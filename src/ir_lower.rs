@@ -16,6 +16,7 @@ use crate::ir::{
     IrTypeOp,
 };
 use crate::resolve::{SymbolTable, TypeInfo};
+use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 struct ClassInfo {
@@ -8702,35 +8703,41 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    if let Some((sig, fid)) = {
-                        // Select the overload matching the argument types, then resolve its method id.
-                        // Only a function defined in THIS file (present in `fun_ids`) is handled here; a
-                        // cross-file function (in `funs` but not `fun_ids`) falls through to the facade
-                        // branch below.
+                    if let Some((fi, fid)) = {
+                        // Select the overload (matching the arg types) through the current module as a
+                        // `SymbolSource` (ModuleSymbols), then resolve its method id. Only a function
+                        // defined in THIS file (present in `fun_ids`) is handled here; a cross-file
+                        // function (in `funs` but not `fun_ids`) falls through to the facade branch below.
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
                         self.syms
                             .funs
                             .get(&fname)
-                            .and_then(|v| {
-                                crate::resolve::pick_overload(v, &arg_tys).map(|i| v[i].clone())
+                            .and_then(|v| crate::resolve::pick_overload(v, &arg_tys))
+                            .map(|i| {
+                                crate::module_symbols::ModuleSymbols::new(self.syms)
+                                    .functions(&fname, None)
+                                    .overloads
+                                    .swap_remove(i)
                             })
-                            .and_then(|sig| {
-                                let key = crate::resolve::erased_params_key(&sig);
+                            .and_then(|fi| {
+                                // `erased_params_key` == the params' descriptors concatenated.
+                                let key: String =
+                                    fi.callable.params.iter().map(|t| t.descriptor()).collect();
                                 self.fun_ids
                                     .get(&(fname.clone(), key))
                                     .copied()
-                                    .map(|fid| (sig, fid))
+                                    .map(|fid| (fi, fid))
                             })
                     } {
                         // A `vararg` function: pack the trailing arguments into a fresh array for the
                         // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
-                        if sig.vararg {
+                        if fi.call_sig.vararg {
                             let params = self.ir.functions[fid as usize].params.clone();
                             let fixed = params.len() - 1;
                             if args.len() < fixed {
                                 return None;
                             }
-                            let elem_ty = sig.params[fixed].array_elem()?;
+                            let elem_ty = fi.callable.params[fixed].array_elem()?;
                             let elem_ir = ty_to_ir(elem_ty);
                             let mut a = Vec::new();
                             for (i, &arg) in args.iter().take(fixed).enumerate() {
@@ -8799,25 +8806,32 @@ impl<'a> Lower<'a> {
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
                         // omitted defaults) is modeled here; anything else bails (skips the file).
                         let arg_tys: Vec<Ty> = args.iter().map(|&a| self.info.ty(a)).collect();
-                        let sig = self.syms.funs.get(&fname).and_then(|v| {
-                            crate::resolve::pick_overload(v, &arg_tys).map(|i| v[i].clone())
-                        })?;
-                        if sig.vararg
-                            || sig.required != sig.params.len()
-                            || args.len() != sig.params.len()
+                        let fi = self
+                            .syms
+                            .funs
+                            .get(&fname)
+                            .and_then(|v| crate::resolve::pick_overload(v, &arg_tys))
+                            .map(|i| {
+                                crate::module_symbols::ModuleSymbols::new(self.syms)
+                                    .functions(&fname, None)
+                                    .overloads
+                                    .swap_remove(i)
+                            })?;
+                        let plen = fi.callable.params.len();
+                        if fi.call_sig.vararg || fi.call_sig.required != plen || args.len() != plen
                         {
                             return None;
                         }
                         let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&sig.params) {
+                        for (arg, pt) in args.iter().zip(&fi.callable.params) {
                             a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                         }
                         self.ir.add_expr(IrExpr::Call {
                             callee: Callee::CrossFile {
                                 facade,
                                 name: fname.clone(),
-                                params: sig.params.iter().map(|t| ty_to_ir(*t)).collect(),
-                                ret: ty_to_ir(sig.ret),
+                                params: fi.callable.params.iter().map(|t| ty_to_ir(*t)).collect(),
+                                ret: ty_to_ir(fi.callable.ret),
                             },
                             dispatch_receiver: None,
                             args: a,
