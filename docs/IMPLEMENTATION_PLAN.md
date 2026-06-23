@@ -3973,10 +3973,21 @@ per-jar/multi-module setups are just more sources.
     type-param name to the actual receiver/arg — structure the erased `FunctionInfo` doesn't carry).
   - shadow-precedence existence guards (413): `module_declares` → `ModuleSymbols::declares_top_level`;
     no direct `syms.funs` access remains in any call-resolution path.
-- Non-resolution remnants (correctly NOT routed through the source): table-building (`fun_ids`/`fn_facades`
-  emit indices, signature collection), a declaration looking up its own registered signature, member-SHAPE
-  queries (`lookup_method` for named-arg eligibility / override checks), and library member resolution
-  (`call_resolver::resolve_instance` over the library source — the library half of the federation).
+- DONE — full call-resolution coverage (commits 415–418): every remaining overload-resolution site now
+  goes through the source — secondary member paths (`this_member_call_ret`, safe-call `?.` return typing,
+  unqualified sibling call, member lambda-param typing, named-arg eligibility), extension lambda-param
+  typing + operator-shadow (416, **net +3 coverage → 1357**), safe-call/operator extension calls (417),
+  and operator-assignment param typing (418). `lookup_method` now serves only its own recursion + the
+  `inner_of` *lexical* enclosing fallback (not a type-hierarchy query).
+- **The redesign is COMPLETE for resolution**: all call/member/extension/operator overload resolution
+  federates module (`ModuleSymbols`) before library, with `ModuleSymbols` LIVE end-to-end in checker AND
+  lowerer; gate 1357/0.
+- Correct architectural boundaries (NOT routed through the neutral source, by design):
+  - **Construction & companion** of USER classes use the rich `ClassSig` (AST-level ctor defaults,
+    generics, value-class fields the neutral `LibraryType` deliberately omits) — module-internal detail,
+    not the cross-backend shape; LIBRARY construction uses `resolve_type`.
+  - **Data assembly** (signature collection, `fun_ids`/`fn_facades`/`ext_fun_ids` emit indices), a
+    **declaration's own** signature/return self-lookup, and the `inner_of` **lexical** scope fallback.
 
 ### Working agreements
 - Every phase: `cargo test` green before moving on; no `unwrap` on user-input paths in the driver.
