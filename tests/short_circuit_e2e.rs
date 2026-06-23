@@ -2,72 +2,17 @@
 //! Regression guard for the eager-`iand`/`ior` miscompile (`x != 0 && 10/x > 0` must not divide when
 //! `x == 0`). Compiled by the krusty binary, run on a real JVM under `-Xverify:all`.
 
-use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
 
 mod common;
 
-/// Compile `src` with krusty (stdlib + JDK jimage on the classpath), run `SCKt.box()` on a JVM, return
-/// trimmed stdout. `None` ⇒ environment unavailable (skip) or krusty couldn't emit.
-fn run_box(tag: &str, src: &str) -> Option<String> {
-    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .or_else(|_| std::env::var("JAVA_HOME"))
-        .ok()?;
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return None;
-    }
+/// Compile `src` in-process and run `SCKt.box()` on the shared persistent JVM (stdlib + JDK jimage on
+/// the classpath). `None` ⇒ environment unavailable (skip) or krusty couldn't emit.
+fn run_box(_tag: &str, src: &str) -> Option<String> {
+    let java_home = common::java_home()?;
     let stdlib = common::stdlib_jar()?;
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let dir = std::env::temp_dir().join(format!("krusty_sc_{tag}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("SC.kt"), src).unwrap();
-    let kcp = format!("{stdlib}:{java_home}/lib/modules");
-    let out = Command::new(env!("CARGO_BIN_EXE_krusty"))
-        .args(["-cp", &kcp, "-d", dir.to_str().unwrap()])
-        .arg(dir.join("SC.kt"))
-        .output()
-        .unwrap();
-    if !out.status.success() {
-        eprintln!(
-            "skip (unsupported): {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
-    fs::write(
-        dir.join("M.java"),
-        "public class M { public static void main(String[] a){ System.out.println(SCKt.box()); } }",
-    )
-    .unwrap();
-    let jc = Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac: {}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let run = Command::new(format!("{java_home}/bin/java"))
-        .args([
-            "-Xverify:all",
-            "-cp",
-            &format!("{}:{stdlib}", dir.display()),
-            "M",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        run.status.success(),
-        "java: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let s = String::from_utf8_lossy(&run.stdout).trim().to_string();
-    let _ = fs::remove_dir_all(&dir);
-    Some(s)
+    let jdk_modules = PathBuf::from(format!("{java_home}/lib/modules"));
+    common::compile_and_run_box(src, "SC", &[stdlib], Some(&jdk_modules))
 }
 
 #[test]

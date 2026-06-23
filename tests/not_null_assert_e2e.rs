@@ -1,35 +1,20 @@
 //! The not-null assertion `x!!` — `kotlin/jvm/internal/Intrinsics.checkNotNull` on a duplicate of the
 //! value (yields the value, throwing on null). Round-tripped against the JVM under `-Xverify:all`.
 
-use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
 
 mod common;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
 #[test]
 fn not_null_assert_runs() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+    let Some(java_home) = common::java_home() else {
         eprintln!("skipping not_null_assert_e2e: set JAVA_HOME");
         return;
     };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping not_null_assert_e2e: no kotlin-stdlib jar found");
         return;
     };
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
-    let dir = std::env::temp_dir().join(format!("krusty_nn_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
     let src = "fun pick(b: Boolean): String? = if (b) \"hi\" else null\n\
 fun len(s: String): Int = s.length\n\
 fun box(): String {\n\
@@ -38,41 +23,9 @@ if (x!! != \"hi\") return \"f1\"\n\
 if (len(pick(true)!!) != 2) return \"f2\"\n\
 return \"OK\"\n\
 }\n";
-    fs::write(dir.join("N.kt"), src).unwrap();
-    let kc = Command::new(krusty)
-        .args(["-d", dir.to_str().unwrap()])
-        .arg(dir.join("N.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skip (IR unsupported): {}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
+    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(src, "N", &[stdlib], Some(&jdk)) else {
         return;
-    }
-    fs::write(
-        dir.join("M.java"),
-        "public class M { public static void main(String[] a) { System.out.println(NKt.box()); } }",
-    )
-    .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
-    let _ = fs::remove_dir_all(&dir);
+    };
+    assert_eq!(out, "OK");
 }

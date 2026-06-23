@@ -2,36 +2,19 @@
 //! `getX()`; class `val y get() = …` → instance `getX()` (`obj.y`/unqualified `y`). Round-tripped
 //! under `-Xverify:all`.
 
-use std::fs;
-use std::process::Command;
-
 mod common;
-
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
 
 #[test]
 fn computed_properties_run() {
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+    let Some(java_home) = common::java_home() else {
         eprintln!("skipping computed_prop_e2e: set JAVA_HOME");
         return;
     };
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return;
-    }
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping computed_prop_e2e: no kotlin-stdlib jar found");
         return;
     };
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
-    let dir = std::env::temp_dir().join(format!("krusty_cp_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let src = "val top: Int get() = 42\n\
+    const SRC: &str = "val top: Int get() = 42\n\
 class C(val a: Int, val b: Int) {\n\
     val sum: Int get() = a + b\n\
     val label: String get() = \"v\" + sum\n\
@@ -45,41 +28,9 @@ if (c.viaThis() != 5) return \"f3\"\n\
 if (c.label != \"v5\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    fs::write(dir.join("P.kt"), src).unwrap();
-    let kc = Command::new(krusty)
-        .args(["-d", dir.to_str().unwrap()])
-        .arg(dir.join("P.kt"))
-        .output()
-        .unwrap();
-    if !kc.status.success() {
-        eprintln!(
-            "skip (IR unsupported): {}",
-            String::from_utf8_lossy(&kc.stderr)
-        );
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(SRC, "P", &[stdlib], Some(&jdk)) else {
         return;
-    }
-    fs::write(
-        dir.join("M.java"),
-        "public class M { public static void main(String[] a) { System.out.println(PKt.box()); } }",
-    )
-    .unwrap();
-    assert!(Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap()
-        .status
-        .success());
-    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let r = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
-        "stderr={}",
-        String::from_utf8_lossy(&r.stderr)
-    );
-    let _ = fs::remove_dir_all(&dir);
+    };
+    assert_eq!(out, "OK");
 }

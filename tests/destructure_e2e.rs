@@ -1,8 +1,7 @@
 //! Destructuring declarations `val (a, b) = e` (desugared to `componentN()` calls). Compiled by
 //! the krusty binary, run on a real JVM. A type without `componentN` operators is cleanly rejected.
 
-use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
 
 use krusty::diag::DiagSink;
 use krusty::lexer::lex;
@@ -37,67 +36,16 @@ fun box(): String {
 }
 "#;
 
-/// Compile `src` with krusty (kotlin-stdlib on the classpath), run `DestrKt.box()` on a real JVM under
-/// `-Xverify:all`, and return its trimmed stdout. `None` means the environment is unavailable (skip) or
-/// krusty couldn't emit (unsupported IR) — never a test failure, matching the suite's other e2e tests.
-fn run_box(tag: &str, src: &str) -> Option<String> {
-    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .or_else(|_| std::env::var("JAVA_HOME"))
-        .ok()?;
-    let java = format!("{java_home}/bin/java");
-    let javac = format!("{java_home}/bin/javac");
-    if !std::path::Path::new(&javac).exists() {
-        return None;
-    }
-    // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath.
+/// Compile `src` in-process (kotlin-stdlib + JDK jimage on the classpath) and run `DestrKt.box()` on
+/// the shared persistent JVM. `None` means the environment is unavailable (skip) or krusty couldn't
+/// emit (unsupported IR) — never a test failure, matching the suite's other e2e tests.
+fn run_box(_tag: &str, src: &str) -> Option<String> {
+    let java_home = common::java_home()?;
+    // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath. The
+    // jimage (`<jdk>/lib/modules`) is the compile-time bootclasspath so collection supertypes resolve.
     let stdlib = common::stdlib_jar()?;
-    let stdlib = stdlib.to_str().unwrap().to_string();
-    let dir = std::env::temp_dir().join(format!("krusty_destr_{tag}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let src_path = dir.join("Destr.kt");
-    fs::write(&src_path, src).unwrap();
-    let bin = env!("CARGO_BIN_EXE_krusty");
-    // krusty has no implicit JDK lookup — the jimage (`<jdk>/lib/modules`) must be on its classpath so
-    // a collection's `java.lang.Iterable` supertype (where stdlib `forEach`/`map` are keyed) resolves.
-    let kcp = format!("{stdlib}:{java_home}/lib/modules");
-    let out = Command::new(bin)
-        .args(["-cp", &kcp, "-d", dir.to_str().unwrap()])
-        .arg(&src_path)
-        .output()
-        .unwrap();
-    if !out.status.success() {
-        eprintln!(
-            "skip (IR unsupported): {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
-    let main = "public class M { public static void main(String[] a) { System.out.println(DestrKt.box()); } }";
-    fs::write(dir.join("M.java"), main).unwrap();
-    let jc = Command::new(&javac)
-        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
-        .arg(dir.join("M.java"))
-        .output()
-        .unwrap();
-    assert!(
-        jc.status.success(),
-        "javac: {}",
-        String::from_utf8_lossy(&jc.stderr)
-    );
-    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
-    let run = Command::new(&java)
-        .args(["-Xverify:all", "-cp", &cp, "M"])
-        .output()
-        .unwrap();
-    assert!(
-        run.status.success(),
-        "java: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
-    let _ = fs::remove_dir_all(&dir);
-    Some(stdout)
+    let jdk_modules = PathBuf::from(format!("{java_home}/lib/modules"));
+    common::compile_and_run_box(src, "Destr", &[stdlib], Some(&jdk_modules))
 }
 
 #[test]
