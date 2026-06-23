@@ -8,6 +8,8 @@
 use std::fs;
 use std::process::Command;
 
+mod common;
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
@@ -23,21 +25,20 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
     if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
         return None;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("B.kt"), src).unwrap();
-    let out = Command::new(krusty)
-        .args(["-d", dir.to_str().unwrap()])
-        .arg(dir.join("B.kt"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{name}: krusty failed to compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // Compile in-process (no CLI spawn): these snippets need no classpath, exactly as the previous
+    // `krusty -d dir B.kt` (no `-cp`). Write the class bytes to `dir` so `javap` can disassemble them.
+    let classes = common::compile_in_process(src, "B", &[], None)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (internal, bytes) in &classes {
+        let path = dir.join(format!("{internal}.class"));
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).ok();
+        }
+        fs::write(&path, bytes).unwrap();
+    }
     Some((dir, jh))
 }
 
