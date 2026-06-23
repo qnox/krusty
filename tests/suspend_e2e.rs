@@ -73,6 +73,69 @@ fn stdlib_jar() -> Option<String> {
 }
 
 #[test]
+fn leaf_suspend_lambda_creates_and_invokes() {
+    // A leaf `suspend` lambda (`{ 42 }`, no captures, no internal suspension) compiles to a concrete
+    // `SuspendLambda` subclass implementing `Function1<Continuation,Object>`, NOT krusty's
+    // invokedynamic path. A Java driver gets the returned `Function1` and invokes it with a
+    // continuation; the synchronously-completing body yields boxed 42.
+    let jh = match java_home() {
+        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
+        _ => return,
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_susp_lam_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("S.kt"), "fun make(): suspend () -> Int = { 42 }\n").unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("S.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed:\n{}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let driver = "import kotlin.coroutines.*;\n\
+import kotlin.jvm.functions.Function1;\n\
+public class M {\n\
+  public static void main(String[] a) {\n\
+    Continuation<Object> k = new Continuation<Object>() {\n\
+      public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }\n\
+      public void resumeWith(Object o) { }\n\
+    };\n\
+    Function1 f = SKt.make();\n\
+    Object r = f.invoke(k);\n\
+    System.out.println(r.equals(Integer.valueOf(42)) ? \"OK\" : (\"r=\" + r));\n\
+  }\n\
+}\n";
+    fs::write(dir.join("M.java"), driver).unwrap();
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    assert!(Command::new(format!("{jh}/bin/javac"))
+        .args(["-cp", &cp, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let run = Command::new(format!("{jh}/bin/java"))
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "leaf suspend lambda: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn suspend_function_type_lowers_to_function1_continuation() {
     // A `suspend () -> Int` parameter type must lower to kotlinc's representation
     // `Function1<? super Continuation<? super Integer>, ? extends Object>` — the suspend arity is the

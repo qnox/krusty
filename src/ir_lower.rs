@@ -2597,6 +2597,139 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Lower a `suspend` lambda literal to a concrete `kotlin/coroutines/jvm/internal/SuspendLambda`
+    /// subclass (kotlinc's representation), returning a `New` of that class with a `null` completion.
+    /// LEAF only for now: arity 0, no captures, no internal suspension. The class implements
+    /// `Function{n+1}` and carries `invokeSuspend(Object)` (the body, result boxed) plus the erased
+    /// `invoke(Object)` (`new This((Continuation)arg).invokeSuspend(Unit)`).
+    fn lower_suspend_lambda(&mut self, body: AstExprId, arity: usize) -> Option<u32> {
+        // Captures (`this`/enclosing locals) and own parameters aren't modeled yet.
+        if self.cur_class.is_some() || arity != 0 {
+            return None;
+        }
+        let jvm_arity = arity + 1; // + the trailing continuation
+        let internal = class_internal(
+            self.afile,
+            &format!("{}$suspend${}", self.cur_fn_name, self.lambda_seq),
+        );
+        self.lambda_seq += 1;
+        let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
+        let object_ir = ty_to_ir(Ty::obj("kotlin/Any"));
+
+        // Class shell: `final class … extends SuspendLambda implements Function{n+1}`, `<init>(Continuation
+        // completion)` → `super(jvm_arity, completion)`.
+        let arity_const = self
+            .ir
+            .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
+        let completion_get = self.ir.add_expr(IrExpr::GetValue(1)); // <init>: this=0, completion=1
+        let class = IrClass {
+            fq_name: internal.clone(),
+            is_value: false,
+            type_param_bounds: vec![],
+            field_type_params: vec![],
+            supertypes: vec![],
+            fields: vec![],
+            ctor_param_count: 0,
+            ctor_args: vec![(cont_ir.clone(), false)],
+            init_body: None,
+            methods: vec![],
+            is_interface: false,
+            superclass: "kotlin/coroutines/jvm/internal/SuspendLambda".to_string(),
+            super_args: vec![arity_const, completion_get],
+            enum_entries: vec![],
+            enum_entry_subclass: vec![],
+            enum_entry_of: None,
+            prop_ref: None,
+            bridges: vec![],
+            interfaces: vec![format!("kotlin/jvm/functions/Function{jvm_arity}")],
+            is_object: false,
+            ctor_param_checks: vec![],
+            is_companion: false,
+            companion_class: None,
+            field_final: vec![],
+            field_private: vec![],
+            secondary_ctors: vec![],
+            has_primary_ctor: true,
+        };
+        let class_id = self.ir.add_class(class);
+
+        // invokeSuspend(Object result): ResultKt.throwOnFailure(result); return box(<body>).
+        let result_get = self.ir.add_expr(IrExpr::GetValue(1)); // this=0, result=1
+        let tof = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: "kotlin/ResultKt".to_string(),
+                name: "throwOnFailure".to_string(),
+                descriptor: "(Ljava/lang/Object;)V".to_string(),
+                inline: false,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![result_get],
+        });
+        let body_val = self.expr(body)?;
+        let boxed = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: body_val,
+            type_operand: object_ir.clone(),
+        });
+        let ret = self.ir.add_expr(IrExpr::Return(Some(boxed)));
+        let inv_susp_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![tof, ret],
+            value: None,
+        });
+        self.add_synth_method(
+            &internal,
+            class_id,
+            "invokeSuspend",
+            vec![object_ir.clone()],
+            Ty::obj("kotlin/Any"),
+            inv_susp_body,
+            true,
+        )?; // invokeSuspend is method index 0.
+
+        // invoke(Object arg): return new This((Continuation)arg).invokeSuspend(Unit.INSTANCE).
+        let arg_get = self.ir.add_expr(IrExpr::GetValue(1)); // this=0, arg=1
+        let arg_cont = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: arg_get,
+            type_operand: cont_ir.clone(),
+        });
+        let new_inst = self.ir.add_expr(IrExpr::New {
+            class: class_id,
+            args: vec![arg_cont],
+            ctor_params: None,
+        });
+        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        let call_is = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index: 0,
+            receiver: new_inst,
+            args: vec![Some(unit)],
+        });
+        let ret2 = self.ir.add_expr(IrExpr::Return(Some(call_is)));
+        let inv_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret2],
+            value: None,
+        });
+        self.add_synth_method(
+            &internal,
+            class_id,
+            "invoke",
+            vec![object_ir.clone()],
+            Ty::obj("kotlin/Any"),
+            inv_body,
+            true,
+        )?;
+
+        // Creation site: `new This((Continuation) null)` (the completion is supplied at invoke time).
+        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        Some(self.ir.add_expr(IrExpr::New {
+            class: class_id,
+            args: vec![null],
+            ctor_params: None,
+        }))
+    }
+
     /// Register a synthesized instance method (a real `IrFunction` with an IR body) on a class, so
     /// it resolves like any other method and the generic emitter handles it — no backend special-case.
     fn add_synth_method(
@@ -4091,11 +4224,24 @@ impl<'a> Lower<'a> {
     }
 
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
-        // Passing a value to a `suspend` function-type parameter (a suspend lambda, or a suspend
-        // function value) needs `SuspendLambda` codegen / continuation threading — not yet modeled.
-        // Bail (skip the file) rather than emit a plain `FunctionN` where `Function{n+1}<Continuation>`
-        // is expected.
-        if matches!(target, IrType::Function { suspend: true, .. }) {
+        // A value flowing into a `suspend` function-type parameter. A LAMBDA literal becomes a concrete
+        // `SuspendLambda` subclass (`lower_suspend_lambda`); any other value (a suspend function value
+        // passed through) needs continuation threading not yet modeled, so it bails (skip the file).
+        if let IrType::Function {
+            suspend: true,
+            params,
+            ..
+        } = target
+        {
+            if let Expr::Lambda {
+                params: lparams,
+                body,
+            } = self.afile.expr(arg).clone()
+            {
+                if lparams.is_empty() {
+                    return self.lower_suspend_lambda(body, params.len());
+                }
+            }
             return None;
         }
         let at = self.info.ty(arg);
