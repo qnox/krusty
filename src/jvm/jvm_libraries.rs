@@ -976,14 +976,10 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn extension_is_inline(&self, receiver: Ty, name: &str) -> bool {
-        supertype_descriptors(&self.cp, receiver)
+        self.functions(name, Some(receiver))
+            .overloads
             .iter()
-            .any(|desc| {
-                self.cp
-                    .find_extensions(desc, name)
-                    .iter()
-                    .any(|c| self.cp.is_inline_method(&c.owner, &c.name))
-            })
+            .any(|o| o.kind == FnKind::Extension && o.flags.inline)
     }
 
     fn toplevel_is_inline(&self, name: &str) -> bool {
@@ -1107,6 +1103,35 @@ impl LibrarySet for JvmLibraries {
                             });
                         }
                     }
+                }
+            }
+            // Plain extensions of `name` on the receiver (and supertypes) — `uppercase`, `map`, `let`, … —
+            // with their inline/`@InlineOnly` flags and return nullability decoded once.
+            for recv_desc in supertype_descriptors(&self.cp, receiver) {
+                for c in self.cp.find_extensions(&recv_desc, name) {
+                    let (params, pret) = parse_method_desc(&c.descriptor);
+                    let inline = self.cp.is_inline_method(&c.owner, &c.name);
+                    overloads.push(FunctionInfo {
+                        kind: FnKind::Extension,
+                        receiver: Some(receiver),
+                        ret_nullable: self.cp.metadata_return_nullable(&c.owner, &c.name),
+                        flags: FnFlags {
+                            inline,
+                            inline_only: inline && !c.public,
+                        },
+                        callable: LibraryCallable {
+                            name: c.name.clone(),
+                            owner: c.owner.clone(),
+                            params,
+                            ret: pret,
+                            physical_ret: pret,
+                            descriptor: c.descriptor.clone(),
+                            is_inline: inline,
+                            default_call: false,
+                            vararg_elem: None,
+                            must_inline: inline && !c.public,
+                        },
+                    });
                 }
             }
         } else {
