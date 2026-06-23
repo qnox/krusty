@@ -202,6 +202,15 @@ pub enum Stmt {
         ty: Option<TypeRef>,
         init: ExprId,
     },
+    /// `val`/`var name (: type)? by delegate` — a local delegated property. Reads route through the
+    /// delegate's `getValue`; a `var`'s writes through `setValue`. No backing local of its own (only the
+    /// synthesized `$delegate` local holds the delegate instance).
+    LocalDelegate {
+        is_var: bool,
+        name: String,
+        ty: Option<TypeRef>,
+        delegate: ExprId,
+    },
     /// `val (a, b, …) = init` — destructuring; each entry binds `init.componentN()`.
     /// An entry named `_` is skipped (no binding, no `componentN` call), per Kotlin.
     Destructure {
@@ -681,6 +690,7 @@ impl File {
             Stmt::Local { init, .. }
             | Stmt::Destructure { init, .. }
             | Stmt::Assign { value: init, .. }
+            | Stmt::LocalDelegate { delegate: init, .. }
             | Stmt::Return(Some(init), _)
             | Stmt::Expr(init) => fe(*init),
             Stmt::AssignMember {
@@ -1037,6 +1047,19 @@ impl File {
             } => {
                 out.push_str(&format!("({} {name} ", if *is_var { "var" } else { "val" }));
                 self.write_expr(*init, out);
+                out.push(')');
+            }
+            Stmt::LocalDelegate {
+                is_var,
+                name,
+                delegate,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "({} {name} by ",
+                    if *is_var { "var" } else { "val" }
+                ));
+                self.write_expr(*delegate, out);
                 out.push(')');
             }
             Stmt::Destructure { entries, init } => {

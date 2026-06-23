@@ -1550,6 +1550,7 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
         Stmt::Break(_) | Stmt::Continue(_) => forbidden,
         Stmt::Local { init, .. }
         | Stmt::Destructure { init, .. }
+        | Stmt::LocalDelegate { delegate: init, .. }
         | Stmt::Assign { value: init, .. } => v(*init),
         Stmt::AssignMember {
             receiver, value, ..
@@ -1659,6 +1660,7 @@ fn lambda_body_writes_outer(
                 outer_names.contains(name) || r(*value)
             }
             Stmt::Local { init, .. } => r(*init),
+            Stmt::LocalDelegate { delegate, .. } => r(*delegate),
             Stmt::Destructure { init, .. } => r(*init),
             Stmt::AssignMember {
                 receiver, value, ..
@@ -1766,6 +1768,7 @@ fn collect_lambda_outer_writes(
             Stmt::Local { init, .. } | Stmt::Destructure { init, .. } => {
                 ce(file, *init, outer, out)
             }
+            Stmt::LocalDelegate { delegate, .. } => ce(file, *delegate, outer, out),
             Stmt::AssignMember {
                 receiver, value, ..
             } => {
@@ -7126,6 +7129,31 @@ impl<'a> Checker<'a> {
                     None => it,
                 };
                 self.declare(&name, bind, is_var);
+            }
+            Stmt::LocalDelegate {
+                is_var,
+                name,
+                ty,
+                delegate,
+            } => {
+                if self.declared_in_current_scope(&name) {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        format!("krusty: conflicting local declaration '{name}'"),
+                    );
+                }
+                // Type-check the delegate; the property's type is the annotation, else the delegate's
+                // `getValue` return type.
+                let dt = self.expr(delegate);
+                let prop_ty = match ty.as_ref() {
+                    Some(r) => self.resolve_ty(r),
+                    None => dt
+                        .obj_internal()
+                        .and_then(|i| self.syms.method_of(i, "getValue"))
+                        .map(|s| s.ret)
+                        .unwrap_or(Ty::Error),
+                };
+                self.declare(&name, prop_ty, is_var);
             }
             Stmt::Destructure { entries, init } => {
                 let it = self.expr(init);
