@@ -6837,22 +6837,24 @@ impl<'a> Checker<'a> {
         if recv == Ty::Error {
             return false;
         }
-        // Parameter type of the user operator, if one exists (member first, then extension).
-        let param = if let Ty::Obj(internal, _) = &recv {
-            self.syms
-                .method_of(internal, aname)
-                .filter(|sig| sig.params.len() == 1)
-                .map(|sig| sig.params[0])
-        } else {
-            None
-        }
-        .or_else(|| {
-            self.syms
-                .ext_funs
-                .get(&(recv.descriptor(), aname.to_string()))
-                .filter(|sig| sig.params.len() == 1)
-                .map(|sig| sig.params[0])
-        });
+        // Parameter type of the user operator, if one exists (member first, then extension) — through
+        // the module source. A member's `params` are just `[arg]`; an extension's are `[recv, arg]`.
+        let fs = crate::module_symbols::ModuleSymbols::new(self.syms).functions(aname, Some(recv));
+        let param = fs
+            .overloads
+            .iter()
+            .find(|o| o.kind == crate::libraries::FnKind::Member && o.callable.params.len() == 1)
+            .map(|o| o.callable.params[0])
+            .or_else(|| {
+                fs.overloads
+                    .iter()
+                    .find(|o| {
+                        o.kind == crate::libraries::FnKind::Extension
+                            && o.receiver_rank == 0
+                            && o.callable.params.len() == 2
+                    })
+                    .map(|o| o.callable.params[1])
+            });
         let rt = self.expr(rhs);
         if let Some(param) = param {
             if rt != Ty::Error {
