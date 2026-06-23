@@ -135,6 +135,10 @@ fn fn_info(
         flags: FnFlags {
             inline: sig.is_inline,
             inline_only: false,
+            // A same-file `suspend fun` is recognized by the coroutine pass via `ir.suspend_funs`
+            // (the AST `is_suspend`), not this resolver path; the classpath suspend flag flows from
+            // `@Metadata` (`jvm_libraries`). The module `Signature` carries no suspend bit yet.
+            suspend: false,
         },
         callable: LibraryCallable {
             owner,
