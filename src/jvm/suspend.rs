@@ -116,8 +116,8 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     }
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
     // whose continuation is the lambda instance itself (ir_lower handled the single-suspension shapes).
-    for (fid, class_id, field_base, n_cap) in ir.suspend_lambda_sm.clone() {
-        if !build_lambda_state_machine(ir, fid, class_id, field_base, n_cap) {
+    for (fid, class_id, field_base) in ir.suspend_lambda_sm.clone() {
+        if !build_lambda_state_machine(ir, fid, class_id, field_base) {
             return false;
         }
     }
@@ -765,7 +765,6 @@ fn build_lambda_state_machine(
     fid: u32,
     class_id: ClassId,
     field_base: u32,
-    n_cap: u32,
 ) -> bool {
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
@@ -792,9 +791,9 @@ fn build_lambda_state_machine(
     reads.dedup();
     let mut spilled: Vec<(u32, IrType)> = Vec::new();
     for idx in reads {
-        // Capture locals (value-indices `2..2+n_cap`) are reloaded from their fields in the prologue at
-        // every entry, so they survive re-entry without being spilled — exclude them.
-        if (2..2 + n_cap).contains(&idx) {
+        // Capture/parameter locals (value-indices `2..2+field_base`) are reloaded from their fields in
+        // the prologue at every entry, so they survive re-entry without being spilled — exclude them.
+        if (2..2 + field_base).contains(&idx) {
             continue;
         }
         if let Some(ty) = find_local_ty(ir, b, idx) {
@@ -979,10 +978,10 @@ fn build_lambda_state_machine(
             label: None,
         },
     );
-    // Reload each captured variable from its field into its local (value-index `2+i`) — runs at every
-    // entry (including a resume), so a capture read across a suspension is always available.
+    // Reload each captured variable / parameter from its field into its local (value-index `2+i`) —
+    // runs at every entry (including a resume), so a value read across a suspension is always available.
     let mut prologue: Vec<ExprId> = Vec::new();
-    for i in 0..n_cap {
+    for i in 0..field_base {
         let cap_ty = ir.classes[class_id as usize].fields[i as usize].1.clone();
         let this_c = k(ir, IrExpr::GetValue(0));
         let getf_c = k(

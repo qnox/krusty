@@ -2650,11 +2650,6 @@ impl<'a> Lower<'a> {
         let body_suspends = call_names
             .iter()
             .any(|n| susp_names.contains(n) || self.resolver().toplevel_is_suspend(n));
-        // Own parameters combined with a suspension aren't modeled yet (the general machine handles
-        // CAPTURES, but a parameter would also need its field reloaded each entry).
-        if body_suspends && arity > 0 {
-            return None;
-        }
         let jvm_arity = arity + 1; // + the trailing continuation
         let internal = class_internal(
             self.afile,
@@ -2783,6 +2778,11 @@ impl<'a> Lower<'a> {
                 let lv = self.fresh_value();
                 self.scope.push((name.clone(), lv, *ty));
             }
+            // Own parameters bind to locals after the captures (their fields are reloaded by the pass).
+            for (name, pty) in bind_names.iter().zip(params.iter()) {
+                let lv = self.fresh_value();
+                self.scope.push((name.clone(), lv, *pty));
+            }
             let body_val = self.expr(body)?;
             self.scope = saved_scope_sm;
             // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
@@ -2832,7 +2832,7 @@ impl<'a> Lower<'a> {
             };
             // A clean SINGLE tail/bound suspension uses the inline two-state machine here; anything else
             // (a second suspension, control flow) gets the general lambda-mode machine from the pass.
-            let handroll = is_susp && n_susp == 1 && n_cap == 0;
+            let handroll = is_susp && n_susp == 1 && n_cap == 0 && arity == 0;
             if !handroll {
                 needs_pass_sm = true;
                 self.next_value = saved_next_sm;
@@ -3101,12 +3101,9 @@ impl<'a> Lower<'a> {
             // Hand the plain `invokeSuspend` to the coroutine pass to flatten into the general state machine
             // (its result/label/spilled fields are appended after the captures/params at `field_base`).
         if needs_pass_sm {
-            self.ir.suspend_lambda_sm.push((
-                invoke_susp_fid,
-                class_id,
-                n_cap + arity as u32,
-                n_cap,
-            ));
+            self.ir
+                .suspend_lambda_sm
+                .push((invoke_susp_fid, class_id, n_cap + arity as u32));
         }
 
         // invoke(Object p0.., Object completion): `r = new This(this.cap.., (Continuation)completion);
