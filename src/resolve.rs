@@ -1980,6 +1980,18 @@ fn prim_conversion_ret(name: &str) -> Option<Ty> {
     })
 }
 
+/// The common type of two branch values for the lightweight signature inferer: identical types
+/// collapse, numeric types widen (`Int`/`Long` → `Long`); anything else is `Error` (so the caller
+/// conservatively skips rather than guessing a supertype). Deliberately narrower than the full
+/// checker's least-upper-bound — it only needs to be SOUND, never complete.
+fn common_lit_ty(a: Ty, b: Ty) -> Ty {
+    if a == b {
+        a
+    } else {
+        Ty::promote(a, b).unwrap_or(Ty::Error)
+    }
+}
+
 fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
@@ -2085,6 +2097,42 @@ fn infer_lit_ty_p(
             }
             Ty::Error
         }
+        // An `if`/`else` expression body (`fun f(x: Int) = if (x > 0) x else -x`): the common type of
+        // the two branches. Needs an `else` to be a value; a branch whose type can't be inferred (e.g. a
+        // block with locals) yields `Error`, so the whole `if` does → safe skip, never a wrong type.
+        Expr::If {
+            then_branch,
+            else_branch: Some(eb),
+            ..
+        } => {
+            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props);
+            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props);
+            common_lit_ty(t, e)
+        }
+        // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
+        // (provably exhaustive as a value); any arm whose body type can't be inferred → `Error` (skip).
+        Expr::When { arms, .. } => {
+            if !arms.iter().any(|a| a.conditions.is_empty()) {
+                return Ty::Error;
+            }
+            let mut acc: Option<Ty> = None;
+            for a in arms {
+                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props);
+                if bt == Ty::Error {
+                    return Ty::Error;
+                }
+                acc = Some(match acc {
+                    None => bt,
+                    Some(p) => common_lit_ty(p, bt),
+                });
+            }
+            acc.unwrap_or(Ty::Error)
+        }
+        // A block expression's value is its trailing expression (`= { … ; value }`). Statements aren't
+        // tracked here, so a trailing referring to a local infers `Error` (safe skip).
+        Expr::Block {
+            trailing: Some(t), ..
+        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
