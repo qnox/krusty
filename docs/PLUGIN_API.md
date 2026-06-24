@@ -350,6 +350,26 @@ The serialization plugin synthesizes the `$serializer` as **IR with full interna
 type refs, which krusty's `ty_of_ref` also can't resolve). Rounds 9–10 (object self-ref, ctor
 null-match) are real, gate-verified general improvements but are **not on the plugin's critical path**.
 
+### STATUS UPDATE — serialization ENCODE round-trip is GREEN
+
+Gap #7 is **substantially closed for the flat case**: krusty compiles `@Serializable class
+Foo(val a: Int, val b: String)`, its plugin emits a **functional** `$serializer`, and a real
+`kotlinc`-compiled driver running `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` against the
+**published `kotlinx-serialization` runtime** returns `{"a":1,"b":"x"}` — a genuine conformance
+round-trip, executed (`tests/serialization_roundtrip_e2e.rs`, `KRUSTY_SER_E2E=1`). What the plugin
+now emits (and krusty's emitter accepts): the `$serializer` object implementing `KSerializer`, a
+`<init>`-built `PluginGeneratedSerialDescriptor` (`.addElement` per property), `getDescriptor`, a
+`serialize` that drives the `CompositeEncoder` (`beginStructure`/`encode<T>Element` reading each
+property via its **public getter**/`endStructure`), the erased generic bridges, and the `serializer()`
+accessor. (Earlier "multi-session impossible" framing was over-pessimistic for the encode path; the
+real-kotlinc-driver split removed the Json gap, and the emit primitives were already present.)
+
+Remaining for *full* serialization conformance: **decode** (a real `deserialize` `decodeElementIndex`
+state machine — currently a default-construct stub), non-flat/nullable/nested/`childSerializers`
+element serializers, wiring the plugin into the main compile path, and the broader language features
+the 69-case `testData/boxIr` corpus needs. The encode round-trip proves the surface + emitter are
+sufficient; the rest is incremental.
+
 The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
 (an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
 the object's `<init>`/`<clinit>` via `NewExternal(PluginGeneratedSerialDescriptor)` + `addElement`

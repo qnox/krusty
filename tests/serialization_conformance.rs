@@ -118,11 +118,45 @@ fn serializer_object_emits_wellformed_bytecode() {
     );
 }
 
+/// Recursively locate a `<prefix>*.jar` (no `-sources`) under `dir`.
+fn walk(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
+    if out.is_some() || depth > 10 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk(&p, prefix, depth + 1, out);
+        } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+            if n.starts_with(prefix) && n.ends_with(".jar") && !n.contains("sources") {
+                *out = Some(p.clone());
+                return;
+            }
+        }
+    }
+}
+
+fn locate(prefix: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let mut out = None;
+    walk(
+        &std::path::Path::new(&home).join(".gradle"),
+        prefix,
+        0,
+        &mut out,
+    );
+    out
+}
+
 fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    // core, json, stdlib from the local gradle cache (mirrors a -classpath user).
-    let core = common::find_jar("kotlinx-serialization-core-jvm", &["sources"])?;
-    let json = common::find_jar("kotlinx-serialization-json-jvm", &["sources"])?;
-    let std = common::stdlib_jar()?;
+    // core, json, stdlib from the local gradle cache (mirrors a -classpath user). A deep walk that
+    // reliably reaches the modules-2 cache (common::stdlib_jar's type-alias scan can miss it).
+    let core = locate("kotlinx-serialization-core-jvm")?;
+    let json = locate("kotlinx-serialization-json-jvm")?;
+    let std = locate("kotlin-stdlib-2").or_else(common::stdlib_jar)?;
     Some((core, json, std))
 }
 
