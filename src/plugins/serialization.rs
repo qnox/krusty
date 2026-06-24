@@ -424,6 +424,45 @@ impl SerializationPlugin {
         ir.classes[class_id as usize].methods.push(accessor);
     }
 
+    /// Add `static serializer(): KSerializer<E>` for a `@Serializable enum`, returning a runtime
+    /// `EnumSerializer(name, E.values())` (the way kotlinc compiles a plain enum). `E.values()` is the
+    /// synthetic static the enum already emits; `E[]` passes where the ctor wants `Enum[]` (array
+    /// covariance).
+    fn add_enum_serializer_accessor(ir: &mut IrFile, class_id: u32, class_fq: &str) {
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+        let values = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: class_fq.to_string(),
+                name: "values".to_string(),
+                descriptor: format!("()[L{class_fq};"),
+                inline: false,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        });
+        let inst = ir.add_expr(IrExpr::NewExternal {
+            internal: "kotlinx/serialization/internal/EnumSerializer".to_string(),
+            ctor_desc: "(Ljava/lang/String;[Ljava/lang/Enum;)V".to_string(),
+            args: vec![name, values],
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(inst)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        let accessor = ir.add_fun(IrFunction {
+            name: "serializer".to_string(),
+            params: vec![],
+            ret: kserializer_of(class_ty(class_fq)),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.classes[class_id as usize].methods.push(accessor);
+    }
+
     /// Add a method to `ir` and return its `FunId`.
     fn add_method(
         ir: &mut IrFile,
@@ -459,6 +498,12 @@ impl IrPlugin for SerializationPlugin {
             // instance of the explicit serializer `X` (`new X(C::class)`), the way kotlinc compiles it.
             if let Some(custom) = ir.classes[class_id as usize].custom_serializer.clone() {
                 Self::add_custom_serializer_accessor(ir, class_id, &class_fq, &custom);
+                continue;
+            }
+            // A `@Serializable enum`: no generated `$serializer` — `serializer()` returns a runtime
+            // `EnumSerializer(name, E.values())`, the way kotlinc compiles a plain enum.
+            if !ir.classes[class_id as usize].enum_entries.is_empty() {
+                Self::add_enum_serializer_accessor(ir, class_id, &class_fq);
                 continue;
             }
             let ser_fq = serializer_fq(&class_fq);
@@ -714,7 +759,9 @@ impl IrPlugin for SerializationPlugin {
         for class_id in ctx.classes_with_simple("Serializable") {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
-            if ir.classes[class_id as usize].custom_serializer.is_some() {
+            if ir.classes[class_id as usize].custom_serializer.is_some()
+                || !ir.classes[class_id as usize].enum_entries.is_empty()
+            {
                 continue;
             }
             // krusty UNBOXES a `@JvmInline value class`-typed field to its underlying (`Holder.f: Foo`
