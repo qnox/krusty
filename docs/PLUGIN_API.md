@@ -359,6 +359,25 @@ runtime** — `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b
 `Json.decodeFromString` of both that and a non-default `{"a":42,"b":"hi"}` reconstructs the values.
 Executed + verified green (`tests/serialization_roundtrip_e2e.rs`, `KRUSTY_SER_E2E=1`), box gate 0-FAIL.
 
+#### Update — FULLY-IN-KRUSTY bidirectional round-trip (no kotlinc anywhere)
+
+The round-trip now compiles **entirely in krusty**, driver included: `Json.encodeToString(Foo.serializer(),
+Foo(7,"hi"))` THEN `Json.decodeFromString(Foo.serializer(), j)` then reads `back.a`/`back.b` — krusty
+emits all of it, the JVM runs it against the published runtime, result `"hi7"`
+(`tests/serialization_krusty_only_e2e.rs::serializable_class_round_trips_through_json_entirely_in_krusty`).
+
+The decode half needed **front-end generic-return inference** for a classpath member whose return erases
+to `Any`. `Json.decodeFromString` is a *member* `<T> T decodeFromString(DeserializationStrategy<? extends
+T>, String)` — its return is the type variable `T`, erased to `Any`, so `back.a` failed as "unresolved
+member on Any". Fix: at the companion-instance call site, when the resolved member's return is the erased
+`kotlin/Any`, run `LibrarySet::instance_call_return` — it finds the member up the receiver's hierarchy
+(accepting a SUBTYPE argument `KSerializer<Foo>` for the `DeserializationStrategy` parameter), unifies the
+method's generic parameter signatures against the actual argument types (`unify_gsig` zips type arguments
+positionally, so `KSerializer<Foo>`'s `<Foo>` binds `T` despite the parameter's different class), and
+substitutes the generic return → `Foo`. The `Any`-only guard is load-bearing: a concrete return
+(`encodeToString: String`) must keep its canonical `Ty::String`, not the re-derived `Obj("kotlin/String")`.
+`serializer()` already returns `KSerializer<Foo>` carrying the type argument. Box gate 1716/0, additive.
+
 What the plugin emits (and krusty's emitter accepts):
 - the `$serializer` object implementing `KSerializer` + erased generic bridges;
 - a `<init>`-built `PluginGeneratedSerialDescriptor` (`.addElement` per property), `getDescriptor`;
