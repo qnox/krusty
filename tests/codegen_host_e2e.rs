@@ -6,8 +6,12 @@
 //! existing decls — see `docs/PLUGIN_API.md`). KSP's own toolchain (the `symbol-processing-aa` and
 //! `kotlin-compiler` embeddable jars) is reachable on Maven and runs the *same* way, but its
 //! transitive closure is large; this test uses the JDK's built-in APT (`javac -processor`) to prove
-//! the host actually loads and runs a third-party processor FROM A JAR and ingests its output —
-//! exercising the capability matrix a KSP host must cover (APT analogue ≈ KSP analogue):
+//! the host actually loads and runs a third-party processor FROM A JAR and ingests its output.
+//!
+//! Scope/honesty: this proves the codegen-host MECHANISM via APT (javac) — it is NOT a KSP run. KSP's
+//! own jars (`tests/ksp_provision_e2e.rs` downloads them) execute the identical host contract; APT is
+//! used here only because it needs no toolchain download. The capability matrix a KSP host must cover
+//! (APT analogue ≈ KSP analogue):
 //!
 //! - annotation query: `RoundEnvironment.getElementsAnnotatedWith` ≈ `Resolver.getSymbolsWithAnnotation`
 //! - element/type inspection: `javax.lang.model` ≈ `KSClassDeclaration`/`KSType`
@@ -55,8 +59,14 @@ fn codegen_host_runs_real_processor_from_jar_with_multiround() {
         return;
     };
 
-    // Unique scratch dir (no Date/rand in tests — use the test binary's pid + a fixed tag).
-    let root = std::env::temp_dir().join(format!("krusty_codegen_host_{}", std::process::id()));
+    // Unique scratch dir: pid + a process-local atomic counter (collision-safe under parallel tests).
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "krusty_codegen_host_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&root);
     let proc_src = root.join("proc_src");
     let proc_classes = root.join("proc_classes");
@@ -186,9 +196,12 @@ public class Foo { public int a; public String b; }
         builder.exists(),
         "round 1: FooBuilder generated from @GenerateBuilder"
     );
+    // FooBuilderValidator can ONLY exist if round 1's generated FooBuilder (which carries
+    // @GenerateValidator) was itself re-processed in a later round — the input `Foo` has no
+    // @GenerateValidator, so a single round could never produce it. Its presence isolates multi-round.
     assert!(
         validator.exists(),
-        "round 2: FooBuilderValidator generated — multi-round re-processing of generated code"
+        "round 2: FooBuilderValidator proves the generated FooBuilder was re-processed"
     );
     let gen = std::fs::read_to_string(&builder).unwrap();
     assert!(
