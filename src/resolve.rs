@@ -4423,6 +4423,14 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                    if self.syms.objects.contains(&n) {
+                        // A bare `object` name used as a value (`val x = Foo`, or a self-reference
+                        // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
+                        // by lowering. Resolved here so an object can refer to itself in its own body.
+                        if let Some(cls) = self.syms.classes.get(&n) {
+                            return self.set(e, Ty::obj(&cls.internal));
+                        }
+                    }
                     if let Some(&(ty, _)) = self.syms.props.get(&n) {
                         ty // top-level property
                     } else if n == "Unit" {
@@ -7956,6 +7964,16 @@ mod tests {
     // hardcoded in the checker — they resolve generically from the classpath (a real stdlib / kotlin.test
     // jar) and are validated by the box-conformance + `feature_box_e2e` suites, not here (these unit
     // tests use `EmptyLibrarySet`, so a classpath-resolved call can't be typed).
+
+    #[test]
+    fn object_self_reference_resolves() {
+        // An `object` may refer to itself by name inside its own body (it resolves to the singleton).
+        // Previously this errored "unresolved reference". (Prerequisite for synthesized serializers,
+        // whose `$serializer` object references its own INSTANCE.)
+        ok("object Baz { fun me(): Baz = Baz }");
+        // And an object used as a plain value elsewhere.
+        ok("object Conf { val n: Int = 1 }\nfun f(): Conf = Conf");
+    }
 
     #[test]
     fn rejects_latent_miscompiles() {
