@@ -238,13 +238,68 @@ fn compile_source(
     Some(outputs)
 }
 
+/// The `helpers` package source the Kotlin test infra injects into every `// WITH_COROUTINES` box test
+/// (kotlinc's `TestFiles.java` adds a `CoroutineUtil.kt` whose text is
+/// `TestHelperGenerator.createTextForCoroutineHelpers(checkStateMachine, checkTailCallOptimization)`).
+/// This is the `false, false` variant — the box corpus uses NEITHER `CHECK_STATE_MACHINE` nor
+/// `CHECK_TAIL_CALL_OPTIMIZATION` (verified: 0 files), so the state-machine/tail-call checker classes are
+/// never emitted. These helpers live in `kotlin.coroutines.*` (the stdlib), NOT `kotlinx-coroutines-core`
+/// — no box test imports `kotlinx.coroutines`. Compiled as an extra source file in the same module so
+/// `EmptyContinuation`, `runBlocking`, `handleResultContinuation`, … resolve exactly as under kotlinc.
+const COROUTINE_HELPERS: &str = r#"package helpers
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+fun <T> runBlocking(block: suspend () -> T): T {
+    var res: Result<T>? = null
+    block.startCoroutine(Continuation(EmptyCoroutineContext) {
+        res = it
+    })
+    return res!!.getOrThrow()
+}
+
+fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<T>) {
+       x(result.getOrThrow())
+    }
+}
+
+fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       result.exceptionOrNull()?.let(x)
+    }
+}
+
+open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
+    companion object : EmptyContinuation()
+    override fun resumeWith(result: Result<Any?>) {
+       result.getOrThrow()
+    }
+}
+
+class ResultContinuation : Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       this.result = result.getOrThrow()
+    }
+
+    var result: Any? = null
+}
+"#;
+
 /// Compile a `// FILE: name.kt`-split multi-file test as ONE module: parse each block, collect global
 /// signatures, populate the cross-file function→facade map (`SymbolTable.fn_facades`, like the CLI
 /// driver), then type-check + lower + emit each file, returning ALL classes. Returns `None` if any file
 /// uses something the IR backend can't lower (e.g. a cross-file *class* reference — only cross-file
 /// top-level functions are modeled so far), so the test SKIPS rather than miscompiles.
+///
+/// `// WITH_COROUTINES` tests are routed here too (even single-file): the generated `helpers` source is
+/// appended as an extra block, mirroring kotlinc's `CoroutineUtil.kt` injection.
 fn compile_multifile(
     src: &str,
+    main_stem: &str,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
@@ -274,6 +329,15 @@ fn compile_multifile(
     }
     if let Some(n) = cur_name.take() {
         blocks.push((n, cur));
+    }
+    // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
+    // source is the one main block.
+    if blocks.is_empty() {
+        blocks.push((main_stem.to_string(), src.to_string()));
+    }
+    // Mirror kotlinc: a `// WITH_COROUTINES` test gets the generated `helpers` source as an extra file.
+    if src.contains("// WITH_COROUTINES") {
+        blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
     }
     if blocks.len() < 2 {
         return None; // not actually multi-file
@@ -691,8 +755,11 @@ fn kotlin_codegen_box_conformance() {
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     let t0 = std::time::Instant::now();
-                    let compiled = if src.contains("// FILE:") {
-                        compile_multifile(&src, &compile_cp, jdk_modules.as_deref())
+                    // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
+                    // generated `helpers` source compiled alongside it), goes through the multi-block path.
+                    let compiled = if src.contains("// FILE:") || src.contains("// WITH_COROUTINES")
+                    {
+                        compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
                     } else {
                         compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref())
                     };
