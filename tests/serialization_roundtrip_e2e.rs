@@ -113,7 +113,8 @@ fn serializable_class_encode_round_trips() {
             json.clone(),
             jimage.clone(),
         ]));
-        let src = "@Serializable class Foo(val a: Int, val b: String)";
+        let src = "@Serializable class Foo(val a: Int, val b: String)\n\
+                   @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -156,7 +157,13 @@ fun box(): String {
     if (back.a != 1 || back.b != "x") return "DEC FAIL: ${back.a},${back.b}"
     // A non-default payload, to prove decode actually reads the values (not defaults).
     val back2 = Json.decodeFromString(s, "{\"a\":42,\"b\":\"hi\"}")
-    return if (back2.a == 42 && back2.b == "hi") "OK" else "DEC2 FAIL: ${back2.a},${back2.b}"
+    if (back2.a != 42 || back2.b != "hi") return "DEC2 FAIL: ${back2.a},${back2.b}"
+    // Richer class: 4 fields incl. Boolean + Float — proves the codegen generalizes.
+    val rs = Rich.serializer() as KSerializer<Rich>
+    val rj = Json.encodeToString(rs, Rich(7, true, 2.5f, "hi"))
+    val rb = Json.decodeFromString(rs, rj)
+    if (rb.n != 7 || !rb.flag || rb.ratio != 2.5f || rb.name != "hi") return "RICH FAIL: $rj -> ${rb.n},${rb.flag},${rb.ratio},${rb.name}"
+    return "OK"
 }
 fun main() { println(box()) }
 "#,
