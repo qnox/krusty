@@ -12018,6 +12018,44 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
+                    // `C.serializer()` on a `@Serializable` class — the serialization plugin synthesizes
+                    // a `static serializer(): KSerializer<C>` on `C`, but only at the BACKEND phase
+                    // (after this lowering). Emit the call BY SIGNATURE now (`invokestatic C.serializer
+                    // ()…`, via the backend-agnostic CrossFile callee); the plugin supplies the method
+                    // body before emit. Scoped to the plugin's synthetic static so it can't shadow a
+                    // companion method (which lowers via the `C$Companion` instance, not a static).
+                    if name == "serializer" {
+                        if let Expr::Name(cls) = self.afile.expr(receiver).clone() {
+                            let is_serializable = self.class_decl(&cls).is_some_and(|cd| {
+                                // Same simple-name detection as the checker + the plugin.
+                                cd.annotations
+                                    .iter()
+                                    .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
+                            });
+                            if is_serializable && args.is_empty() && self.lookup(&cls).is_none() {
+                                if let Some(internal) = self
+                                    .classes
+                                    .get(&class_internal(self.afile, &cls))
+                                    .map(|ci| self.ir.classes[ci.id as usize].fq_name.clone())
+                                {
+                                    let ret = ty_to_ir(Ty::obj_args(
+                                        "kotlinx/serialization/KSerializer",
+                                        &[Ty::obj(&internal)],
+                                    ));
+                                    return Some(self.ir.add_expr(IrExpr::Call {
+                                        callee: Callee::CrossFile {
+                                            facade: internal,
+                                            name: "serializer".to_string(),
+                                            params: vec![],
+                                            ret,
+                                        },
+                                        dispatch_receiver: None,
+                                        args: vec![],
+                                    }));
+                                }
+                            }
+                        }
+                    }
                     // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
                     // receiver bound as `this`, instead of a real static call.
                     {
