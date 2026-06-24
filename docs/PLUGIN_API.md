@@ -302,12 +302,23 @@ generated code itself compiles. (Opt-in `KRUSTY_KSP_E2E=1`; runs under a JDK ≤
 
 **Remaining distance to the stated bar — serialization conformance only:**
 
-1. **Serialization conformance round-trips (all 69 `testData/boxIr`)** require (a) real
-   `serialize`/`deserialize`/descriptor **bytecode** bodies (currently placeholder `return`), and
-   (b) krusty compiling each case — but most of the 69 use sealed/polymorphic/generic/inline-class/
-   contextual features outside krusty's current IR subset (gate 1303/7351), so they bail at lowering
-   before any plugin runs. Closing this is real compiler work (the language features) plus the
-   encode/decode codegen — well beyond a single session. The harness to run them (real runtime jars +
-   `box()=="OK"`) reuses the existing box conformance infra.
+The extension surface is sufficient (it synthesizes the serializer); serialization conformance is
+blocked **downstream of the surface** by core compiler capability. Proven concretely (round 8) by
+trying to compile a HAND-WRITTEN `KSerializer` with krusty (`tests/fixtures/serialization/
+ManualSerializer.kt`) — it fails on three core gaps, none about the plugin:
+
+1. **object self-reference** — `object S { … S … }` fails to resolve `S` inside its own body; a
+   `$serializer` references its own `INSTANCE` (verified: `object Bar { … }` referenced from elsewhere
+   works, but self-reference does not).
+2. **classpath `internal` class construction** — `kotlinx.serialization.internal.
+   PluginGeneratedSerialDescriptor(...)` does not resolve.
+3. **`Json` companion methods** — `Json.encodeToString(serializer, value)` / `decodeFromString` are
+   resolved as a Java *static* instead of the `Json` object's (reified/inherited) members.
+
+Plus: real `serialize`/`deserialize` bytecode bodies and wiring the plugin into the emit path. And the
+full 69 `testData/boxIr` corpus additionally needs sealed/polymorphic/generic/inline-class/contextual
+support outside krusty's IR subset (gate 1303/7351). This is multi-day **core-compiler** work, not
+surface work. `tests/serialization_conformance.rs` encodes the end-state as an `#[ignore]`d round-trip
+test (executable spec) plus a guard test that flips when the blockers close.
 
 This document and the tests state these boundaries explicitly rather than implying the bar is met.
