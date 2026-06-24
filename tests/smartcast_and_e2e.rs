@@ -22,3 +22,20 @@ fun box(): String {\n\
     let out = run(SRC).expect("smart-cast in && should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn smartcast_in_or_negated_condition() {
+    // `x !is String || x.length` — reaching the `||` RHS means `x` IS a `String` (the LHS was false).
+    const SRC: &str = "fun lenOk(x: Any): Boolean {\n\
+    if (x !is String || x.length != 2) return false\n\
+    return true\n\
+}\n\
+fun box(): String {\n\
+    if (!lenOk(\"ok\")) return \"fail string\"\n\
+    if (lenOk(\"too long\")) return \"fail len\"\n\
+    if (lenOk(42)) return \"fail nonstring\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC).expect("smart-cast in || (negated) should compile + run");
+    assert_eq!(out, "OK");
+}
