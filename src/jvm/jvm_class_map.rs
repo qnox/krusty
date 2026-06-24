@@ -134,6 +134,21 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if internal == "kotlin/Throwable" {
         return "java/lang/Throwable";
     }
+    // Emit-only: a BOXED primitive used as a reference (the element of `Array<Int>` = `[Ljava/lang/
+    // Integer;`). The front end carries it as the Kotlin primitive name (`kotlin/Int`); only here does
+    // it erase to the JVM wrapper. ONE-WAY (boxed primitives are never read back from the classpath
+    // under these names), so it stays out of the bidirectional `TYPE_MAP`.
+    match internal {
+        "kotlin/Int" => return "java/lang/Integer",
+        "kotlin/Long" => return "java/lang/Long",
+        "kotlin/Short" => return "java/lang/Short",
+        "kotlin/Byte" => return "java/lang/Byte",
+        "kotlin/Double" => return "java/lang/Double",
+        "kotlin/Float" => return "java/lang/Float",
+        "kotlin/Boolean" => return "java/lang/Boolean",
+        "kotlin/Char" => return "java/lang/Character",
+        _ => {}
+    }
     // Emit-only erasure of the Kotlin collection types (read-only AND mutable) to their single JVM
     // interface — `kotlin/collections/MutableList` → `java/util/List`, `…/List` → `java/util/List`, etc.
     // The front end keeps the two distinct (read-only vs mutable); they collapse only here at the bytecode

@@ -2291,11 +2291,14 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
                 let e = ty_of_ref(a, classes, tparams, diags);
                 if e.is_reference() {
                     Ty::array(e)
+                } else if let Some(boxed) = e.boxed_ref() {
+                    // `Array<Int>` is an array of BOXED `Integer` (`[Ljava/lang/Integer;`), distinct
+                    // from the unboxed `IntArray` (`[I`). Carry the element as the boxed reference.
+                    Ty::array(boxed)
                 } else {
                     diags.error(
                         r.span,
-                        "krusty: Array of a primitive (use IntArray/…) is not supported"
-                            .to_string(),
+                        "krusty: Array of this element type is not supported".to_string(),
                     );
                     Ty::Error
                 }
@@ -5168,11 +5171,15 @@ impl<'a> Checker<'a> {
             }
             match elem {
                 Some(e) if e.is_reference() => return Some(Ty::array(e)),
+                // `arrayOf(1, 2, 3)` is an `Array<Int>` = `[Ljava/lang/Integer;` — box the primitive
+                // element (distinct from `intArrayOf(…)` = `[I`).
+                Some(e) if e.boxed_ref().is_some() => {
+                    return Some(Ty::array(e.boxed_ref().unwrap()))
+                }
                 Some(_) => {
                     self.diags.error(
                         span,
-                        "krusty: arrayOf of a primitive (use intArrayOf/…) is not supported"
-                            .to_string(),
+                        "krusty: arrayOf of this element type is not supported".to_string(),
                     );
                     return Some(Ty::Error);
                 }
@@ -7970,6 +7977,17 @@ mod tests {
         ok("abstract class A<T> { abstract val some: T }\n\
             class I : A<String>() { override val some: String get() = \"OK\" }\n\
             fun box(): String = I().some");
+    }
+
+    #[test]
+    fn boxed_array_type_resolves_and_type_checks() {
+        // `Array<Int>` is a boxed `Integer[]` (distinct from `IntArray`). The type resolves (it used
+        // to error "Array of a primitive"), and element access / size type-check as `Int`.
+        ok("fun id(a: Array<Int>): Array<Int> = a\n\
+            fun rd(a: Array<Int>): Int = a[0]\n\
+            fun wr(a: Array<Int>) { a[0] = 5 }\n\
+            fun sz(a: Array<Int>): Int = a.size\n\
+            fun box(): String = \"OK\"");
     }
 
     fn err_contains(src: &str, needle: &str) {

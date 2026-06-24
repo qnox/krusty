@@ -100,6 +100,13 @@ fn prim_elem(name: &str) -> Option<Ty> {
 /// Lower each argument to a `Vararg` of `elem` (`int[]`/`T[]`). A branchy element is declined (its
 /// stackmap frame would strand the partially-built array).
 fn vararg_of(lw: &mut Lower<'_>, elem: Ty, args: &[AstExprId]) -> Option<ExprId> {
+    // A boxed-primitive element (`arrayOf(1)`/`emptyArray<Int>()` → `Integer[]`) would need each value
+    // boxed into the reference array; declined for now (the type + element access are supported, but
+    // constructing a boxed primitive array is future work). `intArrayOf` passes a primitive `Ty` here
+    // (not a boxed `Obj`), so it is unaffected.
+    if elem.unboxed_primitive().is_some() {
+        return None;
+    }
     let elem_ir = ty_to_ir(elem);
     let mut elements = Vec::new();
     for &arg in args {
@@ -158,7 +165,9 @@ fn b_ref_array(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) 
     if c.args.len() != 2 {
         return None;
     }
-    let elem = lw.synth_array_elem(c.call).filter(|t| t.is_reference())?;
+    let elem = lw
+        .synth_array_elem(c.call)
+        .filter(|t| t.is_reference() && t.unboxed_primitive().is_none())?;
     let (params, body) = lw.synth_arg_lambda(c.args[1])?;
     lw.build_fill_array(elem, c.args[0], params, body)
 }
@@ -174,7 +183,9 @@ fn b_arr_nulls(_syn: &'static Synthetic, lw: &mut Lower<'_>, c: &SynthCall<'_>) 
     if c.args.len() != 1 {
         return None;
     }
-    let elem = lw.synth_array_elem(c.call).filter(|t| t.is_reference())?;
+    let elem = lw
+        .synth_array_elem(c.call)
+        .filter(|t| t.is_reference() && t.unboxed_primitive().is_none())?;
     let size = lw.lower_arg(c.args[0], &ty_to_ir(Ty::Int))?;
     Some(lw.emit(IrExpr::NewArray {
         element_type: ty_to_ir(elem),

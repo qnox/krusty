@@ -3295,6 +3295,11 @@ impl<'a> Emitter<'a> {
                 self.emit_value(args[0], code);
                 let (op, w) = array_load_op(elem);
                 code.array_load(op, w);
+                // A boxed primitive array (`Array<Int>` = `Integer[]`): `a[i]` is an unboxed `Int`, so
+                // unbox the loaded wrapper. (`value_ty` for this call reports the same primitive.)
+                if let Some(p) = boxed_prim_of(elem) {
+                    self.unbox_to(p, code);
+                }
             }
             "kotlin/Array.set" => {
                 let arr = recv.unwrap();
@@ -3302,6 +3307,10 @@ impl<'a> Emitter<'a> {
                 self.emit_value(arr, code);
                 self.emit_value(args[0], code);
                 self.emit_value(args[1], code);
+                // Boxed primitive array: box the primitive value before the `aastore`.
+                if let Some(p) = boxed_prim_of(elem) {
+                    box_prim_free(self.cw, code, p);
+                }
                 let (op, w) = array_store_op(elem);
                 code.array_store(op, w);
             }
@@ -4415,7 +4424,11 @@ impl<'a> Emitter<'a> {
                 Callee::CrossFile { ret, .. } => ir_ty_to_jvm(ret),
                 // Array `get` returns the receiver's element; an array `<init>` returns the array type.
                 Callee::External(fq) if fq == "kotlin/Array.get" => dispatch_receiver
-                    .map(|r| self.array_elem(r))
+                    .map(|r| {
+                        // A boxed primitive array yields the UNBOXED primitive (`a[i]: Int`).
+                        let e = self.array_elem(r);
+                        boxed_prim_of(e).unwrap_or(e)
+                    })
                     .unwrap_or(Ty::Error),
                 Callee::External(fq) if prim_array_elem_ty(fq).is_some() => {
                     Ty::array(prim_array_elem_ty(fq).unwrap())
@@ -4646,6 +4659,23 @@ fn prim_array_elem_ty(fq: &str) -> Option<Ty> {
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
+/// If `t` is the boxed-reference form of a primitive (the element of a `Array<Int>` etc., carried as
+/// `Obj("kotlin/Int")`), the underlying primitive `Ty`. Used to insert box/unbox at the boxed-array
+/// element boundary (`a[i]` yields an unboxed `Int`; `a[i] = v` boxes the `Int`).
+fn boxed_prim_of(t: Ty) -> Option<Ty> {
+    match t {
+        Ty::Obj("kotlin/Int", _) => Some(Ty::Int),
+        Ty::Obj("kotlin/Long", _) => Some(Ty::Long),
+        Ty::Obj("kotlin/Short", _) => Some(Ty::Short),
+        Ty::Obj("kotlin/Byte", _) => Some(Ty::Byte),
+        Ty::Obj("kotlin/Double", _) => Some(Ty::Double),
+        Ty::Obj("kotlin/Float", _) => Some(Ty::Float),
+        Ty::Obj("kotlin/Boolean", _) => Some(Ty::Boolean),
+        Ty::Obj("kotlin/Char", _) => Some(Ty::Char),
+        _ => None,
+    }
+}
+
 fn array_load_op(elem: Ty) -> (u8, i32) {
     match elem {
         Ty::Int => (0x2e, 1),
@@ -4726,10 +4756,15 @@ pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
             "kotlin/CharArray" => Ty::array(Ty::Char),
             "kotlin/ByteArray" => Ty::array(Ty::Byte),
             "kotlin/ShortArray" => Ty::array(Ty::Short),
+            // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
+            // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
             "kotlin/Array" => Ty::array(
                 type_args
                     .first()
-                    .map(ir_ty_to_jvm)
+                    .map(|e| {
+                        let et = ir_ty_to_jvm(e);
+                        et.boxed_ref().unwrap_or(et)
+                    })
                     .unwrap_or(Ty::obj("java/lang/Object")),
             ),
             _ => Ty::obj(fq_name),
