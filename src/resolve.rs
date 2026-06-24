@@ -3839,9 +3839,20 @@ impl<'a> Checker<'a> {
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
         if f.is_inline {
-            self.diags
-                .error(f.span, "krusty: inline functions are not supported");
-            return;
+            // A SIMPLE inline member (no type parameters — so no `reified` — and no function-type
+            // parameter — so no lambda that must be spliced) is semantically an ordinary method;
+            // inlining is only an optimization. Check + emit it as a normal method (member calls become
+            // an ordinary invokevirtual). A generic/reified or lambda-taking inline member still needs
+            // true call-site splicing, which member methods don't yet have → reject (never miscompile).
+            let needs_real_inlining = !f.type_params.is_empty()
+                || f.params.iter().any(|p| {
+                    p.ty.name == "<fun>" || !p.ty.fun_params.is_empty() || p.ty.fun_suspend
+                });
+            if needs_real_inlining {
+                self.diags
+                    .error(f.span, "krusty: inline functions are not supported");
+                return;
+            }
         }
         self.fn_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
