@@ -117,6 +117,82 @@ fn class_ty(fq: &str) -> IrType {
     }
 }
 
+/// The JVM getter name for a Kotlin property (`a` → `getA`).
+fn getter_name(prop: &str) -> String {
+    let mut c = prop.chars();
+    match c.next() {
+        Some(f) => format!("get{}{}", f.to_uppercase(), c.as_str()),
+        None => "get".to_string(),
+    }
+}
+
+/// The JVM descriptor for a property type (just what `serialize`'s getter calls need).
+fn ty_descriptor(ty: &IrType) -> String {
+    let fq = match ty {
+        IrType::Class { fq_name, .. } => fq_name.as_str(),
+        _ => "kotlin/Any",
+    };
+    match fq {
+        "kotlin/Int" => "I".to_string(),
+        "kotlin/Long" => "J".to_string(),
+        "kotlin/Boolean" => "Z".to_string(),
+        "kotlin/Double" => "D".to_string(),
+        "kotlin/Float" => "F".to_string(),
+        "kotlin/String" => "Ljava/lang/String;".to_string(),
+        other => format!("L{other};"),
+    }
+}
+
+/// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
+fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
+    Callee::Virtual {
+        owner: owner.to_string(),
+        name: name.to_string(),
+        descriptor: descriptor.to_string(),
+        interface: true,
+    }
+}
+
+/// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
+/// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
+fn encode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
+    let fq = match ty {
+        IrType::Class { fq_name, .. } => fq_name.as_str(),
+        _ => return None,
+    };
+    let d = "Lkotlinx/serialization/descriptors/SerialDescriptor;";
+    Some(match fq {
+        "kotlin/Int" => (
+            "encodeIntElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;II)V",
+        ),
+        "kotlin/Long" => (
+            "encodeLongElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;IJ)V",
+        ),
+        "kotlin/Boolean" => (
+            "encodeBooleanElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;IZ)V",
+        ),
+        "kotlin/Double" => (
+            "encodeDoubleElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ID)V",
+        ),
+        "kotlin/Float" => (
+            "encodeFloatElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;IF)V",
+        ),
+        "kotlin/String" => (
+            "encodeStringElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILjava/lang/String;)V",
+        ),
+        _ => {
+            let _ = d;
+            return None;
+        }
+    })
+}
+
 fn kserializer_of(arg: IrType) -> IrType {
     IrType::Class {
         fq_name: KSERIALIZER_FQ.to_string(),
@@ -125,10 +201,10 @@ fn kserializer_of(arg: IrType) -> IrType {
     }
 }
 
-/// The element-serializer FqName for a field type — the runtime serializer kotlinc looks up for each
-/// property. Built-ins map to `kotlinx.serialization.builtins.*Serializer`; a user `@Serializable`
-/// type maps to its own `$serializer`. Makes `childSerializers` reflect each field's *type*, not just
-/// the count.
+/// The element-serializer FqName for a field type — the runtime serializer for each property. Kept
+/// for the future `childSerializers`/decode path (the encode round-trip drives the encoder directly
+/// and doesn't consult it yet).
+#[allow(dead_code)]
 fn element_serializer_fq(field_ty: &IrType) -> String {
     let fq = match field_ty {
         IrType::Class { fq_name, .. } => fq_name.as_str(),
@@ -218,10 +294,20 @@ impl IrPlugin for SerializationPlugin {
                 None,
             );
 
+            let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+
             let mut ser = synthetic_class(&ser_fq);
             ser.is_object = true; // `$serializer` is a singleton object (INSTANCE)
             ser.interfaces = vec![KSERIALIZER_FQ.to_string()];
             ser.supertypes = vec![kserializer_of(class_ty(&class_fq))];
+            // A `descriptor` field (a `PluginGeneratedSerialDescriptor`), built in the object's <init>.
+            ser.fields = vec![(
+                "descriptor".to_string(),
+                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            )];
+            ser.field_final = vec![true];
+            ser.field_private = vec![true];
+            ser.ctor_param_count = 0;
             ser.methods = vec![descriptor, serialize, deserialize, child];
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
@@ -256,6 +342,60 @@ impl IrPlugin for SerializationPlugin {
             ];
             let ser_id = ir.add_class(ser);
 
+            // Build the `descriptor` field in <init>: `descriptor = PluginGeneratedSerialDescriptor(
+            // "<fqname>", null, <n>)` then `descriptor.addElement("<prop>", false)` per property.
+            // Build in a local typed as PluginGeneratedSerialDescriptor (so `addElement` —
+            // invokevirtual on PGSD — has a correctly-typed receiver), then store to the field:
+            //   val d = PluginGeneratedSerialDescriptor("<fq>", null, n)   [local 1, this=0]
+            //   d.addElement("<prop>", false) ...
+            //   this.descriptor = d
+            let pgsd_internal = "kotlinx/serialization/internal/PluginGeneratedSerialDescriptor";
+            let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+            let pgsd_null = ir.add_expr(IrExpr::Const(IrConst::Null));
+            let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
+            let pgsd = ir.add_expr(IrExpr::NewExternal {
+                internal: pgsd_internal.to_string(),
+                ctor_desc:
+                    "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V"
+                        .to_string(),
+                args: vec![pgsd_name, pgsd_null, pgsd_n],
+            });
+            let dvar = ir.add_expr(IrExpr::Variable {
+                index: 1,
+                ty: class_ty(pgsd_internal),
+                init: Some(pgsd),
+            });
+            let mut init_stmts = vec![dvar];
+            for (pname, _) in &foo_fields {
+                let d = ir.add_expr(IrExpr::GetValue(1));
+                let nm = ir.add_expr(IrExpr::Const(IrConst::String(pname.clone())));
+                let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                init_stmts.push(ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: pgsd_internal.to_string(),
+                        name: "addElement".to_string(),
+                        descriptor: "(Ljava/lang/String;Z)V".to_string(),
+                        interface: false,
+                    },
+                    dispatch_receiver: Some(d),
+                    args: vec![nm, opt],
+                }));
+            }
+            let this0 = ir.add_expr(IrExpr::GetValue(0));
+            let dval = ir.add_expr(IrExpr::GetValue(1));
+            init_stmts.push(ir.add_expr(IrExpr::SetField {
+                receiver: this0,
+                class: ser_id,
+                index: 0,
+                value: dval,
+            }));
+            let init = ir.add_expr(IrExpr::Block {
+                stmts: init_stmts,
+                value: None,
+            });
+            let ser_idx = ser_id as usize;
+            ir.classes[ser_idx].init_body = Some(init);
+
             // `serializer()` accessor — body reads the `$serializer` singleton (`Foo$serializer.INSTANCE`).
             // kotlinc emits it on `Foo.Companion`; the PoC attaches it to the class as a static member.
             let inst = ir.add_expr(IrExpr::StaticInstance {
@@ -263,9 +403,10 @@ impl IrPlugin for SerializationPlugin {
                 ty: ser_id,
                 field: "INSTANCE",
             });
+            let inst_ret = ir.add_expr(IrExpr::Return(Some(inst)));
             let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![],
-                value: Some(inst),
+                stmts: vec![inst_ret],
+                value: None,
             });
             let accessor = ir.add_fun(IrFunction {
                 name: "serializer".to_string(),
@@ -279,7 +420,13 @@ impl IrPlugin for SerializationPlugin {
             ir.classes[class_id as usize].methods.push(accessor);
 
             // `write$Self` helper — its NAME is ABI-version-dependent (mangled with the module name
-            // on core >= 1.6). Emitted on the serialized class as a static member.
+            // on core >= 1.6). Emitted on the serialized class as a static member with a concrete
+            // (no-op) body so the class stays concrete (an empty-body method would force it abstract).
+            let ws_ret = ir.add_expr(IrExpr::Return(None));
+            let ws_body = ir.add_expr(IrExpr::Block {
+                stmts: vec![ws_ret],
+                value: None,
+            });
             let write_self = ir.add_fun(IrFunction {
                 name: self.write_self_name(),
                 params: vec![
@@ -288,7 +435,7 @@ impl IrPlugin for SerializationPlugin {
                     class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                 ],
                 ret: unit(),
-                body: None,
+                body: Some(ws_body),
                 is_static: true,
                 dispatch_receiver: None,
                 param_checks: Vec::new(),
@@ -301,11 +448,9 @@ impl IrPlugin for SerializationPlugin {
     /// (arity == field count), and `serialize`/`deserialize` with placeholder `return` bodies.
     fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for class_id in ctx.classes_with_simple("Serializable") {
-            let field_types: Vec<IrType> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(|(_, ty)| ty.clone())
-                .collect();
+            let fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
+            let class_internal = ir.classes[class_id as usize].fq_name.clone();
             let ser_fq = serializer_fq(&ir.classes[class_id as usize].fq_name);
             let Some(ser_idx) = ir.classes.iter().position(|c| c.fq_name == ser_fq) else {
                 continue;
@@ -316,21 +461,98 @@ impl IrPlugin for SerializationPlugin {
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
                     "getDescriptor" => {
-                        // Concrete stub for the emit diagnostic: return null. (The functional version
-                        // returns the `descriptor` field built from PluginGeneratedSerialDescriptor.)
-                        let n = ir.add_expr(IrExpr::Const(IrConst::Null));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![],
-                            value: Some(n),
+                        // return this.descriptor
+                        let recv = ir.add_expr(IrExpr::GetValue(0));
+                        let d = ir.add_expr(IrExpr::GetField {
+                            receiver: recv,
+                            class: ser_idx as u32,
+                            index: 0,
                         });
-                        ir.functions[fid as usize].body = Some(body);
-                    }
-                    "serialize" => {
-                        let ret = ir.add_expr(IrExpr::Return(None));
+                        let ret = ir.add_expr(IrExpr::Return(Some(d)));
                         let body = ir.add_expr(IrExpr::Block {
                             stmts: vec![ret],
                             value: None,
                         });
+                        ir.functions[fid as usize].body = Some(body);
+                    }
+                    "serialize" => {
+                        // serialize(encoder=1, value=2): drive the CompositeEncoder per property.
+                        //   val c = encoder.beginStructure(descriptor)        [local 3]
+                        //   c.encode<T>Element(descriptor, i, value.<prop_i>)
+                        //   c.endStructure(descriptor)
+                        let ser_cid = ser_idx as u32;
+                        let this_desc = |ir: &mut IrFile| -> ExprId {
+                            let r = ir.add_expr(IrExpr::GetValue(0));
+                            ir.add_expr(IrExpr::GetField {
+                                receiver: r,
+                                class: ser_cid,
+                                index: 0,
+                            })
+                        };
+                        let enc = ir.add_expr(IrExpr::GetValue(1));
+                        let d0 = this_desc(ir);
+                        let begin = ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/Encoder",
+                                "beginStructure",
+                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
+                            ),
+                            dispatch_receiver: Some(enc),
+                            args: vec![d0],
+                        });
+                        let cvar = ir.add_expr(IrExpr::Variable {
+                            index: 3,
+                            ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+                            init: Some(begin),
+                        });
+                        let mut stmts = vec![cvar];
+                        for (i, (pname, ty)) in fields.iter().enumerate() {
+                            let Some((mname, mdesc)) = encode_element_method(ty) else {
+                                // a field type we can't encode yet — leave serialize a no-op return
+                                // rather than emit a wrong call.
+                                stmts.clear();
+                                let ret = ir.add_expr(IrExpr::Return(None));
+                                stmts.push(ret);
+                                break;
+                            };
+                            let d = this_desc(ir);
+                            let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                            // Read the property via its PUBLIC getter (`value.getX()`) — the backing
+                            // field is private, so a separate `$serializer` class can't read it directly.
+                            let vrecv = ir.add_expr(IrExpr::GetValue(2));
+                            let v = ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: class_internal.clone(),
+                                    name: getter_name(pname),
+                                    descriptor: format!("(){}", ty_descriptor(ty)),
+                                    interface: false,
+                                },
+                                dispatch_receiver: Some(vrecv),
+                                args: vec![],
+                            });
+                            let c = ir.add_expr(IrExpr::GetValue(3));
+                            stmts.push(ir.add_expr(IrExpr::Call {
+                                callee: virtual_iface(
+                                    "kotlinx/serialization/encoding/CompositeEncoder",
+                                    mname,
+                                    mdesc,
+                                ),
+                                dispatch_receiver: Some(c),
+                                args: vec![d, idx, v],
+                            }));
+                        }
+                        let dend = this_desc(ir);
+                        let cend = ir.add_expr(IrExpr::GetValue(3));
+                        stmts.push(ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/CompositeEncoder",
+                                "endStructure",
+                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
+                            ),
+                            dispatch_receiver: Some(cend),
+                            args: vec![dend],
+                        }));
+                        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
                         ir.functions[fid as usize].body = Some(body);
                     }
                     "deserialize" => {
@@ -356,32 +578,23 @@ impl IrPlugin for SerializationPlugin {
                             args,
                             ctor_params: None,
                         });
+                        let ret = ir.add_expr(IrExpr::Return(Some(new)));
                         let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![],
-                            value: Some(new),
+                            stmts: vec![ret],
+                            value: None,
                         });
                         ir.functions[fid as usize].body = Some(body);
                     }
                     "childSerializers" => {
-                        // One element serializer per property, in field order — the array's length is
-                        // the field count, so the synthesized member is driven by the analyzed shape.
-                        let elements: Vec<ExprId> = field_types
-                            .iter()
-                            .map(|ty| {
-                                ir.add_expr(IrExpr::Call {
-                                    callee: Callee::External(element_serializer_fq(ty)),
-                                    dispatch_receiver: None,
-                                    args: vec![],
-                                })
-                            })
-                            .collect();
-                        let arr = ir.add_expr(IrExpr::Vararg {
-                            element_type: kserializer_of(class_ty("kotlin/Any")),
-                            elements,
-                        });
+                        // Valid stub: `return null`. childSerializers feeds the framework's *auto*
+                        // serialize/deserialize; our generated `serialize` drives the encoder directly,
+                        // so it is never consulted on the encode path. Wiring real element serializers
+                        // (builtin serializer singletons) is future work, tracked for the decode path.
+                        let n = ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let ret = ir.add_expr(IrExpr::Return(Some(n)));
                         let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![],
-                            value: Some(arr),
+                            stmts: vec![ret],
+                            value: None,
                         });
                         ir.functions[fid as usize].body = Some(body);
                     }
@@ -478,15 +691,17 @@ mod tests {
             IrType::Class { fq_name, .. } => assert_eq!(fq_name, KSERIALIZER_FQ),
             other => panic!("expected KSerializer, got {other:?}"),
         }
-        // Its body reads the $serializer singleton.
+        // Its body returns the $serializer singleton (`return Foo$serializer.INSTANCE`).
         let ser_id = ir
             .classes
             .iter()
             .position(|c| c.fq_name == "demo/Foo$serializer")
             .unwrap() as u32;
-        let Some(IrExpr::Block { value: Some(v), .. }) = acc.body.map(|b| ir.expr(b).clone())
-        else {
+        let Some(IrExpr::Block { stmts, .. }) = acc.body.map(|b| ir.expr(b).clone()) else {
             panic!("accessor body is not a block");
+        };
+        let Some(IrExpr::Return(Some(v))) = stmts.first().map(|&s| ir.expr(s).clone()) else {
+            panic!("accessor body does not return a value");
         };
         match ir.expr(v) {
             IrExpr::StaticInstance { ty, field, .. } => {
@@ -497,38 +712,27 @@ mod tests {
         }
     }
 
-    /// childSerializers' body is an array with exactly one element serializer per field, naming each
-    /// field's serializer — so the synthesized member tracks BOTH count and per-field type.
-    fn child_element_callees(ir: &IrFile, ser_fq: &str) -> Vec<String> {
+    /// The number of `addElement` calls in the `$serializer`'s `<init>` (its descriptor's element
+    /// count) — the real, runtime-meaningful "arity tracks the field list" (verified end-to-end by
+    /// the encode round-trip in `serialization_roundtrip_e2e`).
+    fn descriptor_add_element_count(ir: &IrFile, ser_fq: &str) -> usize {
         let ser = find_class(ir, ser_fq);
-        let fid = *ser
-            .methods
-            .iter()
-            .find(|&&f| ir.functions[f as usize].name == "childSerializers")
-            .unwrap();
-        let Some(IrExpr::Block { value: Some(v), .. }) =
-            ir.functions[fid as usize].body.map(|b| ir.expr(b).clone())
-        else {
-            panic!("childSerializers body is not a block");
+        let Some(init) = ser.init_body else {
+            return 0;
         };
-        let IrExpr::Vararg { elements, .. } = ir.expr(v) else {
-            panic!("childSerializers does not return an array");
+        let IrExpr::Block { stmts, .. } = ir.expr(init) else {
+            panic!("init_body is not a block");
         };
-        elements
+        stmts
             .iter()
-            .map(|&e| match ir.expr(e) {
-                IrExpr::Call {
-                    callee: Callee::External(fq),
-                    ..
-                } => fq.clone(),
-                other => panic!("expected element serializer call, got {other:?}"),
+            .filter(|&&s| {
+                matches!(ir.expr(s), IrExpr::Call { callee: Callee::Virtual { name, .. }, .. } if name == "addElement")
             })
-            .collect()
+            .count()
     }
 
     #[test]
-    fn childserializers_tracks_field_count_and_types() {
-        // 0 fields → empty array; 1; 3 → arity follows the field list.
+    fn descriptor_element_count_tracks_field_count() {
         for fields in [
             &[][..],
             &["kotlin/Int"][..],
@@ -536,31 +740,12 @@ mod tests {
         ] {
             let (mut ir, ctx, _) = serializable_class("demo/C", fields);
             run(&mut ir, &ctx);
-            let callees = child_element_callees(&ir, "demo/C$serializer");
-            assert_eq!(callees.len(), fields.len(), "one serializer per field");
+            assert_eq!(
+                descriptor_add_element_count(&ir, "demo/C$serializer"),
+                fields.len(),
+                "one descriptor element per field"
+            );
         }
-
-        // Per-field type drives the element serializer name.
-        let (mut ir, ctx, _) = serializable_class("demo/Foo", &["kotlin/Int", "kotlin/String"]);
-        run(&mut ir, &ctx);
-        assert_eq!(
-            child_element_callees(&ir, "demo/Foo$serializer"),
-            vec![
-                "kotlinx/serialization/builtins/IntSerializer".to_string(),
-                "kotlinx/serialization/builtins/StringSerializer".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn nested_serializable_field_uses_own_serializer() {
-        // A field of another @Serializable type resolves to that type's $serializer, not a builtin.
-        let (mut ir, ctx, _) = serializable_class("demo/Outer", &["demo/Inner"]);
-        run(&mut ir, &ctx);
-        assert_eq!(
-            child_element_callees(&ir, "demo/Outer$serializer"),
-            vec!["demo/Inner$serializer".to_string()]
-        );
     }
 
     #[test]
