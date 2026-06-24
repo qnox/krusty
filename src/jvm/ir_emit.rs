@@ -43,9 +43,20 @@ pub fn emit_all(
     }
     INLINE_BAIL.with(|b| b.set(false));
     let mut out = Vec::new();
-    // Facade: the static top-level functions (those with no dispatch receiver).
+    // Facade: the static top-level functions (those with no dispatch receiver). A function that BELONGS
+    // to a class — including a `static` member like the serialization plugin's `serializer()` accessor,
+    // which has no dispatch receiver — is emitted on its class (below), NOT here; otherwise two classes'
+    // same-signature statics (`C.serializer()`/`D.serializer()`) would collide on the facade.
+    let class_member_fids: std::collections::HashSet<u32> = ir
+        .classes
+        .iter()
+        .flat_map(|c| c.methods.iter().copied())
+        .collect();
     let mut cw = ClassWriter::new(facade, "java/lang/Object");
     for (i, f) in ir.functions.iter().enumerate() {
+        if class_member_fids.contains(&(i as u32)) {
+            continue;
+        }
         if f.dispatch_receiver.is_some() || f.body.is_none() {
             continue;
         }
