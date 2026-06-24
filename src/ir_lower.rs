@@ -4903,6 +4903,79 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
+    /// the receiver is evaluated once and captured into the closure. Handles a bound extension function
+    /// (`expr::extFun` → the lifted static `extFun(recv, args…)`, captured receiver) and a bound member
+    /// on a user-class receiver (a synthesized impl invoking the member). Returns None for unmodeled
+    /// shapes (library-type members, `Unit`/`Nothing` SAM-return).
+    fn lower_bound_expr_ref(
+        &mut self,
+        e: AstExprId,
+        recv: AstExprId,
+        name: &str,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<u32> {
+        if ret == Ty::Unit || ret == Ty::Nothing {
+            return None;
+        }
+        let rty = self.info.ty(recv);
+        // Bound extension reference: the extension is a lifted static `name(recv, args…)`. Capture the
+        // receiver; the metafactory binds it and `invoke(args)` supplies the rest (same as a local-fun
+        // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter).
+        if let Some(&fid) = self.ext_fun_ids.get(&(rty.descriptor(), name.to_string())) {
+            let cap = self.expr(recv)?;
+            return Some(self.ir.add_expr(IrExpr::Lambda {
+                impl_fn: fid,
+                arity: params.len() as u8,
+                captures: vec![cap],
+                sam: None,
+                inline_body: None,
+            }));
+        }
+        // Bound member reference on a user-class receiver: synthesize `(recv, args…) -> recv.name(args…)`
+        // and capture the receiver. (Library-type members aren't IR classes → `resolve_method` fails.)
+        let internal = rty.obj_internal()?.to_string();
+        let (class_id, index, _fid, _ret) = self.resolve_method(&internal, name)?;
+        let cap = self.expr(recv)?;
+        let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
+        let arg_vs: Vec<Option<u32>> = (0..params.len() as u32)
+            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1))))
+            .collect();
+        let mc = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv_v,
+            args: arg_vs,
+        });
+        let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![ret_e],
+            value: None,
+        });
+        // Name with the ref's globally-unique AST expr id (not the per-function `lambda_seq`): two
+        // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
+        let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
+        let mut impl_params: Vec<IrType> = vec![ty_to_ir(rty)];
+        impl_params.extend(params.iter().map(|t| ty_to_ir(*t)));
+        let bfid = self.ir.add_fun(IrFunction {
+            name: impl_name,
+            params: impl_params,
+            ret: ty_to_ir(ret),
+            body: Some(block),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        Some(self.ir.add_expr(IrExpr::Lambda {
+            impl_fn: bfid,
+            arity: params.len() as u8,
+            captures: vec![cap],
+            sam: None,
+            inline_body: None,
+        }))
+    }
+
     /// For an unqualified call inside an inner class, resolve `name` as an ENCLOSING method (reached
     /// through `this$0`). Returns `(method_class, method_index, method_fid, inner_class_id)`.
     fn inner_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
@@ -9083,7 +9156,13 @@ impl<'a> Lower<'a> {
                 };
                 let arity = sig.params.len();
                 if let Some(recv) = receiver {
-                    return self.lower_method_ref(recv, &name, &sig.params, sig.ret);
+                    // `lower_method_ref` handles Name receivers (bound local/object, unbound class). An
+                    // arbitrary expression receiver (`"abc"::get`, `1::foo`) or a bound extension falls
+                    // through to `lower_bound_expr_ref`, which evaluates+captures the receiver once.
+                    if let Some(r) = self.lower_method_ref(recv, &name, &sig.params, sig.ret) {
+                        return Some(r);
+                    }
+                    return self.lower_bound_expr_ref(e, recv, &name, &sig.params, sig.ret);
                 }
                 // Local function reference `::localFun` (the checker mapped this ref to its decl): a
                 // closure over the lifted static method, capturing the same outer locals the method

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1572 OK / 0 FAIL** (scanned 7351, Phase 416).
+  repo's `compiler/testData/codegen/box`). Current gate: **1576 OK / 0 FAIL** (scanned 7351, Phase 417).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P41 — bound callable references on an expression receiver (gate 1572 → 1576, +4, FAIL=0).**
+  A bound reference whose receiver is an arbitrary EXPRESSION (`1::foo`, `mk()::dbl`), not just an
+  in-scope name. The receiver is evaluated once and captured. Two cases: (a) a bound EXTENSION function
+  (`expr::extFun`) reuses the lifted static `extFun(recv, args…)` as the closure `impl_fn` with the
+  receiver as the sole capture (same metafactory trick as a local-fun ref); (b) a bound MEMBER on a
+  user-class receiver synthesizes `(recv, args…) -> recv.m(args…)`. Resolve types both as
+  `(method/ext args) -> ret` (receiver bound) via `method_of` / `ext_funs` keyed by the receiver's
+  erased descriptor. Library-type members (`"abc"::get`) still skip (not IR classes). FIX during
+  bring-up: two OVERLOADED enclosing functions share `cur_fn_name`, so the synthesized impl name must
+  use the ref's globally-unique AST expr id, not the per-function `lambda_seq` (a `ClassFormatError:
+  Duplicate method name` otherwise). New `bound_expr_ref_e2e` (ext on `Int`, member on `mk()`, and the
+  overloaded-enclosing-fn no-clash case). +4 corpus, all real `box()=="OK"`.
 - **Phase P40 — local function references `::localFun` (gate 1566 → 1572, +6, FAIL=0).** A reference to
   a local function (`fun inc(x) = …; ::inc`) was rejected. It lowers to a closure over the function's
   lifted static method: the checker maps the ref to the local fun's decl (reusing `local_call_map`, the
