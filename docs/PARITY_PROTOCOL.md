@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 425).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 426).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P49 — coroutine stdlib type resolution: `kotlin.*` wins ambiguous simple names + default-import
+  packages in the generic import machinery (gate 1610 → 1611, +1, FAIL=0).** `kotlin.coroutines.Continuation`
+  and `kotlin.Result` (and `CoroutineContext`) didn't resolve as types — even fully-qualified — because the
+  classpath simple-name index PRUNES ambiguous names, and Java 25's jimage adds `jdk/internal/vm/Continuation`,
+  `com/sun/.../Continuation`, plus several `Result` classes → "Continuation"/"Result" pruned. Both ARE in
+  the stdlib jar (verified). Two fixes, both mirroring kotlinc's resolution model (a bare name resolves
+  against default-import packages + imports, NOT every classpath class): (1) the type index now PREFERS a
+  `kotlin/*` type over a non-kotlin one on a simple-name clash (kotlinc default-imports `kotlin.*`, so the
+  kotlin type wins its bare name) — fixes the signature-collection resolver `ty_of_ref`; (2) the generic
+  import machinery (`imported_type_internal`, used by `check_file`'s `resolve_ty`) now also consults
+  Kotlin's fixed DEFAULT_IMPORT_PACKAGES list + the file's wildcard imports, verifying existence via the
+  federated `resolve_type` — no global-index reliance. This unblocks coroutine-stdlib TYPE resolution (the
+  first of the coroutine-cluster chain; `Result.success` companion + helper-source injection + `Continuation`
+  impl remain). FOLLOW-UP (owner-directed): retire the index `kotlin/*`-precedence patch by making
+  `ty_of_ref` use the same generic import machinery (default imports + wildcards), so NO global every-class
+  simple-name index is consulted — the fully faithful model.
 - **Phase P48 — member property-read inference via federated resolution (gate 1610 → 1610, +0, FAIL=0).**
   Completes P46: `infer_lit_ty_p`'s property-read arm (`s.length`, `list.size`, `vc.value`) now resolves
   through the FEDERATED source too — `String`/`CharSequence` members via the source's builtin-member API

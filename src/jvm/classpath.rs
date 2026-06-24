@@ -1029,7 +1029,21 @@ fn register_class_name(
     }
     match idx.class_names.get(simple) {
         Some(existing) if existing != internal => {
-            ambiguous.insert(simple.to_string());
+            // A `kotlin/*` type WINS its simple name over a non-kotlin one — mirrors kotlinc, where the
+            // `kotlin.*` packages are default-imported, so `Continuation` means `kotlin/coroutines/
+            // Continuation`, not the JVM's `jdk/internal/vm/Continuation`. Only a clash between two
+            // same-tier (both `kotlin/*`, or both non-kotlin) types is genuinely ambiguous → pruned.
+            let existing_kotlin = existing.starts_with("kotlin/");
+            let new_kotlin = internal.starts_with("kotlin/");
+            if new_kotlin && !existing_kotlin {
+                idx.class_names
+                    .insert(simple.to_string(), internal.to_string());
+                ambiguous.remove(simple);
+            } else if existing_kotlin && !new_kotlin {
+                // keep the kotlin winner already recorded
+            } else {
+                ambiguous.insert(simple.to_string());
+            }
         }
         Some(_) => {}
         None => {
