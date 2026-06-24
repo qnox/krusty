@@ -346,8 +346,12 @@ pub struct Param {
     /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
     pub default: Option<ExprId>,
     /// Simple names of annotations applied to the parameter (`@IntroducedAt("1") b: String` →
-    /// `["IntroducedAt"]`). Annotation arguments are discarded. Used by the compiler-extension surface.
+    /// `["IntroducedAt"]`). Used by the compiler-extension surface.
     pub annotations: Vec<String>,
+    /// The argument expressions of each annotation in `annotations` (same order/length): an extension
+    /// that needs an annotation's value (`@SerialName("foo")`) reads `annotation_args[i][0]`. An empty
+    /// inner vec for a no-arg annotation.
+    pub annotation_args: Vec<Vec<ExprId>>,
 }
 
 #[derive(Clone, Debug)]
@@ -411,6 +415,13 @@ pub struct PropParam {
     /// Default value (`class C(val x: Int = 5)`). Used to synthesize a no-arg constructor when
     /// all primary-constructor parameters have defaults.
     pub default: Option<ExprId>,
+    /// Simple names of annotations on this constructor parameter (`@SerialName("x") val a` →
+    /// `["SerialName"]`); empty for none. Read by the compiler-extension surface.
+    pub annotations: Vec<String>,
+    /// The argument expressions of each annotation in `annotations` (same order/length) — kept so an
+    /// extension can const-fold a value (`@SerialName("$prefix.bar")`). Empty inner vec for a no-arg
+    /// annotation.
+    pub annotation_args: Vec<Vec<ExprId>>,
 }
 
 #[derive(Clone, Debug)]

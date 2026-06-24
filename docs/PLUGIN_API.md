@@ -422,12 +422,13 @@ resolution, the encode/decode plumbing, and the erased-generic-member-return inf
 `constValInSerialName, contextualByDefault, inlineClasses, intrinsicsNonReified,
 intrinsicsStarProjections, multiFieldValueClasses, polymorphic, starProjectionsSealed, uuidSerializer`.
 
-Of those 9, runtime `box()` status: **1 is a single feature from green** — `constValInSerialName`
-encode/decodes correctly but emits `{"bar":...}` instead of `{"foo.bar":...}` because `@SerialName` is
-not applied to the descriptor element name (needs annotation-ARGUMENT capture: the parser currently
-records annotation *names* only, `Vec<String>`, discarding args — a parser→AST→IR→plugin feature, plus
-const-template folding for `@SerialName("$prefix.bar")`). The other 8 fail at runtime needing custom/
-polymorphic/sealed/value-class serializers or reflection.
+Of those 9, runtime `box()` status: **`constValInSerialName` now PASSES** (the first fully-green corpus
+file) — `@SerialName` support landed: the parser now captures annotation ARGUMENT expressions (alongside
+names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lower` const-folds the value
+(`@SerialName("$prefix.bar")` with `const val prefix` → `"foo.bar"`, depth-bounded against cyclic
+`const val`s) into `IrClass.serial_names`, and the serialization plugin uses it for the descriptor
+element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
+value-class serializers or reflection.
 
 First-blocker histogram for the 38 that DON'T compile (top entries): `unresolved 'Encoder'`/`'Decoder'`
 (7 — custom `KSerializer` objects, also need interface-body abstract members), `elementDescriptors`/

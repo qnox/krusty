@@ -364,6 +364,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
+                serial_names: serial_names_of(file, c),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -727,6 +728,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             if !c.companion_methods.is_empty() && c.companion_props.is_empty() {
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
+                    serial_names: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -1890,6 +1892,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let entry_name = &c.enum_entries[ei];
                         let sub_fq = format!("{internal}${entry_name}");
                         let sub_id = lo.ir.add_class(IrClass {
+                            serial_names: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -3487,6 +3490,7 @@ impl<'a> Lower<'a> {
         let n_fields = fields.len();
         let class = IrClass {
             fq_name: internal.clone(),
+            serial_names: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![None; n_fields],
@@ -4936,6 +4940,7 @@ impl<'a> Lower<'a> {
         };
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
+            serial_names: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],
@@ -5199,6 +5204,7 @@ impl<'a> Lower<'a> {
         let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
+            serial_names: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],
@@ -13108,6 +13114,67 @@ fn descriptor_has_byte_or_short_param(desc: &str) -> bool {
 /// not compared with `subject == cond`.
 fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
+}
+
+/// Const-fold an annotation argument expression to a String: a string literal, a `const val` name, or a
+/// string template whose interpolations are themselves const-foldable (`"$prefix.bar"` with
+/// `const val prefix = "foo"` → `"foo.bar"`). `None` for anything not statically a string.
+fn const_string_value(file: &ast::File, e: AstExprId) -> Option<String> {
+    const_string_value_d(file, e, 0)
+}
+
+/// `depth` bounds the recursion through `const val` references so a cyclic chain
+/// (`const val a = b; const val b = a`) terminates with `None` instead of overflowing the stack.
+fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    match file.expr(e) {
+        Expr::StringLit(s) => Some(s.clone()),
+        Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
+        Expr::Template(parts) => {
+            let mut out = String::new();
+            for p in parts {
+                match p {
+                    TemplatePart::Str(s) => out.push_str(s),
+                    TemplatePart::Expr(x) => {
+                        out.push_str(&const_string_value_d(file, *x, depth + 1)?)
+                    }
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// The string value of a top-level property `name` whose initializer const-folds to a string
+/// (`const val prefix = "foo"`), or `None`. (krusty's parser doesn't currently retain the `const`
+/// modifier on a top-level `val`, so this matches any top-level property with a foldable string init —
+/// safe, since only literals/foldable templates fold.)
+fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    file.decls.iter().find_map(|&d| match file.decl(d) {
+        Decl::Property(p) if p.name == name => p
+            .init
+            .and_then(|i| const_string_value_d(file, i, depth + 1)),
+        _ => None,
+    })
+}
+
+/// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
+/// (const-folded). Empty when none — the serialization extension reads this to name descriptor elements.
+fn serial_names_of(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, String)> {
+    c.props
+        .iter()
+        .filter_map(|p| {
+            let i = p.annotations.iter().position(|a| a == "SerialName")?;
+            let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
+            Some((p.name.clone(), const_string_value(file, *arg)?))
+        })
+        .collect()
 }
 
 fn is_const_literal(file: &ast::File, e: AstExprId) -> bool {

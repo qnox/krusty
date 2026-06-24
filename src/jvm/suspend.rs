@@ -1750,6 +1750,7 @@ fn build_continuation_class(
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
         fq_name: internal.to_string(),
+        serial_names: Vec::new(),
         is_value: false,
         type_param_bounds: vec![],
         field_type_params,
