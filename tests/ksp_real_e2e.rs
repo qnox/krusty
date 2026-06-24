@@ -250,6 +250,23 @@ fn real_ksp_processor_from_jar_generates_code() {
         content.contains("properties=[a, b]"),
         "processor inspected Foo's real properties via KSP symbol API; got:\n{content}"
     );
+    // Broader KSP case matrix, all surfaced into the generated file by the processor:
+    assert!(
+        content.contains("option.greeting=hi-from-krusty"),
+        "SymbolProcessorEnvironment.options"
+    );
+    assert!(
+        content.contains("firstPropType=kotlin.Int"),
+        "type resolution (KSType.resolve)"
+    );
+    assert!(
+        content.contains("byName=Foo"),
+        "Resolver.getClassDeclarationByName"
+    );
+    assert!(
+        content.contains("supers=[kotlin.Any]"),
+        "resolved supertypes"
+    );
 
     // 6b. MULTI-ROUND: FooBuilderValidator exists only if the round-1-generated FooBuilder (carrying
     // @Validate) was re-fed and processed in a later round — Foo itself has no @Validate.
