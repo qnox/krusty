@@ -269,10 +269,32 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .filter(|p| p.delegate.is_some())
                 .map(|p| (format!("{}$delegate", p.name), info.ty(p.delegate.unwrap())))
                 .collect();
+            // Interface delegation `: I by d` whose delegate `d` is a NON-`val` constructor parameter has
+            // no backing field — kotlinc synthesizes a `private final $$delegate_<i>` (i = delegation index)
+            // holding it, stored in the ctor. (A `val`-param delegate already has its own field.)
+            let ctor_prop_names: std::collections::HashSet<&str> = c
+                .props
+                .iter()
+                .filter(|p| p.is_property)
+                .map(|p| p.name.as_str())
+                .collect();
+            let iface_delegate_fields: Vec<(String, Ty)> = c
+                .delegations
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, d))| !ctor_prop_names.contains(d.as_str()))
+                .filter_map(|(i, (_, d))| {
+                    c.props
+                        .iter()
+                        .find(|p| &p.name == d)
+                        .map(|p| (format!("$$delegate_{i}"), ty_of(file, &p.ty)))
+                })
+                .collect();
             let fields: Vec<(String, Ty)> = ctor_fields
                 .into_iter()
                 .chain(body_fields)
                 .chain(delegate_fields.iter().cloned())
+                .chain(iface_delegate_fields.iter().cloned())
                 .collect();
             // Field indices backing a `lateinit var` (matched by name in the final `fields`, so any
             // `this$0` offset is handled). The backend null-checks every read of these fields.
@@ -312,6 +334,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             );
             // Parallel `None` for each synthetic `x$delegate` field (concrete delegate type, no type-param).
             field_type_params.extend(delegate_fields.iter().map(|_| None));
+            // Parallel `None` for each synthetic interface-delegation `$$delegate_N` field.
+            field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
             let class_ty = IrType::Class {
                 fq_name: internal.clone(),
                 type_args: vec![],
@@ -694,6 +718,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 dispatch_receiver: Some(internal.clone()),
                                 param_checks: vec![],
                             });
+                            // `var x = …; private set` — the setter is emitted `private`.
+                            if c.body_props.iter().any(|p| {
+                                &p.name == pname && p.setter.as_ref().is_some_and(|s| s.is_private)
+                            }) {
+                                lo.ir.private_methods.insert(fid);
+                            }
                             if let Some(tp) = field_tp.get(pname) {
                                 lo.ir.signatures.insert(
                                     fid,
@@ -1573,7 +1603,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // with NO primary constructor the init steps run inside each `super(…)`-reaching secondary
                 // constructor instead (lowered there, in that ctor's own value space) — skip here.
                 let has_delegated = c.body_props.iter().any(|p| p.delegate.is_some());
-                if (!c.init_order.is_empty() || has_delegated) && c.has_primary_ctor {
+                // Interface delegation `: I by d` whose `d` is a NON-`val` param needs a `$$delegate_<i>`
+                // field store in the ctor.
+                let has_iface_synth_delegate = c
+                    .delegations
+                    .iter()
+                    .any(|(_, d)| !c.props.iter().any(|p| p.is_property && &p.name == d));
+                if (!c.init_order.is_empty() || has_delegated || has_iface_synth_delegate)
+                    && c.has_primary_ctor
+                {
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
                     let _ = ctor_count;
@@ -1598,6 +1636,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
                     let mut stmts = Vec::new();
+                    // Interface-delegation `$$delegate_<i>` stores (`this.$$delegate_i = <delegate param>`),
+                    // first in the ctor body (kotlinc stores them right after `super()`).
+                    for (di, (_iface, dname)) in c.delegations.iter().enumerate() {
+                        if c.props.iter().any(|p| p.is_property && &p.name == dname) {
+                            continue; // a `val`-param delegate has its own auto-stored field
+                        }
+                        let synth = format!("$$delegate_{di}");
+                        let fidx = lo.ir.classes[class_id as usize]
+                            .fields
+                            .iter()
+                            .position(|(n, _)| n == &synth)?
+                            as u32;
+                        let (pv, _) = lo.lookup(dname)?;
+                        let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                        let val_e = lo.ir.add_expr(IrExpr::GetValue(pv));
+                        let sf = lo.ir.add_expr(IrExpr::SetField {
+                            receiver: this_e,
+                            class: class_id,
+                            index: fidx,
+                            value: val_e,
+                        });
+                        stmts.push(sf);
+                    }
                     for step in &c.init_order {
                         match step {
                             ast::ClassInit::PropInit(i) => {
@@ -2244,7 +2305,9 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
         && p.getter.is_none()
-        && p.setter.is_none()
+        // A visibility-only setter (`var x = 1; private set`, no body) is still a plain backing field — the
+        // only difference is the setter's access flag (handled at emit). A setter with a BODY is not plain.
+        && p.setter.as_ref().is_none_or(|s| s.body.is_none())
         && p.init.is_some()
 }
 
@@ -4060,13 +4123,37 @@ impl<'a> Lower<'a> {
         internal: &str,
         class_id: ClassId,
     ) -> Option<()> {
-        for (iface_name, delegate) in &c.delegations {
-            let delegate_idx = self
-                .classes
-                .get(internal)?
-                .fields
-                .iter()
-                .position(|(n, _)| n == delegate)? as u32;
+        for (di, (iface_name, delegate)) in c.delegations.iter().enumerate() {
+            // A `val`-param delegate has its own field (`a`); a non-`val` param uses the synthesized
+            // `$$delegate_<di>` (see field synthesis + the ctor store).
+            let is_synth = !c.props.iter().any(|p| p.is_property && &p.name == delegate);
+            // For the NEWLY-enabled non-`val` path only, bail (skip, never miscompile) on two shapes the
+            // method-only forwarder can't model — leaving the long-standing `val`-param path untouched: an
+            // interface with PROPERTIES (its `getX`/`setX` would go un-forwarded → `AbstractMethodError`),
+            // and a GENERIC interface (`A<Long, Int>` needs substituted-type bridges — a raw erased forward
+            // mis-coerces args, e.g. `Int`→`Long`).
+            if is_synth {
+                if self
+                    .syms
+                    .classes
+                    .get(iface_name)
+                    .is_some_and(|s| !s.props.is_empty())
+                {
+                    return None;
+                }
+                if file.decls.iter().any(|&d| {
+                    matches!(file.decl(d), Decl::Class(ic) if ic.name == *iface_name && !ic.type_params.is_empty())
+                }) {
+                    return None;
+                }
+            }
+            let synth_name = format!("$$delegate_{di}");
+            let delegate_idx =
+                self.classes
+                    .get(internal)?
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
             let iface_internal = class_internal(file, iface_name);
             let methods: Vec<(String, Vec<Ty>, Ty)> = self
                 .syms
