@@ -256,3 +256,71 @@ fn cross_file_class_construct_and_property_read() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A destructuring declaration `val (a, b) = c` where `c`'s class — with `operator fun componentN` —
+/// is defined in ANOTHER file of the same compilation. The componentN calls must resolve cross-file
+/// (`CrossFileVirtual`), like an ordinary cross-file instance call.
+#[test]
+fn cross_file_destructuring() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xdestr_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "class Pair2(val a: String, val b: String) {\n  operator fun component1() = a\n  operator fun component2() = b\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "fun box(): String {\n  val p = Pair2(\"O\", \"K\")\n  val (x, y) = p\n  return x + y\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .arg(dir.join("B.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-file destructure compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
