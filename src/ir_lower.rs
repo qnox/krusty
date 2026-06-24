@@ -10448,6 +10448,23 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // No-receiver `run { … }` (the stdlib `inline fun <R> run(block: () -> R): R =
+                    // block()`): inline the lambda body directly as the value. The receiver scope
+                    // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
+                    // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
+                    if fname == "run"
+                        && args.len() == 1
+                        && self.lookup(&fname).is_none()
+                        && !self.module_declares(&fname)
+                    {
+                        if let Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() {
+                            if params.is_empty()
+                                && !body_has_labeled_return(self.afile, body, "run")
+                            {
+                                return self.expr(body);
+                            }
+                        }
+                    }
                     // A call to a lifted local function — the checker mapped this call to its decl.
                     // Prepend the captured outer locals (the enclosing scope holds each captured var's
                     // value, or its `Ref` holder when boxed), then the declared arguments.

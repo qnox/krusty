@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1557 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1559 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P32 — no-receiver `run { … }` with a branchy body (gate 1557 → 1559, +2, FAIL=0).** The stdlib
+  `inline fun <R> run(block: () -> R): R = block()` (no receiver) is now intercepted in `ir_lower` and the
+  lambda body inlined directly as the value — like the receiver scope fns (`x.let`/`with(x)`). Previously
+  it fell to the bytecode splicer, which bails on a branchy body (`run { if … }` / `run { when … }` →
+  "emit bailed"). Guarded to the simple shape (no params, no `return@run`). New `run_noreceiver_e2e`.
 - **Phase P31 — smart-cast within an `||` condition (gate 1557, FAIL=0; correctness, gate-neutral).**
   Completes P30: in `a || b`, the RHS is reached when `a` is FALSE, so it gets `a`'s NEGATED narrowing —
   `x !is String || x.length != 1` (reaching the RHS means `x` IS a `String`). The `&&`/`||` checker arm now
