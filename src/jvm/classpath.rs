@@ -1027,6 +1027,14 @@ fn register_class_name(
     if simple.contains('$') || simple == "module-info" || simple == "package-info" {
         return;
     }
+    // A fully-qualified type reference (`kotlin.time.TimeSource`) resolves WITHOUT an import — Kotlin
+    // always permits the fully-qualified name. Register the dotted FQ form → internal; it is unique
+    // (one class per FQ name), so it never participates in the simple-name ambiguity pruning.
+    if internal.contains('/') {
+        idx.class_names
+            .entry(internal.replace('/', "."))
+            .or_insert_with(|| internal.to_string());
+    }
     match idx.class_names.get(simple) {
         Some(existing) if existing != internal => {
             // A `kotlin/*` type WINS its simple name over a non-kotlin one — mirrors kotlinc, where the
@@ -1342,5 +1350,57 @@ fn scan_types_jimage(
         let internal = format!("{parent}/{}", read_str(base));
         let _ = m;
         register_class_name(&internal, idx, ambiguous);
+    }
+}
+
+#[cfg(test)]
+mod fq_tests {
+    use super::*;
+
+    #[test]
+    fn registers_fully_qualified_name() {
+        let mut idx = TypeIndex::default();
+        let mut amb = std::collections::HashSet::new();
+        register_class_name("kotlin/time/TimeSource", &mut idx, &mut amb);
+        // Both the simple name AND the dotted fully-qualified name resolve to the internal — a FQ type
+        // reference needs no import.
+        assert_eq!(
+            idx.class_names.get("TimeSource").map(String::as_str),
+            Some("kotlin/time/TimeSource")
+        );
+        assert_eq!(
+            idx.class_names
+                .get("kotlin.time.TimeSource")
+                .map(String::as_str),
+            Some("kotlin/time/TimeSource")
+        );
+        // A second class with the same simple name: the simple name is contested (here `kotlin/*` wins,
+        // mirroring kotlinc's default imports), but each distinct FQ name stays independently resolvable.
+        register_class_name("com/example/TimeSource", &mut idx, &mut amb);
+        assert_eq!(
+            idx.class_names
+                .get("com.example.TimeSource")
+                .map(String::as_str),
+            Some("com/example/TimeSource")
+        );
+        assert_eq!(
+            idx.class_names
+                .get("kotlin.time.TimeSource")
+                .map(String::as_str),
+            Some("kotlin/time/TimeSource")
+        );
+
+        // Two genuinely ambiguous (same-tier) simple names ARE pruned, yet both FQ names still resolve.
+        register_class_name("a/b/Widget", &mut idx, &mut amb);
+        register_class_name("c/d/Widget", &mut idx, &mut amb);
+        assert!(amb.contains("Widget"), "same-tier simple name is ambiguous");
+        assert_eq!(
+            idx.class_names.get("a.b.Widget").map(String::as_str),
+            Some("a/b/Widget")
+        );
+        assert_eq!(
+            idx.class_names.get("c.d.Widget").map(String::as_str),
+            Some("c/d/Widget")
+        );
     }
 }
