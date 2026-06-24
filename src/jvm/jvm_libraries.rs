@@ -640,6 +640,14 @@ impl SymbolSource for JvmLibraries {
                 }
             }
         }
+        // `Pair`/`Triple` are auto-imported `kotlin.*` classes constructed directly (`Pair(a, b)`), but
+        // the classpath scan indexes them by FQ name only (they're otherwise reached via `to`), so seed
+        // the simple-name → internal mapping (classpath entries above still take precedence).
+        for (name, internal) in [("Pair", "kotlin/Pair"), ("Triple", "kotlin/Triple")] {
+            class_names
+                .entry(name.to_string())
+                .or_insert_with(|| internal.to_string());
+        }
         let pair = (
             std::rc::Rc::new(class_names),
             std::rc::Rc::new(idx.type_aliases.clone()),
