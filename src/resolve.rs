@@ -401,15 +401,48 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
     }
 }
 
-/// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
+/// Map a file's EXPLICIT imports `simple name -> internal name` (e.g. `Calc -> util/Calc`). A
+/// wildcard import (`a.b.*`) has no simple name — those go to [`import_wildcards`].
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for fq in &file.imports {
+        if fq.ends_with(".*") {
+            continue;
+        }
         if let Some(simple) = fq.rsplit('.').next() {
             m.insert(simple.to_string(), fq.replace('.', "/"));
         }
     }
     m
+}
+
+/// The packages Kotlin imports by DEFAULT into every file, as internal names — kotlinc's fixed list for
+/// the JVM target. A bare type name resolves against these (plus the file's own imports + same package),
+/// NOT against every class on the classpath. (`kotlin.coroutines` is NOT here — it needs an explicit
+/// import, matching kotlinc.)
+pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
+    "kotlin",
+    "kotlin/annotation",
+    "kotlin/collections",
+    "kotlin/comparisons",
+    "kotlin/io",
+    "kotlin/ranges",
+    "kotlin/sequences",
+    "kotlin/text",
+    "kotlin/jvm",
+    "java/lang",
+];
+
+/// A file's wildcard-import packages as internal names (`import kotlin.coroutines.*` →
+/// `"kotlin/coroutines"`), PLUS Kotlin's default-import packages — so a bare type name resolves through
+/// the generic import machinery against exactly the packages kotlinc would consult, instead of a global
+/// every-class simple-name index (which falsely collides `Continuation` with `jdk/internal/vm/...`).
+pub fn import_wildcards(file: &File) -> Vec<String> {
+    file.imports
+        .iter()
+        .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
+        .chain(DEFAULT_IMPORT_PACKAGES.iter().map(|s| s.to_string()))
+        .collect()
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -2586,6 +2619,7 @@ struct Local {
 
 pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> TypeInfo {
     let imports = import_map(file);
+    let import_wildcards = import_wildcards(file);
     let mut c = Checker {
         file,
         syms,
@@ -2594,6 +2628,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
         imports,
+        import_wildcards,
         tparams: Default::default(),
         this_ty: None,
         field_ty: None,
@@ -3069,6 +3104,7 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     imports: HashMap<String, String>,
+    import_wildcards: Vec<String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The type of `this` when checking class members (`None` at top level).
@@ -3189,6 +3225,25 @@ impl<'a> Checker<'a> {
     /// Build a class reference type, carrying any generic arguments from the syntactic type
     /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
     /// descriptors but let the front end recover member/element types.
+    /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
+    /// the classpath — covering names the global simple-name index dropped as ambiguous (e.g.
+    /// `Continuation`). Checks the explicit import first, then each wildcard-imported package. Existence
+    /// is verified via the federated source's `resolve_type` (no guessing a non-existent `Obj`).
+    fn imported_type_internal(&self, name: &str) -> Option<String> {
+        if let Some(internal) = self.imports.get(name) {
+            if self.syms.libraries.resolve_type(internal).is_some() {
+                return Some(internal.clone());
+            }
+        }
+        for pkg in &self.import_wildcards {
+            let cand = format!("{pkg}/{name}");
+            if self.syms.libraries.resolve_type(&cand).is_some() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
     fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
         if r.targs.is_empty() {
             Ty::obj(internal)
@@ -3246,6 +3301,11 @@ impl<'a> Checker<'a> {
                 Some(prim) => Ty::from_name(prim).unwrap_or(Ty::Error),
                 None => self.obj_with_targs(&internal, r),
             }
+        } else if let Some(internal) = self.imported_type_internal(&r.name) {
+            // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
+            // index — either never registered or pruned because it's ambiguous across the whole classpath
+            // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
+            self.obj_with_targs(&internal, r)
         } else {
             Ty::Error
         };
