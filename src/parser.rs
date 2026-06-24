@@ -2312,7 +2312,9 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'object'
         let name = self.ident_or_error("object name");
-        let _ = self.parse_supertypes(); // tolerate (ignore) an object's supertype list
+        // Capture the object's implemented INTERFACES (`object X : KSerializer<C>`) so they're emitted;
+        // a base-class supertype is still tolerated/ignored (objects don't get super-ctor handling yet).
+        let (supertypes, _base_class, _base_args, _delegations) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
@@ -2414,7 +2416,7 @@ impl<'a> Parser<'a> {
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
-            supertypes: Vec::new(),
+            supertypes,
             delegations: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
