@@ -195,6 +195,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "inline"),
                         mods.iter().any(|m| m == "final"),
                         mods.iter().any(|m| m == "suspend"),
+                        mods.iter().any(|m| m == "tailrec"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     let id = self.file.add_decl(Decl::Fun(d));
@@ -677,6 +678,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "inline"),
                         mods.iter().any(|m| m == "final"),
                         mods.iter().any(|m| m == "suspend"),
+                        mods.iter().any(|m| m == "tailrec"),
                     );
                     d.is_private = mods.iter().any(|m| m == "private");
                     methods.push(d);
@@ -778,6 +780,7 @@ impl<'a> Parser<'a> {
                                 bmods.iter().any(|m| m == "inline"),
                                 bmods.iter().any(|m| m == "final"),
                                 bmods.iter().any(|m| m == "suspend"),
+                                bmods.iter().any(|m| m == "tailrec"),
                             ));
                         } else {
                             self.diags.error(
@@ -817,6 +820,7 @@ impl<'a> Parser<'a> {
                         emods.iter().any(|m| m == "inline"),
                         emods.iter().any(|m| m == "final"),
                         emods.iter().any(|m| m == "suspend"),
+                        emods.iter().any(|m| m == "tailrec"),
                     )),
                     // Nested type declarations and secondary constructors in an enum body: parse
                     // them through the real grammar (no token-skipping) and discard — krusty doesn't
@@ -949,7 +953,13 @@ impl<'a> Parser<'a> {
         s
     }
 
-    fn parse_fun(&mut self, is_inline: bool, is_final: bool, is_suspend: bool) -> FunDecl {
+    fn parse_fun(
+        &mut self,
+        is_inline: bool,
+        is_final: bool,
+        is_suspend: bool,
+        is_tailrec: bool,
+    ) -> FunDecl {
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -984,6 +994,7 @@ impl<'a> Parser<'a> {
                 is_final: false,
                 is_private: false,
                 is_suspend: false,
+                is_tailrec: false,
             };
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
@@ -1073,6 +1084,7 @@ impl<'a> Parser<'a> {
             is_final,
             is_private: false,
             is_suspend,
+            is_tailrec,
         }
     }
 
@@ -1259,9 +1271,12 @@ impl<'a> Parser<'a> {
                 let is_abstract = mods.iter().any(|m| m == "abstract");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => {
-                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
-                    }
+                    TokenKind::KwFun => methods.push(self.parse_fun(
+                        fun_inline,
+                        fun_final,
+                        fun_suspend,
+                        mods.iter().any(|m| m == "tailrec"),
+                    )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         // Non-abstract body props may omit the initializer (init blocks supply the
                         // value); an `abstract` property has no field and is marked accordingly.
@@ -1569,6 +1584,7 @@ impl<'a> Parser<'a> {
                             imods.iter().any(|m| m == "inline"),
                             false,
                             imods.iter().any(|m| m == "suspend"),
+                            imods.iter().any(|m| m == "tailrec"),
                         );
                         methods.push(f);
                     }
@@ -1664,9 +1680,12 @@ impl<'a> Parser<'a> {
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => {
-                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
-                    }
+                    TokenKind::KwFun => methods.push(self.parse_fun(
+                        fun_inline,
+                        fun_final,
+                        fun_suspend,
+                        mods.iter().any(|m| m == "tailrec"),
+                    )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
                             lateinit,
@@ -1798,9 +1817,12 @@ impl<'a> Parser<'a> {
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
-                    TokenKind::KwFun => {
-                        methods.push(self.parse_fun(fun_inline, fun_final, fun_suspend))
-                    }
+                    TokenKind::KwFun => methods.push(self.parse_fun(
+                        fun_inline,
+                        fun_final,
+                        fun_suspend,
+                        mods.iter().any(|m| m == "tailrec"),
+                    )),
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let p = self.parse_top_property_c(
                             lateinit,
@@ -2554,7 +2576,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwFun => {
                 // Local functions don't carry a `suspend` modifier through this path; a local
                 // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
-                let f = self.parse_fun(false, false, false);
+                let f = self.parse_fun(false, false, false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             _ => {
@@ -4285,9 +4307,10 @@ const BP_PREFIX: u8 = 13;
 /// cleanly onto an abstract, open class (see the top-level dispatch), so ignoring its
 /// exhaustiveness aspect never miscompiles.
 fn is_modifier(text: &str) -> bool {
-    // NOTE: `tailrec`/`external` are deliberately excluded — ignoring them changes semantics
-    // (no tail-call optimization → stack overflow; no native body), which would *miscompile*
-    // rather than skip. Leaving them unrecognized makes such declarations cleanly unsupported.
+    // NOTE: `external` is deliberately excluded — ignoring it (no native body) would *miscompile*
+    // rather than skip. `tailrec` IS recognized: the lowerer rewrites the tail self-calls into a loop
+    // (so deep recursion doesn't overflow); a non-tail-optimizable `tailrec` falls back to plain
+    // recursion (kotlinc warns; same runtime for the shallow cases).
     matches!(
         text,
         "public"
@@ -4303,6 +4326,7 @@ fn is_modifier(text: &str) -> bool {
             | "operator"
             | "override"
             | "suspend"
+            | "tailrec"
             | "lateinit"
             | "infix"
             | "reified"

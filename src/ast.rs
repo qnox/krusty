@@ -381,6 +381,9 @@ pub struct FunDecl {
     /// `kotlin.coroutines.Continuation` parameter is appended and the return type erases to
     /// `java.lang.Object` (a leaf function with no suspension point needs no state machine).
     pub is_suspend: bool,
+    /// `tailrec` modifier — a self-recursive function whose tail calls the lowerer rewrites into a loop
+    /// (param reassignment + `continue`), so deep recursion doesn't overflow the stack.
+    pub is_tailrec: bool,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
