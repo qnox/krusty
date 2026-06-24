@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 423).
+  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 424).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P47 — faithful K2 backend-mute directive semantics (gate 1610 → 1610, +0, FAIL=0).** krusty
+  targets Kotlin 2.4.0 = the **K2 frontend** + JVM_IR backend, so the conformance harness mutes tests as
+  kotlinc's K2 runner does: honor `// IGNORE_BACKEND` (all frontends), `// IGNORE_BACKEND_K2
+  [_MULTI_MODULE]`, and `// DONT_TARGET_EXACT_BACKEND` for JVM_IR — but NOT `// IGNORE_BACKEND_K1` (mutes
+  only the OLD K1 frontend). Previously `IGNORE_BACKEND_K1` was wrongly excluded, under-counting: those
+  ~270 tests were marked not-applicable when they ARE in scope for krusty's K2 semantics. Now attempted;
+  all currently skip as unsupported (none miscompile — FAIL stays 0), so OK is unchanged but the harness
+  faithfully matches kotlinc's backend applicability. Shared `conformance::backend_applicable` keeps the
+  gate + survey in lockstep.
 - **Phase P46 — member return-type inference via federated resolution (no hardcoded names); shared
   conformance directives (gate 1592 → 1610, +18, FAIL=0).** Two related fixes:
   (1) `infer_lit_ty_p` (the signature-collection pre-pass that infers an expression-bodied member's
