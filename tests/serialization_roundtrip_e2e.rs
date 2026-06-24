@@ -114,7 +114,8 @@ fn serializable_class_encode_round_trips() {
             jimage.clone(),
         ]));
         let src = "@Serializable class Foo(val a: Int, val b: String)\n\
-                   @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)";
+                   @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)\n\
+                   @Serializable class Wide(val big: Long, val d: Double, val tag: String)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -163,6 +164,11 @@ fun box(): String {
     val rj = Json.encodeToString(rs, Rich(7, true, 2.5f, "hi"))
     val rb = Json.decodeFromString(rs, rj)
     if (rb.n != 7 || !rb.flag || rb.ratio != 2.5f || rb.name != "hi") return "RICH FAIL: $rj -> ${rb.n},${rb.flag},${rb.ratio},${rb.name}"
+    // 2-slot types: Long + Double (verifies field-local slot widths in decode).
+    val ws = Wide.serializer() as KSerializer<Wide>
+    val wj = Json.encodeToString(ws, Wide(9000000000L, 3.5, "z"))
+    val wb = Json.decodeFromString(ws, wj)
+    if (wb.big != 9000000000L || wb.d != 3.5 || wb.tag != "z") return "WIDE FAIL: $wj -> ${wb.big},${wb.d},${wb.tag}"
     return "OK"
 }
 fun main() { println(box()) }
