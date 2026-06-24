@@ -64,6 +64,11 @@ points so a port maps method-for-method:
 bodies) — matching kotlinc's phase ordering, so a plugin can rely on another's supertypes being in
 place before its declarations run.
 
+Phase separation is a **convention, not a structural guarantee**: every hook gets `&mut IrFile`, so
+nothing stops `generate_declarations` from rewriting a body. This mirrors kotlinc (FIR/IR extensions
+also get broad access) and is deliberate — the phase ordering, not a capability sandbox, is the
+contract. A future tightening could pass a phase-scoped facade instead of raw `&mut IrFile`.
+
 `PluginContext` carries the annotation index (`ClassId → applied annotation FqNames`). In this PoC
 it is a **side table** because `IrClass` does not yet store applied annotations (only known-flag
 bools like `is_data`). The production integration is one field:
@@ -81,12 +86,28 @@ this PoC to avoid editing every `IrClass` struct-literal site (the gate stays `0
 `@Serializable class Foo(val a: Int, val b: String)` → the PoC synthesizes the structure kotlinc's
 serialization plugin emits:
 
-- a nested `Foo$serializer` **object** implementing `kotlinx/serialization/KSerializer` with
-  `getDescriptor`, `serialize`, `deserialize`, `childSerializers`;
-- the `Foo.Companion.serializer()` accessor.
+- a nested `Foo$serializer` **object** implementing `kotlinx/serialization/KSerializer<Foo>` with
+  `getDescriptor`, `serialize`, `deserialize`, `childSerializers` (decl phase);
+- a static `serializer()` accessor whose body reads the `Foo$serializer.INSTANCE` singleton (decl
+  phase; kotlinc places it on `Foo.Companion`);
+- `childSerializers` filled (body phase) with a **real array of one element serializer per property**
+  — its length tracks the field list and each element names that field's serializer
+  (`kotlin/Int` → `…builtins/IntSerializer`, a nested `@Serializable` type → its own `$serializer`);
+- a `write$Self` helper whose **name is version-dependent** (see Versioning below).
 
-Bodies call the **real published `kotlinx-serialization-core`** runtime (`Encoder`/`Decoder`/
-`SerialDescriptor`) — only codegen is native. This is the template for porting any FIR/IR plugin.
+`serialize`/`deserialize` bodies are placeholder `return`s in the PoC — in production they call the
+**real published `kotlinx-serialization-core`** runtime (`Encoder`/`Decoder`/`SerialDescriptor`).
+Only codegen is native. This is the template for porting any FIR/IR plugin.
+
+#### Versioning — codegen follows the target runtime
+
+The serialization plugin takes a target ABI version (`SerializationAbi`) + module name, exactly as
+krusty itself is pinned to a kotlinc version. The synthesized member shape changed across releases —
+e.g. the per-class write helper is unmangled `write$Self` on core `< 1.6` but module-mangled
+`write$Self$<module>` on core `>= 1.6` (Kotlin `>= 1.8.20`). Generated code that doesn't match the
+linked runtime is a **runtime linkage error**, so version-aware codegen is mandatory, not cosmetic.
+The PoC demonstrates the branch on the write-helper name; a full port carries a codegen profile per
+supported runtime version, validated by the differential harness against each.
 
 ## World 2 — codegen host (`ksp`)
 
@@ -110,7 +131,49 @@ PoC pieces (Rust stand-ins for the JVM shim boundary):
 
 The sample chain proves multi-round feedback: `@GenerateBuilder` → a `*Builder` annotated
 `@GenerateValidator` → a `*Validator`; round 3 finds nothing new → terminate. This is the shape of
-Dagger/Micronaut codegen where one generated type triggers another processor.
+Dagger/Micronaut codegen where one generated type triggers another processor. A `with_max_rounds`
+backstop caps a non-converging chain deterministically (committing each round's work, then stopping).
+
+### Versioning — KSP is tied to the kotlinc version
+
+KSP ships **per Kotlin compiler version**: artifacts are coordinated `<kotlin>-<ksp>` (e.g.
+`2.0.21-1.0.28`), and KSP's behavior depends on the compiler it embeds. So the sidecar toolchain is
+*determined by* the kotlinc version krusty targets — not chosen independently. The build resolves the
+pair from its dependency manifest and pins the host (`KspHost::for_toolchain`); krusty bakes **no**
+kotlin→ksp table (same no-hardcoded-lists rule as the rest of the compiler). The host only guarantees
+the spawned sidecar uses exactly that pair, and `KspToolchain::is_consistent` catches a manifest where
+the KSP coordinate isn't prefixed by its Kotlin version before a mismatched sidecar emits wrong symbols.
+
+### Interaction model — how the host drives real JVM processors
+
+krusty is Rust; a real processor is JVM bytecode needing a live JVM + the KSP API. A JVM **sidecar**
+is mandatory; the question is how thick the bridge. Two strategies:
+
+- **A. Orchestrator** — the sidecar runs **real KSP + the Kotlin Analysis API over the same source**
+  krusty compiles; krusty only spawns it, points it at the source + classpath, and ingests the
+  generated sources (re-parse → fixpoint). **Zero type-system reimplementation, full fidelity.** Cost:
+  the JVM re-parses source once (for KSP only, not codegen).
+- **B. Native shim** — a shim JAR implements KSP's `Resolver`/`KSClassDeclaration`/`KSType` backed by
+  krusty's serialized symbol model (this is the boundary the PoC models). No re-parse, but krusty must
+  reimplement enough Kotlin **type-system** ops (`isAssignableFrom`, variance, type args) to satisfy
+  processors — the exact divergence-from-kotlinc risk krusty fights elsewhere, and it needs the full
+  generic type model first.
+
+**Decision is driven by the build mode:**
+
+| | CI (one-shot, cold) | Dev loop (repeated) |
+|---|---|---|
+| warm daemon / incremental cache | useless (process dies, cold checkout) | big win |
+| orchestrator double-parse | paid once → fine | per-build cost |
+| recommendation | **A (orchestrator)** | A, or B if double-parse latency hurts |
+
+CI is the primary target → ship **A**. Cold-run cost is `JVM_start + max(krusty_compile, KSP_run) +
+recompile_generated`; attack it with: a shipped **CDS/AOT archive** of the fixed KSP+analysis stack
+(dominant cold cost; GraalVM native-image is out — processor JARs load at runtime via ServiceLoader +
+reflection), **overlapping** KSP with krusty's own compile, an **annotation-presence gate** (never
+spawn the JVM when no registered processor's trigger annotation appears), and **native frameworks
+bypassing the JVM entirely** (serialization/Compose are native passes — only true APs spin a sidecar).
+Drop daemon/incremental/zero-copy machinery for CI; it's dev-loop tooling.
 
 ## The AST/signature layer is dual-use: KSP *and* a future LSP
 

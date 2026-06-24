@@ -15,6 +15,37 @@
 
 use crate::ir::IrFile;
 
+/// KSP is released **per Kotlin compiler version** — artifacts are coordinated `<kotlin>-<ksp>`
+/// (e.g. `2.0.21-1.0.28`) and KSP's behavior depends on the compiler it embeds. So the sidecar's
+/// toolchain is *determined by* the kotlinc version krusty targets, not chosen independently.
+///
+/// The pair is RESOLVED BY THE BUILD (the dependency manifest pins both), then handed to the host —
+/// krusty bakes no kotlin→ksp table (same rule as the rest of the compiler). The host's only job is
+/// to guarantee the spawned sidecar uses exactly this pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspToolchain {
+    pub kotlin_version: String,
+    pub ksp_version: String,
+}
+
+impl KspToolchain {
+    pub fn new(kotlin_version: impl Into<String>, ksp_version: impl Into<String>) -> Self {
+        Self {
+            kotlin_version: kotlin_version.into(),
+            ksp_version: ksp_version.into(),
+        }
+    }
+
+    /// Sanity check the build-resolved pair is internally consistent: a KSP coordinate is prefixed by
+    /// the Kotlin version it targets (`2.0.21-1.0.28` ← Kotlin `2.0.21`). Catches a misconfigured
+    /// manifest before a version-mismatched sidecar produces subtly wrong symbols.
+    pub fn is_consistent(&self) -> bool {
+        self.ksp_version
+            .strip_prefix(&self.kotlin_version)
+            .is_some_and(|rest| rest.starts_with('-'))
+    }
+}
+
 /// A source location, so the symbol view can answer go-to-def for an LSP. (`u32` line/col keep it
 /// `Copy` and index-based, per krusty conventions.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,6 +160,9 @@ pub struct KspResult {
 pub struct KspHost {
     processors: Vec<Box<dyn SymbolProcessor>>,
     max_rounds: u32,
+    /// The build-resolved Kotlin/KSP toolchain the sidecar must run. `None` in the pure in-process
+    /// PoC (no real sidecar); `Some` once wired to spawn the version-matched JVM.
+    toolchain: Option<KspToolchain>,
 }
 
 impl KspHost {
@@ -136,7 +170,27 @@ impl KspHost {
         Self {
             processors: Vec::new(),
             max_rounds: 100,
+            toolchain: None,
         }
+    }
+
+    /// Pin the host to the build-resolved toolchain (tied to krusty's targeted kotlinc version).
+    pub fn for_toolchain(toolchain: KspToolchain) -> Self {
+        Self {
+            toolchain: Some(toolchain),
+            ..Self::new()
+        }
+    }
+
+    pub fn toolchain(&self) -> Option<&KspToolchain> {
+        self.toolchain.as_ref()
+    }
+
+    /// Lower the round backstop — for tests, and for a CI policy that caps a misbehaving processor
+    /// chain rather than letting it run away.
+    pub fn with_max_rounds(mut self, max_rounds: u32) -> Self {
+        self.max_rounds = max_rounds;
+        self
     }
 
     pub fn register(&mut self, p: Box<dyn SymbolProcessor>) {
@@ -172,15 +226,18 @@ impl KspHost {
             if fresh.is_empty() {
                 break; // fixpoint reached
             }
-            if rounds >= self.max_rounds {
-                break; // backstop against a non-terminating processor chain
-            }
 
+            // Commit this round's output, then enforce the backstop — so a capped run still keeps
+            // the work it did rather than discarding the final round.
             for f in &fresh {
                 seen_files.push(f.name.clone());
                 symbols.extend(f.declares.iter().cloned()); // re-resolve: generated symbols join the view
             }
             generated.extend(fresh);
+
+            if rounds >= self.max_rounds {
+                break; // backstop against a non-terminating processor chain
+            }
         }
 
         KspResult { generated, rounds }
@@ -328,6 +385,74 @@ mod tests {
             classes_before,
             "codegen never mutates input IR"
         );
+    }
+
+    #[test]
+    fn generates_one_builder_per_annotated_class() {
+        let mut ir = IrFile::default();
+        let mut ctx = PluginContext::default();
+        for name in ["demo/A", "demo/B", "demo/C"] {
+            let id = ir.add_class(synthetic_class(name));
+            ctx.class_annotations
+                .insert(id, vec![GEN_BUILDER.to_string()]);
+        }
+        let mut host = KspHost::new();
+        host.register(Box::new(BuilderProcessor));
+        let result = host.run(symbols_from_ir(&ir, &ctx));
+        let mut names: Vec<&str> = result.generated.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["demo/ABuilder", "demo/BBuilder", "demo/CBuilder"]
+        );
+    }
+
+    /// A processor whose generated class re-triggers the SAME annotation would never converge — the
+    /// `max_rounds` backstop must stop it deterministically rather than hang.
+    struct RunawayProcessor;
+    impl SymbolProcessor for RunawayProcessor {
+        fn process(&mut self, resolver: &Resolver, gen: &mut CodeGenerator) {
+            for c in resolver.get_symbols_with_annotation(GEN_BUILDER) {
+                let next = format!("{}X", c.fq_name);
+                gen.create_new_file(
+                    &next,
+                    "/* generated */",
+                    vec![KsClass {
+                        fq_name: next.clone(),
+                        annotations: vec![GEN_BUILDER.to_string()], // re-triggers itself forever
+                        properties: Vec::new(),
+                        span: SourceSpan::default(),
+                    }],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runaway_chain_stops_at_max_rounds() {
+        let (ir, ctx) = annotated_foo();
+        let mut host = KspHost::new().with_max_rounds(5);
+        host.register(Box::new(RunawayProcessor));
+        let result = host.run(symbols_from_ir(&ir, &ctx));
+        assert_eq!(result.rounds, 5, "backstop caps a non-converging chain");
+        // Each productive round emits exactly one new file; the final (capped) round is productive too.
+        assert_eq!(result.generated.len(), 5);
+    }
+
+    #[test]
+    fn toolchain_is_pinned_and_consistency_checked() {
+        // KSP version is tied to the kotlinc version; the build resolves the pair and pins the host.
+        let tc = KspToolchain::new("2.0.21", "2.0.21-1.0.28");
+        assert!(
+            tc.is_consistent(),
+            "ksp coordinate is prefixed by its kotlin version"
+        );
+        let host = KspHost::for_toolchain(tc.clone());
+        assert_eq!(host.toolchain(), Some(&tc));
+
+        // A mismatched manifest (ksp built for a different kotlin) is caught.
+        let bad = KspToolchain::new("2.4.0", "2.0.21-1.0.28");
+        assert!(!bad.is_consistent());
     }
 
     #[test]
