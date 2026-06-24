@@ -1198,11 +1198,13 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let mut pmods = Vec::new();
+            let mut pannos = Vec::new();
             // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers.
             if self.at(TokenKind::At)
                 || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value")
             {
                 pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
+                pannos = self.take_pending_annotations();
             }
             let is_vararg = pmods.iter().any(|m| m == "vararg");
             let pname = if self.at(TokenKind::Ident) {
@@ -1226,6 +1228,7 @@ impl<'a> Parser<'a> {
                 ty,
                 is_vararg,
                 default,
+                annotations: pannos,
             });
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
@@ -4721,6 +4724,35 @@ mod tests {
         assert!(
             anns("B").is_empty(),
             "annotation must not leak to the next function"
+        );
+    }
+
+    #[test]
+    fn captures_parameter_annotations() {
+        // Parameter annotations are captured on Param (e.g. Compose's `@IntroducedAt`), arguments
+        // discarded, and don't leak to the next parameter.
+        let mut d = DiagSink::new();
+        let src = "fun f(a: Int, @IntroducedAt(\"1\") b: String = \"x\", c: Boolean) {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+        let params = file
+            .decl_arena
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Fun(f) if f.name == "f" => Some(f.params.clone()),
+                _ => None,
+            })
+            .expect("fun f not found");
+        assert!(params[0].annotations.is_empty(), "a: no annotations");
+        assert_eq!(
+            params[1].annotations,
+            vec!["IntroducedAt".to_string()],
+            "b: @IntroducedAt captured (arg discarded)"
+        );
+        assert!(
+            params[2].annotations.is_empty(),
+            "c: annotation must not leak from b"
         );
     }
 
