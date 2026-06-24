@@ -16,7 +16,7 @@
 //!     published `kotlinx-serialization-core` runtime (`Encoder`/`Decoder`/`SerialDescriptor`); the
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
-use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrFunction, IrType};
+use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrType};
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
@@ -223,6 +223,37 @@ impl IrPlugin for SerializationPlugin {
             ser.interfaces = vec![KSERIALIZER_FQ.to_string()];
             ser.supertypes = vec![kserializer_of(class_ty(&class_fq))];
             ser.methods = vec![descriptor, serialize, deserialize, child];
+            // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
+            // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
+            // and delegates to the concrete `Foo`-typed override.
+            ser.bridges = vec![
+                crate::ir::Bridge {
+                    name: "serialize".to_string(),
+                    erased_params: vec![
+                        class_ty("kotlinx/serialization/encoding/Encoder"),
+                        class_ty("kotlin/Any"),
+                    ],
+                    erased_ret: unit(),
+                    concrete_params: vec![
+                        class_ty("kotlinx/serialization/encoding/Encoder"),
+                        class_ty(&class_fq),
+                    ],
+                    concrete_ret: unit(),
+                    target_name: None,
+                    box_ret: None,
+                    unbox_params: Vec::new(),
+                },
+                crate::ir::Bridge {
+                    name: "deserialize".to_string(),
+                    erased_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
+                    erased_ret: class_ty("kotlin/Any"),
+                    concrete_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
+                    concrete_ret: class_ty(&class_fq),
+                    target_name: None,
+                    box_ret: None,
+                    unbox_params: Vec::new(),
+                },
+            ];
             let ser_id = ir.add_class(ser);
 
             // `serializer()` accessor — body reads the `$serializer` singleton (`Foo$serializer.INSTANCE`).
@@ -279,13 +310,55 @@ impl IrPlugin for SerializationPlugin {
             let Some(ser_idx) = ir.classes.iter().position(|c| c.fq_name == ser_fq) else {
                 continue;
             };
+            // The serialized class's ClassId (for constructing it in `deserialize`).
+            let foo_id = class_id;
+            let field_count = field_types.len();
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
-                    "serialize" | "deserialize" => {
+                    "getDescriptor" => {
+                        // Concrete stub for the emit diagnostic: return null. (The functional version
+                        // returns the `descriptor` field built from PluginGeneratedSerialDescriptor.)
+                        let n = ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let body = ir.add_expr(IrExpr::Block {
+                            stmts: vec![],
+                            value: Some(n),
+                        });
+                        ir.functions[fid as usize].body = Some(body);
+                    }
+                    "serialize" => {
                         let ret = ir.add_expr(IrExpr::Return(None));
                         let body = ir.add_expr(IrExpr::Block {
                             stmts: vec![ret],
                             value: None,
+                        });
+                        ir.functions[fid as usize].body = Some(body);
+                    }
+                    "deserialize" => {
+                        // Construct the class with default field values (concrete stub).
+                        let args: Vec<ExprId> = field_types
+                            .iter()
+                            .map(|ty| {
+                                let c = match ty {
+                                    IrType::Class { fq_name, .. } if fq_name == "kotlin/Int" => {
+                                        IrConst::Int(0)
+                                    }
+                                    IrType::Class { fq_name, .. } if fq_name == "kotlin/String" => {
+                                        IrConst::String(String::new())
+                                    }
+                                    _ => IrConst::Null,
+                                };
+                                ir.add_expr(IrExpr::Const(c))
+                            })
+                            .collect();
+                        let _ = field_count;
+                        let new = ir.add_expr(IrExpr::New {
+                            class: foo_id,
+                            args,
+                            ctor_params: None,
+                        });
+                        let body = ir.add_expr(IrExpr::Block {
+                            stmts: vec![],
+                            value: Some(new),
                         });
                         ir.functions[fid as usize].body = Some(body);
                     }
