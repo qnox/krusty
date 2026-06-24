@@ -394,6 +394,19 @@ sufficient** — the goal's "show the surface is enough" is demonstrated by two 
 executed tests (KSP-from-jar + functional serialization). The 69-corpus "all pass" is a separate
 language-coverage milestone, not an extension-surface gap.
 
+#### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
+`Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
+compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
+exercises the whole surface through krusty's own front end + backend: the plugin's `$serializer`, the
+`serializer()` accessor made checker-visible by a **signature phase** (resolve.rs adds a static
+`serializer(): KSerializer<C>` for `@Serializable`) + **static-call lowering** (`invokestatic
+C.serializer()` by signature; the plugin fills the method before emit), the **classpath
+companion-instance call** `Json.encodeToString` (= `Json.Default.encodeToString`), and **subtype-aware
+overload matching** (`KSerializer` ⊂ `SerializationStrategy`). DECODE next: `decodeFromString` returns
+`T` erased to `Any` — needs argument-based generic inference (`T` from the `DeserializationStrategy<T>`
+arg; krusty does receiver-based substitution today, not argument-based). Neither decode nor this encode
+milestone moves the 0/69 reflection/generics/sealed corpus — that remains the language roadmap above.
+
 #### Implemented so far (rounds 12–19, all gate-verified 0-FAIL, real JVM round-trips)
 Full primitive set (Int/Long/Boolean/Float/Double/String, incl. 2-slot locals) + **nested
 `@Serializable` composites** (`encodeSerializableElement`/`decodeSerializableElement` with the nested
