@@ -33,7 +33,357 @@ pub fn parse_with_features(
     p.parse_file();
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
+    rewrite_anon_captures(&mut p.file);
     p.file
+}
+
+/// Whether `body` is the FunBody root expression (an `=`-body or a block).
+fn fun_body_root(body: &FunBody) -> Option<ExprId> {
+    match body {
+        FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+        FunBody::None => None,
+    }
+}
+
+/// Whether `t` (or any of its type arguments / function-type parts) names one of `tps`.
+fn type_ref_mentions(t: &TypeRef, tps: &std::collections::HashSet<String>) -> bool {
+    tps.contains(&t.name)
+        || t.arg.as_deref().is_some_and(|a| type_ref_mentions(a, tps))
+        || t.targs.iter().any(|a| type_ref_mentions(a, tps))
+        || t.fun_params.iter().any(|a| type_ref_mentions(a, tps))
+}
+
+/// Names BOUND inside the anonymous class `did` (its constructor properties, body properties, and the
+/// names/params of its methods) — references to these are NOT captures of the enclosing scope.
+fn anon_bound_names(file: &File, did: DeclId) -> std::collections::HashSet<String> {
+    let mut s = std::collections::HashSet::new();
+    if let Decl::Class(c) = file.decl(did) {
+        for p in &c.props {
+            s.insert(p.name.clone());
+        }
+        for bp in &c.body_props {
+            s.insert(bp.name.clone());
+        }
+        for m in &c.methods {
+            s.insert(m.name.clone());
+            for p in &m.params {
+                s.insert(p.name.clone());
+            }
+        }
+    }
+    s
+}
+
+/// A non-nullable, non-generic type reference to a simple type name (for a literal-inferred local).
+fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
+    TypeRef {
+        name: name.to_string(),
+        nullable: false,
+        arg: None,
+        targs: Vec::new(),
+        span,
+        fun_params: Vec::new(),
+        fun_has_receiver: false,
+        fun_suspend: false,
+    }
+}
+
+/// The type of a local whose initializer is a literal — recoverable WITHOUT inference. Returns `None`
+/// for any non-literal initializer (then the local is not a slice-1/2 capture candidate).
+fn literal_init_type(file: &File, init: ExprId) -> Option<TypeRef> {
+    let span = file.expr_spans[init.0 as usize];
+    let name = match file.expr(init) {
+        Expr::IntLit(_) => "Int",
+        Expr::LongLit(_) => "Long",
+        Expr::DoubleLit(_) => "Double",
+        Expr::FloatLit(_) => "Float",
+        Expr::BoolLit(_) => "Boolean",
+        Expr::CharLit(_) => "Char",
+        Expr::UIntLit(_) => "UInt",
+        Expr::ULongLit(_) => "ULong",
+        Expr::StringLit(_) | Expr::Template(_) => "String",
+        _ => return None,
+    };
+    Some(simple_type_ref(name, span))
+}
+
+/// Collect read-capturable LOCALS (`val`/`var name (: T)? = init`) declared anywhere in `root`, as
+/// (name, type) where the type is the explicit annotation or a literal-inferred type. A local with a
+/// non-literal, unannotated initializer is omitted (no inference available here).
+fn collect_locals(file: &File, root: ExprId, out: &mut Vec<(String, TypeRef)>) {
+    if let Expr::Block { stmts, .. } = file.expr(root) {
+        for &s in stmts {
+            if let Stmt::Local { name, ty, init, .. } = file.stmt(s) {
+                if let Some(t) = ty.clone().or_else(|| literal_init_type(file, *init)) {
+                    out.push((name.clone(), t));
+                }
+            }
+        }
+    }
+    let cell = std::cell::RefCell::new(out);
+    file.any_child_expr(
+        root,
+        &mut |c| {
+            collect_locals(file, c, &mut cell.borrow_mut());
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_locals(file, c, &mut cell.borrow_mut());
+                false
+            });
+            false
+        },
+    );
+}
+
+/// Whether the anonymous class `did`'s body WRITES the name `n` (`n = …` / `n++`). A written capture
+/// needs a shared `Ref` cell (kotlinc's boxing) to stay observable in the enclosing scope — not modeled
+/// in this slice — so such a name is NOT captured by value.
+fn anon_body_writes(file: &File, did: DeclId, n: &str) -> bool {
+    let Decl::Class(c) = file.decl(did) else {
+        return false;
+    };
+    fn writes(file: &File, root: ExprId, n: &str) -> bool {
+        let here = matches!(file.expr(root), Expr::Block { stmts, .. }
+            if stmts.iter().any(|&s| matches!(file.stmt(s),
+                Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } if name == n)));
+        if here {
+            return true;
+        }
+        let found = std::cell::RefCell::new(false);
+        file.any_child_expr(
+            root,
+            &mut |c| {
+                if writes(file, c, n) {
+                    *found.borrow_mut() = true;
+                }
+                false
+            },
+            &mut |s| {
+                file.any_child_stmt(s, &mut |c| {
+                    if writes(file, c, n) {
+                        *found.borrow_mut() = true;
+                    }
+                    false
+                });
+                false
+            },
+        );
+        found.into_inner()
+    }
+    let in_method = c
+        .methods
+        .iter()
+        .filter_map(|m| fun_body_root(&m.body))
+        .any(|root| writes(file, root, n));
+    let in_prop = c
+        .body_props
+        .iter()
+        .filter_map(|p| p.init)
+        .any(|init| writes(file, init, n));
+    let in_super = c.base_args.iter().any(|&a| writes(file, a, n));
+    in_method || in_prop || in_super
+}
+
+/// Whether the anonymous class `did`'s body (method bodies, body-property initializers, super-call
+/// arguments) reads the name `n`.
+fn anon_body_uses(file: &File, did: DeclId, n: &str) -> bool {
+    let Decl::Class(c) = file.decl(did) else {
+        return false;
+    };
+    let in_method = c
+        .methods
+        .iter()
+        .filter_map(|m| fun_body_root(&m.body))
+        .any(|root| crate::resolve::expr_uses_name_pub(file, root, n));
+    let in_prop = c
+        .body_props
+        .iter()
+        .filter_map(|p| p.init)
+        .any(|init| crate::resolve::expr_uses_name_pub(file, init, n));
+    let in_super = c
+        .base_args
+        .iter()
+        .any(|&a| crate::resolve::expr_uses_name_pub(file, a, n));
+    in_method || in_prop || in_super
+}
+
+/// Collect the `ExprId`s of zero-argument constructions of an anonymous class (`Call{Name(anon), []}`)
+/// reachable from `root`, paired with the anon class name.
+fn collect_anon_calls(
+    file: &File,
+    root: ExprId,
+    anon: &std::collections::HashMap<String, DeclId>,
+    out: &mut Vec<(ExprId, String)>,
+) {
+    if let Expr::Call { callee, args } = file.expr(root) {
+        if args.is_empty() {
+            if let Expr::Name(name) = file.expr(*callee) {
+                if anon.contains_key(name) {
+                    out.push((root, name.clone()));
+                }
+            }
+        }
+    }
+    let cell = std::cell::RefCell::new(out);
+    file.any_child_expr(
+        root,
+        &mut |c| {
+            collect_anon_calls(file, c, anon, &mut cell.borrow_mut());
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_anon_calls(file, c, anon, &mut cell.borrow_mut());
+                false
+            });
+            false
+        },
+    );
+}
+
+/// Slice 1 of anonymous-object capture. An `object : I { … }` expression is desugared (in
+/// `parse_anon_object`) to a hoisted top-level synth class + a no-argument construction, so a body that
+/// reads an enclosing local fails to resolve. This rewrite turns each captured enclosing-FUNCTION
+/// PARAMETER and read-only LOCAL into a constructor `val` property of the synth class and passes it at
+/// the construction — after which the ordinary class machinery resolves the body reference as a member
+/// and emits the field.
+///
+/// Captured types must be known WITHOUT inference: a parameter's declared type, or a local's explicit
+/// annotation / literal-inferred type. These stay unresolved (→ the file cleanly skips, never a
+/// miscompile) and are NOT captured: a name WRITTEN inside the anon (needs a shared `Ref` cell); a
+/// captured type that mentions an enclosing type parameter; an outer local with a non-literal,
+/// unannotated initializer.
+fn rewrite_anon_captures(file: &mut File) {
+    // anon class simple name -> its DeclId
+    let mut anon_by_name: std::collections::HashMap<String, DeclId> =
+        std::collections::HashMap::new();
+    for &d in &file.decls {
+        if let Decl::Class(c) = file.decl(d) {
+            if c.name.contains("$anon$") {
+                anon_by_name.insert(c.name.clone(), d);
+            }
+        }
+    }
+    if anon_by_name.is_empty() {
+        return;
+    }
+
+    // Each function body with its capturable (name, type) list — parameters plus read-capturable
+    // locals — and the enclosing type-parameter names.
+    type CaptureBody = (
+        Vec<(String, TypeRef)>,
+        std::collections::HashSet<String>,
+        ExprId,
+    );
+    let mut fn_bodies: Vec<CaptureBody> = Vec::new();
+    let mut push_body =
+        |params: Vec<(String, TypeRef)>, tps: std::collections::HashSet<String>, root: ExprId| {
+            let mut cands = params;
+            let mut locals = Vec::new();
+            collect_locals(file, root, &mut locals);
+            cands.extend(locals);
+            fn_bodies.push((cands, tps, root));
+        };
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => {
+                if let Some(root) = fun_body_root(&f.body) {
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.ty.clone()))
+                        .collect();
+                    let tps = f.type_params.iter().cloned().collect();
+                    push_body(params, tps, root);
+                }
+            }
+            Decl::Class(c) => {
+                let class_tps: std::collections::HashSet<String> =
+                    c.type_params.iter().cloned().collect();
+                for m in &c.methods {
+                    if let Some(root) = fun_body_root(&m.body) {
+                        let params = m
+                            .params
+                            .iter()
+                            .map(|p| (p.name.clone(), p.ty.clone()))
+                            .collect();
+                        let mut tps = class_tps.clone();
+                        tps.extend(m.type_params.iter().cloned());
+                        push_body(params, tps, root);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut class_caps: Vec<(DeclId, Vec<(String, TypeRef)>)> = Vec::new();
+    let mut call_args: Vec<(ExprId, Vec<String>)> = Vec::new();
+    for (params, tps, root) in &fn_bodies {
+        if params.is_empty() {
+            continue;
+        }
+        let mut calls: Vec<(ExprId, String)> = Vec::new();
+        collect_anon_calls(file, *root, &anon_by_name, &mut calls);
+        for (call_id, anon_name) in calls {
+            let did = anon_by_name[&anon_name];
+            let bound = anon_bound_names(file, did);
+            let mut caps: Vec<(String, TypeRef)> = Vec::new();
+            for (pn, pty) in params {
+                if bound.contains(pn) || type_ref_mentions(pty, tps) {
+                    continue;
+                }
+                if caps.iter().any(|(n, _)| n == pn) {
+                    continue; // a local shadowing a param — capture once
+                }
+                // A captured name WRITTEN inside the anon would need a shared `Ref` cell to stay
+                // observable in the enclosing scope (not modeled here) — capturing it by value would
+                // miscompile, so leave it (the reference stays unresolved → the file cleanly skips).
+                if anon_body_writes(file, did, pn) {
+                    continue;
+                }
+                if anon_body_uses(file, did, pn) {
+                    caps.push((pn.clone(), pty.clone()));
+                }
+            }
+            if caps.is_empty() {
+                continue;
+            }
+            call_args.push((call_id, caps.iter().map(|(n, _)| n.clone()).collect()));
+            class_caps.push((did, caps));
+        }
+    }
+
+    for (did, caps) in class_caps {
+        if let Decl::Class(c) = &mut file.decl_arena[did.0 as usize] {
+            for (name, ty) in caps {
+                if c.props.iter().any(|p| p.name == name) {
+                    continue;
+                }
+                c.props.push(PropParam {
+                    name,
+                    ty,
+                    is_var: false,
+                    is_property: true,
+                    default: None,
+                    annotations: Vec::new(),
+                    annotation_args: Vec::new(),
+                });
+            }
+        }
+    }
+    for (call_id, names) in call_args {
+        let span = file.expr_spans[call_id.0 as usize];
+        let arg_ids: Vec<ExprId> = names
+            .into_iter()
+            .map(|n| file.add_expr(Expr::Name(n), span))
+            .collect();
+        if let Expr::Call { args, .. } = &mut file.expr_arena[call_id.0 as usize] {
+            args.extend(arg_ids);
+        }
+    }
 }
 
 /// Hoist every local class (`class`/`interface`/… declared inside a function body, parsed as
