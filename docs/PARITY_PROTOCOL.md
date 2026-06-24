@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1726 OK / 0 FAIL** (scanned 7351, Phase 439).
+  repo's `compiler/testData/codegen/box`). Current gate: **1730 OK / 0 FAIL** (scanned 7351, Phase 440).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P63 — top-level `const val` visibility + cross-file const reads (gate 1726 → 1730, +4,
+  FAIL=0).** Two bugs. (1) The parser dispatched top-level `val`/`var` through `parse_top_property`
+  (not `_c`), so `is_const` was dropped — top-level `const val X = …` emitted a `private` field instead
+  of kotlinc's `public static final` + `ConstantValue`. Threaded `const` through the dispatch. (2)
+  Cross-file `const val` reads (`// FILE:` tests) routed through a `getX()` accessor that const fields
+  don't have (`NoSuchMethodError`). Now `is_const` is carried in `syms.props` (`(Ty,bool,bool)`) and
+  `syms.prop_facades` (`(String,Ty,bool,bool)`); a cross-file const read lowers to
+  `IrExpr::ExternalStaticField` (a direct `getstatic` of the public field) rather than a
+  `Callee::CrossFile` accessor call. Matches kotlinc: const reads are field accesses, not getters.
 
 - **Phase P62 — interface delegation through a non-`val` constructor parameter (gate 1723 → 1726, +3,
   FAIL=0).** `class C(a: I) : I by a` where `a` is a NON-`val` param had no backing field, so the forwarder
