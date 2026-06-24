@@ -4912,6 +4912,18 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        // Object/singleton method reference `O::m` → BOUND to the singleton instance,
+                        // so its arity is the method's own args (the receiver is captured, not a param).
+                        // The lowering captures `O.INSTANCE`.
+                        if self.lookup(&rn).is_none() && self.syms.objects.contains(&rn) {
+                            if let Some(cls) = self.syms.classes.get(&rn).cloned() {
+                                if let Some(sig) = cls.methods.get(&name).cloned() {
+                                    if !sig.vararg && sig.params.len() == sig.required {
+                                        return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if let Some(recv) = receiver {

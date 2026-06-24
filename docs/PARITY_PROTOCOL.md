@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1565 OK / 0 FAIL** (scanned 7351, Phase 414).
+  repo's `compiler/testData/codegen/box`). Current gate: **1566 OK / 0 FAIL** (scanned 7351, Phase 415).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P39 — object/singleton method references `O::m` (gate 1565 → 1566, +1, FAIL=0).** An
+  `O::method` where `O` is an `object` was rejected ("callable references are not supported" /
+  "unresolved reference 'O'") — the callable-ref resolver explicitly skipped objects. It's a BOUND
+  reference: the singleton is captured and the arity is the method's own args (the receiver is NOT a
+  parameter), so `O::dbl` types as `(Int) -> R`. Resolve: a receiver naming an object now types as
+  `Ty::fun(method params, ret)`. Lower (`lower_method_ref`): the captured receiver is the singleton
+  `getstatic O.INSTANCE` (`IrExpr::StaticInstance{field:"INSTANCE"}`) instead of a captured local;
+  `bound_capture` now carries the capture EXPR directly (local `GetValue` OR the static instance),
+  unifying the bound-local and bound-singleton paths. Unbound `Type::m` and bound `obj::m` unchanged.
+  New `object_method_ref_e2e` (singleton field access through the captured `this`, 1- and 2-arg, val
+  binding). Correctly verified at runtime (the corpus `+1` is a real `box()=="OK"`).
 - **Phase P38 — member expr-body return inference for `if`/`when` bodies (gate 1563 → 1565, +2,
   FAIL=0).** Extends P37: the lightweight member-signature inferer (`infer_lit_ty_p`) now types an
   `if`/`else` or `when` expression-body member (`fun absLike(x: Int) = if (x > 0) x else -x`,
