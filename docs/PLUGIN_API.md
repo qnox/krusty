@@ -403,7 +403,9 @@ builtin `{String,Int,Long,…}Serializer.INSTANCE`, encode+decode (present *and*
 `{"a":2,"b":null}` and all-null `{"a":null,"b":null,"c":null}` round-trip), arbitrary field count,
 plugin wired into the main compile path. (Nullable primitives are lowered to their boxed fq name —
 `Int?` → `java/lang/Integer` — so the getter/field/local are already references; `slot_width` accounts
-for boxed `Long?`/`Double?` being one slot, not two.)
+for boxed `Long?`/`Double?` being one slot, not two.) **Nullable nested composites (`Inner?`)** also
+round-trip — the nullable variant shares the non-nullable element call's descriptor, so it's a method
+name swap (`encode/decodeNullableSerializableElement`) over the nested `$serializer.INSTANCE`.
 
 #### The classpath static-field brick — BUILT (round 19)
 The previously-blocking gap ("no IR node to getstatic a *classpath* object's `INSTANCE`") is closed: a
