@@ -77,25 +77,32 @@ impl PluginContext {
     }
 
     /// Build the annotation index from the parsed source: each `IrClass` inherits the annotations the
-    /// AST captured on the matching `ClassDecl` (matched by simple name). This is how the surface is
-    /// driven from REAL `@Serializable`/`@…` in source — no manual injection. (Production would carry
-    /// the annotations on `IrClass` directly; matching by simple name keeps the change localized.)
+    /// AST captured on the matching `ClassDecl`. Matching is by **fully-qualified name** (the file's
+    /// package + the class simple name) compared to `IrClass.fq_name`, so two classes with the same
+    /// simple name in different packages don't cross-contaminate. This is how the surface is driven
+    /// from REAL `@Serializable`/`@…` in source — no manual injection. (Production would carry the
+    /// annotations on `IrClass` directly; this keeps the change localized.)
     pub fn from_source(file: &crate::ast::File, ir: &IrFile) -> PluginContext {
         use std::collections::HashMap;
-        let by_name: HashMap<&str, &Vec<String>> = file
+        let pkg_prefix = file
+            .package
+            .as_deref()
+            .map(|p| format!("{}/", p.replace('.', "/")))
+            .unwrap_or_default();
+        // Key by fully-qualified internal name (`pkg/Foo`), matching IrClass.fq_name exactly.
+        let by_fq: HashMap<String, &Vec<String>> = file
             .decl_arena
             .iter()
             .filter_map(|d| match d {
                 crate::ast::Decl::Class(c) if !c.annotations.is_empty() => {
-                    Some((c.name.as_str(), &c.annotations))
+                    Some((format!("{pkg_prefix}{}", c.name), &c.annotations))
                 }
                 _ => None,
             })
             .collect();
         let mut ctx = PluginContext::default();
         for (i, c) in ir.classes.iter().enumerate() {
-            let simple = c.fq_name.rsplit('/').next().unwrap_or(&c.fq_name);
-            if let Some(anns) = by_name.get(simple) {
+            if let Some(anns) = by_fq.get(&c.fq_name) {
                 ctx.class_annotations.insert(i as u32, (*anns).clone());
             }
         }
@@ -236,5 +243,45 @@ mod tests {
         host.run(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), 1);
         assert_eq!(ir.classes[0].fq_name, "demo/Generated");
+    }
+
+    #[test]
+    fn from_source_matches_by_fqname_not_simple_name() {
+        use crate::ast::{ClassDecl, Decl, File};
+        // Two classes, same simple name `Foo`, different packages — only the annotated one's IrClass
+        // must receive the annotation (no simple-name cross-contamination).
+        let mut file = File {
+            package: Some("a.b".to_string()),
+            ..File::default()
+        };
+        let annotated = ClassDecl {
+            name: "Foo".to_string(),
+            annotations: vec!["Serializable".to_string()],
+            ..blank_class("Foo")
+        };
+        file.decl_arena.push(Decl::Class(annotated));
+
+        let mut ir = IrFile::default();
+        let other = ir.add_class(synthetic_class("x/y/Foo")); // same simple name, different package
+        let target = ir.add_class(synthetic_class("a/b/Foo")); // the real one
+
+        let ctx = PluginContext::from_source(&file, &ir);
+        assert!(ctx.has_annotation(target, "Serializable"));
+        assert!(
+            !ctx.has_annotation(other, "Serializable"),
+            "annotation must not bleed onto a same-simple-name class in another package"
+        );
+    }
+
+    /// A `ClassDecl` with only the fields `from_source` reads (name + annotations) populated.
+    fn blank_class(name: &str) -> crate::ast::ClassDecl {
+        let src = format!("class {name}");
+        let mut d = crate::diag::DiagSink::new();
+        let toks = crate::lexer::lex(&src, &mut d);
+        let file = crate::parser::parse(&src, &toks, &mut d);
+        match file.decl_arena.into_iter().next() {
+            Some(crate::ast::Decl::Class(c)) => c,
+            _ => unreachable!(),
+        }
     }
 }

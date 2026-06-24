@@ -4602,6 +4602,52 @@ mod tests {
         );
     }
 
+    /// Annotation capture (drives the compiler-extension surface): the parser records applied
+    /// annotation simple names on a class, attached to the RIGHT declaration, excluding use-site ones.
+    #[test]
+    fn captures_class_annotations() {
+        let mut d = DiagSink::new();
+        let src = "@Serializable class Foo(val a: Int)\nclass Bar(val b: Int)";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+
+        let anns = |name: &str| {
+            file.decl_arena
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Class(c) if c.name == name => Some(c.annotations.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("class {name} not found"))
+        };
+        assert_eq!(anns("Foo"), vec!["Serializable".to_string()]);
+        assert!(
+            anns("Bar").is_empty(),
+            "annotation must not leak to the next class"
+        );
+    }
+
+    #[test]
+    fn use_site_annotations_excluded_from_capture() {
+        // A use-site `@file:`/`@get:` target annotation doesn't apply to the declaration.
+        let mut d = DiagSink::new();
+        let src = "@kotlinx.serialization.Serializable\nclass Q(val a: Int)";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+        let q = file
+            .decl_arena
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Class(c) if c.name == "Q" => Some(c.annotations.clone()),
+                _ => None,
+            })
+            .unwrap();
+        // Fully-qualified annotation is captured by its SIMPLE name.
+        assert_eq!(q, vec!["Serializable".to_string()]);
+    }
+
     #[test]
     fn receiver_function_type_param() {
         // A receiver (extension) function type `Recv.() -> R` parses by folding the receiver in as the
