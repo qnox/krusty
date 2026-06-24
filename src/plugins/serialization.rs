@@ -21,6 +21,7 @@ use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
+const GENERATED_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/GeneratedSerializer";
 
 /// The `kotlinx.serialization` runtime ABI the generated code must match. The synthesized member
 /// shape changed across releases, so the plugin emits *per target version* — exactly as krusty
@@ -576,7 +577,10 @@ impl IrPlugin for SerializationPlugin {
 
             let mut ser = synthetic_class(&ser_fq);
             ser.is_object = true; // `$serializer` is a singleton object (INSTANCE)
-            ser.interfaces = vec![KSERIALIZER_FQ.to_string()];
+                                  // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
+                                  // (we generate it) and a DEFAULT `typeParametersSerializers()`, and it lets the descriptor
+                                  // (built with `this` below) derive element descriptors for `getElementDescriptor`/introspection.
+            ser.interfaces = vec![GENERATED_SERIALIZER_FQ.to_string()];
             ser.supertypes = vec![kserializer_of(class_ty(&class_fq))];
             // A `descriptor` field (a `PluginGeneratedSerialDescriptor`), built in the object's <init>.
             ser.fields = vec![(
@@ -672,14 +676,16 @@ impl IrPlugin for SerializationPlugin {
             } else {
                 let pgsd_name =
                     ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
-                let pgsd_null = ir.add_expr(IrExpr::Const(IrConst::Null));
+                // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
+                // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
+                let pgsd_self = ir.add_expr(IrExpr::GetValue(0));
                 let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
                 let pgsd = ir.add_expr(IrExpr::NewExternal {
                     internal: pgsd_internal.to_string(),
                     ctor_desc:
                         "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V"
                             .to_string(),
-                    args: vec![pgsd_name, pgsd_null, pgsd_n],
+                    args: vec![pgsd_name, pgsd_self, pgsd_n],
                 });
                 let dvar = ir.add_expr(IrExpr::Variable {
                     index: 1,
@@ -1527,7 +1533,7 @@ mod tests {
 
         let ser = find_class(&ir, "demo/Foo$serializer");
         assert!(ser.is_object, "$serializer is a singleton object");
-        assert_eq!(ser.interfaces, vec![KSERIALIZER_FQ.to_string()]);
+        assert_eq!(ser.interfaces, vec![GENERATED_SERIALIZER_FQ.to_string()]);
         // supertype is KSerializer<Foo> (parameterized by the serialized type).
         match &ser.supertypes[0] {
             IrType::Class {
