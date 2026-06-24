@@ -241,6 +241,37 @@ fun box(): String {
 }
 
 #[test]
+fn serializable_with_object_serializer_in_krusty() {
+    // `@Serializable(with = MyObj::class)` where `MyObj` is a user `object : KSerializer<C>`:
+    // `C.serializer()` returns `MyObj.INSTANCE` (an object serializer has no ctor). Exercises a user
+    // object IMPLEMENTING a classpath generic interface (`object MyObj : KSerializer<C>` now emits
+    // `implements KSerializer` + its override members), and the with=-object accessor.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+
+object MyObj : KSerializer<C> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("my.C", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: C) { TODO() }
+    override fun deserialize(decoder: Decoder): C { TODO() }
+}
+@Serializable(MyObj::class)
+class C(val x: Int)
+fun box(): String =
+    if (C.serializer().descriptor.serialName == "my.C") "OK" else C.serializer().descriptor.serialName
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerWithObj") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "@Serializable(with=object) wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty @Serializable(with=object) OK");
+}
+
+#[test]
 fn custom_serializer_object_with_primitive_descriptor_in_krusty() {
     // A user `object X : KSerializer<T>` whose descriptor is `PrimitiveSerialDescriptor(name,
     // PrimitiveKind.STRING)` — exercising classpath nested-object value resolution (`PrimitiveKind.STRING`

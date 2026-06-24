@@ -378,35 +378,48 @@ fn inline_prim_methods(
 }
 
 impl SerializationPlugin {
-    /// Add `static serializer(): KSerializer<C>` returning a fresh instance of the explicit serializer
-    /// `X` from `@Serializable(with = X::class)`: `new X(Reflection.getOrCreateKotlinClass(C.class))`.
-    /// `ContextualSerializer`/`PolymorphicSerializer` (any serializer with a single `KClass` ctor) take
-    /// the serialized class's `KClass`; their descriptors carry the right `SerialKind`.
+    /// Add `static serializer(): KSerializer<C>` returning the explicit serializer `X` from
+    /// `@Serializable(with = X::class)`. An `object` serializer (`object Other : KSerializer<…>`) is its
+    /// `INSTANCE`; a class serializer (`ContextualSerializer`/`PolymorphicSerializer`, single `KClass`
+    /// ctor) is `new X(Reflection.getOrCreateKotlinClass(C.class))`.
     fn add_custom_serializer_accessor(
         ir: &mut IrFile,
         class_id: u32,
         class_fq: &str,
         custom: &str,
     ) {
-        let classlit = ir.add_expr(IrExpr::ClassConst {
-            internal: class_fq.to_string(),
-        });
-        let kclass = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: "kotlin/jvm/internal/Reflection".to_string(),
-                name: "getOrCreateKotlinClass".to_string(),
-                descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
-                inline: false,
-                must_inline: false,
-            },
-            dispatch_receiver: None,
-            args: vec![classlit],
-        });
-        let inst = ir.add_expr(IrExpr::NewExternal {
-            internal: custom.to_string(),
-            ctor_desc: "(Lkotlin/reflect/KClass;)V".to_string(),
-            args: vec![kclass],
-        });
+        // An OBJECT serializer has no public constructor — return its singleton `INSTANCE`.
+        let inst = if let Some(oid) = ir
+            .classes
+            .iter()
+            .position(|c| c.fq_name == custom && c.is_object)
+        {
+            ir.add_expr(IrExpr::StaticInstance {
+                owner: oid as u32,
+                ty: oid as u32,
+                field: "INSTANCE",
+            })
+        } else {
+            let classlit = ir.add_expr(IrExpr::ClassConst {
+                internal: class_fq.to_string(),
+            });
+            let kclass = ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: "kotlin/jvm/internal/Reflection".to_string(),
+                    name: "getOrCreateKotlinClass".to_string(),
+                    descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+                    inline: false,
+                    must_inline: false,
+                },
+                dispatch_receiver: None,
+                args: vec![classlit],
+            });
+            ir.add_expr(IrExpr::NewExternal {
+                internal: custom.to_string(),
+                ctor_desc: "(Lkotlin/reflect/KClass;)V".to_string(),
+                args: vec![kclass],
+            })
+        };
         let ret = ir.add_expr(IrExpr::Return(Some(inst)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
