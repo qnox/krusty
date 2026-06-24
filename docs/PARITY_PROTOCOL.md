@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1562 OK / 0 FAIL** (scanned 7351, Phase 412).
+  repo's `compiler/testData/codegen/box`). Current gate: **1563 OK / 0 FAIL** (scanned 7351, Phase 413).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P37 — member expr-body return inference for bitwise/shift infix calls (gate 1562 → 1563, +1,
+  FAIL=0).** A *member* (object/class) function with an expression body whose value is a builtin
+  bitwise/shift infix call — `fun packFast(…) = (r shl 0) or (g shl 8) or …` — wrongly inferred its
+  return type as `Unit`, then rejected the body with a spurious "expected 'Unit', actual 'Int'". The
+  lightweight member-signature inferer (`infer_lit_ty_p`) handled `this.m()`, primitive conversions and
+  `toString`, but not the infix desugaring `r shl 8` → `r.shl(8)`: on an `Int`/`Long` receiver, `shl`/
+  `shr`/`ushr`/`and`/`or`/`xor` (one arg) and `inv` (unary) now return the receiver's type — mirroring
+  the full checker's builtin-bitwise handling (`resolve.rs:6107`). Top-level functions already inferred
+  correctly (they use the full checker); only the member pre-pass was weaker. New
+  `member_infix_inference_e2e` (packed RGBA `Int`, `Long` mask, `inv`). Unblocks `arithmetic/github1856`;
+  the other "expected 'Unit', actual 'Int'" files carry further blockers (callable refs / inline classes).
 - **Phase P36 — `Unit`-returning `tailrec` → loop (gate 1562 → 1562, +0 corpus, FAIL=0).** Removes the
   P34 bail (`if ret_ty == Unit { return None }` — which dropped the whole file). A `Unit` body recurses
   with a bare *statement* (`if (c) f(args)` / `{ …; f(args) }`), never `return f(args)`, so the

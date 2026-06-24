@@ -2037,7 +2037,7 @@ fn infer_lit_ty_p(
         }
         // Constructor call `Foo(args)` — infer type from callee name via class_names (seeded from
         // classpath scan + user-defined classes).
-        Expr::Call { callee, .. } => {
+        Expr::Call { callee, args } => {
             match file.expr(*callee) {
                 Expr::Name(n) => {
                     // A call to a top-level function with a known return type (`val v = mk()`).
@@ -2064,6 +2064,20 @@ fn infer_lit_ty_p(
                     if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
                         if let Some(ret) = fun_rets.get(name.as_str()) {
                             return *ret;
+                        }
+                    }
+                    // Builtin bitwise/shift infix methods (`r shl 8` parses to `r.shl(8)`): on an
+                    // `Int`/`Long` receiver they return the receiver's type — mirrors the checker's
+                    // builtin handling. `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one arg.
+                    let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props);
+                    if matches!(rt, Ty::Int | Ty::Long) {
+                        if name == "inv" && args.is_empty() {
+                            return rt;
+                        }
+                        if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor")
+                            && args.len() == 1
+                        {
+                            return rt;
                         }
                     }
                 }
