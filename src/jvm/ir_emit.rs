@@ -1562,7 +1562,17 @@ fn emit_method(
             0
         }
     } else {
-        0x0019 // PUBLIC | STATIC | FINAL
+        // A `static` method is `public static final` (kotlinc) — EXCEPT on an interface, where a
+        // `final` static method is illegal (`ClassFormatError`); emit `public static`.
+        let owner_is_iface = ir
+            .classes
+            .iter()
+            .any(|o| o.fq_name == owner && o.is_interface);
+        if owner_is_iface {
+            0x0009 // PUBLIC | STATIC
+        } else {
+            0x0019 // PUBLIC | STATIC | FINAL
+        }
     };
     let signature = ir
         .signatures
@@ -2627,9 +2637,20 @@ impl<'a> Emitter<'a> {
                     let args = args.clone();
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let m = self
-                        .cw
-                        .methodref(&facade, &name, &method_descriptor(&param_tys, ret));
+                    let desc = method_descriptor(&param_tys, ret);
+                    // A static method declared on an INTERFACE (`@Serializable(with=X) interface I` whose
+                    // synthetic `serializer()` is static) needs an InterfaceMethodref constant, even for
+                    // `invokestatic` (else `IncompatibleClassChangeError`).
+                    let m = if self
+                        .ir
+                        .classes
+                        .iter()
+                        .any(|c| c.fq_name == facade && c.is_interface)
+                    {
+                        self.cw.interface_methodref(&facade, &name, &desc)
+                    } else {
+                        self.cw.methodref(&facade, &name, &desc)
+                    };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::Static {

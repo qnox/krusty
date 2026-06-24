@@ -389,6 +389,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 serial_names: serial_names_of(file, c),
+                custom_serializer: lo.custom_serializer_of(c),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -759,6 +760,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
                     serial_names: Vec::new(),
+                    custom_serializer: None,
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -1954,6 +1956,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sub_fq = format!("{internal}${entry_name}");
                         let sub_id = lo.ir.add_class(IrClass {
                             serial_names: Vec::new(),
+                            custom_serializer: None,
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -3554,6 +3557,7 @@ impl<'a> Lower<'a> {
         let class = IrClass {
             fq_name: internal.clone(),
             serial_names: Vec::new(),
+            custom_serializer: None,
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![None; n_fields],
@@ -4749,6 +4753,31 @@ impl<'a> Lower<'a> {
             })
     }
 
+    /// The internal name of an explicit serializer `X` from `@Serializable(with = X::class)` on class
+    /// `c`, or `None`. The arg is a class-literal `X::class` (`CallableRef{name:"class"}`); `X`'s
+    /// internal comes from the checker's type of the literal's receiver.
+    fn custom_serializer_of(&self, c: &ast::ClassDecl) -> Option<String> {
+        let i = c
+            .annotations
+            .iter()
+            .position(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))?;
+        let arg = c.annotation_args.get(i).and_then(|args| args.first())?;
+        // `X::class` — a class literal; annotation args aren't type-checked, so resolve `X`'s internal
+        // name from the symbol table (imports/classpath seed) rather than the checker's expr types.
+        if let Expr::CallableRef {
+            receiver: Some(r),
+            name,
+        } = self.afile.expr(*arg)
+        {
+            if name == "class" {
+                if let Expr::Name(x) = self.afile.expr(*r) {
+                    return self.syms.class_names.get(x).cloned();
+                }
+            }
+        }
+        None
+    }
+
     fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
         self.afile
             .decls
@@ -5149,6 +5178,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
             serial_names: Vec::new(),
+            custom_serializer: None,
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],
@@ -5413,6 +5443,7 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: synth_fq,
             serial_names: Vec::new(),
+            custom_serializer: None,
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],

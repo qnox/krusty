@@ -206,6 +206,41 @@ fun box(): String {
 }
 
 #[test]
+fn custom_serializer_with_clause_entirely_in_krusty() {
+    // `@Serializable(with = X::class)`: `serializer()` returns an instance of the explicit serializer X
+    // (`new X(C::class)`) instead of a generated `$serializer`, so its descriptor carries X's SerialKind.
+    // Mirrors the kotlinx `contextualByDefault` / `polymorphic` boxIr conformance cases. Also exercises a
+    // synthetic `static serializer()` on an INTERFACE (no illegal FINAL, InterfaceMethodref invokestatic).
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.ContextualSerializer
+import kotlinx.serialization.PolymorphicSerializer
+
+@Serializable(with = ContextualSerializer::class)
+class Ref(val id: String)
+
+@Serializable(with = PolymorphicSerializer::class)
+interface Poly
+
+fun box(): String {
+    val a = Ref.serializer().descriptor.kind.toString()
+    if (a != "CONTEXTUAL") return "Ref=$a"
+    val b = Poly.serializer().descriptor.kind.toString()
+    if (b != "OPEN") return "Poly=$b"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerCustom") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "@Serializable(with=) wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty @Serializable(with=) OK");
+}
+
+#[test]
 fn serializable_class_encodes_to_json_entirely_in_krusty() {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping: no kotlin-stdlib jar located");

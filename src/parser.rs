@@ -832,6 +832,7 @@ impl<'a> Parser<'a> {
     /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
     fn parse_enum(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'enum'
         self.bump(); // 'class'
@@ -1002,6 +1003,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             annotations,
+            annotation_args,
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props,
@@ -1092,6 +1094,7 @@ impl<'a> Parser<'a> {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
         let annotations = self.take_pending_annotations();
+        let _ = self.take_pending_annotation_args(); // a function decl doesn't carry annotation args yet
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -1299,6 +1302,7 @@ impl<'a> Parser<'a> {
     /// Every primary-constructor parameter must be a `val`/`var` property (no plain params yet).
     fn parse_class(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'class'
         let name = if self.at(TokenKind::Ident) {
@@ -1571,6 +1575,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             annotations,
+            annotation_args,
             type_params,
             type_param_bounds,
             props,
@@ -1693,6 +1698,7 @@ impl<'a> Parser<'a> {
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
     fn parse_interface(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
@@ -1772,6 +1778,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             annotations,
+            annotation_args,
             type_params,
             type_param_bounds: Vec::new(),
             props: Vec::new(),
@@ -1895,6 +1902,7 @@ impl<'a> Parser<'a> {
         let synth = ClassDecl {
             name: name.clone(),
             annotations: Vec::new(),
+            annotation_args: Vec::new(),
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props: Vec::new(),
@@ -1936,6 +1944,7 @@ impl<'a> Parser<'a> {
 
     fn parse_object(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'object'
         let name = self.ident_or_error("object name");
@@ -2020,6 +2029,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             name,
             annotations,
+            annotation_args,
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props: Vec::new(),
