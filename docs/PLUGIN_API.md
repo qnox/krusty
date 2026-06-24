@@ -310,11 +310,16 @@ ManualSerializer.kt`) — it fails on three core gaps, none about the plugin:
 1. **object self-reference** — `object S { … S … }` failed to resolve `S` inside its own body; a
    `$serializer` references its own `INSTANCE`. **FIXED (round 9, gate-verified 0 FAIL):** a bare
    object name used as a value now resolves to the singleton.
-2. **classpath class construction by imported name** — `PluginGeneratedSerialDescriptor(...)` does not
-   resolve; isolation showed this is **general** (even `import java.util.ArrayList; ArrayList()` fails
-   — "unresolved function"), so it is a broad compiler feature, not serialization-specific.
-3. **`Json` companion methods** — `Json.encodeToString(serializer, value)` / `decodeFromString` are
-   resolved as a Java *static* instead of the `Json` object's (reified/inherited) members.
+2. **constructor overload matching with a `null` argument** — narrower than first thought: imported
+   classpath construction works in general (`ArrayList()` compiles once the JDK jimage is on the
+   classpath), and `PluginGeneratedSerialDescriptor` resolves as a *type*; only constructing it —
+   `PluginGeneratedSerialDescriptor("x", null, 2)` against `(String, GeneratedSerializer<?>, int)` —
+   fails to match (the `null` for the reference param). A focused ctor-matcher fix.
+3. **`Json` companion / reified methods** — `Json.encodeToString(serializer, value)` /
+   `decodeFromString` resolve as a Java *static* instead of the `Json` object's members.
+4. **the serializer object in the IR subset** — implements a generic interface (`KSerializer<Foo>`),
+   has a `descriptor` property with an initializer, and a `decodeElementIndex` state-machine loop;
+   today such a complex object/body falls outside `is_simple_object`/the IR subset.
 
 Plus: real `serialize`/`deserialize` bytecode bodies and wiring the plugin into the emit path. And the
 full 69 `testData/boxIr` corpus additionally needs sealed/polymorphic/generic/inline-class/contextual
