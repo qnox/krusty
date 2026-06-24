@@ -21,3 +21,14 @@ fun box(): String {\n\
     let out = run(SRC).expect("classpath object as value should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn classpath_object_via_wildcard_import() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+fun box(): String {\n\
+    val c = EmptyCoroutineContext\n\
+    return if (c.toString() == \"EmptyCoroutineContext\") \"OK\" else c.toString()\n\
+}\n";
+    let out = run(SRC).expect("classpath object via wildcard import should compile + run");
+    assert_eq!(out, "OK");
+}

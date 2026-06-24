@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 427).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 428).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P51 — wildcard imports `import a.b.*` were silently dropped (gate 1611 → 1611, +0, FAIL=0).**
+  `parse_qualified_name` only keeps a path segment when an `Ident` follows the `.`, so for `import
+  kotlin.coroutines.*` it consumed `kotlin.coroutines` and left the cursor on `*`, which the import
+  parser's trailing-token tolerance loop then swallowed — the import was recorded as `kotlin.coroutines`
+  (a bogus explicit import of a type named `coroutines`) and NEVER as a wildcard. So no non-default
+  wildcard import (`kotlin.coroutines.*`, `kotlin.math.*`, `kotlin.reflect.*`, …) ever fed
+  `import_wildcards`, and bare names from those packages were unresolvable. Fix: after
+  `parse_qualified_name`, if the cursor is on `*`, consume it and record the import as `a.b.*` (the form
+  `import_wildcards` recognizes; `import_map` already skips `.*`). e2e `classpath_object_via_wildcard_import`
+  resolves `EmptyCoroutineContext` through `import kotlin.coroutines.*`. Gate count is unchanged because the
+  unblocked files hit further blockers (coroutine helpers `EmptyContinuation`/`resume`, `kotlin/Result`
+  members), but the survey confirms real progress: the `EmptyCoroutineContext` skip category (26) is gone and
+  `getOrThrow on kotlin/Result` rose 36 → 59 as files now advance to their next real blocker.
 - **Phase P50 — classpath `object` referenced as a value + kind-flag enums (gate 1611 → 1611, +0, FAIL=0).**
   Coroutine-chain layer 1b: a bare reference to a CLASSPATH Kotlin `object` (e.g. `EmptyCoroutineContext`)
   was an "unresolved reference". Now the checker's bare-`Name` fallback resolves the name through the generic
