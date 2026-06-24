@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1582 OK / 0 FAIL** (scanned 7351, Phase 418).
+  repo's `compiler/testData/codegen/box`). Current gate: **1690 OK / 0 FAIL** (scanned 7351, Phase 434).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,199 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P57 — unsigned (`UInt`/`ULong`) value-class extension resolution via `@Metadata` (gate 1616 → 1690,
+  +74, FAIL=0).** A value-class extension (`UInt.coerceAtMost`/`coerceIn`/…) has a `@JvmName`-MANGLED bytecode
+  name (`coerceAtMost-J1ME1BU`) in a multifile PART class, indexed under the ERASED underlying descriptor —
+  the literal-name lookup misses it, and `UInt`'s erased descriptor `"I"` makes the SIGNED `Int` extension
+  shadow it. Four pieces, all reusing the Result machinery: (1) `functions()` resolves the mangled extension
+  for a value-class receiver via `package_functions` (facade PARTS merged from the facade's `@Metadata` `d1`),
+  matching the Kotlin name + `@Metadata` extension receiver, then loads the real candidate by the mangled JVM
+  name; (2) the plain-extension loop now REJECTS a candidate whose `@Metadata` receivers are concrete and
+  exclude this value class (not it, nor a supertype via `kotlin_subtype`) — so signed `Int.coerceAtMost` no
+  longer binds a `UInt`; (3) the arg-matcher accepts a value-class argument (`3u`) for its erased-underlying
+  param (`coerceAtMost-<hash>(II)`); (4) the logical return is recovered from `@Metadata` by the mangled JVM
+  name (`MetaFn.ret_class`, new) so `b: UInt`, not `Int` (the by-Kotlin-name lookup is ambiguous across the
+  4 unsigned overloads). e2e `unsigned_ext_e2e` (`coerceAtMost`, `coerceIn`). +74 unsigned-cluster box files,
+  all run correctly under `-Xverify:all`.
+- **Phase P56 — full `kotlin.Result` end-to-end: construction + extension + erasure, byte-equal (gate 1612 →
+  1616, +4, FAIL=0).** `Result.success(42)` then `getOrThrow()` now compiles, runs under `-Xverify:all`, and
+  is byte-equal to kotlinc. Pieces: (1) the checker resolves a value-class COMPANION call (`Result.success`)
+  via a new `LibrarySet::value_companion_fn` (metadata: `class_companion_name` + `class_functions`, the
+  companion fn is bytecode-private + public-inline), recorded in `TypeInfo.companion_calls`; (2) lowering
+  emits the companion `getstatic <class>.Companion` receiver + an inline `Callee::Static` with
+  `dispatch_receiver`; (3) emit's `try_inline_static_as` splices an INSTANCE inline method — the real
+  descriptor fetches the body, a receiver-prepended `splice_desc` maps `this`=local0/params=local1.., and the
+  splicer drops the unused `this` (`pop`) + inlines the single-use arg, exactly like kotlinc. Three
+  kotlinc-faithful value-class rules completed the byte-equality: RETURN mangling applies to a `Result`-
+  returning member (`C.foo(): Result` → `foo-d1pmJ48`, kotlinc `hasMangledReturnType`) but NOT a file-class
+  (top-level) fn, while PARAM mangling stays exempt for `Result`; an external value class's bridge returns
+  the underlying directly (no `box-impl`); and `as Result`/`is Result` erase to the underlying (no
+  `checkcast Result`). `result_e2e` is green (un-`#[ignore]`d); `inlineClasses/returnResult/class*Override`
+  box files pass.
+- **Phase P55 — classpath value-class type erasure (`Result`→`Object`): the value-class pass now unboxes
+  classpath value classes (gate 1611 → 1612, +1, FAIL=0).** krusty's unboxed value-class ABI pass
+  (`jvm/value_classes.rs`) erased only USER value classes; a CLASSPATH value class typed in the file
+  (`fun f(r: Result<Int>)`) kept the boxed `Lkotlin/Result;` form, diverging from kotlinc's erased
+  `Ljava/lang/Object;`. Now ir_lower discovers every classpath value class referenced by type and records its
+  REFERENCE underlying (`Result`→`Any`; a primitive-underlying `UInt`/`ULong` is EXCLUDED, keeping its
+  dedicated handling) into a new `IrFile.external_value_classes` map (via `LibraryType.value_underlying`,
+  populated from `class_inline`). The pass merges these into its erasure map so their types erase exactly like
+  a user value class. Two kotlinc-faithful rules added: (1) `kotlin.Result` is EXEMPT from name mangling
+  (kotlinc's `IrType.getRequiresMangling` is `!isClassWithFqName(RESULT_FQ_NAME) && …`) — `f(Result)` keeps
+  the plain name `f`, not `f-<hash>`; (2) a classpath value class is only ever held UNBOXED here, so box/unbox
+  at a boundary is identity (krusty never materializes its `box-impl` object). Verified byte-for-byte vs
+  kotlinc (`bytediff` on `f(r)=r.getOrThrow()`: erased param + spliced body), and the gate gains a real
+  Result-using box file. Construction (`Result.success`, a Companion instance-inline splice) is the last piece
+  for the full `result_e2e`.
+- **Phase P54 — metadata-primary resolution of an `inline` value-class extension (`Result.getOrThrow`) (gate
+  1611 → 1611, +0, FAIL=0).** An `inline` extension on a value class is PRIVATE in bytecode (so the
+  literal-name `find_extensions` finds it only at the receiver's erased `Object`/underlying rung, then
+  rejects it for non-public visibility), but PUBLIC per `@Metadata`. `functions()` now, for a BYTECODE-private
+  extension candidate only (the public ones already resolve, untouched — keeps the 1611 intact), consults
+  `package_functions`: if the candidate is metadata-public + `inline` and its `@Metadata` extension receiver
+  is EXACTLY this value class, it resolves as public (with `must_inline` still keyed on the bytecode
+  visibility — no legal `invokestatic`, so the body is spliced). The metadata receiver disambiguates the
+  erased-`Object` rung so `getOrThrow` binds only a `Result`, never an unrelated receiver. Verified by
+  `metadata_reader_e2e`: `resolve_callable("getOrThrow", Result)` → `kotlin/ResultKt.getOrThrow` inline;
+  `resolve_callable("getOrThrow", String)` → none. The body splices correctly (`throwOnFailure`; unbox).
+  Byte-equal codegen for a `Result`-typed value additionally needs classpath value-class param/local erasure
+  (`Result`→`Object`, layer 4) and the companion inline-splice for construction (`Result.success`); the
+  target `result_e2e` stays `#[ignore]`d for those.
+- **Phase P53 — metadata reader for classpath `@JvmInline value class` detection (gate 1611 → 1611, +0,
+  FAIL=0).** Layer 2 prerequisite for `kotlin.Result`: krusty's unboxed value-class ABI pass
+  (`jvm/value_classes.rs`) already lowers USER value classes, but had no way to recognize a CLASSPATH type as
+  a value class or learn its underlying type. New `metadata.rs` `class_inline(ci) -> Option<InlineClass {
+  underlying_class, property_name }>`, reading the `Class.inline_class_underlying_type`(=18) / `_property_name`
+  (=17) / `_type_id`(=19) proto fields (presence is the value-class marker). `metadata_reader_e2e` validates:
+  `Result` → underlying `kotlin/Any` (`value class Result<T>(val value: Any?)`, erases to Object), `UInt` →
+  `kotlin/Int`, `Pair` → not a value class. Reader only (not yet consumed by the value-class erasure pass).
+- **Phase P52 — metadata-primary function reader: signatures from `@Metadata`, bytecode is fallback (gate
+  1611 → 1611, +0, FAIL=0).** Foundation for `kotlin.Result` (and every `inline` stdlib member). An `inline`
+  function is `private`/synthetic in bytecode, so its *public* signature exists only in `@Metadata` — krusty
+  built `companion`/members from the bytecode method table and never saw `Result.Companion.success`/`failure`
+  or the `ResultKt` extensions (`getOrThrow`, …). Verified kotlinc's model in `JvmProtoBufUtil.
+  getJvmMethodSignature`: name/params/return/visibility/`inline`/receiver come from the proto `Function`/
+  `Class`/`Package` messages; the `method_signature` extension only *overrides* the JVM descriptor, else it's
+  computed from proto types. New `metadata.rs` reader: `class_functions`/`package_functions` →
+  `Vec<MetaFn{kotlin_name, jvm_name, jvm_desc, is_public, is_inline, is_suspend, receiver_class}>` (visibility
+  decoded from `Flags`), and `class_companion_name`. When metadata omits the JVM descriptor (no `@JvmName`
+  mangling), the bytecode method of that name is the fallback — covers value-class members erased to
+  `(Object)Object` (`success`). `metadata_reader_e2e` validates against the real stdlib: `Result.Companion.
+  success` is public+inline with desc `(Ljava/lang/Object;)Ljava/lang/Object;`; `ResultKt.getOrThrow` is a
+  public inline extension on `kotlin/Result`. Reader only so far (not yet wired into resolution) — the two
+  remaining Result layers are the inline-class unboxed ABI and inline-fn splicing of these bodies (target
+  e2e `result_e2e`, `#[ignore]`d with that reason).
+- **Phase P51 — wildcard imports `import a.b.*` were silently dropped (gate 1611 → 1611, +0, FAIL=0).**
+  `parse_qualified_name` only keeps a path segment when an `Ident` follows the `.`, so for `import
+  kotlin.coroutines.*` it consumed `kotlin.coroutines` and left the cursor on `*`, which the import
+  parser's trailing-token tolerance loop then swallowed — the import was recorded as `kotlin.coroutines`
+  (a bogus explicit import of a type named `coroutines`) and NEVER as a wildcard. So no non-default
+  wildcard import (`kotlin.coroutines.*`, `kotlin.math.*`, `kotlin.reflect.*`, …) ever fed
+  `import_wildcards`, and bare names from those packages were unresolvable. Fix: after
+  `parse_qualified_name`, if the cursor is on `*`, consume it and record the import as `a.b.*` (the form
+  `import_wildcards` recognizes; `import_map` already skips `.*`). e2e `classpath_object_via_wildcard_import`
+  resolves `EmptyCoroutineContext` through `import kotlin.coroutines.*`. Gate count is unchanged because the
+  unblocked files hit further blockers (coroutine helpers `EmptyContinuation`/`resume`, `kotlin/Result`
+  members), but the survey confirms real progress: the `EmptyCoroutineContext` skip category (26) is gone and
+  `getOrThrow on kotlin/Result` rose 36 → 59 as files now advance to their next real blocker.
+- **Phase P50 — classpath `object` referenced as a value + kind-flag enums (gate 1611 → 1611, +0, FAIL=0).**
+  Coroutine-chain layer 1b: a bare reference to a CLASSPATH Kotlin `object` (e.g. `EmptyCoroutineContext`)
+  was an "unresolved reference". Now the checker's bare-`Name` fallback resolves the name through the generic
+  import machinery (`imported_type_internal` — explicit imports + Kotlin default-import packages), and if the
+  resolved library type is an `object` (`LibraryType::is_object()` — detected via a `public static final
+  INSTANCE` field of the type's own descriptor), it types the reference as that object and records it; lowering
+  emits a new `IrExpr::ExternalStaticField { owner, name: "INSTANCE", descriptor }` → `getstatic
+  <owner>.INSTANCE`. e2e `classpath_object_value_e2e` round-trips `EmptyCoroutineContext.toString()` under
+  `-Xverify:all`. Plus a design cleanup the maintainer flagged on review: the parallel kind booleans
+  (`is_interface`/`is_object`/`is_enum`/`is_annotation`) on `ClassDecl` and (`is_interface`/`is_annotation`/
+  `is_object`) on `LibraryType` are now a single `kind:` field — `ast::ClassKind` and `libraries::TypeKind`
+  enums — read through `is_*()` accessor methods. `TypeKind::is_interface()` returns `true` for `Annotation`
+  too (JVM annotations carry `ACC_INTERFACE`); the AST `ClassKind` keeps `Annotation` distinct from
+  `Interface` (matching the parser, which never set `is_interface` on annotation classes). No behavior change
+  — pure single-source-of-truth refactor; full suite + gate green.
+- **Phase P49 — coroutine stdlib type resolution: `kotlin.*` wins ambiguous simple names + default-import
+  packages in the generic import machinery (gate 1610 → 1611, +1, FAIL=0).** `kotlin.coroutines.Continuation`
+  and `kotlin.Result` (and `CoroutineContext`) didn't resolve as types — even fully-qualified — because the
+  classpath simple-name index PRUNES ambiguous names, and Java 25's jimage adds `jdk/internal/vm/Continuation`,
+  `com/sun/.../Continuation`, plus several `Result` classes → "Continuation"/"Result" pruned. Both ARE in
+  the stdlib jar (verified). Two fixes, both mirroring kotlinc's resolution model (a bare name resolves
+  against default-import packages + imports, NOT every classpath class): (1) the type index now PREFERS a
+  `kotlin/*` type over a non-kotlin one on a simple-name clash (kotlinc default-imports `kotlin.*`, so the
+  kotlin type wins its bare name) — fixes the signature-collection resolver `ty_of_ref`; (2) the generic
+  import machinery (`imported_type_internal`, used by `check_file`'s `resolve_ty`) now also consults
+  Kotlin's fixed DEFAULT_IMPORT_PACKAGES list + the file's wildcard imports, verifying existence via the
+  federated `resolve_type` — no global-index reliance. This unblocks coroutine-stdlib TYPE resolution (the
+  first of the coroutine-cluster chain; `Result.success` companion + helper-source injection + `Continuation`
+  impl remain). FOLLOW-UP (owner-directed): retire the index `kotlin/*`-precedence patch by making
+  `ty_of_ref` use the same generic import machinery (default imports + wildcards), so NO global every-class
+  simple-name index is consulted — the fully faithful model.
+- **Phase P48 — member property-read inference via federated resolution (gate 1610 → 1610, +0, FAIL=0).**
+  Completes P46: `infer_lit_ty_p`'s property-read arm (`s.length`, `list.size`, `vc.value`) now resolves
+  through the FEDERATED source too — `String`/`CharSequence` members via the source's builtin-member API
+  (`builtin_member_ret`), object properties via the shared `call_resolver::resolve_instance` trying the
+  property name, its `getX` accessor (new shared `property_getter_name`), and any mapped collection
+  accessor — exactly the full checker's property-read path. NO hardcoded property names. +0 corpus (the
+  member-expr-body property reads in the corpus carry other blockers), but it removes the last
+  name-matching temptation from member inference (calls AND properties now federated) and is regression-
+  free (full `just test` green). Foundation for the eventual `infer_lit_ty_p` retirement once the
+  SymbolSource redesign federates the module's own declarations.
+- **Phase P47 — faithful K2 backend-mute directive semantics (gate 1610 → 1610, +0, FAIL=0).** krusty
+  targets Kotlin 2.4.0 = the **K2 frontend** + JVM_IR backend, so the conformance harness mutes tests as
+  kotlinc's K2 runner does: honor `// IGNORE_BACKEND` (all frontends), `// IGNORE_BACKEND_K2
+  [_MULTI_MODULE]`, and `// DONT_TARGET_EXACT_BACKEND` for JVM_IR — but NOT `// IGNORE_BACKEND_K1` (mutes
+  only the OLD K1 frontend). Previously `IGNORE_BACKEND_K1` was wrongly excluded, under-counting: those
+  ~270 tests were marked not-applicable when they ARE in scope for krusty's K2 semantics. Now attempted;
+  all currently skip as unsupported (none miscompile — FAIL stays 0), so OK is unchanged but the harness
+  faithfully matches kotlinc's backend applicability. Shared `conformance::backend_applicable` keeps the
+  gate + survey in lockstep.
+- **Phase P46 — member return-type inference via federated resolution (no hardcoded names); shared
+  conformance directives (gate 1592 → 1610, +18, FAIL=0).** Two related fixes:
+  (1) `infer_lit_ty_p` (the signature-collection pre-pass that infers an expression-bodied member's
+  return type) name-matched stdlib symbols (`toString`, `shl`/`or`/`xor`, `toLong`, …) — prohibited
+  hardcoding. Now it resolves method/extension/function return types through the FEDERATED `SymbolSource`
+  (`src.functions(name, receiver)`, the same classpath/stdlib resolution the full checker uses), so
+  `s.uppercase()`, `x.toString()`, library members type with ZERO hardcoded names. Genuine primitive
+  INTRINSICS (the named bitwise operators `shl`/`and`/…, numeric/char conversions) — which compile to JVM
+  opcodes, not classpath methods, so they're absent from `functions()` — go through the SHARED helpers
+  the checker also uses (`conversion_target`, and a new `builtin_bitwise_ret` extracted so the checker and
+  the pre-pass share ONE list, not two). Deleted the duplicated `prim_conversion_ret`. +14 corpus.
+  (2) Gate/survey directive drift: extracted `krusty::conformance` as the SINGLE source of truth for
+  backend applicability (`TARGET_BACKEND`/`IGNORE_BACKEND*`/`DONT_TARGET_EXACT_BACKEND` — the last newly
+  honored, matching kotlinc's runner, which excludes the JVM_IR backend krusty emits, e.g.
+  `@EagerInitialization`) and the per-test EXTRA-library set (`extra_libs`). The gate, the `survey` bin,
+  and `tests/common` classpath now all consult it, so survey no longer over-counts by compiling against
+  libraries a test didn't request.
+- **Phase P45 — local classes (slice 2b: named local objects) (gate 1592 → 1592, +0 corpus, FAIL=0).**
+  Completes the local-type-decl surface: a NAMED local object (`object Counter { … }`) now parses + hoists
+  like the other local types. Distinguished from an anonymous-object EXPRESSION (`object { … }` /
+  `object : T { … }`, which stays on the expr path) by the token after `object` being a name. +0 on the
+  corpus (no box file is blocked solely on a named local object), but it removes a real "not parsed" gap
+  and is proven by `named_local_object` e2e (singleton members + an anonymous object alongside, no
+  regression). Local-class surface now: class / data class / interface / object / inheritance — only the
+  CAPTURING case remains (outer locals → synthetic ctor fields, needs type-info-driven capture typing).
+- **Phase P44 — local classes (slice 2a: modifier-prefixed + inheritance) (gate 1590 → 1592, +2,
+  FAIL=0).** Extends P43: a local class may now carry `open`/`abstract`/`private`/… modifiers, enabling
+  local-class inheritance (`open class Base; class Derived : Base()`). The parser's local-type lookahead
+  scans through declaration modifiers to the `class`/`interface` keyword; the statement arm consumes the
+  modifier/annotation prefix (`skip_decl_prefix`, as the top-level path does) and applies `open`/
+  `abstract` to the parsed decl before hoisting. Still non-capturing only: a modifier-prefixed local
+  class that reads an outer local fails to resolve → file skips (sound). New e2e case
+  `local_class_inheritance_with_modifiers` (open override + virtual dispatch through the base type,
+  abstract + impl).
+- **Phase P43 — local classes (slice 1: non-capturing) (gate 1582 → 1590, +8, FAIL=0).** A `class`/
+  `data class`/`interface` declared inside a function body was unparsed (`class` in a block → "expected
+  an expression"). Now parsed as `Stmt::LocalClass(ClassDecl)` (parser detects a local type decl via
+  lookahead — `class`/soft-keyword `data`/`enum`/`sealed`/`annotation`/`value` + `class`, or
+  `interface Name`) and HOISTED post-parse (`hoist_local_classes`) to a top-level-equivalent
+  `Decl::Class`, so signature collection, checking, and lowering treat it like any other class — the
+  in-body `Stmt::LocalClass` is a no-op. A CAPTURING local class is checked with no enclosing scope, so
+  its outer references fail to resolve and the file cleanly skips (never miscompiles). SOUND SLICE
+  BOUNDARY: a local class with super-constructor ARGS (`class Z : C(s)`) isn't hoisted (its base-arg
+  capture isn't rejected by the outer-scope-free check → would miscompile, VerifyError); modifier-
+  prefixed (`open`/`abstract`) local classes stay on the expr path (skip) — both are slice 2. Also fixed
+  a latent scope leak: `check_file` now resets to the base scope depth before each top-level decl (a
+  prior function's locals must not be visible to a hoisted class). New `local_class_e2e` (fields/methods,
+  `data class` equality, local `interface` + impl).
 - **Phase P42 — function references as `FunctionReferenceImpl` subclasses → real reference EQUALITY
   (gate 1576 → 1582, +6, FAIL=0).** Top-level (`::f`) and member (`obj::m`, `Type::m`, `O::m`,
   `this::m`) function references were emitted as bare `LambdaMetafactory` closures — which gave NO Kotlin

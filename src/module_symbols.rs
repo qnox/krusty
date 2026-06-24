@@ -266,10 +266,18 @@ impl SymbolSource for ModuleSymbols<'_> {
         if let Some(s) = &c.super_internal {
             supertypes.push(s.clone());
         }
+        // Module objects resolve as values via the existing user-object path (StaticInstance), not the
+        // classpath ExternalStaticField path, so this needn't distinguish `Object`.
+        let kind = if c.is_annotation {
+            crate::libraries::TypeKind::Annotation
+        } else if c.is_interface {
+            crate::libraries::TypeKind::Interface
+        } else {
+            crate::libraries::TypeKind::Class
+        };
         Some(LibraryType {
             is_public: true,
-            is_interface: c.is_interface,
-            is_annotation: c.is_annotation,
+            kind,
             supertypes,
             constructors,
             members,
@@ -277,6 +285,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             // In-module classes resolve a bare-companion reference via their own companion path
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
+            value_underlying: None,
         })
     }
 }

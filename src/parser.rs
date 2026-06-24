@@ -30,8 +30,35 @@ pub fn parse_with_features(
         pending_annotations: Vec::new(),
     };
     p.parse_file();
+    hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     p.file
+}
+
+/// Hoist every local class (`class`/`interface`/… declared inside a function body, parsed as
+/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection, checking, and lowering
+/// treat it like any other class — zero changes to those passes. The `Stmt::LocalClass` stays in the
+/// body as a no-op. A local class that captures outer locals is checked with no enclosing scope, so its
+/// outer references fail to resolve and the file cleanly skips (never miscompiles). Two same-named local
+/// classes (or a clash with a top-level name) become a "conflicting declarations" skip — also sound.
+fn hoist_local_classes(file: &mut File) {
+    use crate::ast::{Decl, Stmt};
+    let hoisted: Vec<crate::ast::ClassDecl> = file
+        .stmt_arena
+        .iter()
+        .filter_map(|s| match s {
+            // A local class with super-CONSTRUCTOR arguments (`class Z : C(s)`) can capture an outer
+            // local through that call, which the hoisted (outer-scope-free) check doesn't currently
+            // reject — so it would miscompile. Don't hoist those; the reference stays unresolved and the
+            // file skips (sound). Local-class INHERITANCE is a later slice. Everything else hoists.
+            Stmt::LocalClass(c) if c.base_args.is_empty() => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    for c in hoisted {
+        let id = file.add_decl(Decl::Class(c));
+        file.decls.push(id);
+    }
 }
 
 /// A class with NO primary constructor names its base class WITHOUT parentheses (`class A : B { …
@@ -45,7 +72,9 @@ fn fixup_parenless_base_classes(file: &mut File) {
         .decl_arena
         .iter()
         .filter_map(|d| match d {
-            Decl::Class(c) if !c.is_interface && !c.is_object && !c.is_enum => Some(c.name.clone()),
+            Decl::Class(c) if c.kind == ClassKind::Class || c.is_annotation() => {
+                Some(c.name.clone())
+            }
             _ => None,
         })
         .collect();
@@ -174,7 +203,14 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwImport => {
                     self.bump(); // 'import'
-                    let fq = self.parse_qualified_name();
+                    let mut fq = self.parse_qualified_name();
+                    // `import a.b.*` — `parse_qualified_name` consumes the trailing `.` (it only keeps a
+                    // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
+                    // recorded as `a.b.*` (the form `import_wildcards` recognizes).
+                    if self.at(TokenKind::Star) {
+                        self.bump(); // '*'
+                        fq.push_str(".*");
+                    }
                     if !fq.is_empty() {
                         self.file.imports.push(fq);
                     }
@@ -260,7 +296,7 @@ impl<'a> Parser<'a> {
                 {
                     self.bump(); // 'annotation'
                     let mut d = self.parse_class();
-                    d.is_annotation = true;
+                    d.kind = ClassKind::Annotation;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -376,6 +412,44 @@ impl<'a> Parser<'a> {
     /// `class`-body/`object`-body/`enum`-body grammar doesn't support nested types, so the caller
     /// discards the result; a *reference* to the (dropped) nested type then fails to resolve and the
     /// file is cleanly skipped, never miscompiled.
+    /// Whether the statement at the cursor begins a local TYPE declaration: a `class` keyword, an
+    /// `interface Name`, or a soft-keyword class form (`data`/`enum`/`sealed`/`annotation`/`value` +
+    /// `class`, possibly through modifiers like `open`/`abstract`/`inner`/`private`). Lookahead only —
+    /// doesn't consume. Excludes `object` (a bare `object` may be an anonymous-object expression).
+    fn looks_like_local_type_decl(&self) -> bool {
+        let mut j = self.i;
+        loop {
+            let Some(tk) = self.t.get(j) else {
+                return false;
+            };
+            if tk.kind == TokenKind::KwClass {
+                return true;
+            }
+            if tk.kind != TokenKind::Ident {
+                return false;
+            }
+            let s = tk.text(self.src);
+            // `interface Name` — a named local interface (the next token is the name).
+            if s == "interface" {
+                return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
+            }
+            // `object Name` — a named local object DECLARATION. A bare `object :`/`object {` is an
+            // anonymous-object EXPRESSION (no name), which stays on the expression path.
+            if s == "object" {
+                return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
+            }
+            // A class-introducing soft keyword or a declaration modifier (`open`/`abstract`/`private`/
+            // `inner`/…) — keep scanning toward `class`/`interface`. The scan only returns `true` if it
+            // actually reaches a type keyword, so a soft-keyword used as a value (`data.x`, `value.foo()`)
+            // doesn't misfire.
+            if matches!(s, "data" | "enum" | "sealed" | "annotation" | "value") || is_modifier(s) {
+                j += 1;
+                continue;
+            }
+            return false;
+        }
+    }
+
     fn parse_nested_type_decl(&mut self) -> ClassDecl {
         match self.kind() {
             TokenKind::KwClass => self.parse_class(),
@@ -906,13 +980,10 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: true,
+            kind: ClassKind::Enum,
             enum_entries: entries,
             enum_entry_args: entry_args,
             enum_entry_bodies: entry_bodies,
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -986,6 +1057,9 @@ impl<'a> Parser<'a> {
         is_suspend: bool,
         is_tailrec: bool,
     ) -> FunDecl {
+        // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
+        // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -1021,6 +1095,7 @@ impl<'a> Parser<'a> {
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
+                annotations,
             };
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
@@ -1111,6 +1186,7 @@ impl<'a> Parser<'a> {
             is_private: false,
             is_suspend,
             is_tailrec,
+            annotations,
         }
     }
 
@@ -1122,11 +1198,13 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let mut pmods = Vec::new();
+            let mut pannos = Vec::new();
             // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers.
             if self.at(TokenKind::At)
                 || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value")
             {
                 pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
+                pannos = self.take_pending_annotations();
             }
             let is_vararg = pmods.iter().any(|m| m == "vararg");
             let pname = if self.at(TokenKind::Ident) {
@@ -1150,6 +1228,7 @@ impl<'a> Parser<'a> {
                 ty,
                 is_vararg,
                 default,
+                annotations: pannos,
             });
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
@@ -1461,13 +1540,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Class,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1665,13 +1741,10 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Interface,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: true,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1791,13 +1864,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Class,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1919,13 +1989,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: true,
-            is_enum: false,
+            kind: ClassKind::Object,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1942,7 +2009,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> TypeRef {
+        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
+        // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
+        // Without this, an `@` before a type would fail to parse. NOTE: a following `(` is NOT consumed
+        // as an annotation argument list here — in type position it belongs to a function type
+        // (`@Composable () -> Unit`); an argument-bearing type annotation (`@Foo(1) Bar`, rare) is not
+        // yet handled.
+        let mut type_anns = Vec::new();
+        while self.at(TokenKind::At) {
+            self.bump(); // '@'
+            let qname = self.parse_qualified_name();
+            self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
+            if !qname.is_empty() {
+                type_anns.push(qname.rsplit('.').next().unwrap_or(&qname).to_string());
+            }
+        }
         let span = self.tok().span;
+        if !type_anns.is_empty() {
+            self.file.type_annotations.insert(span.lo, type_anns);
+        }
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
         let mut fun_suspend = false;
         if self.at(TokenKind::Ident) && self.text() == "suspend" {
@@ -2611,6 +2696,21 @@ impl<'a> Parser<'a> {
                 // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
                 let f = self.parse_fun(false, false, false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
+            }
+            // Local class declaration inside a function body (`class`/`data class`/`enum class`/
+            // `sealed class`/`annotation class`/`interface Name`, optionally `open`/`abstract`/… prefixed).
+            // Consume leading modifiers/annotations (as the top-level path does), then apply `open`/
+            // `abstract` to the parsed decl. (`object` is omitted — a bare `object` may start an
+            // anonymous-object EXPRESSION, which stays on the expression path.)
+            _ if self.looks_like_local_type_decl() => {
+                let mods = self.skip_decl_prefix();
+                let is_sealed = mods.iter().any(|m| m == "sealed");
+                let is_open = is_sealed || mods.iter().any(|m| m == "open");
+                let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
+                let mut d = self.parse_nested_type_decl();
+                d.is_open = is_open;
+                d.is_abstract = is_abstract;
+                self.finish_stmt(Stmt::LocalClass(d), start)
             }
             _ => {
                 let e = self.parse_expr();
@@ -4646,6 +4746,98 @@ mod tests {
             .unwrap();
         // Fully-qualified annotation is captured by its SIMPLE name.
         assert_eq!(q, vec!["Serializable".to_string()]);
+    }
+
+    #[test]
+    fn captures_function_annotations() {
+        // Function annotations are captured on FunDecl (mirroring class capture) and don't leak.
+        let mut d = DiagSink::new();
+        let src = "@Composable fun A() {}\nfun B() {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+
+        let anns = |name: &str| {
+            file.decl_arena
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Fun(f) if f.name == name => Some(f.annotations.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("fun {name} not found"))
+        };
+        assert_eq!(anns("A"), vec!["Composable".to_string()]);
+        assert!(
+            anns("B").is_empty(),
+            "annotation must not leak to the next function"
+        );
+    }
+
+    #[test]
+    fn captures_parameter_annotations() {
+        // Parameter annotations are captured on Param (e.g. Compose's `@IntroducedAt`), arguments
+        // discarded, and don't leak to the next parameter.
+        let mut d = DiagSink::new();
+        let src = "fun f(a: Int, @IntroducedAt(\"1\") b: String = \"x\", c: Boolean) {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+        let params = file
+            .decl_arena
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Fun(f) if f.name == "f" => Some(f.params.clone()),
+                _ => None,
+            })
+            .expect("fun f not found");
+        assert!(params[0].annotations.is_empty(), "a: no annotations");
+        assert_eq!(
+            params[1].annotations,
+            vec!["IntroducedAt".to_string()],
+            "b: @IntroducedAt captured (arg discarded)"
+        );
+        assert!(
+            params[2].annotations.is_empty(),
+            "c: annotation must not leak from b"
+        );
+    }
+
+    #[test]
+    fn captures_annotations_on_a_function_type() {
+        // `@Composable () -> Unit` (an annotated function TYPE) parses, and the annotation is recorded
+        // by the type's start offset; an unannotated function-type param has none.
+        let mut d = DiagSink::new();
+        let src = "fun W(content: @Composable () -> Unit, plain: () -> Unit) {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+
+        let w = file
+            .decl_arena
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Fun(f) if f.name == "W" => Some(f),
+                _ => None,
+            })
+            .expect("fun W");
+        let ty_of = |name: &str| {
+            &w.params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("param {name}"))
+                .ty
+        };
+        let anns_of = |name: &str| {
+            file.type_annotations
+                .get(&ty_of(name).span.lo)
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(anns_of("content"), vec!["Composable".to_string()]);
+        assert!(
+            anns_of("plain").is_empty(),
+            "an unannotated function type has no recorded annotations"
+        );
     }
 
     #[test]

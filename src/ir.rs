@@ -264,6 +264,15 @@ pub enum IrExpr {
         ty: ClassId,
         field: &'static str,
     },
+    /// Read a static field of a CLASSPATH class by name — `getstatic owner.name:descriptor`. Used for a
+    /// classpath `object` referenced as a value (`EmptyCoroutineContext` → `getstatic kotlin/coroutines/
+    /// EmptyCoroutineContext.INSTANCE:Lkotlin/coroutines/EmptyCoroutineContext;`). Unlike `StaticInstance`
+    /// (a user `ClassId`) and `GetStatic` (a facade statics index), this names an external owner directly.
+    ExternalStaticField {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues {
         class: ClassId,
@@ -469,6 +478,10 @@ pub struct IrClass {
     /// parameters (stored directly from args, in order); any after them are class-body properties
     /// initialized by `init_body`.
     pub fields: Vec<(String, IrType)>,
+    /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
+    /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
+    /// matching kotlinc, which inserts the check at each access site (not only the property getter).
+    pub lateinit_fields: Vec<u32>,
     /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
@@ -723,6 +736,12 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     pub field_signatures: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `IrType`) REFERENCED in
+    /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
+    /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
+    /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
+    /// `UInt`/`ULong` keeps its existing dedicated handling).
+    pub external_value_classes: std::collections::HashMap<String, IrType>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
@@ -756,6 +775,125 @@ impl IrFile {
         let id = self.classes.len() as u32;
         self.classes.push(c);
         id
+    }
+}
+
+/// Invoke `f` on each direct child expression of `e`. The single structural definition of an
+/// `IrExpr`'s sub-expressions — tree walks (index shifting, scans) delegate here so a new variant is
+/// covered in one place. Written EXHAUSTIVELY (no `_` arm) on purpose: adding an `IrExpr` variant must
+/// fail to compile here rather than silently drop its children from every walk.
+pub fn for_each_child(ir: &IrFile, e: ExprId, f: &mut impl FnMut(ExprId)) {
+    match &ir.exprs[e as usize] {
+        IrExpr::Block { stmts, value } => {
+            stmts.iter().for_each(|&s| f(s));
+            value.iter().for_each(|&v| f(v));
+        }
+        IrExpr::When { branches } => branches.iter().for_each(|(c, b)| {
+            c.iter().for_each(|&c| f(c));
+            f(*b);
+        }),
+        IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
+        IrExpr::TypeOp { arg, .. }
+        | IrExpr::NotNullAssert { operand: arg }
+        | IrExpr::Throw { operand: arg }
+        | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::RefNew { init: arg, .. }
+        | IrExpr::RefGet { holder: arg, .. }
+        | IrExpr::NewArray { size: arg, .. } => f(*arg),
+        IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+            f(*lhs);
+            f(*rhs);
+        }
+        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => f(*value),
+        IrExpr::SetField {
+            receiver, value, ..
+        }
+        | IrExpr::RefSet {
+            holder: receiver,
+            value,
+            ..
+        } => {
+            f(*receiver);
+            f(*value);
+        }
+        IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
+        IrExpr::GetField { receiver, .. } => f(*receiver),
+        IrExpr::Call {
+            args,
+            dispatch_receiver,
+            ..
+        } => {
+            dispatch_receiver.iter().for_each(|&r| f(r));
+            args.iter().for_each(|&a| f(a));
+        }
+        IrExpr::MethodCall { receiver, args, .. } => {
+            f(*receiver);
+            args.iter().flatten().for_each(|&a| f(a));
+        }
+        IrExpr::InvokeFunction { func, args, .. } => {
+            f(*func);
+            args.iter().for_each(|&a| f(a));
+        }
+        IrExpr::New { args, .. }
+        | IrExpr::NewExternal { args, .. }
+        | IrExpr::NewCrossFile { args, .. }
+        | IrExpr::Vararg { elements: args, .. } => args.iter().for_each(|&a| f(a)),
+        IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } => {
+            captures.iter().for_each(|&c| f(c));
+            inline_body.iter().for_each(|&b| f(b));
+        }
+        IrExpr::While {
+            cond, body, update, ..
+        } => {
+            f(*cond);
+            f(*body);
+            update.iter().for_each(|&u| f(u));
+        }
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            f(*body);
+            catches.iter().for_each(|c| f(c.body));
+            finally.iter().for_each(|&fin| f(fin));
+        }
+        IrExpr::Const(_)
+        | IrExpr::ClassConst { .. }
+        | IrExpr::GetValue(_)
+        | IrExpr::GetStatic(_)
+        | IrExpr::Break { .. }
+        | IrExpr::Continue { .. }
+        | IrExpr::EnumEntry { .. }
+        | IrExpr::ExternalStaticField { .. }
+        | IrExpr::ExternalStaticInstance { .. }
+        | IrExpr::StaticInstance { .. }
+        | IrExpr::EnumValues { .. }
+        | IrExpr::UnitInstance => {}
+    }
+}
+
+/// Shift every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` by `by`, throughout the
+/// expression tree rooted at `e`. Used when a pass **appends parameters** to a function: the body's
+/// locals (numbered from the old parameter count) must move up by the number of new parameters so
+/// they don't collide with the inserted parameter slots.
+pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
+    match &mut ir.exprs[e as usize] {
+        IrExpr::GetValue(i) if *i >= threshold => *i += by,
+        IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
+        IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
+        _ => {}
+    }
+    let mut kids = Vec::new();
+    for_each_child(ir, e, &mut |c| kids.push(c));
+    for c in kids {
+        shift_value_indices(ir, c, threshold, by);
     }
 }
 

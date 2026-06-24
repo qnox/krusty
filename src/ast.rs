@@ -287,6 +287,11 @@ pub enum Stmt {
     /// A local function declaration: `fun name(params): Ret { body }` inside a function body.
     /// Emitted as a private static method on the file/class with a mangled name.
     LocalFun(FunDecl),
+    /// A local class/object/interface declared inside a function body. Hoisted (signature collection
+    /// walks fn bodies) to a top-level-equivalent class with a mangled internal name, so the checker
+    /// and lowering treat it like any other class. A capturing local class fails to resolve its outer
+    /// references (it's checked with no enclosing scope) → the file skips, never miscompiles.
+    LocalClass(ClassDecl),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -340,6 +345,9 @@ pub struct Param {
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted trailing
     /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
     pub default: Option<ExprId>,
+    /// Simple names of annotations applied to the parameter (`@IntroducedAt("1") b: String` →
+    /// `["IntroducedAt"]`). Annotation arguments are discarded. Used by the compiler-extension surface.
+    pub annotations: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -384,6 +392,10 @@ pub struct FunDecl {
     /// `tailrec` modifier — a self-recursive function whose tail calls the lowerer rewrites into a loop
     /// (param reassignment + `continue`), so deep recursion doesn't overflow the stack.
     pub is_tailrec: bool,
+    /// Simple names of annotations applied to this function (`@Composable fun f()` → `["Composable"]`),
+    /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
+    /// find annotated functions.
+    pub annotations: Vec<String>,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
@@ -427,18 +439,15 @@ pub struct ClassDecl {
     /// Constructor init steps in source order: a body-property initializer (index into `body_props`)
     /// or an `init { … }` block.
     pub init_order: Vec<ClassInit>,
+    /// The declaration kind (plain class / interface / object / enum / annotation). One field instead
+    /// of parallel `is_*` booleans; read it through the `is_*` accessor methods.
+    pub kind: ClassKind,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
     /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
     /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
     pub is_value: bool,
-    /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
-    /// instantiation (`A("x")`) synthesizes a `<facade>$annotationImpl$A$0` impl class.
-    pub is_annotation: bool,
-    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
-    pub is_object: bool,
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
-    pub is_enum: bool,
     pub enum_entries: Vec<String>,
     /// Constructor arguments per enum entry (parallel to `enum_entries`; empty for `A` with no args).
     /// The enum's primary-constructor parameters are in `props`.
@@ -447,8 +456,6 @@ pub struct ClassDecl {
     /// anonymous subclass kotlinc emits as `Enum$ENTRY`. Parallel to `enum_entries`; an empty `Vec`
     /// means the entry has no body. Only method overrides are captured (property overrides bail).
     pub enum_entry_bodies: Vec<Vec<FunDecl>>,
-    /// `interface Name { … }` — a JVM interface (abstract methods).
-    pub is_interface: bool,
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
     /// convertible to it.
     pub is_fun_interface: bool,
@@ -478,6 +485,38 @@ pub struct ClassDecl {
     /// `class A()`, `class A(...)`), including a `class A() { constructor(...) : this(...) }`.
     pub has_primary_ctor: bool,
     pub span: Span,
+}
+
+/// What a declaration *is*. Mutually exclusive at the source level (`data`/`value` are modifiers on a
+/// `Class`, `fun interface` is `Interface` + `is_fun_interface`). An `annotation class` compiles to a
+/// JVM interface, but the front end keeps it distinct from `Interface` — `is_interface()` is `false`
+/// for it (matching the parser, which never set `is_interface` on annotations).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClassKind {
+    Class,
+    Interface,
+    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
+    Object,
+    /// `enum class Name { A, B }` — extends `java/lang/Enum`.
+    Enum,
+    /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
+    /// instantiation (`A("x")`) synthesizes a `<facade>$annotationImpl$A$0` impl class.
+    Annotation,
+}
+
+impl ClassDecl {
+    pub fn is_interface(&self) -> bool {
+        self.kind == ClassKind::Interface
+    }
+    pub fn is_object(&self) -> bool {
+        self.kind == ClassKind::Object
+    }
+    pub fn is_enum(&self) -> bool {
+        self.kind == ClassKind::Enum
+    }
+    pub fn is_annotation(&self) -> bool {
+        self.kind == ClassKind::Annotation
+    }
 }
 
 /// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
@@ -588,6 +627,11 @@ pub struct File {
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
     pub spread_arg_ids: std::collections::HashSet<u32>,
+    /// Annotations written on a TYPE (`@Composable () -> Unit`, `@UnsafeVariance T`), keyed by the
+    /// type's start offset (`TypeRef.span.lo`). The parser consumes leading `@Foo` before a type and
+    /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
+    /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
+    pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
 }
 
 impl File {
@@ -726,6 +770,8 @@ impl File {
             Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || fe(*body),
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
+            // A local class's members are hoisted + walked separately; it has no inline child expr here.
+            Stmt::LocalClass(_) => false,
         }
     }
 }
@@ -760,14 +806,14 @@ impl File {
                 }
                 out.push(')');
             }
-            Decl::Class(c) if c.is_interface => {
+            Decl::Class(c) if c.is_interface() => {
                 out.push_str(&format!("(interface {}", c.name));
                 for m in &c.methods {
                     out.push_str(&format!(" (absfun {})", m.name));
                 }
                 out.push(')');
             }
-            Decl::Class(c) if c.is_enum => {
+            Decl::Class(c) if c.is_enum() => {
                 out.push_str(&format!("(enum {}", c.name));
                 for e in &c.enum_entries {
                     out.push_str(&format!(" {e}"));
@@ -775,11 +821,12 @@ impl File {
                 out.push(')');
             }
             Decl::Class(c) => {
-                out.push_str(&format!(
-                    "({} {}",
-                    if c.is_object { "object" } else { "class" },
-                    c.name
-                ));
+                let keyword = match c.kind {
+                    ClassKind::Object => "object",
+                    ClassKind::Annotation => "annotation",
+                    _ => "class",
+                };
+                out.push_str(&format!("({} {}", keyword, c.name));
                 for p in &c.props {
                     out.push_str(&format!(
                         " ({} {} {})",
@@ -1194,6 +1241,9 @@ impl File {
             Stmt::Expr(e) => self.write_expr(*e, out),
             Stmt::LocalFun(f) => {
                 out.push_str(&format!("(local-fun {})", f.name));
+            }
+            Stmt::LocalClass(c) => {
+                out.push_str(&format!("(local-class {})", c.name));
             }
         }
     }

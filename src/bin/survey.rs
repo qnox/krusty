@@ -250,14 +250,10 @@ fn main() {
         if !src.contains("fun box()") {
             continue;
         }
-        if src.contains("// LAMBDAS: INDY") || src.contains("IGNORE_BACKEND_K2: JVM_IR") {
+        // INDY-lambda mode isn't modeled by this front-end-only survey; otherwise defer ALL backend
+        // applicability to the shared `conformance` directive logic (same as the gate — no drift).
+        if src.contains("// LAMBDAS: INDY") || !krusty::conformance::applies(&src) {
             continue;
-        }
-        if let Some(tb) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-            let t = tb.trim_start_matches("// TARGET_BACKEND:").trim();
-            if !t.split(',').any(|x| matches!(x.trim(), "JVM" | "JVM_IR")) {
-                continue;
-            }
         }
         scanned += 1;
         let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("File");

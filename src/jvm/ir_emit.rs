@@ -2055,6 +2055,22 @@ impl<'a> Emitter<'a> {
         args: &[u32],
         code: &mut CodeBuilder,
     ) -> bool {
+        self.try_inline_static_as(owner, name, descriptor, descriptor, args, code)
+    }
+
+    /// Splice `owner.name` whose REAL (body-fetch) descriptor is `descriptor`, mapping the body's locals
+    /// per `splice_desc`. For an ordinary static they are equal; for an INSTANCE inline method spliced
+    /// through this path, `splice_desc` PREPENDS the receiver as the first parameter (`this` = local 0)
+    /// and `args[0]` is that receiver — so the body's `aload_0`/`aload_1`/… map to receiver/params.
+    fn try_inline_static_as(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        splice_desc: &str,
+        args: &[u32],
+        code: &mut CodeBuilder,
+    ) -> bool {
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
             return false;
         };
@@ -2090,7 +2106,7 @@ impl<'a> Emitter<'a> {
         // layout is position-independent); a branchy body is then RE-spliced at its real method offset so
         // any `tableswitch`/`lookupswitch` pads correctly.
         let Some(probe) =
-            crate::jvm::inline::splice_unified(&body, descriptor, base, &[], 0, self.cw)
+            crate::jvm::inline::splice_unified(&body, splice_desc, base, &[], 0, self.cw)
         else {
             return false;
         };
@@ -2120,9 +2136,14 @@ impl<'a> Emitter<'a> {
         }
         self.emit_operands(args, code);
         let splice_start = code.bytes.len();
-        let Some(bs) =
-            crate::jvm::inline::splice_unified(&body, descriptor, base, &[], splice_start, self.cw)
-        else {
+        let Some(bs) = crate::jvm::inline::splice_unified(
+            &body,
+            splice_desc,
+            base,
+            &[],
+            splice_start,
+            self.cw,
+        ) else {
             return false;
         };
         let prefix = self.verif_locals_upto(base);
@@ -2400,9 +2421,29 @@ impl<'a> Emitter<'a> {
                 let (name, fty) = c.fields[*index as usize].clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
+                let is_lateinit = c.lateinit_fields.contains(index);
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
                 code.getfield(fref, slot_words(jt) as i32);
+                // A `lateinit var` read throws `UninitializedPropertyAccessException` while the field is
+                // still null (kotlinc inserts this at every access): `dup; ifnonnull L; ldc name;
+                // invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`.
+                if is_lateinit {
+                    code.dup();
+                    let lbl = code.new_label();
+                    code.ifnonnull(lbl);
+                    code.push_string(&name, self.cw);
+                    let m = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "throwUninitializedPropertyAccessException",
+                        "(Ljava/lang/String;)V",
+                    );
+                    code.invokestatic(m, 1, 0);
+                    // At the join the field value (non-null on the taken path) is on the stack.
+                    let st = self.verif_stack(jt);
+                    self.frame(lbl, st, code);
+                    code.bind(lbl);
+                }
             }
             IrExpr::GetStatic(i) => {
                 let s = &self.ir.statics[*i as usize];
@@ -2585,10 +2626,36 @@ impl<'a> Emitter<'a> {
                         *must_inline,
                     );
                     let args = args.clone();
+                    // An inline call to an INSTANCE method on a singleton receiver (a value-class COMPANION
+                    // fn, `Result.success`): the receiver loads first, then the body is spliced with the
+                    // receiver prepended as `this` (local 0). `splice_desc` adds the receiver as the first
+                    // parameter; the body is fetched by its REAL (instance) descriptor.
+                    if inline {
+                        if let Some(&recv) = dispatch_receiver.as_ref() {
+                            let recv_desc = self.value_ty(recv).descriptor();
+                            let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
+                            let mut all = Vec::with_capacity(args.len() + 1);
+                            all.push(recv);
+                            all.extend(args.iter().copied());
+                            if self.try_inline_static_as(
+                                &owner,
+                                &name,
+                                &descriptor,
+                                &splice_desc,
+                                &all,
+                                code,
+                            ) {
+                                return;
+                            }
+                        }
+                    }
                     // A cross-module `inline fun`: try to splice its compiled body here (the bytecode
                     // inliner). On any unsupported shape `try_inline_static` returns false and we emit the
                     // ordinary `invokestatic` — so an un-spliceable inline call is never miscompiled.
-                    if inline && self.try_inline_static(&owner, &name, &descriptor, &args, code) {
+                    if inline
+                        && dispatch_receiver.is_none()
+                        && self.try_inline_static(&owner, &name, &descriptor, &args, code)
+                    {
                         return;
                     }
                     // A `must_inline` callee (non-public `@InlineOnly`) has no legal `invokestatic`: the
@@ -2814,6 +2881,19 @@ impl<'a> Emitter<'a> {
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
                 let f = self.cw.fieldref(owner, field, &format!("L{ty};"));
                 code.getstatic(f, 1);
+            }
+            IrExpr::ExternalStaticField {
+                owner,
+                name,
+                descriptor,
+            } => {
+                let f = self.cw.fieldref(owner, name, descriptor);
+                let words = if descriptor == "J" || descriptor == "D" {
+                    2
+                } else {
+                    1
+                };
+                code.getstatic(f, words);
             }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
@@ -4467,6 +4547,21 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
             IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj(ty),
+            IrExpr::ExternalStaticField { descriptor, .. } => {
+                // The static field's JVM type, from its descriptor (an object `L…;` for an `object`'s
+                // INSTANCE; primitives for the rare const-field case).
+                match descriptor.as_str() {
+                    "J" => Ty::Long,
+                    "D" => Ty::Double,
+                    "I" => Ty::Int,
+                    "Z" => Ty::Boolean,
+                    d => d
+                        .strip_prefix('L')
+                        .and_then(|s| s.strip_suffix(';'))
+                        .map(Ty::obj)
+                        .unwrap_or(Ty::obj("java/lang/Object")),
+                }
+            }
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,
