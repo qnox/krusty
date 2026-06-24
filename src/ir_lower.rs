@@ -3093,6 +3093,30 @@ impl<'a> Lower<'a> {
                     }),
                     ret,
                 )
+            } else if self.class_of(it_ty).is_none()
+                && self.syms.class_by_internal(&internal).is_some_and(|cs| {
+                    cs.value_field.is_none()
+                        && cs.methods.get(&comp).is_some_and(|s| s.params.is_empty())
+                })
+            {
+                // `componentN` of a class defined in ANOTHER file of this compilation → `CrossFileVirtual`
+                // (mirrors a cross-file instance call), so a destructure of a sibling-file value resolves.
+                let (ret, interface) = {
+                    let cs = self.syms.class_by_internal(&internal).unwrap();
+                    (cs.methods[&comp].ret, cs.is_interface)
+                };
+                let c = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::CrossFileVirtual {
+                        owner: internal.clone(),
+                        name: comp.clone(),
+                        params: vec![],
+                        ret: ty_to_ir(ret),
+                        interface,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![],
+                });
+                (c, ret)
             } else if let Some(m) =
                 crate::call_resolver::resolve_instance(&*self.syms.libraries, &internal, &comp, &[])
             {
