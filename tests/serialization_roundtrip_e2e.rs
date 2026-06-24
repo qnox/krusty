@@ -115,7 +115,9 @@ fn serializable_class_encode_round_trips() {
         ]));
         let src = "@Serializable class Foo(val a: Int, val b: String)\n\
                    @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)\n\
-                   @Serializable class Wide(val big: Long, val d: Double, val tag: String)";
+                   @Serializable class Wide(val big: Long, val d: Double, val tag: String)\n\
+                   @Serializable class Inner(val v: Int)\n\
+                   @Serializable class Outer(val inner: Inner, val label: String)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -169,6 +171,12 @@ fun box(): String {
     val wj = Json.encodeToString(ws, Wide(9000000000L, 3.5, "z"))
     val wb = Json.decodeFromString(ws, wj)
     if (wb.big != 9000000000L || wb.d != 3.5 || wb.tag != "z") return "WIDE FAIL: $wj -> ${wb.big},${wb.d},${wb.tag}"
+    // Nested @Serializable (composite): Outer holds an Inner.
+    val os = Outer.serializer() as KSerializer<Outer>
+    val oj = Json.encodeToString(os, Outer(Inner(5), "n"))
+    if (oj != "{\"inner\":{\"v\":5},\"label\":\"n\"}") return "OUTER ENC FAIL: $oj"
+    val ob = Json.decodeFromString(os, oj)
+    if (ob.inner.v != 5 || ob.label != "n") return "OUTER DEC FAIL: ${ob.inner.v},${ob.label}"
     return "OK"
 }
 fun main() { println(box()) }
