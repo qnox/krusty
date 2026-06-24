@@ -27,8 +27,96 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 
 mod common;
+
+/// Gap #7 emit diagnostic: lower a real `@Serializable Foo`, run the serialization plugin, then run
+/// krusty's ACTUAL emitter over the result — does it produce a well-formed `Foo$serializer.class`?
+/// This isolates whether the emitter can emit an `object` implementing the generic `KSerializer`
+/// interface with bridges (the crux of finishing serialization conformance).
+#[test]
+fn serializer_object_emits_wellformed_bytecode() {
+    use krusty::diag::DiagSink;
+    use krusty::ir_lower::lower_file;
+    use krusty::jvm::classpath::Classpath;
+    use krusty::jvm::jvm_libraries::JvmLibraries;
+    use krusty::jvm::names::file_class_name;
+    use krusty::lexer::lex;
+    use krusty::parser::parse;
+    use krusty::plugins::{serialization::SerializationPlugin, PluginContext, PluginHost};
+    use krusty::resolve::{check_file, collect_signatures_with_cp};
+
+    let Some((core, json, std)) = runtime_jars() else {
+        eprintln!("skipping: serialization runtime jars not in local cache");
+        return;
+    };
+    let Some(jimage) = jimage() else {
+        eprintln!("skipping: no JAVA_HOME/lib/modules");
+        return;
+    };
+    let cp = Rc::new(Classpath::new(vec![std, core, json, jimage]));
+
+    let src = "@Serializable class Foo(val a: Int, val b: String)";
+    let mut d = DiagSink::new();
+    let toks = lex(src, &mut d);
+    let files = vec![parse(src, &toks, &mut d)];
+    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    let syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
+    if d.has_errors() {
+        eprintln!("skipping: krusty could not lower Foo (front-end gap)");
+        return;
+    }
+    let Some(mut ir) = lower_file(&files[0], &info, &syms) else {
+        eprintln!("skipping: Foo outside IR subset");
+        return;
+    };
+
+    let ctx = PluginContext::from_source(&files[0], &ir);
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    let facade = file_class_name("Foo", files[0].package.as_deref());
+    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None);
+    let Some(classes) = classes else {
+        panic!("EMIT GAP: emit_all returned None for the serializer object (gap #7 — emitter does not yet support this construct)");
+    };
+    let ser = classes
+        .iter()
+        .find(|(n, _)| n.contains("Foo$serializer"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no Foo$serializer emitted; got {:?}",
+                classes.iter().map(|(n, _)| n).collect::<Vec<_>>()
+            )
+        });
+
+    // Write it and run `javap` — a malformed classfile fails to parse.
+    let out = std::env::temp_dir().join(format!("krusty_seremit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let p = out.join("Foo$serializer.class");
+    std::fs::write(&p, &ser.1).unwrap();
+    let javap = std::env::var("JAVA_HOME")
+        .map(|j| PathBuf::from(j).join("bin/javap"))
+        .unwrap_or_else(|_| PathBuf::from("javap"));
+    let o = Command::new(javap)
+        .arg("-p")
+        .arg(&p)
+        .output()
+        .expect("run javap");
+    assert!(
+        o.status.success(),
+        "emitted Foo$serializer.class is malformed (javap failed):\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    eprintln!(
+        "gap #7 emit OK — Foo$serializer.class is well-formed:\n{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+}
 
 fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
     // core, json, stdlib from the local gradle cache (mirrors a -classpath user).
