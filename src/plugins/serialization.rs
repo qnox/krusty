@@ -457,7 +457,6 @@ impl IrPlugin for SerializationPlugin {
             };
             // The serialized class's ClassId (for constructing it in `deserialize`).
             let foo_id = class_id;
-            let field_count = field_types.len();
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
                     "getDescriptor" => {
@@ -572,7 +571,6 @@ impl IrPlugin for SerializationPlugin {
                                 ir.add_expr(IrExpr::Const(c))
                             })
                             .collect();
-                        let _ = field_count;
                         let new = ir.add_expr(IrExpr::New {
                             class: foo_id,
                             args,
