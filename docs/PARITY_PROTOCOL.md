@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1528 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1530 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P24 — unsigned literal/`toString`/`ULong`-promotion correctness (gate 1528 → 1530, +2, FAIL=0).**
+  Three drop-in fidelity fixes for unsigned types (`UInt`/`ULong`, erased to int/long): (1) top-level &
+  member property inference now types an unsigned-literal initializer (`val ua = 1234U` → `UInt`) — was
+  `Error` ("cannot infer the type of property"). (2) String concatenation `"x" + uint` now converts the
+  operand via `Integer.toUnsignedString`/`Long.toUnsignedString` (the erased-int `String.plus`/`valueOf`
+  printed the SIGNED value — a real miscompile, e.g. `0x8fffffffU` → `-1879048193` instead of
+  `2415919103`); the `$`-template path already did this, the `+`-concat path didn't. (3) A `U`-suffixed
+  literal exceeding `UInt.MAX` is now a `ULong` (Kotlin's rule), not a truncated `UInt`
+  (`0xffff_ffff_ffffU`). New `unsigned_toplevel_e2e`. (NOTE: broader unsigned support — `compareTo` on a
+  primitive, unsigned ranges/`downTo`/`until`, unsigned division/shift — remains a separate workstream.)
+- **Phase P23 — parallelize the full test suite under 60s (test-time).** `just test` builds once then runs
+  the ~57 JVM-bound e2e binaries in parallel (`xargs -P $(nproc)`, each keeping its shared JVM); the rayon
+  conformance gate runs first/alone to avoid contention. ~99s → ~44s. Failure-aware (any binary's non-zero
+  exit fails the run + prints its log); a filter arg defers to plain `cargo test`. `nextest` was worse (82s).
 - **Phase P22 — expression-parser completeness: unary `+` and `return` in expression position (gate 1515 → 1528, +13, FAIL=0).**
   Chosen via a full-corpus `survey` skip histogram (no single big bucket left — a long tail; these are two
   clean, correct gaps). (1) Unary `+` (`+5`, `0.compareTo(+0.0f)`): new `UnOp::Plus`, identity on the

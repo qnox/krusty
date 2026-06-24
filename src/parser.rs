@@ -3755,7 +3755,13 @@ impl<'a> Parser<'a> {
             TokenKind::UIntLit => {
                 let v = parse_int_literal(self.text()); // suffix stripped inside
                 self.bump();
-                self.file.add_expr(Expr::UIntLit(v), span)
+                // A `U`-suffixed literal (no `L`) is `UInt` if it fits, else `ULong` (Kotlin's rule):
+                // e.g. `0xffff_ffff_ffffU` exceeds `UInt.MAX` so it's a `ULong`.
+                if v >= 0 && (v as u64) > u32::MAX as u64 {
+                    self.file.add_expr(Expr::ULongLit(v), span)
+                } else {
+                    self.file.add_expr(Expr::UIntLit(v), span)
+                }
             }
             TokenKind::ULongLit => {
                 let v = parse_int_literal(self.text());

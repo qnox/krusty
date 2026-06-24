@@ -9456,9 +9456,20 @@ impl<'a> Lower<'a> {
                         }
                     }
                     operands.reverse();
-                    let mut acc = self.expr(operands[0])?;
+                    // Lower an operand, converting an unsigned value to its UNSIGNED decimal string
+                    // (`String.plus`/`String.valueOf` on the erased int would print the signed value).
+                    let lower_concat_operand = |this: &mut Self, oe: AstExprId| -> Option<u32> {
+                        let v = this.expr(oe)?;
+                        let t = this.info.ty(oe);
+                        Some(if t.is_unsigned() {
+                            this.unsigned_to_string(v, t)
+                        } else {
+                            v
+                        })
+                    };
+                    let mut acc = lower_concat_operand(self, operands[0])?;
                     for &op_e in &operands[1..] {
-                        let r = self.expr(op_e)?;
+                        let r = lower_concat_operand(self, op_e)?;
                         acc = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::External("kotlin/String.plus".to_string()),
                             dispatch_receiver: Some(acc),
