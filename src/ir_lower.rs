@@ -496,7 +496,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
-                let ty = p.ty.as_ref().map(|r| ty_of(file, r)).unwrap();
+                let ty = body_prop_ty(file, info, p);
                 let gname = getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
@@ -970,10 +970,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 );
                 continue;
             }
-            let ty =
-                p.ty.as_ref()
-                    .map(|r| ty_of(file, r))
-                    .unwrap_or_else(|| info.ty(p.init.unwrap()));
+            let ty = body_prop_ty(file, info, p);
             if is_computed_prop(p) {
                 // A computed property: a `getX()` accessor (static on the facade), no backing field.
                 let fid = lo.ir.add_fun(IrFunction {
@@ -2302,6 +2299,20 @@ fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
 
 /// A computed property `val x: T get() = expr` — a custom getter, no backing field (no initializer),
 /// immutable (no setter). Compiled to a `getX()` accessor; reads call it.
+/// The `Ty` of a body property: its explicit annotation, else inferred from the getter body (a computed
+/// `val xx get() = x`) or the initializer.
+fn body_prop_ty(file: &ast::File, info: &TypeInfo, p: &ast::PropDecl) -> Ty {
+    if let Some(r) = p.ty.as_ref() {
+        ty_of(file, r)
+    } else if let Some(FunBody::Expr(g) | FunBody::Block(g)) = p.getter {
+        info.ty(g)
+    } else if let Some(i) = p.init {
+        info.ty(i)
+    } else {
+        Ty::Error
+    }
+}
+
 fn is_computed_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
@@ -2309,7 +2320,7 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
         && p.init.is_none()
         && p.getter.is_some()
         && p.setter.is_none()
-        && p.ty.is_some()
+    // The type may be inferred from the getter body (`val xx get() = x`) — no explicit annotation needed.
 }
 
 /// A body property with a real backing field — neither a computed property (custom getter, no field)
