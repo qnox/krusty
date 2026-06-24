@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1705 OK / 0 FAIL** (scanned 7351, Phase 437).
+  repo's `compiler/testData/codegen/box`). Current gate: **1726 OK / 0 FAIL** (scanned 7351, Phase 439).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,23 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P62 — interface delegation through a non-`val` constructor parameter (gate 1723 → 1726, +3,
+  FAIL=0).** `class C(a: I) : I by a` where `a` is a NON-`val` param had no backing field, so the forwarder
+  (which looks the delegate up as a field) bailed. Now ir_lower synthesizes a `private final $$delegate_<i>`
+  field per such delegation (kotlinc's name), the ctor stores the param into it (first in the body, after
+  `super()`), and `synth_delegation_forwarders` routes each interface method through it. Handles multiple
+  delegations (`A by x, B by y`). The long-standing `val`-param path is untouched. For the non-`val` path
+  ONLY, two shapes still bail (skip, never miscompile): an interface with PROPERTIES (un-forwarded
+  accessors → `AbstractMethodError`) and a GENERIC interface (`A<Long,Int>` needs substituted-type bridges).
+  e2e `interface_delegation_e2e`.
+
+- **Phase P61 — visibility-only property setter (`var x = 0; private set`) (gate 1705 → 1723, +18, FAIL=0).**
+  A property with a visibility-only setter (no body — `private`/`protected`/`internal set`) bailed because
+  `is_plain_body_prop` required `setter.is_none()`. It's still a plain backing-field property; only the
+  setter's access flag differs. `is_plain_body_prop` now allows a body-less setter; the synthesized `setX`
+  for a `private set` is recorded in a new `IrFile.private_methods` set and emitted `private final` (mirrors
+  `open_methods`). e2e `private_set_e2e`. +18 box files (all visibility-only setters).
 
 - **Phase P60 — inferred-type computed property (`val xx get() = x`) (gate 1702 → 1705, +3, FAIL=0).** A
   computed property without an explicit type annotation (the type is inferred from the getter body) bailed —

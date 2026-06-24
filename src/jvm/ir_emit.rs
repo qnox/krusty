@@ -1539,7 +1539,17 @@ fn emit_method(
             .iter()
             .any(|o| o.fq_name == owner && o.is_interface);
         let fin = final_class && !ir.open_methods.contains(&fid) && !owner_is_iface;
-        0x0001 | if fin { 0x0010 } else { 0 }
+        // A `private set` setter is `private final` (kotlinc); else `public` (+`final` per above).
+        let vis = if ir.private_methods.contains(&fid) {
+            0x0002
+        } else {
+            0x0001
+        };
+        vis | if fin || ir.private_methods.contains(&fid) {
+            0x0010
+        } else {
+            0
+        }
     } else {
         0x0019 // PUBLIC | STATIC | FINAL
     };
