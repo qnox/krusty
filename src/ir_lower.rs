@@ -8221,6 +8221,30 @@ impl<'a> Lower<'a> {
                 };
                 self.ir.add_expr(IrExpr::Throw { operand: v })
             }
+            // `return value` in expression position (`x ?: return null`). Only the simple function-return
+            // case is modeled here; an enclosing `finally`, an `inline fun` expansion frame, or a label
+            // naming a spliced lambda needs the richer `Stmt::Return` handling — skip the file instead.
+            Expr::Return { value, label } => {
+                if !self.try_finally_stack.is_empty() || !self.inline_return.is_empty() {
+                    return None;
+                }
+                if let Some(lbl) = &label {
+                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl) {
+                        return None;
+                    }
+                }
+                let v = match value {
+                    Some(ve)
+                        if self.cur_ret_ty != IrType::Unit && self.info.ty(ve) != Ty::Nothing =>
+                    {
+                        let rt = self.cur_ret_ty.clone();
+                        Some(self.lower_arg(ve, &rt)?)
+                    }
+                    Some(ve) => Some(self.expr(ve)?),
+                    None => None,
+                };
+                self.ir.add_expr(IrExpr::Return(v))
+            }
             // `try { … } catch (e: E) { … } … [finally { f }]` (nested try already rejected by checker).
             Expr::Try {
                 body,
@@ -10157,6 +10181,14 @@ impl<'a> Lower<'a> {
                             lhs: v,
                             rhs: f,
                         })
+                    }
+                    // Unary `+` is identity on numerics — emit the operand unchanged. A non-numeric
+                    // operand (a user `unaryPlus` operator) isn't modeled → skip the file.
+                    UnOp::Plus => {
+                        if !self.info.ty(operand).is_numeric() {
+                            return None;
+                        }
+                        v
                     }
                 }
             }

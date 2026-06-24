@@ -3347,9 +3347,46 @@ impl<'a> Parser<'a> {
                 .file
                 .add_expr(Expr::Throw { operand }, Span::new(start.lo, end.hi));
         }
+        // `return`/`return@label value` in expression position (`x ?: return null`).
+        if self.at(TokenKind::KwReturn) {
+            self.bump(); // 'return'
+            let label = if self.at(TokenKind::At) {
+                self.bump();
+                if self.at(TokenKind::Ident) {
+                    let l = self.text().to_string();
+                    self.bump();
+                    Some(l)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // A value follows unless the next token closes the expression context.
+            let value = if matches!(
+                self.kind(),
+                TokenKind::Newline
+                    | TokenKind::RBrace
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Comma
+                    | TokenKind::Eof
+            ) {
+                None
+            } else {
+                Some(self.parse_bp(0))
+            };
+            let end = value
+                .map(|v| self.file.expr_spans[v.0 as usize])
+                .unwrap_or(start);
+            return self
+                .file
+                .add_expr(Expr::Return { value, label }, Span::new(start.lo, end.hi));
+        }
         let unop = match self.kind() {
             TokenKind::Minus => Some(UnOp::Neg),
             TokenKind::Not => Some(UnOp::Not),
+            TokenKind::Plus => Some(UnOp::Plus),
             _ => None,
         };
         if let Some(op) = unop {

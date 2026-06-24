@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1515 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1528 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -67,6 +67,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P22 — expression-parser completeness: unary `+` and `return` in expression position (gate 1515 → 1528, +13, FAIL=0).**
+  Chosen via a full-corpus `survey` skip histogram (no single big bucket left — a long tail; these are two
+  clean, correct gaps). (1) Unary `+` (`+5`, `0.compareTo(+0.0f)`): new `UnOp::Plus`, identity on the
+  numeric types in the checker/lowerer (a user `unaryPlus` operator on a non-numeric operand skips the
+  file). (2) `return value` / `return@label value` used as an EXPRESSION (`x ?: return -1`,
+  `?: return null`): new `Expr::Return { value, label }` (mirrors the existing `Expr::Throw`). Parser adds
+  it in `parse_prefix`; resolver types it `Nothing` and marks it diverging; the lowerer emits the
+  simple function-return (bails on an enclosing `finally` / `inline` expansion / spliced-lambda label —
+  those need the richer `Stmt::Return` path). KEY BUG (found via `javap`): `emit_value` had a `Throw`
+  arm but NO `Return` arm — so `IrExpr::Return` in a `when`/elvis branch emitted nothing and the merge
+  frame was empty (`VerifyError`). Added the `Return` arm to `emit_value` mirroring `Throw`. New
+  `expr_completeness_e2e`.
 - **Phase P21 — LOCAL delegated properties `fun f(){ val/var x by Del() }` (gate 1509 → 1515, +6, FAIL=0).**
   A function-body `val/var x: T by Delegate()` now compiles. New `Stmt::LocalDelegate { is_var, name, ty,
   delegate }` AST variant (avoids changing the 29 `Stmt::Local` sites). The lowering declares a synthetic

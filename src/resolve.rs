@@ -1865,7 +1865,7 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg => infer_getter_ty(file, *operand, locals),
+            UnOp::Neg | UnOp::Plus => infer_getter_ty(file, *operand, locals),
         },
         Expr::Binary { op, lhs, rhs } => {
             let lt = infer_getter_ty(file, *lhs, locals);
@@ -2009,7 +2009,7 @@ fn infer_lit_ty_p(
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg => infer_lit_ty_p(file, *operand, class_names, fun_rets, props),
+            UnOp::Neg | UnOp::Plus => infer_lit_ty_p(file, *operand, class_names, fun_rets, props),
         },
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (
@@ -3266,7 +3266,7 @@ impl<'a> Checker<'a> {
     /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
     fn expr_diverges(&self, e: ExprId) -> bool {
         match self.file.expr(e) {
-            Expr::Throw { .. } => true,
+            Expr::Throw { .. } | Expr::Return { .. } => true,
             Expr::Block { stmts, trailing } => {
                 if let Some(te) = trailing {
                     self.expr_diverges(*te)
@@ -3813,6 +3813,12 @@ impl<'a> Checker<'a> {
             }
             Expr::Throw { operand } => {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
+                Ty::Nothing
+            }
+            Expr::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.expr(v);
+                }
                 Ty::Nothing
             }
             Expr::Lambda { params, body } => {
@@ -4781,6 +4787,8 @@ impl<'a> Checker<'a> {
     fn check_unary(&mut self, op: UnOp, ot: Ty, span: Span) -> Ty {
         match op {
             UnOp::Neg if ot.is_numeric() => ot,
+            // Unary `+` is identity on the numeric types (`+x : typeof x`).
+            UnOp::Plus if ot.is_numeric() => ot,
             UnOp::Not if ot == Ty::Boolean => Ty::Boolean,
             _ if ot == Ty::Error => Ty::Error,
             _ => {

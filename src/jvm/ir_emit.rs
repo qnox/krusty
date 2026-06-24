@@ -2703,6 +2703,17 @@ impl<'a> Emitter<'a> {
                 self.emit_value(*operand, code);
                 code.athrow();
             }
+            // `return v` in value position (`x ?: return v`): emit the return; control transfers away, so
+            // (like `throw`) nothing is left for the surrounding merge.
+            IrExpr::Return(ret_val) => match ret_val {
+                Some(rv) => {
+                    self.emit_value(*rv, code);
+                    if !self.diverges(*rv) {
+                        emit_return(self.ret, code);
+                    }
+                }
+                None => code.ret_void(),
+            },
             IrExpr::Vararg {
                 element_type,
                 elements,

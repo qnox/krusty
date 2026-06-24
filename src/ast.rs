@@ -33,6 +33,9 @@ pub enum BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// Unary `+` — identity on the built-in numeric types (`+x == x`); a user `unaryPlus` operator is
+    /// not modeled (the lowerer bails on a non-numeric operand).
+    Plus,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +74,12 @@ pub enum Expr {
     /// `throw operand` — raises an exception; an expression of bottom type `Nothing`.
     Throw {
         operand: ExprId,
+    },
+    /// `return value` / `return@label value` used in expression position (`x ?: return null`). An
+    /// expression of bottom type `Nothing` — it transfers control out of the enclosing function.
+    Return {
+        value: Option<ExprId>,
+        label: Option<String>,
     },
     /// A lambda literal `{ param -> body }` / `{ body }` (implicit `it`). krusty only supports it as
     /// the trailing argument of an *inlined* scope function (`let`/`also`); `body` is a `Block`.
@@ -634,6 +643,10 @@ impl File {
             | Expr::NullLit
             | Expr::Name(_) => false,
             Expr::CallableRef { receiver, .. } => receiver.map_or(false, |r| fe(r)),
+            Expr::Return { value, .. } => match value {
+                Some(v) => fe(*v),
+                None => false,
+            },
             Expr::NotNull { operand }
             | Expr::Throw { operand }
             | Expr::Unary { operand, .. }
@@ -830,6 +843,17 @@ impl File {
             Expr::Throw { operand } => {
                 out.push_str("(throw ");
                 self.write_expr(*operand, out);
+                out.push(')');
+            }
+            Expr::Return { value, label } => {
+                out.push_str("(return");
+                if let Some(l) = label {
+                    out.push_str(&format!("@{l}"));
+                }
+                if let Some(v) = value {
+                    out.push(' ');
+                    self.write_expr(*v, out);
+                }
                 out.push(')');
             }
             Expr::Lambda { params, body } => {
@@ -1192,5 +1216,6 @@ fn unop(op: UnOp) -> &'static str {
     match op {
         UnOp::Neg => "neg",
         UnOp::Not => "not",
+        UnOp::Plus => "plus",
     }
 }
