@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1537 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1549 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P27 — interface default methods (gate 1537 → 1549, +12, FAIL=0).** A method WITH a body in an
+  `interface` (`interface I { fun f() = "OK" }`) is now emitted as a JVM default method (concrete Code,
+  not `ACC_ABSTRACT`, and crucially NOT `ACC_FINAL` — a final interface method is a `ClassFormatError`,
+  the bug behind the first +12-compiled/12-FAIL attempt). `is_simple_interface` now admits bodied
+  methods; pass-2 lowers default-method bodies like instance methods (`this`=value 0); `emit_interface_class`
+  emits concrete-vs-abstract per body (reusing `emit_method`) and `emit_method` skips `FINAL` for an
+  interface owner. New `interface_default_method_e2e` (inherited via the interface type + overridden).
+  FOLLOW-UP: calling an inherited default through the CONCRETE class (`C().f()` where `C : I` doesn't
+  override `f`) still bails — `resolve_method(C, f)` is `None` and the call lowering doesn't yet fall back
+  to the interface default (calls via an `I`-typed reference and overrides work).
 - **Phase P26 — bound callable references with a `this` receiver (`this::method`/`this::prop`) (gate
   1537, FAIL=0; correctness/de-bail, gate-neutral for now).** The resolver rejected `this::foo` as
   "callable references are not supported" because `this` isn't a scope local (`lookup("this")` is

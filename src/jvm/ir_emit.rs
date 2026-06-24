@@ -278,7 +278,7 @@ fn emit_class(
         return emit_enum_class(ir, c, facade, bodies);
     }
     if c.is_interface {
-        return emit_interface_class(ir, c);
+        return emit_interface_class(ir, c, facade, bodies);
     }
     if let Some(user_tys) = &c.enum_entry_of {
         return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
@@ -1004,9 +1004,16 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     code.invokevirtual(m, 0, slot_words(t) as i32);
 }
 
-/// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`, with one
-/// `public abstract` method per declared (abstract) method and no fields/constructor.
-fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
+/// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
+/// with no body is a `public abstract` declaration; a method WITH a body is a Kotlin default method —
+/// emitted as a concrete instance method (Code, no `ACC_ABSTRACT`), which the JVM treats as a default
+/// method.
+fn emit_interface_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+) -> Vec<u8> {
     let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in &c.interfaces {
@@ -1014,13 +1021,19 @@ fn emit_interface_class(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<u8> {
     }
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
-        let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
-        let ret = ir_ty_to_jvm(&f.ret);
-        cw.add_abstract_method(
-            0x0001 | 0x0400,
-            &f.name,
-            &method_descriptor(&param_tys, ret),
-        ); // PUBLIC | ABSTRACT
+        if f.body.is_some() {
+            // A default method — concrete instance method on the interface.
+            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
+        } else {
+            let param_tys: Vec<Ty> = f.params.iter().map(ir_ty_to_jvm).collect();
+            let ret = ir_ty_to_jvm(&f.ret);
+            cw.add_abstract_method(
+                0x0001 | 0x0400,
+                &f.name,
+                &method_descriptor(&param_tys, ret),
+            );
+            // PUBLIC | ABSTRACT
+        }
     }
     cw.finish()
 }
@@ -1309,7 +1322,12 @@ fn emit_method(
         // kotlinc keeps an `Object`-override (a data class's toString/hashCode/equals) open even in a
         // final class, so honor `open_methods`; otherwise a method of a final class is itself final.
         let final_class = !ir.classes.iter().any(|o| o.superclass == owner);
-        let fin = final_class && !ir.open_methods.contains(&fid);
+        // An interface default method must NOT be `final` (the JVM rejects a final interface method).
+        let owner_is_iface = ir
+            .classes
+            .iter()
+            .any(|o| o.fq_name == owner && o.is_interface);
+        let fin = final_class && !ir.open_methods.contains(&fid) && !owner_is_iface;
         0x0001 | if fin { 0x0010 } else { 0 }
     } else {
         0x0019 // PUBLIC | STATIC | FINAL
