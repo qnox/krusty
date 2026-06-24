@@ -40,6 +40,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         },
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
+        ext_prop_get_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
         scope: Vec::new(),
@@ -72,8 +73,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             Decl::Class(c) if c.is_enum() && is_simple_enum(c) => {}
             Decl::Class(c) if c.is_interface() && is_simple_interface(c) => {}
             Decl::Class(c) if c.is_object() && is_simple_object(c) => {}
+            // A `val` extension property (`val Recv.name get() = …`) is lowered to a static getter; the
+            // unsupported shapes (`var`, no `get()`) are skipped in pass 1.
             Decl::Property(p)
-                if is_plain_body_prop(p) || is_computed_prop(p) || p.delegate.is_some() => {}
+                if is_plain_body_prop(p)
+                    || is_computed_prop(p)
+                    || p.delegate.is_some()
+                    || p.receiver.is_some() => {}
             _ => return None,
         }
     }
@@ -982,6 +988,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // slots (`x$delegate`, `x$kprop`) in declaration order so later non-delegated statics get the
             // matching indices. The field initializers + `getX()` body are built in pass 2.
             if p.delegate.is_some() {
+                // An EXTENSION delegated property (`val Recv.x by …`) isn't modeled — skip the file
+                // (pass 2 would otherwise treat it as an extension property and find no getter).
+                if p.receiver.is_some() {
+                    return None;
+                }
                 let ty = lo.delegated_prop_type(p)?;
                 let fid = lo.ir.add_fun(IrFunction {
                     name: getter_name(&p.name),
@@ -1002,6 +1013,30 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     format!("{}$kprop", p.name),
                     (k_idx, Ty::obj("kotlin/reflect/KProperty")),
                 );
+                continue;
+            }
+            // A `val` extension property (`val Recv.name: T get() = …`) → a static `getName(Recv): T`,
+            // exactly like an extension function's lowering. No backing field; only a `get()`-bodied
+            // property is modeled. A `var` extension property (custom setter) is not modeled yet — skip
+            // the file rather than emit a getter-only accessor that drops writes.
+            if let Some(recv_ref) = &p.receiver {
+                if p.is_var || p.getter.is_none() || p.delegate.is_some() {
+                    return None;
+                }
+                let recv_ty = ty_of(file, recv_ref);
+                let recv_desc = recv_ty.descriptor();
+                let pty = body_prop_ty(file, info, p);
+                let gfid = lo.ir.add_fun(IrFunction {
+                    name: getter_name(&p.name),
+                    params: vec![ty_to_ir(recv_ty)],
+                    ret: ty_to_ir(pty),
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: vec![],
+                });
+                lo.ext_prop_get_ids
+                    .insert((recv_desc, p.name.clone()), gfid);
                 continue;
             }
             let ty = body_prop_ty(file, info, p);
@@ -2121,7 +2156,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
-                if p.delegate.is_some() {
+                if let Some(recv_ref) = &p.receiver {
+                    // Extension property getter: lower `get() = …` with `this` = receiver (param 0).
+                    let recv_ty = ty_of(file, recv_ref);
+                    let recv_desc = recv_ty.descriptor();
+                    let pty = body_prop_ty(file, info, p);
+                    let gfid = *lo.ext_prop_get_ids.get(&(recv_desc, p.name.clone()))?;
+                    lo.cur_fn_name = getter_name(&p.name);
+                    lo.lambda_seq = 0;
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, recv_ty));
+                    let body = p.getter.clone().unwrap();
+                    lo.lower_body(&body, &ty_to_ir(pty), gfid)?;
+                } else if p.delegate.is_some() {
                     lo.lower_delegated_top_level(p)?;
                 } else if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
                     // A computed property: lower its custom getter into the `getX()` body.
@@ -2558,6 +2605,9 @@ pub(crate) struct Lower<'a> {
     /// Top-level extension functions, keyed by `(receiver type descriptor, name)` — separate from
     /// `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by receiver.
     ext_fun_ids: HashMap<(String, String), u32>,
+    /// Top-level `val` extension PROPERTIES (`val Recv.name: T get() = …`), keyed by `(receiver
+    /// descriptor, name)` → the synthesized static getter (`getName(Recv): T`) FunId.
+    ext_prop_get_ids: HashMap<(String, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
     statics: HashMap<String, (u32, Ty)>,
@@ -10314,6 +10364,16 @@ impl<'a> Lower<'a> {
                         owner: internal.clone(),
                         name: "INSTANCE".to_string(),
                         descriptor: format!("L{internal};"),
+                    }));
+                }
+                // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
+                let rty = self.info.ty(receiver);
+                if let Some(&gfid) = self.ext_prop_get_ids.get(&(rty.descriptor(), name.clone())) {
+                    let a = self.expr(receiver)?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Local(gfid),
+                        dispatch_receiver: None,
+                        args: vec![a],
                     }));
                 }
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the

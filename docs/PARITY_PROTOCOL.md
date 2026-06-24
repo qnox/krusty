@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1736 OK / 0 FAIL** (scanned 7351, Phase 446).
+  repo's `compiler/testData/codegen/box`). Current gate: **1740 OK / 0 FAIL** (scanned 7351, Phase 447).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P70 — `val` extension properties (gate 1736 → 1740, +4, FAIL=0).** `val Recv.name: T get() = …`
+  bailed at lowering: the checker already handled extension properties (`ext_props`, getter as a static
+  `getName(Recv)`), but the lowerability gate rejected them and pass-1 mis-registered them as
+  receiver-LESS computed props. Now a `val` extension property lowers exactly like an extension function:
+  pass-1 synthesizes a static `getName(Recv): T` (FunId in `ext_prop_get_ids`), pass-2 lowers `get() = …`
+  with `this` = the receiver (param 0), and a read `x.name` emits `getName(x)` (`Callee::Local`). Bare
+  receiver-member access in the body (`val A.doubled get() = n*2`) works via the same `this`-scope path
+  extension functions use. Unsupported shapes skip the file cleanly: a `var` extension property (custom
+  setter) and an extension-DELEGATED property (`val Recv.x by …` — pass-1's delegate branch now returns
+  None for a receiver prop, which fixed a pass-1/pass-2 desync panic caught during the gate run). TDD:
+  tests/extension_property_e2e.rs (user-class bare member, `Int` `this`, `String`).
 
 - **Phase P69 — user-class indexed access via `operator get`/`set` (gate 1734 → 1736, +2, FAIL=0).**
   `m[i]` / `m[i] = v` on a user class with an `operator fun get(index)` / `operator fun set(index,
