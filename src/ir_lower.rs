@@ -4878,13 +4878,70 @@ impl<'a> Lower<'a> {
     fn resolve_method(&self, internal: &str, name: &str) -> Option<(ClassId, u32, u32, Ty)> {
         let mut cur = Some(internal.to_string());
         while let Some(ci_name) = cur {
-            let ci = self.classes.get(&ci_name)?;
+            // Stop at a non-IR (classpath) super rather than aborting the whole lookup — the interface
+            // default-method fallback below still applies.
+            let Some(ci) = self.classes.get(&ci_name) else {
+                break;
+            };
             if let Some(&(idx, fid, ret)) = ci.methods.get(name) {
                 return Some((ci.id, idx, fid, ret));
             }
             cur = ci.super_internal.clone();
         }
+        // Inherited interface DEFAULT method (`class C : I` calling `I`'s `fun f() = …` it doesn't
+        // override): search the class's (and supers') interfaces transitively for a method WITH a body.
+        // Returns the interface's class id, so the call emits `invokeinterface` on the receiver.
+        // A VALUE-class receiver (erased to its underlying type) needs boxing to dispatch an interface
+        // default — not modeled here, so skip the fallback (the caller bails → file skipped, not wrong).
+        if self
+            .syms
+            .class_by_internal(internal)
+            .is_some_and(|c| c.value_field.is_some())
+        {
+            return None;
+        }
+        let mut stack = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cn) = stack.pop() {
+            if !seen.insert(cn.clone()) {
+                continue;
+            }
+            let Some(ci) = self.classes.get(&cn) else {
+                continue;
+            };
+            if let Some(sup) = &ci.super_internal {
+                stack.push(sup.clone());
+            }
+            for itf in &self.ir.classes[ci.id as usize].interfaces {
+                if let Some(ici) = self.classes.get(itf) {
+                    // Only a genuine DEFAULT method (a body in the source) is a valid inherited target.
+                    // An ABSTRACT interface method reached here (e.g. via class delegation `by`, where
+                    // the class neither defines nor IR-registers it) would emit an `invokeinterface` to an
+                    // unimplemented method (`AbstractMethodError`). Check the AST (order-independent; the
+                    // IR body is set later in pass 2).
+                    if self.iface_method_is_default(itf, name) {
+                        if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
+                            return Some((ici.id, idx, fid, ret));
+                        }
+                    }
+                }
+                stack.push(itf.clone());
+            }
+        }
         None
+    }
+
+    /// Whether a same-file interface's method is a DEFAULT method (declared with a body) — checked on
+    /// the AST so it's independent of pass-2 lowering order. Conservatively excludes interfaces that
+    /// declare (abstract) properties: a default reading such a property lowers it as a (nonexistent)
+    /// interface field — until interface property reads route through the getter, skip those.
+    fn iface_method_is_default(&self, iface_internal: &str, name: &str) -> bool {
+        self.afile.decls.iter().any(|&d| {
+            matches!(self.afile.decl(d), Decl::Class(c) if c.is_interface
+                && class_internal(self.afile, &c.name) == iface_internal
+                && c.body_props.is_empty()
+                && c.methods.iter().any(|m| m.name == name && !matches!(m.body, FunBody::None)))
+        })
     }
 
     /// Lower a call argument, inserting an explicit `ImplicitCoercion` when a primitive must box

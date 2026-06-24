@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1549 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1555 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P28 — call an inherited interface default through the concrete class (gate 1549 → 1555, +6,
+  FAIL=0).** Completes P27's follow-up: `C().f()` where `C : I` doesn't override `I`'s default `f`.
+  `resolve_method` now, after the superclass chain, walks the class's interfaces transitively and returns
+  the interface's `(class_id, method)` for a default — so the call emits `invokeinterface I.f` on the `C`
+  receiver. SOUND GUARDS added after the fix surfaced 7 FAILs: (a) the candidate must be a genuine DEFAULT
+  method, checked on the AST (`iface_method_is_default`, order-independent — the IR body is set later in
+  pass 2) — without this, class-delegation `by` and abstract methods emitted `invokeinterface` to an
+  unimplemented method (`AbstractMethodError`); (b) skip a VALUE-class receiver (needs boxing to dispatch —
+  VerifyError/IncompatibleClassChange otherwise); (c) skip interfaces that declare (abstract) properties
+  (a default reading one lowers it as a nonexistent interface field — `NoSuchFieldError`; routing interface
+  property reads through the getter is the follow-up). Also fixed the `resolve_method` super-chain `?` that
+  aborted before the fallback at a classpath super. `interface_default_method_e2e` extended with `En().greet()`.
 - **Phase P27 — interface default methods (gate 1537 → 1549, +12, FAIL=0).** A method WITH a body in an
   `interface` (`interface I { fun f() = "OK" }`) is now emitted as a JVM default method (concrete Code,
   not `ACC_ABSTRACT`, and crucially NOT `ACC_FINAL` — a final interface method is a `ClassFormatError`,
