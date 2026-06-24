@@ -750,6 +750,123 @@ impl IrFile {
     }
 }
 
+/// Invoke `f` on each direct child expression of `e`. The single structural definition of an
+/// `IrExpr`'s sub-expressions — tree walks (index shifting, scans) delegate here so a new variant is
+/// covered in one place. Written EXHAUSTIVELY (no `_` arm) on purpose: adding an `IrExpr` variant must
+/// fail to compile here rather than silently drop its children from every walk.
+pub fn for_each_child(ir: &IrFile, e: ExprId, f: &mut impl FnMut(ExprId)) {
+    match &ir.exprs[e as usize] {
+        IrExpr::Block { stmts, value } => {
+            stmts.iter().for_each(|&s| f(s));
+            value.iter().for_each(|&v| f(v));
+        }
+        IrExpr::When { branches } => branches.iter().for_each(|(c, b)| {
+            c.iter().for_each(|&c| f(c));
+            f(*b);
+        }),
+        IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
+        IrExpr::TypeOp { arg, .. }
+        | IrExpr::NotNullAssert { operand: arg }
+        | IrExpr::Throw { operand: arg }
+        | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::RefNew { init: arg, .. }
+        | IrExpr::RefGet { holder: arg, .. }
+        | IrExpr::NewArray { size: arg, .. } => f(*arg),
+        IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+            f(*lhs);
+            f(*rhs);
+        }
+        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => f(*value),
+        IrExpr::SetField {
+            receiver, value, ..
+        }
+        | IrExpr::RefSet {
+            holder: receiver,
+            value,
+            ..
+        } => {
+            f(*receiver);
+            f(*value);
+        }
+        IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
+        IrExpr::GetField { receiver, .. } => f(*receiver),
+        IrExpr::Call {
+            args,
+            dispatch_receiver,
+            ..
+        } => {
+            dispatch_receiver.iter().for_each(|&r| f(r));
+            args.iter().for_each(|&a| f(a));
+        }
+        IrExpr::MethodCall { receiver, args, .. } => {
+            f(*receiver);
+            args.iter().flatten().for_each(|&a| f(a));
+        }
+        IrExpr::InvokeFunction { func, args, .. } => {
+            f(*func);
+            args.iter().for_each(|&a| f(a));
+        }
+        IrExpr::New { args, .. }
+        | IrExpr::NewExternal { args, .. }
+        | IrExpr::NewCrossFile { args, .. }
+        | IrExpr::Vararg { elements: args, .. } => args.iter().for_each(|&a| f(a)),
+        IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } => {
+            captures.iter().for_each(|&c| f(c));
+            inline_body.iter().for_each(|&b| f(b));
+        }
+        IrExpr::While {
+            cond, body, update, ..
+        } => {
+            f(*cond);
+            f(*body);
+            update.iter().for_each(|&u| f(u));
+        }
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            f(*body);
+            catches.iter().for_each(|c| f(c.body));
+            finally.iter().for_each(|&fin| f(fin));
+        }
+        IrExpr::Const(_)
+        | IrExpr::ClassConst { .. }
+        | IrExpr::GetValue(_)
+        | IrExpr::GetStatic(_)
+        | IrExpr::Break { .. }
+        | IrExpr::Continue { .. }
+        | IrExpr::EnumEntry { .. }
+        | IrExpr::StaticInstance { .. }
+        | IrExpr::EnumValues { .. }
+        | IrExpr::UnitInstance => {}
+    }
+}
+
+/// Shift every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` by `by`, throughout the
+/// expression tree rooted at `e`. Used when a pass **appends parameters** to a function: the body's
+/// locals (numbered from the old parameter count) must move up by the number of new parameters so
+/// they don't collide with the inserted parameter slots.
+pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
+    match &mut ir.exprs[e as usize] {
+        IrExpr::GetValue(i) if *i >= threshold => *i += by,
+        IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
+        IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
+        _ => {}
+    }
+    let mut kids = Vec::new();
+    for_each_child(ir, e, &mut |c| kids.push(c));
+    for c in kids {
+        shift_value_indices(ir, c, threshold, by);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
