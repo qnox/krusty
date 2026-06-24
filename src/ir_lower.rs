@@ -13316,6 +13316,11 @@ pub(crate) fn ty_to_ir(t: Ty) -> IrType {
                 Ty::Char => "kotlin/CharArray",
                 Ty::Byte => "kotlin/ByteArray",
                 Ty::Short => "kotlin/ShortArray",
+                // An unsigned array (e.g. a `vararg x: UInt` → `UIntArray`) is the unboxed underlying
+                // primitive array (`[I`/`[J`), NOT a boxed `kotlin/Array`. Keep it primitive so it
+                // doesn't collide with a boxed `Array<Int>` at the `kotlin/Array` element-boxing step.
+                Ty::UInt => "kotlin/IntArray",
+                Ty::ULong => "kotlin/LongArray",
                 _ => {
                     return IrType::Class {
                         fq_name: "kotlin/Array".to_string(),

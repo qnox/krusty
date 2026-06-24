@@ -230,6 +230,41 @@ impl Ty {
         })
     }
 
+    /// The BOXED reference form of a primitive, used as the element type of a `Array<Int>` (a
+    /// `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`). Carried in the front end
+    /// as the Kotlin primitive name (`kotlin/Int`); it erases to the JVM wrapper only at emit (see
+    /// `jvm_class_map::to_jvm_internal`). `None` for a non-primitive (already a reference) or for the
+    /// unsigned inline-class primitives (their boxing is handled by the value-class path).
+    pub fn boxed_ref(self) -> Option<Ty> {
+        Some(Ty::obj(match self {
+            Ty::Int => "kotlin/Int",
+            Ty::Byte => "kotlin/Byte",
+            Ty::Short => "kotlin/Short",
+            Ty::Long => "kotlin/Long",
+            Ty::Float => "kotlin/Float",
+            Ty::Double => "kotlin/Double",
+            Ty::Boolean => "kotlin/Boolean",
+            Ty::Char => "kotlin/Char",
+            _ => return None,
+        }))
+    }
+
+    /// Inverse of [`boxed_ref`]: if `self` is the boxed-reference form of a primitive (the element of a
+    /// `Array<Int>`, carried as `Obj("kotlin/Int")`), the underlying primitive `Ty`. `None` otherwise.
+    pub fn unboxed_primitive(self) -> Option<Ty> {
+        Some(match self {
+            Ty::Obj("kotlin/Int", _) => Ty::Int,
+            Ty::Obj("kotlin/Byte", _) => Ty::Byte,
+            Ty::Obj("kotlin/Short", _) => Ty::Short,
+            Ty::Obj("kotlin/Long", _) => Ty::Long,
+            Ty::Obj("kotlin/Float", _) => Ty::Float,
+            Ty::Obj("kotlin/Double", _) => Ty::Double,
+            Ty::Obj("kotlin/Boolean", _) => Ty::Boolean,
+            Ty::Obj("kotlin/Char", _) => Ty::Char,
+            _ => return None,
+        })
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Ty::Int => "Int",
