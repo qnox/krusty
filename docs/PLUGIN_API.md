@@ -394,6 +394,24 @@ sufficient** — the goal's "show the surface is enough" is demonstrated by two 
 executed tests (KSP-from-jar + functional serialization). The 69-corpus "all pass" is a separate
 language-coverage milestone, not an extension-surface gap.
 
+#### Implemented so far (rounds 12–17, all gate-verified 0-FAIL, real JVM round-trips)
+Full primitive set (Int/Long/Boolean/Float/Double/String, incl. 2-slot locals) + **nested
+`@Serializable` composites** (`encodeSerializableElement`/`decodeSerializableElement` with the nested
+type's krusty-generated `$serializer.INSTANCE`), encode+decode, arbitrary field count, plugin wired
+into the main compile path.
+
+#### Next brick (confirmed precisely) — classpath static-field access
+nullable/enum/collection fields need an **element-serializer reference to a builtin serializer**, e.g.
+`kotlinx.serialization.internal.StringSerializer.INSTANCE` (verified getstatic-able: public static
+field, JVM-accessible) passed to `encodeNullableSerializableElement` / wrapped by
+`BuiltinSerializersKt.getNullable`. Nested composites worked only because their element serializer is
+a *krusty-generated* `$serializer` (a `StaticInstance` of a krusty ClassId); a builtin is a *classpath*
+object, and krusty has **no IR node to getstatic a classpath object's `INSTANCE`** (same gap as
+`Json.Default`). Adding it is a new `IrExpr` variant touching the emit match + IR walkers
+(`ir_emit`/`suspend`/`value_classes`) — a real, bounded compiler feature, but gate-risky and to be
+done as dedicated work, not rushed. Past it: enum/collection/generic/sealed serialization, then the
+language features for the rest of the 69-corpus.
+
 The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
 (an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
 the object's `<init>`/`<clinit>` via `NewExternal(PluginGeneratedSerialDescriptor)` + `addElement`
