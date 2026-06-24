@@ -274,6 +274,9 @@ impl SymbolSource for ModuleSymbols<'_> {
             constructors,
             members,
             companion,
+            // In-module classes resolve a bare-companion reference via their own companion path
+            // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
+            companion_object: None,
         })
     }
 }

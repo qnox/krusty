@@ -702,6 +702,22 @@ impl SymbolSource for JvmLibraries {
         if let Some(s) = &ci.super_class {
             supertypes.push(s.clone());
         }
+        // A companion object compiles to a `public static final C$Name` field on `C` (default name
+        // `Companion`; e.g. `Json.Default: Json$Default`). Detect it by the descriptor pattern
+        // `L<this>$<fieldname>;` so a bare `C` reference can resolve to the companion instance.
+        let companion_object = ci.fields.iter().find_map(|f| {
+            // A Kotlin companion-object instance field is always `public static final`, typed as the
+            // nested companion class (`L<this>$<fieldname>;`). Requiring all three flags + the nested-
+            // type-name pattern makes a false positive on a hand-authored non-Kotlin static field
+            // (a nested-class-typed `public static final` field) vanishingly unlikely.
+            let public_static_final =
+                f.access & (0x0001 | 0x0008 | 0x0010) == (0x0001 | 0x0008 | 0x0010);
+            if !public_static_final {
+                return None;
+            }
+            let nested = format!("{internal}${}", f.name);
+            (f.descriptor == format!("L{nested};")).then(|| (f.name.clone(), nested))
+        });
         Some(LibraryType {
             is_public: ci.is_public(),
             is_interface: ci.is_interface(),
@@ -710,6 +726,7 @@ impl SymbolSource for JvmLibraries {
             constructors,
             members,
             companion,
+            companion_object,
         })
     }
 

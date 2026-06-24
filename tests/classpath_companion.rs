@@ -1,0 +1,46 @@
+//! Classpath companion-object resolution: a bare reference to a classpath class with a `companion
+//! object` (`Json` → `Json.Default`, `Random` → `Random.Default`) resolves to the companion INSTANCE.
+//! This tests the library-layer detection (`LibraryType::companion_object`) — the substrate the
+//! resolver/lowering use to emit `getstatic C.field:LcompanionType;` for such a bare reference.
+
+mod common;
+
+use krusty::jvm::classpath::Classpath;
+use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::symbol_source::SymbolSource;
+use std::rc::Rc;
+
+#[test]
+fn classpath_class_companion_object_is_detected() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar located");
+        return;
+    };
+    let cp = Rc::new(Classpath::new(vec![stdlib]));
+    let libs = JvmLibraries::new(cp);
+
+    // `kotlin.random.Random` has a companion object `Default` — a `public static final
+    // kotlin/random/Random$Default Default` field on `Random` (the same shape as
+    // `kotlinx.serialization.json.Json.Default`).
+    let random = libs
+        .resolve_type("kotlin/random/Random")
+        .expect("kotlin/random/Random resolves on the stdlib classpath");
+    assert_eq!(
+        random.companion_object,
+        Some((
+            "Default".to_string(),
+            "kotlin/random/Random$Default".to_string()
+        )),
+        "Random's companion-object instance field should be detected"
+    );
+
+    // A class without a companion object has none — the detection must not false-positive on an
+    // unrelated static field.
+    let pair = libs
+        .resolve_type("kotlin/Pair")
+        .expect("kotlin/Pair resolves");
+    assert_eq!(
+        pair.companion_object, None,
+        "kotlin/Pair has no companion object"
+    );
+}

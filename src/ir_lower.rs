@@ -9506,6 +9506,29 @@ impl<'a> Lower<'a> {
                 } else if n == "Unit" {
                     // The `Unit` singleton used as a value → `getstatic kotlin/Unit.INSTANCE`.
                     self.ir.add_expr(IrExpr::UnitInstance)
+                } else if let Some((owner, field, cty)) = {
+                    // A bare CLASSPATH class with a companion object (`Json` → `Json.Default`): read the
+                    // companion-instance static field. Resolve the simple name to its classpath internal
+                    // via imports (`class_names`), exactly as the checker did. The checker already typed
+                    // this as the companion's type, so member calls on it resolve normally.
+                    self.syms
+                        .class_names
+                        .get(&n)
+                        .filter(|i| !i.starts_with("__ty/"))
+                        .map(|i| i.to_string())
+                        .and_then(|internal| {
+                            self.syms
+                                .libraries
+                                .resolve_type(&internal)
+                                .and_then(|lt| lt.companion_object)
+                                .map(|(f, t)| (internal, f, t))
+                        })
+                } {
+                    self.ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner,
+                        ty: cty,
+                        field,
+                    })
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).

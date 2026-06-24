@@ -3736,6 +3736,21 @@ impl<'a> Checker<'a> {
         self.lookup_prop(&s, name)
     }
 
+    /// If `name` is a CLASSPATH class with a companion object, the companion instance's type
+    /// (`Json` → `Ty::obj("…/Json$Default")`). A bare reference to such a class is its companion
+    /// instance; member calls then resolve on the companion's type. `None` for a non-classpath name,
+    /// a `__ty/` alias, or a class without a companion.
+    fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
+        let internal = self.syms.class_names.get(name)?;
+        if internal.starts_with("__ty/") {
+            return None;
+        }
+        let internal = internal.to_string();
+        let lt = self.syms.libraries.resolve_type(&internal)?;
+        let (_, companion_ty) = lt.companion_object?;
+        Some(Ty::obj(&companion_ty))
+    }
+
     /// Silent (non-erroring) assignability of each argument to a constructor's parameters — used to pick
     /// between a same-arity primary and a secondary constructor (`Sc(Int)` vs `Sc(String)`).
     fn ctor_args_match(&self, params: &[Ty], args: &[Ty]) -> bool {
@@ -4450,6 +4465,12 @@ impl<'a> Checker<'a> {
                         // Unit`) — the `kotlin/Unit` object, read as its `INSTANCE` in lowering. Only a
                         // fallback: any local/property/object named `Unit` was resolved above.
                         Ty::obj("kotlin/Unit")
+                    } else if let Some(ct) = self.classpath_companion_ty(&n) {
+                        // A bare reference to a CLASSPATH class with a companion object (`Json` →
+                        // `Json.Default`): its value is the companion instance, typed as the companion's
+                        // type, so `Json.encodeToString(…)` resolves as an instance method on it.
+                        // Lowering emits `getstatic <class>.<field>:LcompanionType;`.
+                        self.set(e, ct)
                     } else {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));

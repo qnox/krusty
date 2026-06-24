@@ -187,6 +187,12 @@ pub struct LibraryType {
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
+    /// The companion-object INSTANCE, if this class has one: `(field_name, companion_type_internal)`.
+    /// A Kotlin `class C { companion object [Name] }` compiles to a `public static final C$Name`
+    /// field on `C` (default name `Companion`, e.g. `Json.Default: Json$Default`). A bare reference to
+    /// `C` in value position is that companion instance — `getstatic C.field:LcompanionType;`. Lets the
+    /// resolver resolve `Json.encodeToString(…)` (an instance method on the companion's type).
+    pub companion_object: Option<(String, String)>,
 }
 
 /// Whether a member's parameter list matches `args` as a prefix — the loose match the JVM resolver

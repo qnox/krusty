@@ -318,7 +318,7 @@ pub enum IrExpr {
     ExternalStaticInstance {
         owner: String,
         ty: String,
-        field: &'static str,
+        field: String,
     },
     /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
     /// invokespecial internal.<init>(params)V`. Like `NewExternal` but carries the ctor parameter types
