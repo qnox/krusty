@@ -203,7 +203,14 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwImport => {
                     self.bump(); // 'import'
-                    let fq = self.parse_qualified_name();
+                    let mut fq = self.parse_qualified_name();
+                    // `import a.b.*` — `parse_qualified_name` consumes the trailing `.` (it only keeps a
+                    // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
+                    // recorded as `a.b.*` (the form `import_wildcards` recognizes).
+                    if self.at(TokenKind::Star) {
+                        self.bump(); // '*'
+                        fq.push_str(".*");
+                    }
                     if !fq.is_empty() {
                         self.file.imports.push(fq);
                     }
