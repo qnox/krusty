@@ -1486,6 +1486,29 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
 
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
+/// The JVM getter name for a Kotlin property `name`: `x` → `getX`, but an `isFoo` boolean property keeps
+/// its name. A Kotlin property is a zero-arg accessor on the JVM; callers try the property's own name
+/// AND this getter form. Shared by the checker's property-read path and the signature-inference pre-pass.
+pub(crate) fn property_getter_name(name: &str) -> String {
+    if name.starts_with("is")
+        && name
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| b.is_ascii_uppercase())
+    {
+        name.to_string()
+    } else {
+        let mut c = name.chars();
+        format!(
+            "get{}{}",
+            c.next()
+                .map(|f| f.to_uppercase().to_string())
+                .unwrap_or_default(),
+            c.as_str()
+        )
+    }
+}
+
 /// Kotlin's built-in read-only/mutable collection types remap a handful of member names onto their JVM
 /// `java.util` methods (the compiler's "mapped members"): `Map.keys`→`keySet`, `Map.entries`→`entrySet`.
 /// `values`/`size` keep their JVM name, so only the renamed ones need listing. Returns the JVM accessor.
@@ -2078,10 +2101,43 @@ fn infer_lit_ty_p(
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(prim) = file.expr(*receiver) {
-                prim_companion_ty(prim, name).unwrap_or(Ty::Error)
-            } else {
-                Ty::Error
+                if let Some(t) = prim_companion_ty(prim, name) {
+                    return t;
+                }
             }
+            // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
+            // the same path the full checker uses, no hardcoded property names. A `String`/`CharSequence`
+            // builtin member goes through the source's builtin-member resolution; an object property tries
+            // its own name, its `getX` accessor, and any mapped collection accessor.
+            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+            // `String`/`CharSequence` is its own `Ty` (not `Obj`); the checker resolves its members via
+            // the source's builtin-member API keyed on `kotlin/String` — mirror that here.
+            if rt == Ty::String {
+                if let Some(t) = src.builtin_member_ret("kotlin/String", name, &[]) {
+                    if !matches!(t, Ty::Unit | Ty::Error) {
+                        return t;
+                    }
+                }
+            }
+            if let Some(internal) = rt.obj_internal() {
+                if let Some(t) = src.builtin_member_ret(internal, name, &[]) {
+                    if !matches!(t, Ty::Unit | Ty::Error) {
+                        return t;
+                    }
+                }
+                let getter = property_getter_name(name);
+                let mapped = collection_mapped_accessor(name).map(|s| s.to_string());
+                for cand in [name.to_string(), getter].into_iter().chain(mapped) {
+                    if let Some(m) =
+                        crate::call_resolver::resolve_instance(src, internal, &cand, &[])
+                    {
+                        if !matches!(m.ret, Ty::Unit | Ty::Error) {
+                            return m.ret;
+                        }
+                    }
+                }
+            }
+            Ty::Error
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
