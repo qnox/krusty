@@ -4935,8 +4935,29 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(recv) = receiver {
-                    self.expr(recv);
+                // Bound reference on an arbitrary expression receiver (`"abc"::get`, `1::foo`, `mk()::m`):
+                // type-check the receiver (evaluated+captured once by the lowering), then resolve a member
+                // method or an extension function (keyed by the receiver's erased descriptor). Typed as
+                // `(method/ext args) -> ret` — the receiver is bound, not a parameter.
+                if let Some(r) = receiver {
+                    let rty = self.expr(r);
+                    if let Some(internal) = rty.obj_internal() {
+                        if let Some(sig) = self.syms.method_of(internal, &name) {
+                            if !sig.vararg && sig.params.len() == sig.required {
+                                return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                            }
+                        }
+                    }
+                    if let Some(sig) = self
+                        .syms
+                        .ext_funs
+                        .get(&(rty.descriptor(), name.clone()))
+                        .cloned()
+                    {
+                        if !sig.vararg && sig.params.len() == sig.required {
+                            return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                        }
+                    }
                 }
                 self.diags.error(
                     self.span(e),
