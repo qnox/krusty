@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1563 OK / 0 FAIL** (scanned 7351, Phase 413).
+  repo's `compiler/testData/codegen/box`). Current gate: **1565 OK / 0 FAIL** (scanned 7351, Phase 414).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P38 — member expr-body return inference for `if`/`when` bodies (gate 1563 → 1565, +2,
+  FAIL=0).** Extends P37: the lightweight member-signature inferer (`infer_lit_ty_p`) now types an
+  `if`/`else` or `when` expression-body member (`fun absLike(x: Int) = if (x > 0) x else -x`,
+  `fun grade(s: Int) = when { … else -> … }`) as the **common type of its branches** — identical types
+  collapse, numeric branches widen (`Int`/`Long` → `Long`), anything else stays `Error` so the inferer
+  conservatively skips rather than guess a supertype (SOUND, not complete — the full checker still does
+  the real least-upper-bound). `if` needs an `else`; `when` needs an explicit `else` arm (provably
+  exhaustive as a value). Also infers a block-expr body's trailing value. This is the authoritative
+  fix: `infer_lit_ty_p` populates the STORED method signature that BOTH the checker and `ir_lower` read —
+  refining only the checker's local `ret_ty` would leave `ir_lower` emitting a `Unit` descriptor
+  (miscompile). New `member_ctrl_inference_e2e` (`if` abs, `when` grade, `Int`/`Long`-widening branch).
 - **Phase P37 — member expr-body return inference for bitwise/shift infix calls (gate 1562 → 1563, +1,
   FAIL=0).** A *member* (object/class) function with an expression body whose value is a builtin
   bitwise/shift infix call — `fun packFast(…) = (r shl 0) or (g shl 8) or …` — wrongly inferred its
