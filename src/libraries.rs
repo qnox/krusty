@@ -233,10 +233,14 @@ impl LibraryType {
         if let Some(m) = self.constructors.iter().find(|m| m.params == *args) {
             return Some(m);
         }
+        // A constructor of a GENERIC class has erased `Object`/`Any` parameters; a reference arg widens to
+        // `Any`, and a PRIMITIVE arg boxes to `Any` too (`Pair(1, 2)` → `Pair(Object, Object)`). Match the
+        // erased ctor with both widenings (the exact-match check above already handled primitive-param
+        // ctors like `Foo(Int)`).
         let widened: Vec<Ty> = args
             .iter()
             .map(|t| {
-                if t.is_reference() {
+                if t.is_reference() || t.is_primitive() {
                     Ty::obj("kotlin/Any")
                 } else {
                     *t

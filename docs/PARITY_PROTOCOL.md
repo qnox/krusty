@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1559 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1560 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P33 — `Pair`/`Triple` constructors (gate 1559 → 1560, +1, FAIL=0).** `Pair(a, b)` / `Triple(a,
+  b, c)` were "unresolved function" — the classpath scan indexes these auto-imported `kotlin.*` classes by
+  FQ name only (they're otherwise reached via `to`), so `class_names` lacked the simple-name mapping.
+  Seeded `Pair`→`kotlin/Pair`, `Triple`→`kotlin/Triple` (classpath entries still take precedence). Also
+  fixed `LibraryType::ctor` to box PRIMITIVE args into an erased `Object`/`Any` ctor param (`Pair(1, 2)` →
+  `Pair(Object, Object)`) — it previously widened only reference args. New `pair_triple_e2e`. (NOTE:
+  `.first`/`.second` are erased to `Any` — typed member access on a Pair element still needs generic
+  type tracking, which `Ty` lacks; `Pair(...)` + `==`/passing works.)
 - **Phase P32 — no-receiver `run { … }` with a branchy body (gate 1557 → 1559, +2, FAIL=0).** The stdlib
   `inline fun <R> run(block: () -> R): R = block()` (no receiver) is now intercepted in `ir_lower` and the
   lambda body inlined directly as the value — like the receiver scope fns (`x.let`/`with(x)`). Previously
