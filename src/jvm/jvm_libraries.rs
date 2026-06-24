@@ -717,6 +717,22 @@ impl SymbolSource for JvmLibraries {
         } else {
             crate::libraries::TypeKind::Class
         };
+        // A classpath `@JvmInline value class` (detected via `@Metadata`): its erased underlying type, so
+        // the JVM backend can unbox it like a user value class. `UInt` → `Int`, `Result` → `Any`.
+        let value_underlying = crate::jvm::metadata::class_inline(&ci).map(|ic| {
+            match ic.underlying_class.as_deref() {
+                Some("kotlin/Boolean") => Ty::Boolean,
+                Some("kotlin/Byte") => Ty::Byte,
+                Some("kotlin/Short") => Ty::Short,
+                Some("kotlin/Int") => Ty::Int,
+                Some("kotlin/Long") => Ty::Long,
+                Some("kotlin/Char") => Ty::Char,
+                Some("kotlin/Float") => Ty::Float,
+                Some("kotlin/Double") => Ty::Double,
+                Some(other) => Ty::obj(other),
+                None => Ty::obj("kotlin/Any"),
+            }
+        });
         Some(LibraryType {
             is_public: ci.is_public(),
             kind,
@@ -724,6 +740,7 @@ impl SymbolSource for JvmLibraries {
             constructors,
             members,
             companion,
+            value_underlying,
         })
     }
 

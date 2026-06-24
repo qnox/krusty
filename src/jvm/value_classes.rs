@@ -64,6 +64,14 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             })
         })
         .collect();
+    // Merge classpath `@JvmInline value class`es referenced by this file (`Result` → `Object`). They are
+    // NOT in `ir.classes` (no synthesized members — their `-impl`/`box-impl` live on the classpath), so
+    // they only contribute to the erasure map: every occurrence of their type erases to the underlying,
+    // exactly like a user value class, but no member synthesis happens for them below.
+    let mut under = under;
+    for (fq, u) in &ir.external_value_classes {
+        under.entry(fq.clone()).or_insert_with(|| u.clone());
+    }
     if under.is_empty() {
         return true;
     }
@@ -1093,6 +1101,16 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .unwrap_or(0)
         + 1;
     for (id, op) in ops {
+        // A CLASSPATH value class (`Result`) is only ever held in its erased (underlying) form here —
+        // krusty never materializes its boxed `box-impl` object — so box/unbox at a boundary is identity.
+        // (kotlinc agrees: a `Result`-erased `Object` value flows into an `Object`/extension-receiver
+        // position with no `box-impl`.) Skip the op for an external value class.
+        let x = match &op {
+            BoxOp::Box(x) | BoxOp::BoxNull(x) | BoxOp::Unbox(x) => x,
+        };
+        if ir.external_value_classes.contains_key(x) {
+            continue;
+        }
         match op {
             BoxOp::Box(x) => box_wrap(ir, id, &x, &under),
             BoxOp::BoxNull(x) => {
@@ -2344,7 +2362,10 @@ fn mangling_info(
         _ => (String::new(), false),
     };
     crate::jvm::inline_class::InfoForMangling {
-        is_value: under.contains_key(&fq_name),
+        // `kotlin.Result` is erased like any value class but is EXEMPT from name mangling — kotlinc's
+        // `IrType.getRequiresMangling` is `!isClassWithFqName(RESULT_FQ_NAME) && …`. So a function with a
+        // `Result` parameter/return keeps its plain name (`f`, not `f-<hash>`).
+        is_value: under.contains_key(&fq_name) && fq_name != "kotlin/Result",
         fq_name: fq_name.replace('/', "."),
         is_nullable,
     }

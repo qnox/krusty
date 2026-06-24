@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 431).
+  repo's `compiler/testData/codegen/box`). Current gate: **1612 OK / 0 FAIL** (scanned 7351, Phase 432).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P55 — classpath value-class type erasure (`Result`→`Object`): the value-class pass now unboxes
+  classpath value classes (gate 1611 → 1612, +1, FAIL=0).** krusty's unboxed value-class ABI pass
+  (`jvm/value_classes.rs`) erased only USER value classes; a CLASSPATH value class typed in the file
+  (`fun f(r: Result<Int>)`) kept the boxed `Lkotlin/Result;` form, diverging from kotlinc's erased
+  `Ljava/lang/Object;`. Now ir_lower discovers every classpath value class referenced by type and records its
+  REFERENCE underlying (`Result`→`Any`; a primitive-underlying `UInt`/`ULong` is EXCLUDED, keeping its
+  dedicated handling) into a new `IrFile.external_value_classes` map (via `LibraryType.value_underlying`,
+  populated from `class_inline`). The pass merges these into its erasure map so their types erase exactly like
+  a user value class. Two kotlinc-faithful rules added: (1) `kotlin.Result` is EXEMPT from name mangling
+  (kotlinc's `IrType.getRequiresMangling` is `!isClassWithFqName(RESULT_FQ_NAME) && …`) — `f(Result)` keeps
+  the plain name `f`, not `f-<hash>`; (2) a classpath value class is only ever held UNBOXED here, so box/unbox
+  at a boundary is identity (krusty never materializes its `box-impl` object). Verified byte-for-byte vs
+  kotlinc (`bytediff` on `f(r)=r.getOrThrow()`: erased param + spliced body), and the gate gains a real
+  Result-using box file. Construction (`Result.success`, a Companion instance-inline splice) is the last piece
+  for the full `result_e2e`.
 - **Phase P54 — metadata-primary resolution of an `inline` value-class extension (`Result.getOrThrow`) (gate
   1611 → 1611, +0, FAIL=0).** An `inline` extension on a value class is PRIVATE in bytecode (so the
   literal-name `find_extensions` finds it only at the receiver's erased `Object`/underlying rung, then

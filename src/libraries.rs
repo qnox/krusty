@@ -189,6 +189,10 @@ pub struct LibraryType {
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
+    /// For a classpath `@JvmInline value class`, the erased underlying type it represents on the JVM
+    /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
+    /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
+    pub value_underlying: Option<Ty>,
 }
 
 /// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
