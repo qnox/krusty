@@ -233,6 +233,20 @@ impl LibraryType {
         if let Some(m) = self.constructors.iter().find(|m| m.params == *args) {
             return Some(m);
         }
+        // A `null` argument matches any reference parameter (exact on the other positions). Lets a
+        // constructor with a reference parameter be called with an explicit `null`
+        // (e.g. `PluginGeneratedSerialDescriptor(name, null, count)`), which the exact compare misses.
+        if args.iter().any(|a| matches!(a, Ty::Null)) {
+            if let Some(m) = self.constructors.iter().find(|m| {
+                m.params.len() == args.len()
+                    && m.params
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| p == a || (matches!(a, Ty::Null) && p.is_reference()))
+            }) {
+                return Some(m);
+            }
+        }
         // A constructor of a GENERIC class has erased `Object`/`Any` parameters; a reference arg widens to
         // `Any`, and a PRIMITIVE arg boxes to `Any` too (`Pair(1, 2)` → `Pair(Object, Object)`). Match the
         // erased ctor with both widenings (the exact-match check above already handled primitive-param
