@@ -5070,6 +5070,25 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ty);
                             }
                         }
+                        // `ClasspathClass.NestedObject` — a nested singleton object on the classpath
+                        // (`PrimitiveKind.STRING` → `getstatic PrimitiveKind$STRING.INSTANCE`). The value
+                        // type is the nested object's type; lowering reads its `INSTANCE`.
+                        if let Some(outer) = self.imported_type_internal(&en) {
+                            let nested = format!("{outer}${name}");
+                            if self
+                                .syms
+                                .libraries
+                                .resolve_type(&nested)
+                                .is_some_and(|t| t.is_object())
+                            {
+                                // Value = `getstatic Outer$Nested.INSTANCE` (lowering reads `nested`), but
+                                // TYPE it as the OUTER class — the runtime object is-a Outer, and erased
+                                // argument matching wants `Outer` (`PrimitiveSerialDescriptor(_, PrimitiveKind)`
+                                // accepts `PrimitiveKind.STRING`), not the narrower nested type.
+                                self.obj_value_refs.insert(e, nested);
+                                return self.set(e, Ty::obj(&outer));
+                            }
+                        }
                     }
                 }
                 let rt = self.expr(receiver);

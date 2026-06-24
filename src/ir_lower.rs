@@ -10138,6 +10138,15 @@ impl<'a> Lower<'a> {
                 })
             }
             Expr::Member { receiver, name } => {
+                // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
+                // `getstatic <Outer$Nested>.INSTANCE`.
+                if let Some(internal) = self.info.obj_value_refs.get(&e) {
+                    return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
+                        owner: internal.clone(),
+                        name: "INSTANCE".to_string(),
+                        descriptor: format!("L{internal};"),
+                    }));
+                }
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / … — inline the
                 // compile-time value read from the library (kotlinc emits the same `ldc`).
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {

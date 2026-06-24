@@ -241,6 +241,39 @@ fun box(): String {
 }
 
 #[test]
+fn custom_serializer_object_with_primitive_descriptor_in_krusty() {
+    // A user `object X : KSerializer<T>` whose descriptor is `PrimitiveSerialDescriptor(name,
+    // PrimitiveKind.STRING)` — exercising classpath nested-object value resolution (`PrimitiveKind.STRING`
+    // → getstatic PrimitiveKind$STRING.INSTANCE), wildcard-imported `Encoder`/`Decoder` param types, and
+    // a classpath top-level function (`PrimitiveSerialDescriptor`). Mirrors the kotlinx `externalSerialierJava`
+    // boxIr case: assert `X.descriptor.toString()`.
+    let src = r#"import kotlinx.serialization.KSerializer
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+
+object MySer : KSerializer<String> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("my.Thing", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: String) { TODO() }
+    override fun deserialize(decoder: Decoder): String { TODO() }
+}
+
+fun box(): String {
+    return if (MySer.descriptor.toString() == "PrimitiveDescriptor(my.Thing)") "OK"
+           else MySer.descriptor.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerCustomObj") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "custom KSerializer object wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty custom KSerializer object OK");
+}
+
+#[test]
 fn ambiguous_import_resolves_in_signature_phase() {
     // `Encoder`/`Decoder` collide with `java.beans.Encoder`/`Decoder` once the JDK modules are on the
     // classpath, so the simple name is ambiguity-pruned from the global type seed. An EXPLICIT import
