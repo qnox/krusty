@@ -9,7 +9,7 @@
 //!   - code generation (`CodeGenerator.createNewFile`)
 //!
 //! Heavy + network + JDK-sensitive (Kotlin 2.0.21's compiler rejects JDK >= 24), so it is OPT-IN:
-//! set `KRUSTY_KSP_E2E=1`. It reuses `<repo>/.ksp-toolchain` (gitignored) across runs: the KSP jars
+//! set `KRUSTY_KSP_E2E=1`. It reuses `<repo>/target/cache/ksp-toolchain` (gitignored) across runs: the KSP jars
 //! (provisioned via `krusty::plugins::deps`) and a JDK 21 (`KSP_E2E_JDK`, or an already-extracted
 //! `jdk-21*`, else downloaded). Self-skips if prerequisites are missing.
 
@@ -94,7 +94,7 @@ fn real_ksp_processor_from_jar_generates_code() {
         return;
     };
 
-    let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ksp-toolchain");
+    let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/cache/ksp-toolchain");
     let libs_dir = tool.join("libs");
 
     // 1. Provision the KSP2 + kotlin-compiler closure (reused across runs).
@@ -163,7 +163,14 @@ fn real_ksp_processor_from_jar_generates_code() {
     );
     w(
         "app/app/Foo.kt",
-        "package app\n@demo.Builder\nclass Foo(val a: Int, val b: String)\n",
+        "package app\n\
+         open class Base\n\
+         /**\n * Foo docs.\n */\n\
+         @demo.Builder\n\
+         class Foo(val a: Int, var b: String?) : Base() {\n\
+         \x20   fun greet(x: Int, vararg rest: String, y: Int = 0): String = \"\"\n\
+         \x20   companion object { const val K = 1 }\n\
+         }\n",
     );
 
     let kotlinc = |out: &str, cp: &str, src: &str| -> bool {
@@ -234,46 +241,54 @@ fn real_ksp_processor_from_jar_generates_code() {
     );
     assert!(ran, "KSP2 run must succeed");
 
-    // 6. Assert the processor inspected the class and generated code.
-    let builder = ksp_out.join("kotlin/app/FooBuilder.kt");
+    // 6. Assert the processor observed the resolved model across the KSP capability matrix (mirrors
+    // categories from google/ksp's testData — see `just ksp-corpus`). The processor dumps each into
+    // FooCaps.kt; we assert the dump line-by-line.
+    let caps = ksp_out.join("kotlin/app/FooCaps.kt");
     assert!(
-        builder.exists(),
-        "KSP generated FooBuilder.kt at {}",
-        builder.display()
+        caps.exists(),
+        "KSP generated FooCaps.kt at {}",
+        caps.display()
     );
-    let content = std::fs::read_to_string(&builder).unwrap();
-    assert!(
-        content.contains("class FooBuilder"),
-        "generated builder class"
-    );
-    assert!(
-        content.contains("properties=[a, b]"),
-        "processor inspected Foo's real properties via KSP symbol API; got:\n{content}"
-    );
-    // Broader KSP case matrix, all surfaced into the generated file by the processor:
-    assert!(
-        content.contains("option.greeting=hi-from-krusty"),
-        "SymbolProcessorEnvironment.options"
-    );
-    assert!(
-        content.contains("firstPropType=kotlin.Int"),
-        "type resolution (KSType.resolve)"
-    );
-    assert!(
-        content.contains("byName=Foo"),
-        "Resolver.getClassDeclarationByName"
-    );
-    assert!(
-        content.contains("supers=[kotlin.Any]"),
-        "resolved supertypes"
-    );
+    let c = std::fs::read_to_string(&caps).unwrap();
+    let want = [
+        ("classKind=CLASS", "class kind"),
+        ("visibility=PUBLIC", "visibility"),
+        ("qualifiedName=app.Foo", "qualified name"),
+        ("Foo docs.", "docString"),
+        ("superTypes=[app.Base]", "resolved supertypes"),
+        ("hasCompanion=true", "companion detection"),
+        (
+            "prop a : kotlin.Int mutable=false",
+            "val property + resolved type + mutability",
+        ),
+        (
+            "prop b : kotlin.String mutable=true const=false nullable=NULLABLE",
+            "var + nullable type resolution",
+        ),
+        ("rest:kotlin.Array(vararg)", "vararg value parameter"),
+        ("y:kotlin.Int(def)", "default value parameter"),
+        ("kind=MEMBER", "function kind"),
+        ("byName=Foo", "Resolver.getClassDeclarationByName"),
+        ("builtinInt=kotlin.Int", "Resolver.builtIns"),
+        (
+            "option.greeting=hi-from-krusty",
+            "SymbolProcessorEnvironment.options",
+        ),
+    ];
+    for (needle, what) in want {
+        assert!(
+            c.contains(needle),
+            "KSP capability '{what}' — missing {needle:?} in:\n{c}"
+        );
+    }
 
-    // 6b. MULTI-ROUND: FooBuilderValidator exists only if the round-1-generated FooBuilder (carrying
+    // 6b. MULTI-ROUND: FooCapsValidator exists only if the round-1-generated FooCaps (carrying
     // @Validate) was re-fed and processed in a later round — Foo itself has no @Validate.
-    let validator = ksp_out.join("kotlin/app/FooBuilderValidator.kt");
+    let validator = ksp_out.join("kotlin/app/FooCapsValidator.kt");
     assert!(
         validator.exists(),
-        "multi-round: FooBuilderValidator.kt proves the generated builder was re-processed"
+        "multi-round: FooCapsValidator.kt proves the generated file was re-processed"
     );
 
     // 7. GENERATED CODE COMPILATION: KSP's output must itself compile. Feed every generated .kt back
@@ -315,12 +330,12 @@ fn real_ksp_processor_from_jar_generates_code() {
     );
     assert!(compiled, "KSP-generated code must compile");
     assert!(
-        gen_classes.join("app/FooBuilder.class").exists(),
-        "generated FooBuilder compiled to bytecode"
+        gen_classes.join("app/FooCaps.class").exists(),
+        "generated FooCaps compiled to bytecode"
     );
     assert!(
-        gen_classes.join("app/FooBuilderValidator.class").exists(),
-        "generated (round-2) FooBuilderValidator compiled to bytecode"
+        gen_classes.join("app/FooCapsValidator.class").exists(),
+        "generated (round-2) FooCapsValidator compiled to bytecode"
     );
-    eprintln!("real KSP from-jar run OK — multi-round + generated code compiled:\n{content}");
+    eprintln!("real KSP from-jar run OK — capability matrix + multi-round + generated code compiled:\n{c}");
 }

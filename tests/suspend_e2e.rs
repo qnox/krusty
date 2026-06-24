@@ -55,12 +55,12 @@ fn javap(jh: &str, class_file: &std::path::Path) -> String {
 
 /// Locate a real `kotlin-stdlib.jar` (the coroutine intrinsics — `Continuation`, `ContinuationImpl`,
 /// `IntrinsicsKt`, `ResultKt` — live there) for the compile + run classpath. Mirrors how the box
-/// harness finds it: a vendored `.kotlinc/<v>/.../lib/kotlin-stdlib.jar`, else `KRUSTY_KOTLINC`'s dist.
+/// harness finds it: a vendored `target/cache/kotlinc/<v>/.../lib/kotlin-stdlib.jar`, else `KRUSTY_KOTLINC`'s dist.
 fn stdlib_jar() -> Option<String> {
-    // Walk up from CWD looking for `.kotlinc/*/kotlinc/lib/kotlin-stdlib.jar`.
+    // Walk up from CWD looking for `target/cache/kotlinc/*/kotlinc/lib/kotlin-stdlib.jar`.
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        if let Ok(versions) = fs::read_dir(dir.join(".kotlinc")) {
+        if let Ok(versions) = fs::read_dir(dir.join("target/cache/kotlinc")) {
             for v in versions.flatten() {
                 let jar = v.path().join("kotlinc/lib/kotlin-stdlib.jar");
                 if jar.exists() {
@@ -1150,11 +1150,11 @@ fn suspend_fun_calls_cross_file_suspend_fun() {
     );
 }
 
-/// Locate the vendored real `kotlinc` launcher (same `.kotlinc/<v>/…` tree as `stdlib_jar`).
+/// Locate the vendored real `kotlinc` launcher (same `target/cache/kotlinc/<v>/…` tree as `stdlib_jar`).
 fn kotlinc_bin() -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        if let Ok(versions) = fs::read_dir(dir.join(".kotlinc")) {
+        if let Ok(versions) = fs::read_dir(dir.join("target/cache/kotlinc")) {
             for v in versions.flatten() {
                 let bin = v.path().join("kotlinc/bin/kotlinc");
                 if bin.exists() {

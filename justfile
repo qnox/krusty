@@ -144,7 +144,7 @@ kotlinc VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     ver="{{VERSION}}"
-    dest="$PWD/.kotlinc/$ver"
+    dest="$PWD/target/cache/kotlinc/$ver"
     bin="$dest/kotlinc/bin/kotlinc"
     if [ -x "$bin" ]; then echo "$bin"; exit 0; fi
     url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip"
@@ -159,7 +159,7 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
-# Provision the Kotlin codegen/box conformance corpus into one cached dir (.kotlin-box/<ver>/) and
+# Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
@@ -168,7 +168,7 @@ box-corpus VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     ver="{{VERSION}}"
-    root="$PWD/.kotlin-box/$ver"
+    root="$PWD/target/cache/box-corpus/$ver"
     box="$root/compiler/testData/codegen/box"
     if [ -d "$box" ]; then echo "$box"; exit 0; fi
     echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
@@ -179,6 +179,46 @@ box-corpus VERSION=`just max-version`:
     git -C "$root" sparse-checkout set compiler/testData/codegen/box >&2
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     echo "$box"
+
+# Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
+# testData/boxIr) from JetBrains/kotlin at the matching tag — blobless+sparse, idempotent. The
+# reference suite our own serialization conformance tests mirror (and must meet-or-exceed). Point
+# KRUSTY_SER_BOXIR_DIR at the printed path.
+ser-corpus VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="{{VERSION}}"
+    root="$PWD/target/cache/ser-corpus/$ver"
+    box="$root/plugins/kotlinx-serialization/testData/boxIr"
+    if [ -d "$box" ]; then echo "$box"; exit 0; fi
+    echo "cloning kotlinx.serialization boxIr corpus (v${ver})…" >&2
+    rm -rf "$root"
+    git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
+        https://github.com/JetBrains/kotlin.git "$root" >&2 \
+        || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
+    git -C "$root" sparse-checkout set plugins/kotlinx-serialization/testData >&2
+    [ -d "$box" ] || { echo "serialization boxIr dir missing after sparse checkout: $box" >&2; exit 1; }
+    echo "$box"
+
+# Provision the KSP reference test corpus (google/ksp kotlin-analysis-api/testData + its test-utils
+# processors) — shallow+sparse, idempotent. The authoritative KSP capability suite our own KSP
+# conformance tests mirror (and must meet-or-exceed). Point KRUSTY_KSP_TESTDATA_DIR at the printed
+# path. KSP_REF defaults to the repo default branch (no version tags published as branches).
+ksp-corpus KSP_REF="main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ref="{{KSP_REF}}"
+    root="$PWD/target/cache/ksp-corpus/$ref"
+    td="$root/kotlin-analysis-api/testData"
+    if [ -d "$td" ]; then echo "$td"; exit 0; fi
+    echo "cloning google/ksp test corpus (${ref})…" >&2
+    rm -rf "$root"
+    git clone --depth 1 --filter=blob:none --sparse --branch "$ref" \
+        https://github.com/google/ksp.git "$root" >&2 \
+        || { echo "failed to clone google/ksp ${ref}" >&2; rm -rf "$root"; exit 1; }
+    git -C "$root" sparse-checkout set kotlin-analysis-api/testData test-utils >&2
+    [ -d "$td" ] || { echo "ksp testData dir missing after sparse checkout: $td" >&2; exit 1; }
+    echo "$td"
 
 # Run the full suite against EVERY supported Kotlin reference version, in parallel — locally and in
 # CI alike. Parallelization lives here, not in a CI matrix, so `just test-all` behaves identically
@@ -203,13 +243,13 @@ test-all *ARGS:
         [ -z "$v" ] && continue
         kc_var="KRUSTY_KOTLINC_${v//./_}"
         kc="${!kc_var:-}"
-        vendored="$PWD/.kotlinc/$v/kotlinc/bin/kotlinc"
+        vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
         [ -z "$kc" ] && kc="${KRUSTY_KOTLINC:-}"
         ( CARGO_TARGET_DIR="target/kt-$v" \
           KRUSTY_LANGUAGE_VERSION="$v" \
           KRUSTY_KOTLINC="$kc" \
-          KRUSTY_KOTLIN_BOX_DIR="$PWD/.kotlin-box/$v/compiler/testData/codegen/box" \
+          KRUSTY_KOTLIN_BOX_DIR="$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box" \
           cargo test {{ARGS}} > "target/test-$v.log" 2>&1 ) &
         pids+=("$!"); tags+=("$v")
     done < <(just kotlin-versions)

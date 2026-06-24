@@ -6,7 +6,7 @@
 //!
 //! Split compilation (krusty emits the serializer; kotlinc compiles the Json driver) sidesteps the
 //! Json-resolution gap and mirrors how the KSP e2e splits responsibilities. Opt-in
-//! `KRUSTY_SER_E2E=1`; reuses the `.ksp-toolchain` (kotlin-compiler + JDK 21) and the serialization
+//! `KRUSTY_SER_E2E=1`; reuses the `target/cache/ksp-toolchain` (kotlin-compiler + JDK 21) and the serialization
 //! runtime from the gradle cache. Self-skips if prerequisites are missing.
 
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ fn serializable_class_encode_round_trips() {
         eprintln!("skipping: set KRUSTY_SER_E2E=1 (heavy: kotlinc + JDK 21 + runtime)");
         return;
     }
-    let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ksp-toolchain");
+    let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/cache/ksp-toolchain");
     let libs = tool.join("libs");
     let jdk = std::fs::read_dir(&tool).ok().and_then(|rd| {
         rd.flatten().map(|e| e.path()).find(|p| {
@@ -65,7 +65,7 @@ fn serializable_class_encode_round_trips() {
         })
     });
     let (Some(jdk), true) = (jdk, libs.exists()) else {
-        eprintln!("skipping: .ksp-toolchain (kotlin-compiler + JDK 21) not provisioned — run the KSP e2e first");
+        eprintln!("skipping: target/cache/ksp-toolchain (kotlin-compiler + JDK 21) not provisioned — run the KSP e2e first");
         return;
     };
     let cc: String = std::fs::read_dir(&libs)
