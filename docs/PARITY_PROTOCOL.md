@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1561 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1562 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P35 — numeric primitive → `Number` assignability (gate 1561 → 1562, +1, FAIL=0).** A numeric
+  primitive (`Int`/`Long`/`Double`/…) is a subtype of `Number` — it boxes to its wrapper, which IS a
+  `Number` — so `fun f(n: Number)` accepts `5`, `val n: Number = 5L` type-checks. `expect_assignable`
+  gained that case (`java/lang/Number`/`kotlin/Number` expected, numeric actual). A broader
+  primitive→`Comparable`/`Serializable` clause was tried but dropped — it miscompiled a contravariant
+  value-class case (VerifyError); `Number` alone is clean. New `number_assignability_e2e`. (NOTE:
+  `Number.toInt()` member calls remain unresolved — a separate Kotlin-`Number`-method-mapping gap.)
 - **Phase P34 — `tailrec` value-returning functions → loop (gate 1560 → 1561, +1, FAIL=0).** `tailrec`
   was deliberately unparsed (ignoring it = no TCO = stack overflow = miscompile). Now PARSED
   (`is_modifier` + `FunDecl.is_tailrec`, threaded through all `parse_fun` callers) AND TRANSFORMED: a

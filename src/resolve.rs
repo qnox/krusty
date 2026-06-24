@@ -3743,6 +3743,17 @@ impl<'a> Checker<'a> {
         if actual == Ty::obj("kotlin/Any") && expected != Ty::Unit {
             return;
         }
+        // A numeric primitive is a subtype of `Number`: it boxes to its wrapper, which IS a `Number`
+        // (`val n: Number = 5`, `fun f(n: Number)` called with an `Int`).
+        if let Ty::Obj(e, _) = expected {
+            let numeric = matches!(
+                actual,
+                Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Double | Ty::Float
+            );
+            if numeric && (e == "java/lang/Number" || e == "kotlin/Number") {
+                return;
+            }
+        }
         // A class value is assignable to an interface (supertype) it implements.
         if let (Ty::Obj(e, _), Ty::Obj(a, _)) = (expected, actual) {
             if self.obj_is_subtype(a, e) {
