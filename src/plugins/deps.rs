@@ -26,8 +26,10 @@ pub enum Resolver {
     Coursier(PathBuf),
 }
 
-/// Probe `PATH` (and `JAVA`/mise-style locations are already on `PATH` here) for a usable resolver.
-/// Order of preference: Coursier (purpose-built, fastest), then Gradle, then Maven.
+/// Probe `PATH` for a usable resolver, preferring the lightest: **Coursier** (purpose-built jar
+/// fetcher) → **Gradle** → **Maven**. Returns `None` if none is installed; the caller then reports
+/// that the user must supply the jars (the built-in Maven fetcher fallback is documented in the
+/// module header). The order is preference, not capability — all three resolve the same closure.
 pub fn detect() -> Option<Resolver> {
     if let Some(p) = which("cs") {
         return Some(Resolver::Coursier(p));
@@ -41,7 +43,8 @@ pub fn detect() -> Option<Resolver> {
     None
 }
 
-/// Locate an executable on `PATH` by probing `--version` (works for gradle/mvn/cs).
+/// Locate an executable named `name` on `PATH` (first matching file). Detection order in [`detect`]
+/// then prefers the lightest resolver.
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -57,6 +60,16 @@ impl Resolver {
     /// Resolve `coords` (`group:artifact:version`) plus their transitive closure into `out_dir`,
     /// returning the jar paths placed there. Network + resolver are required.
     pub fn fetch(&self, coords: &[String], out_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        // Validate up front: a Maven coordinate is `group:artifact:version[:classifier]` over a
+        // restricted charset. Rejecting here prevents a malformed coord from being silently dropped
+        // (a missing KSP jar) AND closes script-injection via the generated gradle/pom text.
+        for c in coords {
+            if !is_valid_coord(c) {
+                return Err(std::io::Error::other(format!(
+                    "invalid Maven coordinate {c:?} (expected group:artifact:version)"
+                )));
+            }
+        }
         std::fs::create_dir_all(out_dir)?;
         match self {
             Resolver::Gradle(bin) => self.fetch_gradle(bin, coords, out_dir),
@@ -149,13 +162,31 @@ fn collect_jars(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(jars)
 }
 
+/// A Maven coordinate krusty will interpolate into a build script: `group:artifact:version` with an
+/// optional `:classifier`, over `[A-Za-z0-9._-]`. Anything else is rejected (see `fetch`).
+pub fn is_valid_coord(c: &str) -> bool {
+    let parts: Vec<&str> = c.split(':').collect();
+    (3..=4).contains(&parts.len())
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        })
+}
+
 /// The Gradle build that resolves `coords` + transitive deps and copies the closure into `out_dir`.
-/// Pure (no I/O) so it is unit-testable.
+/// Pure (no I/O) so it is unit-testable. `coords` are pre-validated by [`is_valid_coord`]; the path is
+/// escaped for the Kotlin string literal it lands in.
 pub fn gradle_build_script(coords: &[String], out_dir: &Path) -> String {
     let deps = coords
         .iter()
         .map(|c| format!("    fetch(\"{c}\")\n"))
         .collect::<String>();
+    let out = out_dir
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     format!(
         "plugins {{ base }}\n\
          repositories {{ mavenCentral() }}\n\
@@ -164,8 +195,7 @@ pub fn gradle_build_script(coords: &[String], out_dir: &Path) -> String {
          tasks.register<Copy>(\"fetchJars\") {{\n\
          \x20   from(configurations[\"fetch\"])\n\
          \x20   into(\"{out}\")\n\
-         }}\n",
-        out = out_dir.display()
+         }}\n"
     )
 }
 
@@ -220,6 +250,29 @@ mod tests {
         // A malformed coord (missing version) is skipped, not panicked on.
         let pom2 = maven_pom(&["only:two".to_string()]);
         assert!(!pom2.contains("only"));
+    }
+
+    #[test]
+    fn coord_validation_rejects_malformed_and_injection() {
+        assert!(is_valid_coord(
+            "com.google.devtools.ksp:symbol-processing-api:2.0.21-1.0.28"
+        ));
+        assert!(is_valid_coord("g:a:1.0:linux")); // classifier ok
+        assert!(!is_valid_coord("only:two")); // missing version
+        assert!(!is_valid_coord("g::1.0")); // empty artifact
+                                            // Injection attempts are rejected (quotes / gradle syntax / whitespace).
+        assert!(!is_valid_coord("g:a:1\") ; exec(\"rm -rf /\")"));
+        assert!(!is_valid_coord("g:a:1 2"));
+    }
+
+    #[test]
+    fn fetch_errors_on_bad_coord_without_touching_network() {
+        // A malformed coord fails fast (no resolver/network needed) rather than silently dropping it.
+        let r = Resolver::Gradle(std::path::PathBuf::from("/nonexistent/gradle"));
+        let err = r
+            .fetch(&["bad-coord".to_string()], Path::new("/tmp/krusty-x"))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid Maven coordinate"));
     }
 
     #[test]
