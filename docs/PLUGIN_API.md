@@ -430,6 +430,12 @@ names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lowe
 element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
 value-class serializers or reflection.
 
+**Value-class FIELD landed → `inlineClasses` green (4th corpus file).** krusty unboxes a `@JvmInline
+value class`-typed field to its underlying (`Holder.f: Foo` → `int`), so the serializer treats such a
+field AS its terminal underlying (`value_class_underlying`, recursive) — `encodeIntElement` → `{"f":42}`
+(same JSON as kotlinc's inline serializer), consistent with the unboxed slot. Plugin-level fix (the
+runtime-only `inlineClasses` half; the `descriptor.isInline` half is the value-class serializer below).
+
 **Value-class serializer landed** (krusty-only e2e green; a `@JvmInline value class`'s `$serializer`
 uses `InlinePrimitiveDescriptor(name, <Underlying>Serializer.INSTANCE)` so `descriptor.isInline==true`,
 and serialize/deserialize go through `encodeInline()/decodeInline()` — `Foo(42)` round-trips as bare
