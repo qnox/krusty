@@ -618,16 +618,21 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
-                // `data class` — `data` is a soft keyword (a plain identifier elsewhere).
+                // `data class` / `data object` — `data` is a soft keyword (a plain identifier elsewhere).
                 TokenKind::Ident
                     if self.text() == "data"
-                        && self
-                            .t
-                            .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                        && self.t.get(self.i + 1).map_or(false, |t| {
+                            t.kind == TokenKind::KwClass
+                                || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                        }) =>
                 {
                     self.bump(); // 'data'
-                    let mut d = self.parse_class();
+                    let is_obj = self.at(TokenKind::Ident) && self.text() == "object";
+                    let mut d = if is_obj {
+                        self.parse_object()
+                    } else {
+                        self.parse_class()
+                    };
                     d.is_data = true;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
@@ -827,7 +832,11 @@ impl<'a> Parser<'a> {
             TokenKind::Ident if self.text() == "enum" => self.parse_enum(),
             TokenKind::Ident if self.text() == "data" => {
                 self.bump();
-                let mut d = self.parse_class();
+                let mut d = if self.at(TokenKind::Ident) && self.text() == "object" {
+                    self.parse_object()
+                } else {
+                    self.parse_class()
+                };
                 d.is_data = true;
                 d
             }

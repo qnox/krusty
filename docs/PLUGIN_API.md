@@ -513,6 +513,19 @@ green alone — the corpus sealed files additionally need sealed-INTERFACE IR lo
 (`serializerFactory`), or the `elementDescriptors` extension property (`starProjections`) — each a separate
 feature. The sealed serializer foundation itself is proven by the e2e test + the +4 main-gate lift.
 
+#### Update (2026-06-24) — reified `serializer<T>()` + `data object` → corpus 6/69, main gate 1746
+
+Two changes greened corpus `serializerFactory` (its `box()` returns "OK" unconditionally — it only checks
+that `serializer<T>()`/`T.serializer()` are callable for object/enum/sealed/plain `@Serializable` kinds):
+(1) **reified free function `serializer<T>()`** (`kotlinx.serialization.serializer`) is a `reified inline`
+that throws if called directly — `ir_lower`'s free-function arm now desugars it to `T.serializer()` (via
+`serializer_crossfile`) for a `@Serializable` T, the way kotlinc's inliner does (mirrors the existing
+`encodeToString<T>`/`decodeFromString<T>` desugar); (2) **`data object` parsing** — the top-level and
+nested `data` decl arms now dispatch to `parse_object()` when followed by `object` (was `class`-only →
+"expected a top-level declaration"). **Serialization corpus 5 → 6/69; main box gate 1745 → 1746 (+1, a
+`data object` main-corpus file)**, 0 FAIL. Test:
+`serialization_krusty_only_e2e::reified_serializer_free_function_and_data_object_in_krusty`.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

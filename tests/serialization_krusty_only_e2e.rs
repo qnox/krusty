@@ -270,6 +270,37 @@ fun box(): String {
 }
 
 #[test]
+fn reified_serializer_free_function_and_data_object_in_krusty() {
+    // `serializer<T>()` (the reified free function `kotlinx.serialization.serializer`) can't be called
+    // directly (throws at runtime) — krusty desugars it to `T.serializer()`. Also exercises a
+    // `@Serializable data object` (the `data object` parse + its generated serializer).
+    let src = r#"import kotlinx.serialization.*
+
+@Serializable
+class Plain(val x: Int)
+
+@Serializable
+data object Obj
+
+fun box(): String {
+    if (serializer<Plain>().descriptor.serialName != "Plain") return "plain=" + serializer<Plain>().descriptor.serialName
+    if (Obj.serializer().descriptor.serialName != "Obj") return "obj=" + Obj.serializer().descriptor.serialName
+    if (serializer<Obj>().descriptor.serialName != "Obj") return "objreified"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerReifiedFree") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "reified serializer<T>() / data object wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty reified serializer<T>() + data object OK");
+}
+
+#[test]
 fn sealed_class_polymorphic_serializer_in_krusty() {
     // A `@Serializable sealed class` base: `Base.serializer()` returns a runtime `SealedClassSerializer`
     // over its `@Serializable` subclasses, so `Json.encodeToString(Base.serializer(), A(1))` emits the

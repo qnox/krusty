@@ -11769,6 +11769,25 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
+                    // `reified inline` that can't be called directly (throws at runtime) — desugar to
+                    // `T.serializer()` for a `@Serializable` T, the way kotlinc's inliner does.
+                    if fname == "serializer"
+                        && args.is_empty()
+                        && self.lookup(&fname).is_none()
+                        && !self.module_declares(&fname)
+                    {
+                        if let Some(c) = self
+                            .afile
+                            .call_type_args
+                            .get(&e.0)
+                            .and_then(|ts| ts.first())
+                            .and_then(|tr| self.ty_ref(tr))
+                            .and_then(|targ| self.serializable_internal(targ))
+                        {
+                            return Some(self.serializer_crossfile(&c));
+                        }
+                    }
                     // No-receiver `run { … }` (the stdlib `inline fun <R> run(block: () -> R): R =
                     // block()`): inline the lambda body directly as the value. The receiver scope
                     // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
