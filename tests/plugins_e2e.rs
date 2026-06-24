@@ -19,9 +19,9 @@ use krusty::resolve::{check_file, collect_signatures_with_cp};
 
 mod common;
 
-/// Lower a source to a real `IrFile` through krusty's full front end, or `None` if it can't compile
-/// (or no stdlib is available).
-fn lower(src: &str) -> Option<krusty::ir::IrFile> {
+/// Lower a source through krusty's full front end to its parsed `File` + real `IrFile`, or `None` if
+/// it can't compile (or no stdlib is available).
+fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
     let jar = common::stdlib_jar()?;
     let cp = Rc::new(krusty::jvm::classpath::Classpath::new(vec![jar]));
 
@@ -40,13 +40,15 @@ fn lower(src: &str) -> Option<krusty::ir::IrFile> {
     if d.has_errors() {
         return None;
     }
-    lower_file(&files[0], &info, &syms)
+    let ir = lower_file(&files[0], &info, &syms)?;
+    let [file] = <[krusty::ast::File; 1]>::try_from(files).ok()?;
+    Some((file, ir))
 }
 
 #[test]
 fn serialization_plugin_runs_on_real_lowered_ir() {
     // A plain class krusty's IR subset lowers (primary-constructor val properties).
-    let Some(mut ir) = lower("class Foo(val a: Int, val b: String)") else {
+    let Some((_file, mut ir)) = lower("class Foo(val a: Int, val b: String)") else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
         return;
     };
@@ -106,5 +108,32 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
             .iter()
             .any(|&f| ir.functions[f as usize].name == "serializer"),
         "serializer() accessor added to real Foo"
+    );
+}
+
+#[test]
+fn serialization_activates_from_source_annotation() {
+    // The keystone: the surface activates from a REAL `@Serializable` in source — parser captures the
+    // annotation, `PluginContext::from_source` indexes it, the plugin fires. No manual injection.
+    let Some((file, mut ir)) = lower("@Serializable class Foo(val a: Int, val b: String)") else {
+        eprintln!("skipping: no stdlib jar / class outside IR subset");
+        return;
+    };
+
+    let ctx = PluginContext::from_source(&file, &ir);
+    assert!(
+        !ctx.classes_with_simple("Serializable").is_empty(),
+        "@Serializable captured from source and indexed"
+    );
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+
+    assert!(
+        ir.classes
+            .iter()
+            .any(|c| c.fq_name.ends_with("Foo$serializer")),
+        "$serializer synthesized purely from the source annotation"
     );
 }

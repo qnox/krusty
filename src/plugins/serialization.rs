@@ -173,7 +173,7 @@ impl IrPlugin for SerializationPlugin {
     /// FIR declaration generation: the `$serializer` object + members + the `serializer()` accessor.
     /// PRODUCTION NOTE: hosted at the signature phase so `Foo.serializer()` in user code resolves.
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
-        for class_id in ctx.classes_with(SERIALIZABLE_FQ) {
+        for class_id in ctx.classes_with_simple("Serializable") {
             let class_fq = ir.classes[class_id as usize].fq_name.clone();
             let ser_fq = serializer_fq(&class_fq);
 
@@ -269,7 +269,7 @@ impl IrPlugin for SerializationPlugin {
     /// IR backend generation: fill `childSerializers` with a real per-field element-serializer array
     /// (arity == field count), and `serialize`/`deserialize` with placeholder `return` bodies.
     fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext) {
-        for class_id in ctx.classes_with(SERIALIZABLE_FQ) {
+        for class_id in ctx.classes_with_simple("Serializable") {
             let field_types: Vec<IrType> = ir.classes[class_id as usize]
                 .fields
                 .iter()
