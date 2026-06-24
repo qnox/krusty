@@ -424,6 +424,11 @@ impl<'a> Parser<'a> {
             if s == "interface" {
                 return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
             }
+            // `object Name` — a named local object DECLARATION. A bare `object :`/`object {` is an
+            // anonymous-object EXPRESSION (no name), which stays on the expression path.
+            if s == "object" {
+                return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
+            }
             // A class-introducing soft keyword or a declaration modifier (`open`/`abstract`/`private`/
             // `inner`/…) — keep scanning toward `class`/`interface`. The scan only returns `true` if it
             // actually reaches a type keyword, so a soft-keyword used as a value (`data.x`, `value.foo()`)

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1592 OK / 0 FAIL** (scanned 7351, Phase 421).
+  repo's `compiler/testData/codegen/box`). Current gate: **1592 OK / 0 FAIL** (scanned 7351, Phase 422).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P45 — local classes (slice 2b: named local objects) (gate 1592 → 1592, +0 corpus, FAIL=0).**
+  Completes the local-type-decl surface: a NAMED local object (`object Counter { … }`) now parses + hoists
+  like the other local types. Distinguished from an anonymous-object EXPRESSION (`object { … }` /
+  `object : T { … }`, which stays on the expr path) by the token after `object` being a name. +0 on the
+  corpus (no box file is blocked solely on a named local object), but it removes a real "not parsed" gap
+  and is proven by `named_local_object` e2e (singleton members + an anonymous object alongside, no
+  regression). Local-class surface now: class / data class / interface / object / inheritance — only the
+  CAPTURING case remains (outer locals → synthetic ctor fields, needs type-info-driven capture typing).
 - **Phase P44 — local classes (slice 2a: modifier-prefixed + inheritance) (gate 1590 → 1592, +2,
   FAIL=0).** Extends P43: a local class may now carry `open`/`abstract`/`private`/… modifiers, enabling
   local-class inheritance (`open class Base; class Derived : Base()`). The parser's local-type lookahead
