@@ -1043,6 +1043,41 @@ impl SymbolSource for JvmLibraries {
 }
 
 impl LibrarySet for JvmLibraries {
+    fn value_companion_fn(
+        &self,
+        class_internal: &str,
+        name: &str,
+        n_args: usize,
+    ) -> Option<crate::libraries::CompanionFn> {
+        let ci = self.cp.find(class_internal)?;
+        // Only a classpath value class has its companion fns realized this way (`Result.success`).
+        crate::jvm::metadata::class_inline(&ci)?;
+        let companion_field = crate::jvm::metadata::class_companion_name(&ci)?;
+        let companion_internal = format!("{class_internal}${companion_field}");
+        let comp_ci = self.cp.find(&companion_internal)?;
+        let mf = crate::jvm::metadata::class_functions(&comp_ci)
+            .into_iter()
+            .find(|m| {
+                m.kotlin_name == name
+                    && m.is_public
+                    && m.jvm_desc
+                        .as_deref()
+                        .map(|d| parse_method_desc(d).0.len() == n_args)
+                        .unwrap_or(false)
+            })?;
+        let descriptor = mf.jvm_desc?;
+        Some(crate::libraries::CompanionFn {
+            class_internal: class_internal.to_string(),
+            companion_internal,
+            companion_field,
+            jvm_name: mf.jvm_name,
+            // The logical return is the value class itself (`Result`); its type argument stays erased,
+            // matching kotlinc (a generic companion result flows as the erased underlying).
+            ret: Ty::obj(class_internal),
+            descriptor,
+        })
+    }
+
     fn prim_companion_const(&self, prim: &str, field: &str) -> Option<crate::libraries::LibConst> {
         use crate::jvm::classreader::ConstVal;
         use crate::libraries::LibConst;

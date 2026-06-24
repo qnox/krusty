@@ -11037,6 +11037,45 @@ impl<'a> Lower<'a> {
             // A receiver-lambda scope function the checker resolved (`x.run { … }`, `with(x) { … }`):
             // inline it generically — bind `this` to the receiver, lower the body — driven by the
             // checker's recorded decision, NOT a backend name-match.
+            // A classpath value-class COMPANION call (`Result.success(42)`): load the companion singleton
+            // (`getstatic <class>.<field>:L<companion>;`) as the receiver, then an inline-splice of the
+            // companion's (instance) `inline` method — `success`'s `this` is the singleton, its param the
+            // boxed argument. The splicer drops the unused `this` and inlines the arg, like kotlinc.
+            Expr::Call { .. } if self.info.companion_calls.contains_key(&e) => {
+                let cf = self.info.companion_calls[&e].clone();
+                let args = match self.afile.expr(e).clone() {
+                    Expr::Call { args, .. } => args,
+                    _ => return None,
+                };
+                let recv = self.ir.add_expr(IrExpr::ExternalStaticField {
+                    owner: cf.class_internal.clone(),
+                    name: cf.companion_field.clone(),
+                    descriptor: format!("L{};", cf.companion_internal),
+                });
+                // A value-class companion fn's params are erased reference types (`success(Object)`,
+                // `failure(Throwable)`) — target `Object` so a primitive argument is boxed (`Integer.
+                // valueOf`), matching kotlinc; a reference argument passes through unchanged.
+                let obj_ty = IrType::Class {
+                    fq_name: "kotlin/Any".to_string(),
+                    type_args: vec![],
+                    nullable: true,
+                };
+                let mut ir_args = Vec::with_capacity(args.len());
+                for &a in &args {
+                    ir_args.push(self.lower_arg(a, &obj_ty)?);
+                }
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: cf.companion_internal.clone(),
+                        name: cf.jvm_name.clone(),
+                        descriptor: cf.descriptor.clone(),
+                        inline: true,
+                        must_inline: true,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: ir_args,
+                }))?
+            }
             Expr::Call { .. } if self.info.receiver_lambdas.contains_key(&e) => {
                 let rl = self.info.receiver_lambdas[&e];
                 self.lower_receiver_lambda(rl)?

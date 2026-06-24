@@ -49,6 +49,25 @@ pub enum Origin {
 }
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
+/// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
+/// to `getstatic <class>.<field>:L<companion>;` (the receiver) then an inline-splice of the companion
+/// INSTANCE method `<companion>.<jvm_name><descriptor>` (its `this` is the loaded singleton).
+#[derive(Clone, Debug)]
+pub struct CompanionFn {
+    /// The value-class declaring the companion (`kotlin/Result`).
+    pub class_internal: String,
+    /// The companion object's internal name (`kotlin/Result$Companion`).
+    pub companion_internal: String,
+    /// The static field on `class_internal` holding the singleton (`Companion`).
+    pub companion_field: String,
+    /// The JVM method name on the companion (`success`).
+    pub jvm_name: String,
+    /// The companion method's real (instance) JVM descriptor (`(Ljava/lang/Object;)Ljava/lang/Object;`).
+    pub descriptor: String,
+    /// The call's logical Kotlin return type (`Result<T>`).
+    pub ret: Ty,
+}
+
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone)]
 pub struct LibraryCallable {
@@ -326,6 +345,19 @@ pub trait LibrarySet: SymbolSource {
     /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a
     /// known constant / not in the library.
     fn prim_companion_const(&self, _prim: &str, _field: &str) -> Option<LibConst> {
+        None
+    }
+
+    /// Resolve a call `ClassName.fn(args)` to a function on `ClassName`'s COMPANION object, when
+    /// `ClassName` is a classpath value class (`Result.success`). The companion fn is `inline` (private in
+    /// bytecode, public per `@Metadata`); the JVM realizes the call as `getstatic ClassName.Companion`
+    /// then an inline-splice of the (instance) companion method. `None` unless it resolves.
+    fn value_companion_fn(
+        &self,
+        _class_internal: &str,
+        _name: &str,
+        _n_args: usize,
+    ) -> Option<CompanionFn> {
         None
     }
 

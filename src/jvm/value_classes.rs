@@ -223,7 +223,16 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         // `base-<hash>`. Index-resolved `MethodCall`s pick this up automatically; name-resolved calls
         // (super/interface) are rewritten below via `mangle_map`.
         if !synthesized {
-            let mangled = vc_mangle(&f.name, &orig_params[fid], &orig_rets[fid], &under);
+            // A top-level (facade/file-class) function has no dispatch receiver — its value-class RETURN
+            // is not mangled; a member's is.
+            let is_file_class = f.dispatch_receiver.is_none();
+            let mangled = vc_mangle(
+                &f.name,
+                &orig_params[fid],
+                &orig_rets[fid],
+                &under,
+                is_file_class,
+            );
             if mangled != f.name {
                 if let Some(owner) = &f.dispatch_receiver {
                     mangle_map.insert(
@@ -297,6 +306,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // so the bridge boxes the result back to `X` (`box_ret`). Runs even with an empty `mangle_map` — a
     // value-class GETTER bridge (`Child2.prop: Child` through `Base2.prop: Base`) needs the erase+box with
     // no mangling involved.
+    let external_vc: HashSet<String> = ir.external_value_classes.keys().cloned().collect();
     {
         for c in &mut ir.classes {
             // A value class keeps its own members' value-class PARAMS boxed (`compareTo(LFoo;)`), so a
@@ -327,7 +337,8 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     // return. A VC param (`foo(i: Marker)`) mangles by the param; a literal-VC return
                     // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
                     // `Object`) does not.
-                    b.name = vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under);
+                    // A bridge lives on a class (never a file class); its value-class return mangles.
+                    b.name = vc_mangle(&b.name, &b.concrete_params, &b.erased_ret, &under, false);
                     // A value-class PARAM erases to its underlying in both the bridge descriptor and the
                     // target call (`foo-<hash>(Marker)` → `foo-<hash>(int)`). Done AFTER the mangle,
                     // which keys on the un-erased param type.
@@ -347,7 +358,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     let supertype_returns_vc = matches!(&b.erased_ret,
                         IrType::Class { fq_name, nullable, .. }
                             if under.contains_key(fq_name) && (!*nullable || !nullable_is_boxed(fq_name, &under)));
-                    if supertype_returns_vc {
+                    // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere — the bridge
+                    // returns the override's already-`Object` result directly, NO `box-impl` (krusty never
+                    // materializes its box object); same as a supertype that returns the value class unboxed.
+                    if supertype_returns_vc || external_vc.contains(&fq_name) {
                         b.concrete_ret = erase(&b.concrete_ret, &under);
                         b.erased_ret = b.concrete_ret.clone();
                     } else {
@@ -422,10 +436,13 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         match e {
             IrExpr::Variable { ty, .. } => *ty = erase(ty, &under),
             IrExpr::TypeOp { type_operand, .. } => {
-                // `is X` / `as X` on a value class keep the BOXED type — the box is the only object that
-                // is `instanceof X`, and a `checkcast X` of an `Any` yields a box the property access
-                // then unboxes. (Erasing would turn `as X` into `as <underlying>`, mis-typing the value.)
-                let is_vc_ty = matches!(type_operand, IrType::Class { fq_name, .. } if under.contains_key(fq_name));
+                // `is X` / `as X` on a USER value class keep the BOXED type — the box is the only object
+                // that is `instanceof X`, and a `checkcast X` of an `Any` yields a box the property access
+                // then unboxes. An EXTERNAL value class (`Result`) has NO box — it is always its underlying
+                // — so `as Result` must erase to the underlying (`as Any` → no `checkcast Result`, which
+                // would `ClassCastException` the raw value).
+                let is_vc_ty = matches!(type_operand, IrType::Class { fq_name, .. }
+                    if under.contains_key(fq_name) && !external_vc.contains(fq_name));
                 if !is_vc_ty {
                     *type_operand = erase(type_operand, &under);
                 }
@@ -2362,10 +2379,7 @@ fn mangling_info(
         _ => (String::new(), false),
     };
     crate::jvm::inline_class::InfoForMangling {
-        // `kotlin.Result` is erased like any value class but is EXEMPT from name mangling — kotlinc's
-        // `IrType.getRequiresMangling` is `!isClassWithFqName(RESULT_FQ_NAME) && …`. So a function with a
-        // `Result` parameter/return keeps its plain name (`f`, not `f-<hash>`).
-        is_value: under.contains_key(&fq_name) && fq_name != "kotlin/Result",
+        is_value: under.contains_key(&fq_name),
         fq_name: fq_name.replace('/', "."),
         is_nullable,
     }
@@ -2378,10 +2392,24 @@ fn vc_mangle(
     params: &[IrType],
     ret: &IrType,
     under: &HashMap<String, IrType>,
+    is_file_class: bool,
 ) -> String {
-    let pinfo: Vec<_> = params.iter().map(|t| mangling_info(t, under)).collect();
+    // PARAM mangling (kotlinc `IrType.getRequiresMangling`) EXEMPTS `kotlin.Result`
+    // (`!isClassWithFqName(RESULT_FQ_NAME)`), so a `Result` parameter never triggers a mangle.
+    let pinfo: Vec<_> = params
+        .iter()
+        .map(|t| {
+            let mut info = mangling_info(t, under);
+            if info.fq_name == "kotlin.Result" {
+                info.is_value = false;
+            }
+            info
+        })
+        .collect();
+    // RETURN mangling (kotlinc `hasMangledReturnType`) does NOT exempt `Result`, but applies only when the
+    // function is NOT in a file class (a top-level fn returning a value class keeps its plain name).
     let rinfo = mangling_info(ret, under);
-    let ret_opt = rinfo.is_value.then_some(&rinfo);
+    let ret_opt = (rinfo.is_value && !is_file_class).then_some(&rinfo);
     crate::jvm::inline_class::mangled_name(base, &pinfo, ret_opt)
 }
 
