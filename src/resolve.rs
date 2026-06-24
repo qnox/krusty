@@ -385,15 +385,64 @@ pub fn conversion_target(name: &str) -> Option<Ty> {
     })
 }
 
-/// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
+/// The return type of a builtin bitwise/shift operator method on an `Int`/`Long` receiver — the named
+/// forms of Kotlin's primitive operators (`a shl b`, `a and b`, `a.inv()`), which compile to JVM
+/// `ishl`/`iand`/… intrinsics, NOT classpath method calls (so they don't appear in the federated
+/// `functions()` index). `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one argument. The
+/// single source of truth shared by the checker and the signature-inference pre-pass.
+pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
+    if !matches!(recv, Ty::Int | Ty::Long) {
+        return None;
+    }
+    match (name, n_args) {
+        ("inv", 0) => Some(recv),
+        ("shl" | "shr" | "ushr" | "and" | "or" | "xor", 1) => Some(recv),
+        _ => None,
+    }
+}
+
+/// Map a file's EXPLICIT imports `simple name -> internal name` (e.g. `Calc -> util/Calc`). A
+/// wildcard import (`a.b.*`) has no simple name — those go to [`import_wildcards`].
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for fq in &file.imports {
+        if fq.ends_with(".*") {
+            continue;
+        }
         if let Some(simple) = fq.rsplit('.').next() {
             m.insert(simple.to_string(), fq.replace('.', "/"));
         }
     }
     m
+}
+
+/// The packages Kotlin imports by DEFAULT into every file, as internal names — kotlinc's fixed list for
+/// the JVM target. A bare type name resolves against these (plus the file's own imports + same package),
+/// NOT against every class on the classpath. (`kotlin.coroutines` is NOT here — it needs an explicit
+/// import, matching kotlinc.)
+pub const DEFAULT_IMPORT_PACKAGES: &[&str] = &[
+    "kotlin",
+    "kotlin/annotation",
+    "kotlin/collections",
+    "kotlin/comparisons",
+    "kotlin/io",
+    "kotlin/ranges",
+    "kotlin/sequences",
+    "kotlin/text",
+    "kotlin/jvm",
+    "java/lang",
+];
+
+/// A file's wildcard-import packages as internal names (`import kotlin.coroutines.*` →
+/// `"kotlin/coroutines"`), PLUS Kotlin's default-import packages — so a bare type name resolves through
+/// the generic import machinery against exactly the packages kotlinc would consult, instead of a global
+/// every-class simple-name index (which falsely collides `Continuation` with `jdk/internal/vm/...`).
+pub fn import_wildcards(file: &File) -> Vec<String> {
+    file.imports
+        .iter()
+        .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
+        .chain(DEFAULT_IMPORT_PACKAGES.iter().map(|s| s.to_string()))
+        .collect()
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -598,8 +647,14 @@ pub fn collect_signatures_with_cp(
                                         )]
                                     })
                                     .unwrap_or_default();
-                                let t =
-                                    infer_lit_ty_p(file, *e, &class_names, &fun_rets, &this_scope);
+                                let t = infer_lit_ty_p(
+                                    file,
+                                    *e,
+                                    &class_names,
+                                    &fun_rets,
+                                    &this_scope,
+                                    &*libraries,
+                                );
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -788,13 +843,18 @@ pub fn collect_signatures_with_cp(
                             // `getValue` return type.
                             match &bp.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => {
-                                    infer_lit_ty_p(file, de, &class_names, &fun_rets, &init_scope)
-                                        .obj_internal()
-                                        .and_then(|i| table.method_of(i, "getValue"))
-                                        .map(|s| s.ret)
-                                        .unwrap_or(Ty::Error)
-                                }
+                                None => infer_lit_ty_p(
+                                    file,
+                                    de,
+                                    &class_names,
+                                    &fun_rets,
+                                    &init_scope,
+                                    &*libraries,
+                                )
+                                .obj_internal()
+                                .and_then(|i| table.method_of(i, "getValue"))
+                                .map(|s| s.ret)
+                                .unwrap_or(Ty::Error),
                             }
                         } else {
                             match (&bp.ty, &bp.getter) {
@@ -815,6 +875,7 @@ pub fn collect_signatures_with_cp(
                                             &class_names,
                                             &fun_rets,
                                             &init_scope,
+                                            &*libraries,
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -890,7 +951,16 @@ pub fn collect_signatures_with_cp(
                                 Some(r) => ty_of_ref(r, &class_names, &bctp, diags),
                                 None => bp
                                     .init
-                                    .map(|i| infer_lit_ty_p(file, i, &class_names, &fun_rets, &[]))
+                                    .map(|i| {
+                                        infer_lit_ty_p(
+                                            file,
+                                            i,
+                                            &class_names,
+                                            &fun_rets,
+                                            &[],
+                                            &*libraries,
+                                        )
+                                    })
                                     .unwrap_or(Ty::Error),
                             };
                             if ty != Ty::Error {
@@ -979,6 +1049,7 @@ pub fn collect_signatures_with_cp(
                                             &class_names,
                                             &local_rets,
                                             &scope,
+                                            &*libraries,
                                         );
                                         if t != Ty::Error {
                                             return t;
@@ -1072,10 +1143,10 @@ pub fn collect_signatures_with_cp(
                             },
                         );
                     }
-                    if c.is_object {
+                    if c.is_object() {
                         table.objects.insert(c.name.clone());
                     }
-                    if c.is_enum {
+                    if c.is_enum() {
                         table.enums.insert(c.name.clone(), c.enum_entries.clone());
                     }
                     // Resolve each supertype to a JVM internal name via `class_names` (user/classpath
@@ -1112,7 +1183,13 @@ pub fn collect_signatures_with_cp(
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
                                     if let FunBody::Expr(e) = &m.body {
-                                        let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
+                                        let t = infer_lit_ty(
+                                            file,
+                                            *e,
+                                            &class_names,
+                                            &fun_rets,
+                                            &*libraries,
+                                        );
                                         if t != Ty::Error {
                                             t
                                         } else {
@@ -1198,7 +1275,7 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -1271,7 +1348,7 @@ pub fn collect_signatures_with_cp(
                             props,
                             ctor_params,
                             methods,
-                            is_interface: c.is_interface,
+                            is_interface: c.is_interface(),
                             is_sealed: c.is_sealed,
                             inner_of,
                             static_methods,
@@ -1279,7 +1356,7 @@ pub fn collect_signatures_with_cp(
                             lateinit_props,
                             interfaces,
                             super_internal,
-                            is_annotation: c.is_annotation,
+                            is_annotation: c.is_annotation(),
                             ctor_defaults,
                             secondary_ctors,
                             tparam_names,
@@ -1297,9 +1374,13 @@ pub fn collect_signatures_with_cp(
                             p.ty.as_ref()
                                 .map(|r| ty_of_ref(r, &class_names, &Default::default(), diags))
                                 .or_else(|| match &p.getter {
-                                    Some(FunBody::Expr(g)) => {
-                                        Some(infer_lit_ty(file, *g, &class_names, &fun_rets))
-                                    }
+                                    Some(FunBody::Expr(g)) => Some(infer_lit_ty(
+                                        file,
+                                        *g,
+                                        &class_names,
+                                        &fun_rets,
+                                        &*libraries,
+                                    )),
                                     _ => None,
                                 })
                                 .unwrap_or(Ty::Error);
@@ -1335,7 +1416,7 @@ pub fn collect_signatures_with_cp(
                     let ty = if let Some(de) = p.delegate {
                         match &p.ty {
                             Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            None => infer_lit_ty(file, de, &class_names, &fun_rets)
+                            None => infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries)
                                 .obj_internal()
                                 .and_then(|i| table.method_of(i, "getValue"))
                                 .map(|s| s.ret)
@@ -1347,7 +1428,7 @@ pub fn collect_signatures_with_cp(
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
                             (None, Some(FunBody::Expr(g))) if is_computed => {
-                                infer_lit_ty(file, *g, &class_names, &fun_rets)
+                                infer_lit_ty(file, *g, &class_names, &fun_rets, &*libraries)
                             }
                             (None, _) => p
                                 .init
@@ -1358,7 +1439,7 @@ pub fn collect_signatures_with_cp(
                                             return *t;
                                         }
                                     }
-                                    infer_lit_ty(file, i, &class_names, &fun_rets)
+                                    infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
                                 })
                                 .unwrap_or(Ty::Error),
                         }
@@ -1479,6 +1560,29 @@ fn stmt_refs_param(file: &File, s: StmtId, names: &std::collections::HashSet<&st
 
 /// Whether `e`'s subtree contains a `try` expression (used to reject *nested* try/catch, which hits
 /// a StackMapTable frame bug in codegen).
+/// The JVM getter name for a Kotlin property `name`: `x` → `getX`, but an `isFoo` boolean property keeps
+/// its name. A Kotlin property is a zero-arg accessor on the JVM; callers try the property's own name
+/// AND this getter form. Shared by the checker's property-read path and the signature-inference pre-pass.
+pub(crate) fn property_getter_name(name: &str) -> String {
+    if name.starts_with("is")
+        && name
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| b.is_ascii_uppercase())
+    {
+        name.to_string()
+    } else {
+        let mut c = name.chars();
+        format!(
+            "get{}{}",
+            c.next()
+                .map(|f| f.to_uppercase().to_string())
+                .unwrap_or_default(),
+            c.as_str()
+        )
+    }
+}
+
 /// Kotlin's built-in read-only/mutable collection types remap a handful of member names onto their JVM
 /// `java.util` methods (the compiler's "mapped members"): `Map.keys`→`keySet`, `Map.entries`→`entrySet`.
 /// `values`/`size` keep their JVM name, so only the renamed ones need listing. Returns the JVM accessor.
@@ -1617,6 +1721,8 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
             FunBody::Expr(e) | FunBody::Block(e) => bc_complex_e(file, *e, true),
             FunBody::None => false,
         },
+        // A local class is hoisted + checked separately; no enclosing-loop break/continue in its body.
+        Stmt::LocalClass(_) => false,
     }
 }
 
@@ -1720,6 +1826,7 @@ fn lambda_body_writes_outer(
             Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
             Stmt::Expr(e) => r(*e),
             Stmt::LocalFun(_) => false,
+            Stmt::LocalClass(_) => false,
         }
     }
     check_e(file, e, outer_names)
@@ -1840,7 +1947,11 @@ fn collect_lambda_outer_writes(
                 ce(file, *body, outer, out);
             }
             Stmt::Expr(e) => ce(file, *e, outer, out),
-            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalFun(_) => {}
+            Stmt::Return(None, _)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::LocalFun(_)
+            | Stmt::LocalClass(_) => {}
         }
     }
     ce(file, e, outer_names, out);
@@ -1999,26 +2110,9 @@ fn infer_lit_ty(
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
+    src: &dyn crate::libraries::LibrarySet,
 ) -> Ty {
-    infer_lit_ty_p(file, e, class_names, fun_rets, &[])
-}
-
-/// As [`infer_lit_ty`], but with the enclosing class's properties in scope so an expression-bodied
-/// member (`fun get() = v`, where `v` is a constructor property) infers the property's type.
-/// The primitive return type of a Kotlin primitive-conversion method (`toByte`/`toInt`/…), or `None`
-/// for any other name. The conversions are total and receiver-independent, so a property initializer
-/// `2.toByte()` infers to `Byte` without resolving the receiver.
-fn prim_conversion_ret(name: &str) -> Option<Ty> {
-    Some(match name {
-        "toByte" => Ty::Byte,
-        "toShort" => Ty::Short,
-        "toInt" => Ty::Int,
-        "toLong" => Ty::Long,
-        "toFloat" => Ty::Float,
-        "toDouble" => Ty::Double,
-        "toChar" => Ty::Char,
-        _ => return None,
-    })
+    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
 }
 
 /// The common type of two branch values for the lightweight signature inferer: identical types
@@ -2039,7 +2133,29 @@ fn infer_lit_ty_p(
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
+    src: &dyn crate::libraries::LibrarySet,
 ) -> Ty {
+    // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
+    // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
+    // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
+    // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
+    // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
+    fn resolved_ret(
+        src: &dyn crate::libraries::LibrarySet,
+        name: &str,
+        receiver: Option<Ty>,
+    ) -> Option<Ty> {
+        let fs = src.functions(name, receiver);
+        let mut ret: Option<Ty> = None;
+        for o in &fs.overloads {
+            match ret {
+                None => ret = Some(o.callable.ret),
+                Some(r) if r == o.callable.ret => {}
+                Some(_) => return None, // overloads disagree on return type — needs arg selection
+            }
+        }
+        ret
+    }
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -2059,19 +2175,54 @@ fn infer_lit_ty_p(
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(prim) = file.expr(*receiver) {
-                prim_companion_ty(prim, name).unwrap_or(Ty::Error)
-            } else {
-                Ty::Error
+                if let Some(t) = prim_companion_ty(prim, name) {
+                    return t;
+                }
             }
+            // Property read (`s.length`, `list.size`, `vc.value`): resolve through the FEDERATED source —
+            // the same path the full checker uses, no hardcoded property names. A `String`/`CharSequence`
+            // builtin member goes through the source's builtin-member resolution; an object property tries
+            // its own name, its `getX` accessor, and any mapped collection accessor.
+            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+            // `String`/`CharSequence` is its own `Ty` (not `Obj`); the checker resolves its members via
+            // the source's builtin-member API keyed on `kotlin/String` — mirror that here.
+            if rt == Ty::String {
+                if let Some(t) = src.builtin_member_ret("kotlin/String", name, &[]) {
+                    if !matches!(t, Ty::Unit | Ty::Error) {
+                        return t;
+                    }
+                }
+            }
+            if let Some(internal) = rt.obj_internal() {
+                if let Some(t) = src.builtin_member_ret(internal, name, &[]) {
+                    if !matches!(t, Ty::Unit | Ty::Error) {
+                        return t;
+                    }
+                }
+                let getter = property_getter_name(name);
+                let mapped = collection_mapped_accessor(name).map(|s| s.to_string());
+                for cand in [name.to_string(), getter].into_iter().chain(mapped) {
+                    if let Some(m) =
+                        crate::call_resolver::resolve_instance(src, internal, &cand, &[])
+                    {
+                        if !matches!(m.ret, Ty::Unit | Ty::Error) {
+                            return m.ret;
+                        }
+                    }
+                }
+            }
+            Ty::Error
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg | UnOp::Plus => infer_lit_ty_p(file, *operand, class_names, fun_rets, props),
+            UnOp::Neg | UnOp::Plus => {
+                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src)
+            }
         },
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props),
-                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props),
+                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src),
+                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src),
             );
             match op {
                 BinOp::Lt
@@ -2101,36 +2252,51 @@ fn infer_lit_ty_p(
                     if let Some(internal) = class_names.get(n.as_str()) {
                         return Ty::obj(internal);
                     }
-                }
-                // A primitive conversion method (`2.toByte()`, `n.toLong()`) returns its named
-                // primitive regardless of receiver — Kotlin's `Number`/`Char` conversion family.
-                // `toString()` is `String` on any receiver (`Any.toString`).
-                Expr::Member { receiver, name } => {
-                    if let Some(t) = prim_conversion_ret(name) {
+                    // A top-level library/stdlib function — federated resolution (no hardcoded names).
+                    if let Some(t) = resolved_ret(src, n, None) {
                         return t;
                     }
-                    if name == "toString" {
-                        return Ty::String;
-                    }
-                    // `this.method()` — resolve the receiver-`this` method via the rets map (extended
-                    // with this class's + superclasses' methods at the method-inference call site).
+                }
+                // A method/extension call (`n.toLong()`, `s.uppercase()`, `r shl 8` → `r.shl(8)`,
+                // `x.toString()`): resolve the return type through the FEDERATED symbol source (the same
+                // classpath/stdlib resolution the full checker uses) — NO stdlib symbol names hardcoded.
+                Expr::Member { receiver, name } => {
+                    // `this.method()` — a method of the CURRENT module's class; the federated source
+                    // doesn't carry the module's own (in-progress) signatures, so use the rets map.
                     if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
                         if let Some(ret) = fun_rets.get(name.as_str()) {
                             return *ret;
                         }
                     }
-                    // Builtin bitwise/shift infix methods (`r shl 8` parses to `r.shl(8)`): on an
-                    // `Int`/`Long` receiver they return the receiver's type — mirrors the checker's
-                    // builtin handling. `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one arg.
-                    let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props);
-                    if matches!(rt, Ty::Int | Ty::Long) {
-                        if name == "inv" && args.is_empty() {
-                            return rt;
-                        }
-                        if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor")
-                            && args.len() == 1
+                    let recv_ty =
+                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+                    if recv_ty != Ty::Error {
+                        // Builtin primitive intrinsics — the SAME shared helpers the full checker uses
+                        // (NOT classpath functions, which don't carry these): numeric/char/unsigned
+                        // conversions (`toLong`/`toChar`/…) and the named bitwise/shift operators.
+                        if args.is_empty()
+                            && (recv_ty.is_numeric()
+                                || recv_ty == Ty::Char
+                                || recv_ty.is_unsigned())
                         {
-                            return rt;
+                            if let Some(t) = conversion_target(name) {
+                                return t;
+                            }
+                        }
+                        if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
+                            return t;
+                        }
+                        // Everything else (`s.uppercase()`, library members/extensions): federated
+                        // classpath/stdlib resolution — no hardcoded symbol names.
+                        if let Some(t) = resolved_ret(src, name, Some(recv_ty)) {
+                            return t;
+                        }
+                        // A USER receiver type (a module class — not in the library source, so the call
+                        // above found nothing) can still call an `Any`-inherited member (`toString`,
+                        // `hashCode`, `equals`): resolve it on `kotlin/Any`, the universal supertype the
+                        // source DOES carry. Still real classpath resolution — no member name hardcoded.
+                        if let Some(t) = resolved_ret(src, name, Some(Ty::obj("kotlin/Any"))) {
+                            return t;
                         }
                     }
                 }
@@ -2146,8 +2312,8 @@ fn infer_lit_ty_p(
             else_branch: Some(eb),
             ..
         } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props);
-            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props);
+            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src);
+            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src);
             common_lit_ty(t, e)
         }
         // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
@@ -2158,7 +2324,7 @@ fn infer_lit_ty_p(
             }
             let mut acc: Option<Ty> = None;
             for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props);
+                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src);
                 if bt == Ty::Error {
                     return Ty::Error;
                 }
@@ -2173,12 +2339,12 @@ fn infer_lit_ty_p(
         // tracked here, so a trailing referring to a local infers `Error` (safe skip).
         Expr::Block {
             trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props),
+        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props);
-            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props);
+            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src);
+            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
             let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
             match (lt, rt) {
                 (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
@@ -2423,6 +2589,12 @@ pub struct TypeInfo {
     pub local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     /// Maps a call `ExprId` to the `StmtId` of the local function it dispatches to.
     pub local_call_map: HashMap<ExprId, StmtId>,
+    /// A bare `Name` expr that resolves to a CLASSPATH `object` used as a value → the object's internal
+    /// name. Lowering emits `getstatic <internal>.INSTANCE` (`ExternalStaticField`) for it.
+    pub obj_value_refs: HashMap<ExprId, String>,
+    /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
+    /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
+    pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     /// Inferred return types for expression-body functions that lacked an explicit return annotation.
     /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
     pub fun_ret_overrides: HashMap<String, Ty>,
@@ -2497,6 +2669,7 @@ struct Local {
 
 pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> TypeInfo {
     let imports = import_map(file);
+    let import_wildcards = import_wildcards(file);
     let mut c = Checker {
         file,
         syms,
@@ -2505,6 +2678,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
         imports,
+        import_wildcards,
         tparams: Default::default(),
         this_ty: None,
         field_ty: None,
@@ -2512,6 +2686,8 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_funs: Vec::new(),
         local_fun_sigs: HashMap::new(),
         local_call_map: HashMap::new(),
+        obj_value_refs: HashMap::new(),
+        companion_calls: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
@@ -2538,7 +2714,13 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         .collect();
     c.check_no_erased_clash(&top_funs, true);
 
+    // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
+    // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
+    // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
+    // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
+    let base_scope_depth = c.scopes.len();
     for &d in &file.decls {
+        c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
                 c.tparams = TParams::from_decl(&f.type_params, &f.type_param_bounds);
@@ -2565,7 +2747,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // An annotation with an array member needs content-based equals/hashCode
                 // (`Arrays.equals`/`Arrays.hashCode`) per the annotation contract — krusty's synthesized
                 // members use reference equality, so reject it rather than miscompile equality.
-                if cl.is_annotation
+                if cl.is_annotation()
                     && cl
                         .props
                         .iter()
@@ -2814,7 +2996,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.this_ty = None;
                 // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
                 // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
-                if cl.is_enum {
+                if cl.is_enum() {
                     let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
                     for args in &cl.enum_entry_args {
                         for (a, expected_ty) in args.iter().zip(&ctor_tys) {
@@ -2956,6 +3138,8 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         expr_types: c.expr_types,
         local_fun_sigs: c.local_fun_sigs,
         local_call_map: c.local_call_map,
+        obj_value_refs: c.obj_value_refs,
+        companion_calls: c.companion_calls,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
         bridges: c.bridges,
@@ -2974,6 +3158,7 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     imports: HashMap<String, String>,
+    import_wildcards: Vec<String>,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The type of `this` when checking class members (`None` at top level).
@@ -2991,6 +3176,8 @@ struct Checker<'a> {
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     local_call_map: HashMap<ExprId, StmtId>,
+    obj_value_refs: HashMap<ExprId, String>,
+    companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
@@ -3094,6 +3281,36 @@ impl<'a> Checker<'a> {
     /// Build a class reference type, carrying any generic arguments from the syntactic type
     /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
     /// descriptors but let the front end recover member/element types.
+    /// If bare `name` resolves (through imports/defaults) to a CLASSPATH Kotlin `object`, its internal
+    /// name — so the object can be referenced as a value (`getstatic <internal>.INSTANCE` in lowering).
+    fn classpath_object_value(&self, name: &str) -> Option<String> {
+        let internal = self.imported_type_internal(name)?;
+        if self.syms.libraries.resolve_type(&internal)?.is_object() {
+            Some(internal)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
+    /// the classpath — covering names the global simple-name index dropped as ambiguous (e.g.
+    /// `Continuation`). Checks the explicit import first, then each wildcard-imported package. Existence
+    /// is verified via the federated source's `resolve_type` (no guessing a non-existent `Obj`).
+    fn imported_type_internal(&self, name: &str) -> Option<String> {
+        if let Some(internal) = self.imports.get(name) {
+            if self.syms.libraries.resolve_type(internal).is_some() {
+                return Some(internal.clone());
+            }
+        }
+        for pkg in &self.import_wildcards {
+            let cand = format!("{pkg}/{name}");
+            if self.syms.libraries.resolve_type(&cand).is_some() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
     fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
         if r.targs.is_empty() {
             Ty::obj(internal)
@@ -3151,6 +3368,11 @@ impl<'a> Checker<'a> {
                 Some(prim) => Ty::from_name(prim).unwrap_or(Ty::Error),
                 None => self.obj_with_targs(&internal, r),
             }
+        } else if let Some(internal) = self.imported_type_internal(&r.name) {
+            // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
+            // index — either never registered or pruned because it's ambiguous across the whole classpath
+            // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
+            self.obj_with_targs(&internal, r)
         } else {
             Ty::Error
         };
@@ -4503,6 +4725,11 @@ impl<'a> Checker<'a> {
                         // type, so `Json.encodeToString(…)` resolves as an instance method on it.
                         // Lowering emits `getstatic <class>.<field>:LcompanionType;`.
                         self.set(e, ct)
+                    } else if let Some(internal) = self.classpath_object_value(&n) {
+                        // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`): its type is
+                        // the object type; lowering reads `getstatic <internal>.INSTANCE`.
+                        self.obj_value_refs.insert(e, internal.clone());
+                        Ty::obj(&internal)
                     } else {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -5853,6 +6080,28 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // Classpath value-class COMPANION call `Result.success(args)`: `Result` is a classpath
+                // value class whose companion declares `success` (an `inline` fn — private in bytecode,
+                // public per `@Metadata`). Resolve metadata-first; lowering emits the companion `getstatic`
+                // receiver + an inline-splice of the companion method.
+                if let Expr::Name(root) = self.file.expr(receiver).clone() {
+                    if self.lookup(&root).is_none() {
+                        if let Some(internal) = self.imported_type_internal(&root) {
+                            if let Some(cf) =
+                                self.syms
+                                    .libraries
+                                    .value_companion_fn(&internal, &name, args.len())
+                            {
+                                for &a in args {
+                                    self.expr(a);
+                                }
+                                let ret = cf.ret;
+                                self.companion_calls.insert(call, cf);
+                                return ret;
+                            }
+                        }
+                    }
+                }
                 // `recv.run { … }` / `recv.apply { … }`: the lambda body has `recv` as its implicit
                 // receiver (`this`); `run` yields the body, `apply` the receiver.
                 if matches!(name.as_str(), "run" | "apply") && args.len() == 1 {
@@ -6313,30 +6562,20 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Builtin bitwise/shift infix methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`).
-                // These have no operator symbol in Kotlin (only the named form), so there's no
-                // shadowing concern — resolve to the receiver's type. Shifts take an `Int` amount;
-                // `and`/`or`/`xor` take the same type; `inv` is unary.
-                if matches!(rt, Ty::Int | Ty::Long) {
-                    if name == "inv" && arg_tys.is_empty() {
-                        return rt;
-                    }
-                    if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor")
-                        && arg_tys.len() == 1
-                    {
+                // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
+                // `a.inv()`) — the named primitive operators (no symbol form), resolved via the shared
+                // `builtin_bitwise_ret` (also used by signature inference). The arg-type rule is the
+                // checker's: a shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+                if let Some(ret) = builtin_bitwise_ret(rt, &name, arg_tys.len()) {
+                    if let Some(arg0) = arg_tys.first() {
                         let expected = if matches!(name.as_str(), "shl" | "shr" | "ushr") {
                             Ty::Int
                         } else {
                             rt
                         };
-                        self.expect_assignable(
-                            expected,
-                            arg_tys[0],
-                            self.span(args[0]),
-                            "argument",
-                        );
-                        return rt;
+                        self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
                     }
+                    return ret;
                 }
                 // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
                 // primitive operator, which *beats* any same-named user extension (in Kotlin a
@@ -7890,6 +8129,9 @@ impl<'a> Checker<'a> {
             Stmt::LocalFun(f) => {
                 self.check_local_fun(&f.clone(), s);
             }
+            // A local class is hoisted to a top-level `Decl::Class` (see `hoist_local_classes`) and
+            // checked there — nothing to do for the in-body statement.
+            Stmt::LocalClass(_) => {}
         }
     }
 

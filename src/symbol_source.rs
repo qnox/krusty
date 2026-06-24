@@ -169,13 +169,13 @@ mod tests {
             if self.typed.as_deref() == Some(internal) {
                 Some(LibraryType {
                     is_public: true,
-                    is_interface: false,
-                    is_annotation: false,
+                    kind: crate::libraries::TypeKind::Class,
                     supertypes: vec![self.owner.clone()],
                     constructors: vec![],
                     members: vec![],
                     companion: vec![],
                     companion_object: None,
+                    value_underlying: None,
                 })
             } else {
                 None

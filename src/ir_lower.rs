@@ -69,9 +69,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         match file.decl(d) {
             Decl::Fun(_) => {} // top-level function, extension function, or `inline fun` (expanded at call sites)
             Decl::Class(c) if is_simple_class(c) => {}
-            Decl::Class(c) if c.is_enum && is_simple_enum(c) => {}
-            Decl::Class(c) if c.is_interface && is_simple_interface(c) => {}
-            Decl::Class(c) if c.is_object && is_simple_object(c) => {}
+            Decl::Class(c) if c.is_enum() && is_simple_enum(c) => {}
+            Decl::Class(c) if c.is_interface() && is_simple_interface(c) => {}
+            Decl::Class(c) if c.is_object() && is_simple_object(c) => {}
             Decl::Property(p)
                 if is_plain_body_prop(p) || is_computed_prop(p) || p.delegate.is_some() => {}
             _ => return None,
@@ -270,6 +270,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .chain(body_fields)
                 .chain(delegate_fields.iter().cloned())
                 .collect();
+            // Field indices backing a `lateinit var` (matched by name in the final `fields`, so any
+            // `this$0` offset is handled). The backend null-checks every read of these fields.
+            let lateinit_names: std::collections::HashSet<&str> = c
+                .body_props
+                .iter()
+                .filter(|p| p.is_lateinit)
+                .map(|p| p.name.as_str())
+                .collect();
+            let lateinit_fields: Vec<u32> = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, (n, _))| lateinit_names.contains(n.as_str()))
+                .map(|(i, _)| i as u32)
+                .collect();
             // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
             // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
             // backing-field body props). Neutral metadata for the value-class pass's bound resolution.
@@ -303,7 +317,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // supported; extending a classpath/Java type isn't modeled yet → bail.
             let super_internal: Option<String> = match &c.base_class {
                 Some(base) => {
-                    let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface));
+                    let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface()));
                     if !is_file_class {
                         return None;
                     }
@@ -311,7 +325,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 None => None,
             };
-            let superclass = if c.is_enum {
+            let superclass = if c.is_enum() {
                 "java/lang/Enum".to_string()
             } else {
                 super_internal
@@ -322,7 +336,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // (`Runnable`, `Comparator`) resolved through the library set; else bail.
             let mut iface_internals = Vec::new();
             for st in &c.supertypes {
-                let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface));
+                let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                 if is_file_iface {
                     iface_internals.push(class_internal(file, st));
                     continue;
@@ -337,7 +351,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .syms
                     .libraries
                     .resolve_type(&resolved)
-                    .map_or(false, |t| t.is_interface)
+                    .map_or(false, |t| t.is_interface())
                 {
                     iface_internals.push(resolved);
                 } else {
@@ -388,7 +402,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .collect(),
                 init_body: None,
                 methods: vec![],
-                is_interface: c.is_interface,
+                is_interface: c.is_interface(),
                 superclass,
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
@@ -403,7 +417,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 func_ref: None,
                 bridges: Vec::new(),
                 interfaces: iface_internals,
-                is_object: c.is_object,
+                is_object: c.is_object(),
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
@@ -422,6 +436,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .chain(delegate_fields.iter().map(|_| true))
                     .collect(),
                 field_private: vec![], // user backing fields are all private (default)
+                lateinit_fields,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
             });
@@ -456,7 +471,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // `$DefaultImpls` class) and >31 parameters (kotlinc's multi-`int` mask) aren't modeled —
                 // leaving them unmarked makes an omitted-arg call bail, so the file is skipped, not wrong.
                 if m.params.iter().any(|p| p.default.is_some())
-                    && !c.is_interface
+                    && !c.is_interface()
                     && m.params.len() <= 31
                 {
                     lo.ir.fn_param_defaults.insert(fid, Vec::new());
@@ -541,7 +556,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 for p in c
                     .body_props
                     .iter()
-                    .filter(|p| p.is_abstract || (c.is_interface && !is_computed_prop(p)))
+                    .filter(|p| p.is_abstract || (c.is_interface() && !is_computed_prop(p)))
                 {
                     let ty =
                         p.ty.as_ref()
@@ -584,7 +599,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // Synthesize `getX()`/`setX()` accessors for each backing-field property (kotlinc emits
             // them; the fields are private). Getter returns the field; setter (var only) writes it.
             // Enums keep their existing shape (separate emit path); interfaces have no backing fields.
-            if !c.is_interface && !c.is_enum {
+            if !c.is_interface() && !c.is_enum() {
                 let field_props: Vec<(String, bool)> = c
                     .props
                     .iter()
@@ -613,6 +628,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].1.clone();
                     let gname = getter_name(pname);
                     if !methods.contains_key(&gname) {
+                        // A plain field read; if the field is `lateinit` the backend's `GetField`
+                        // emission inserts the uninitialized null-check throw (so does every other read).
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                         let gf = lo.ir.add_expr(IrExpr::GetField {
                             receiver: this_e,
@@ -732,6 +749,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     companion_class: None,
                     field_final: vec![],
                     field_private: vec![],
+                    lateinit_fields: Vec::new(),
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
                 });
@@ -1014,6 +1032,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
                 }
+                // Register parameter defaults for a plain top-level function (no extension receiver, no
+                // vararg, ≤31 params) so a transform/plugin can read the lowered default exprs. Lowered
+                // with the STATIC value layout — params at values `0..n` (no `this`), the layout these
+                // bodies already use. This does NOT emit a `name$default` stub: stub emission runs only on
+                // the class path (`emit_default_stub`), never the facade, so a top-level function's codegen
+                // is unchanged (top-level calls keep filling omitted args at the call site).
+                if f.receiver.is_none()
+                    && f.params.iter().any(|p| p.default.is_some())
+                    && !f.params.iter().any(|p| p.is_vararg)
+                    && f.params.len() <= 31
+                {
+                    let mut defaults = Vec::new();
+                    for (p, t) in f.params.iter().zip(&sig.params) {
+                        match p.default {
+                            Some(d) => defaults.push(Some(lo.lower_arg(d, &ty_to_ir(*t))?)),
+                            None => defaults.push(None),
+                        }
+                    }
+                    lo.ir.fn_param_defaults.insert(fid, defaults);
+                    lo.ir
+                        .fn_param_names
+                        .insert(fid, f.params.iter().map(|p| p.name.clone()).collect());
+                }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
                 // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
@@ -1121,7 +1162,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // `val x: T` erased to `Object` overridden with a concrete type) needs a synthetic
                 // `getX()` returning the supertype's (erased) type that delegates to the concrete getter —
                 // else a call through the supertype reference resolves to the missing erased getter.
-                if !c.is_interface {
+                if !c.is_interface() {
                     let cid = lo.classes[&internal].id;
                     for sup in lo.syms.supertype_internals(&internal) {
                         let Some(sc) = lo.syms.class_by_internal(&sup) else {
@@ -1157,7 +1198,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // Interface bridges: for each implemented-interface method, if the class's actual
                 // implementation (declared or inherited) has a different erased signature than the
                 // interface's, add a bridge with the interface's descriptor delegating to the impl.
-                if !c.is_interface {
+                if !c.is_interface() {
                     let cid = lo.classes[&internal].id;
                     let ifaces = lo.ir.classes[cid as usize].interfaces.clone();
                     let mut seen: std::collections::HashSet<String> = lo.ir.classes[cid as usize]
@@ -1228,7 +1269,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
-                if c.is_interface && c.methods.iter().all(|m| matches!(m.body, FunBody::None)) {
+                if c.is_interface() && c.methods.iter().all(|m| matches!(m.body, FunBody::None)) {
                     continue;
                 }
                 for m in &c.methods {
@@ -1262,7 +1303,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // value layout. `None` for a required parameter. Gated identically to the pass-1
                     // marker (no interface defaults, ≤31 parameters).
                     if m.params.iter().any(|p| p.default.is_some())
-                        && !c.is_interface
+                        && !c.is_interface()
                         && m.params.len() <= 31
                     {
                         let mut defaults = Vec::new();
@@ -1798,7 +1839,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
                 // Enum entries: lower each entry's constructor arguments (constant expressions
                 // evaluated in `<clinit>`), coerced to the matching ctor-parameter field type.
-                if c.is_enum {
+                if c.is_enum() {
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
                     let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields
@@ -1858,6 +1899,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             companion_class: None,
                             field_final: vec![],
                             field_private: vec![],
+                            lateinit_fields: Vec::new(),
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                         });
@@ -1983,6 +2025,64 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     if nothing_bridge {
         return None;
     }
+    // Discover classpath `@JvmInline value class`es referenced by type in this file and record their
+    // REFERENCE underlying (`Result` → `Object`), so the value-class pass erases them like a user value
+    // class. A primitive-underlying value class (`UInt`/`ULong` → `Int`/`Long`) is EXCLUDED — it keeps
+    // its existing dedicated handling, and erasing it here would disturb that.
+    {
+        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let note = |t: &IrType, set: &mut std::collections::HashSet<String>| {
+            if let IrType::Class { fq_name, .. } = t {
+                set.insert(fq_name.clone());
+            }
+        };
+        for f in &lo.ir.functions {
+            for p in &f.params {
+                note(p, &mut referenced);
+            }
+            note(&f.ret, &mut referenced);
+        }
+        for c in &lo.ir.classes {
+            for (_, t) in &c.fields {
+                note(t, &mut referenced);
+            }
+            for (t, _) in &c.ctor_args {
+                note(t, &mut referenced);
+            }
+        }
+        for s in &lo.ir.statics {
+            note(&s.ty, &mut referenced);
+        }
+        for e in &lo.ir.exprs {
+            if let IrExpr::Variable { ty, .. } = e {
+                note(ty, &mut referenced);
+            }
+        }
+        for fq in referenced {
+            if let Some(under) = lo
+                .syms
+                .libraries
+                .resolve_type(&fq)
+                .and_then(|t| t.value_underlying)
+            {
+                if !under.is_primitive() {
+                    // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
+                    // marks a type-parameter value-class field.
+                    let ir_under = match ty_to_ir(under) {
+                        IrType::Class {
+                            fq_name, type_args, ..
+                        } => IrType::Class {
+                            fq_name,
+                            type_args,
+                            nullable: true,
+                        },
+                        other => other,
+                    };
+                    lo.ir.external_value_classes.insert(fq, ir_under);
+                }
+            }
+        }
+    }
     Some(lo.ir)
 }
 
@@ -2003,7 +2103,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // yet, so the resolver still rejects value-class *files* — admission here is for member synthesis.
     // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
     // companion with properties (`val`/`const val`) is not yet.
-    !c.is_object && !c.is_enum && !c.is_interface && c.companion_props.is_empty()
+    !c.is_object() && !c.is_enum() && !c.is_interface() && c.companion_props.is_empty()
         // Secondary constructors: in a class WITH a primary ctor each must delegate to it (`this(…)`);
         // a class with NO primary ctor admits `this(…)` (to a sibling), `super(…)`, or implicit
         // delegation — each becomes its own `<init>` (see the secondary-ctor lowering).
@@ -2018,7 +2118,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -2035,7 +2135,7 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         .filter(|m| matches!(m.body, FunBody::None))
         .map(|m| m.name.as_str())
         .collect();
-    c.is_enum
+    c.is_enum()
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
         && c.props.iter().all(|p| p.is_property)
@@ -2058,7 +2158,7 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
 /// An `object Foo` the IR can emit as a singleton: no primary-constructor params, plain body
 /// properties, concrete (bodied, non-extension) methods, no inheritance/interfaces/companion.
 fn is_simple_object(c: &ast::ClassDecl) -> bool {
-    c.is_object
+    c.is_object()
         && c.base_class.is_none() && c.supertypes.is_empty()
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.is_empty()
@@ -2075,7 +2175,7 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
 /// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
 /// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
-    c.is_interface
+    c.is_interface()
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
         && c.props.is_empty()
         // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`;
@@ -2159,6 +2259,20 @@ fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
     !p.is_var
         && p.receiver.is_none()
         && !p.is_lateinit
+        && p.init.is_none()
+        && p.getter.is_none()
+        && p.setter.is_none()
+        && !p.is_abstract
+        && p.ty.is_some()
+}
+
+/// A `lateinit var x: T` — a mutable backing-field property with no initializer (the field defaults to
+/// `null`); the synthesized getter throws `UninitializedPropertyAccessException` when the field is still
+/// `null`. The declared type is non-null but the JVM field is a plain (nullable-at-runtime) reference.
+fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
+    p.is_lateinit
+        && p.is_var
+        && p.receiver.is_none()
         && p.init.is_none()
         && p.getter.is_none()
         && p.setter.is_none()
@@ -2955,7 +3069,7 @@ impl<'a> Lower<'a> {
                     .syms
                     .libraries
                     .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface);
+                    .map_or(false, |t| t.is_interface());
                 let log = self
                     .syms
                     .libraries
@@ -3002,7 +3116,7 @@ impl<'a> Lower<'a> {
                     .syms
                     .libraries
                     .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface);
+                    .map_or(false, |t| t.is_interface());
                 let log = self
                     .syms
                     .libraries
@@ -3346,6 +3460,7 @@ impl<'a> Lower<'a> {
                 .map(|i| i < (n_cap + arity as u32) as usize)
                 .collect(),
             field_private: vec![false; n_fields],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         };
@@ -4797,6 +4912,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             field_final: vec![],
             field_private: vec![],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
@@ -5065,6 +5181,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             field_final: vec![],
             field_private: vec![],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
@@ -5155,7 +5272,7 @@ impl<'a> Lower<'a> {
     /// the AST so it's independent of pass-2 lowering order.
     fn iface_method_is_default(&self, iface_internal: &str, name: &str) -> bool {
         self.afile.decls.iter().any(|&d| {
-            matches!(self.afile.decl(d), Decl::Class(c) if c.is_interface
+            matches!(self.afile.decl(d), Decl::Class(c) if c.is_interface()
                 && class_internal(self.afile, &c.name) == iface_internal
                 && c.methods.iter().any(|m| m.name == name && !matches!(m.body, FunBody::None)))
         })
@@ -5626,12 +5743,12 @@ impl<'a> Lower<'a> {
             .syms
             .libraries
             .resolve_type(internal)
-            .map_or(false, |t| t.is_interface);
+            .map_or(false, |t| t.is_interface());
         let iter_iface = self
             .syms
             .libraries
             .resolve_type(&iter_internal)
-            .map_or(false, |t| t.is_interface);
+            .map_or(false, |t| t.is_interface());
         let depth = self.scope.len();
         // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
         // first parameter, incremented at the end of each iteration.
@@ -6001,7 +6118,7 @@ impl<'a> Lower<'a> {
                             .syms
                             .libraries
                             .resolve_type(&internal)
-                            .map_or(false, |t| t.is_interface);
+                            .map_or(false, |t| t.is_interface());
                         (m, is_iface)
                     })
             })?;
@@ -6167,7 +6284,7 @@ impl<'a> Lower<'a> {
                         .syms
                         .libraries
                         .resolve_type(internal)
-                        .map_or(false, |ty| ty.is_interface);
+                        .map_or(false, |ty| ty.is_interface());
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let mut a = Vec::new();
                     for (arg, pt) in args.iter().zip(&m.params) {
@@ -7545,7 +7662,7 @@ impl<'a> Lower<'a> {
                                 .syms
                                 .libraries
                                 .resolve_type(internal)
-                                .map_or(false, |t| t.is_interface);
+                                .map_or(false, |t| t.is_interface());
                             let a = self.expr(array)?;
                             let i = self.lower_arg(
                                 index,
@@ -7836,6 +7953,12 @@ impl<'a> Lower<'a> {
             // A local-function declaration emits no code here — its body is lifted to a separate static
             // method (pass 2'); a call to it routes to that method.
             Stmt::LocalFun(_) => Some(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![],
+                value: None,
+            })),
+            // A local class is lowered via its hoisted top-level `Decl::Class`; the in-body statement
+            // emits nothing.
+            Stmt::LocalClass(_) => Some(self.ir.add_expr(IrExpr::Block {
                 stmts: vec![],
                 value: None,
             })),
@@ -8687,7 +8810,7 @@ impl<'a> Lower<'a> {
             .syms
             .libraries
             .resolve_type(&internal)
-            .is_some_and(|t| t.is_interface);
+            .is_some_and(|t| t.is_interface());
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name.clone();
             if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
@@ -8965,7 +9088,7 @@ impl<'a> Lower<'a> {
                     .syms
                     .libraries
                     .resolve_type(&internal)
-                    .map_or(false, |t| t.is_interface);
+                    .map_or(false, |t| t.is_interface());
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
                 // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
                 // whole `s?.…` yield `null` when `s` is null.
@@ -9400,6 +9523,15 @@ impl<'a> Lower<'a> {
                 ));
             }
             Expr::Name(n) => {
+                // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`) — the checker
+                // recorded it; read `getstatic <internal>.INSTANCE`.
+                if let Some(internal) = self.info.obj_value_refs.get(&e) {
+                    return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
+                        owner: internal.clone(),
+                        name: "INSTANCE".to_string(),
+                        descriptor: format!("L{internal};"),
+                    }));
+                }
                 // A local delegated property: read through the delegate's `getValue(null, propref)`.
                 if let Some(ld) = self.local_delegated.get(&n).cloned() {
                     // Resolve the `$delegate` slot via the CURRENT scope (so a capture-remapped value
@@ -9659,7 +9791,7 @@ impl<'a> Lower<'a> {
                                 .syms
                                 .libraries
                                 .resolve_type(internal)
-                                .map_or(false, |t| t.is_interface);
+                                .map_or(false, |t| t.is_interface());
                             let a = self.expr(array)?;
                             let i = self.lower_arg(
                                 index,
@@ -10987,6 +11119,45 @@ impl<'a> Lower<'a> {
             // A receiver-lambda scope function the checker resolved (`x.run { … }`, `with(x) { … }`):
             // inline it generically — bind `this` to the receiver, lower the body — driven by the
             // checker's recorded decision, NOT a backend name-match.
+            // A classpath value-class COMPANION call (`Result.success(42)`): load the companion singleton
+            // (`getstatic <class>.<field>:L<companion>;`) as the receiver, then an inline-splice of the
+            // companion's (instance) `inline` method — `success`'s `this` is the singleton, its param the
+            // boxed argument. The splicer drops the unused `this` and inlines the arg, like kotlinc.
+            Expr::Call { .. } if self.info.companion_calls.contains_key(&e) => {
+                let cf = self.info.companion_calls[&e].clone();
+                let args = match self.afile.expr(e).clone() {
+                    Expr::Call { args, .. } => args,
+                    _ => return None,
+                };
+                let recv = self.ir.add_expr(IrExpr::ExternalStaticField {
+                    owner: cf.class_internal.clone(),
+                    name: cf.companion_field.clone(),
+                    descriptor: format!("L{};", cf.companion_internal),
+                });
+                // A value-class companion fn's params are erased reference types (`success(Object)`,
+                // `failure(Throwable)`) — target `Object` so a primitive argument is boxed (`Integer.
+                // valueOf`), matching kotlinc; a reference argument passes through unchanged.
+                let obj_ty = IrType::Class {
+                    fq_name: "kotlin/Any".to_string(),
+                    type_args: vec![],
+                    nullable: true,
+                };
+                let mut ir_args = Vec::with_capacity(args.len());
+                for &a in &args {
+                    ir_args.push(self.lower_arg(a, &obj_ty)?);
+                }
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: cf.companion_internal.clone(),
+                        name: cf.jvm_name.clone(),
+                        descriptor: cf.descriptor.clone(),
+                        inline: true,
+                        must_inline: true,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: ir_args,
+                }))?
+            }
             Expr::Call { .. } if self.info.receiver_lambdas.contains_key(&e) => {
                 let rl = self.info.receiver_lambdas[&e];
                 self.lower_receiver_lambda(rl)?
@@ -12484,7 +12655,7 @@ impl<'a> Lower<'a> {
                                         .syms
                                         .libraries
                                         .resolve_type(&internal)
-                                        .map_or(false, |t| t.is_interface);
+                                        .map_or(false, |t| t.is_interface());
                                     (internal, m.descriptor, is_iface, m.params, m.ret)
                                 })
                             })

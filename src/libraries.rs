@@ -49,6 +49,25 @@ pub enum Origin {
 }
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
+/// A resolved companion-object function on a classpath value class (`Result.success`). The call lowers
+/// to `getstatic <class>.<field>:L<companion>;` (the receiver) then an inline-splice of the companion
+/// INSTANCE method `<companion>.<jvm_name><descriptor>` (its `this` is the loaded singleton).
+#[derive(Clone, Debug)]
+pub struct CompanionFn {
+    /// The value-class declaring the companion (`kotlin/Result`).
+    pub class_internal: String,
+    /// The companion object's internal name (`kotlin/Result$Companion`).
+    pub companion_internal: String,
+    /// The static field on `class_internal` holding the singleton (`Companion`).
+    pub companion_field: String,
+    /// The JVM method name on the companion (`success`).
+    pub jvm_name: String,
+    /// The companion method's real (instance) JVM descriptor (`(Ljava/lang/Object;)Ljava/lang/Object;`).
+    pub descriptor: String,
+    /// The call's logical Kotlin return type (`Result<T>`).
+    pub ret: Ty,
+}
+
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone)]
 pub struct LibraryCallable {
@@ -178,8 +197,10 @@ pub struct FunctionSet {
 /// knowing the target ABI.
 pub struct LibraryType {
     pub is_public: bool,
-    pub is_interface: bool,
-    pub is_annotation: bool,
+    /// The declaration kind (class / interface / annotation / object). One field instead of parallel
+    /// booleans — read it through the `is_*` accessors, which encode the JVM reality that an annotation
+    /// is also an interface.
+    pub kind: TypeKind,
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: Vec<String>,
     pub constructors: Vec<LibraryMember>,
@@ -193,6 +214,34 @@ pub struct LibraryType {
     /// `C` in value position is that companion instance — `getstatic C.field:LcompanionType;`. Lets the
     /// resolver resolve `Json.encodeToString(…)` (an instance method on the companion's type).
     pub companion_object: Option<(String, String)>,
+    /// For a classpath `@JvmInline value class`, the erased underlying type it represents on the JVM
+    /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
+    /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
+    pub value_underlying: Option<Ty>,
+}
+
+/// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
+/// also carries `ACC_INTERFACE`, which `is_interface()` reflects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeKind {
+    Class,
+    Interface,
+    Annotation,
+    /// A Kotlin `object` (singleton) — has a `public static final INSTANCE` field of its own type, read
+    /// as `getstatic <Type>.INSTANCE` when the object is referenced as a value.
+    Object,
+}
+
+impl LibraryType {
+    pub fn is_interface(&self) -> bool {
+        matches!(self.kind, TypeKind::Interface | TypeKind::Annotation)
+    }
+    pub fn is_annotation(&self) -> bool {
+        self.kind == TypeKind::Annotation
+    }
+    pub fn is_object(&self) -> bool {
+        self.kind == TypeKind::Object
+    }
 }
 
 /// Whether a member's parameter list matches `args` as a prefix — the loose match the JVM resolver
@@ -277,7 +326,7 @@ impl LibraryType {
 
     /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
     pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
-        if !self.is_annotation {
+        if !self.is_annotation() {
             return None;
         }
         let mut out = Vec::new();
@@ -316,6 +365,19 @@ pub trait LibrarySet: SymbolSource {
     /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a
     /// known constant / not in the library.
     fn prim_companion_const(&self, _prim: &str, _field: &str) -> Option<LibConst> {
+        None
+    }
+
+    /// Resolve a call `ClassName.fn(args)` to a function on `ClassName`'s COMPANION object, when
+    /// `ClassName` is a classpath value class (`Result.success`). The companion fn is `inline` (private in
+    /// bytecode, public per `@Metadata`); the JVM realizes the call as `getstatic ClassName.Companion`
+    /// then an inline-splice of the (instance) companion method. `None` unless it resolves.
+    fn value_companion_fn(
+        &self,
+        _class_internal: &str,
+        _name: &str,
+        _n_args: usize,
+    ) -> Option<CompanionFn> {
         None
     }
 
