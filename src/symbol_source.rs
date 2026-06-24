@@ -175,6 +175,7 @@ mod tests {
                     constructors: vec![],
                     members: vec![],
                     companion: vec![],
+                    companion_object: None,
                 })
             } else {
                 None

@@ -677,7 +677,7 @@ impl IrPlugin for SerializationPlugin {
                                     let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
                                         owner: ser.to_string(),
                                         ty: ser.to_string(),
-                                        field: "INSTANCE",
+                                        field: "INSTANCE".to_string(),
                                     });
                                     stmts.push(ir.add_expr(IrExpr::Call {
                                         callee: virtual_iface(
@@ -890,7 +890,7 @@ impl IrPlugin for SerializationPlugin {
                                     let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
                                         owner: ser.to_string(),
                                         ty: ser.to_string(),
-                                        field: "INSTANCE",
+                                        field: "INSTANCE".to_string(),
                                     });
                                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
                                     let raw = ir.add_expr(IrExpr::Call {
