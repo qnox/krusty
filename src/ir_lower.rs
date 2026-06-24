@@ -8044,6 +8044,29 @@ impl<'a> Lower<'a> {
                 value,
             } => {
                 let at = self.info.ty(array);
+                // `m[i] = v` on a USER class with an `operator fun set(index, value)` → `m.set(i, v)`
+                // (walks supers, so an inherited operator resolves — consistent with the checker).
+                if let Ty::Obj(internal, _) = at {
+                    if at.array_elem().is_none() {
+                        let setm = self
+                            .resolve_method(internal, "set")
+                            .map(|(class, midx, fid, _)| (class, midx, fid));
+                        if let Some((class, midx, fid)) = setm {
+                            let ptys = self.ir.functions[fid as usize].params.clone();
+                            let ity = ty_to_ir(self.info.ty(index));
+                            let vty = ty_to_ir(self.info.ty(value));
+                            let a = self.expr(array)?;
+                            let i = self.lower_arg(index, ptys.first().unwrap_or(&ity))?;
+                            let v = self.lower_arg(value, ptys.get(1).unwrap_or(&vty))?;
+                            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index: midx,
+                                receiver: a,
+                                args: vec![Some(i), Some(v)],
+                            }));
+                        }
+                    }
+                }
                 // `coll[i] = v` on a library type → its `set(index, value)` operator member, discarding
                 // the returned previous element (an array set stays the `kotlin/Array.set` intrinsic).
                 if let Ty::Obj(internal, _) = at {
@@ -10209,6 +10232,30 @@ impl<'a> Lower<'a> {
             // `kotlin/Array.get` (backend reads element from the receiver type).
             Expr::Index { array, index } => {
                 let at = self.info.ty(array);
+                // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)` (walks supers, so
+                // an inherited operator resolves — consistent with the checker's `method_of`).
+                if let Ty::Obj(internal, _) = at {
+                    if at.array_elem().is_none() {
+                        let getm = self
+                            .resolve_method(internal, "get")
+                            .map(|(class, midx, fid, _)| (class, midx, fid));
+                        if let Some((class, midx, fid)) = getm {
+                            let pty = self.ir.functions[fid as usize]
+                                .params
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| ty_to_ir(self.info.ty(index)));
+                            let a = self.expr(array)?;
+                            let i = self.lower_arg(index, &pty)?;
+                            return Some(self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index: midx,
+                                receiver: a,
+                                args: vec![Some(i)],
+                            }));
+                        }
+                    }
+                }
                 // `coll[i]` on a library type (`List`, `Map`) → its `get(index)` operator member.
                 if let Ty::Obj(internal, _) = at {
                     if at.array_elem().is_none() {

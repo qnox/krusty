@@ -4462,6 +4462,15 @@ impl<'a> Checker<'a> {
                         return self.set(e, ret);
                     }
                 }
+                // `m[i]` on a USER class with an `operator fun get(index)` → `m.get(i)`.
+                if let Ty::Obj(internal, _) = at {
+                    if let Some(sig) = self.syms.method_of(internal, "get") {
+                        if sig.params.len() == 1 {
+                            self.expect_assignable(sig.params[0], it, self.span(index), "index");
+                            return self.set(e, sig.ret);
+                        }
+                    }
+                }
                 // `coll[i]` on a library type → the `get(index)` operator member (`List.get(Int)`,
                 // `Map.get(K)`); the index type is checked against the member's parameter.
                 if let Ty::Obj(internal, _) = at {
@@ -8155,6 +8164,22 @@ impl<'a> Checker<'a> {
                     Some(elem) => {
                         self.expect_assignable(Ty::Int, it, span, "array index");
                         self.expect_assignable(elem, vt, span, "array element assignment");
+                    }
+                    // `m[i] = v` on a USER class with an `operator fun set(index, value)` → `m.set(i, v)`.
+                    None if matches!(at, Ty::Obj(internal, _)
+                        if self.syms.method_of(internal, "set").is_some_and(|sig| sig.params.len() == 2)) =>
+                    {
+                        if let Ty::Obj(internal, _) = at {
+                            if let Some(sig) = self.syms.method_of(internal, "set") {
+                                self.expect_assignable(sig.params[0], it, span, "index");
+                                self.expect_assignable(
+                                    sig.params[1],
+                                    vt,
+                                    span,
+                                    "indexed assignment",
+                                );
+                            }
+                        }
                     }
                     // `coll[i] = v` on a library type → its `set(index, value)` operator member
                     // (`MutableList.set(Int, E)`, `MutableMap.put(K, V)`).
