@@ -839,10 +839,14 @@ pub fn collect_signatures_with_cp(
                             })
                             .find(|x| x.name == *outer)
                         {
+                            // Resolve the OUTER class's props with the OUTER's own type parameters
+                            // (erased) — not this class's `ctp` — so an outer `<T>` used in an outer
+                            // property type resolves instead of erroring as an unknown reference here.
+                            let octp = TParams::erased(&oc.type_params);
                             for p in oc.props.iter().filter(|p| p.is_property) {
                                 props.push((
                                     p.name.clone(),
-                                    ty_of_ref(&p.ty, &class_names, &ctp, diags),
+                                    ty_of_ref(&p.ty, &class_names, &octp, diags),
                                     p.is_var,
                                 ));
                             }
@@ -869,16 +873,21 @@ pub fn collect_signatures_with_cp(
                         else {
                             break;
                         };
+                        // Resolve the BASE class's props with the BASE's own type parameters (erased) —
+                        // not the subclass's `ctp`. A base `class A<T> { val some: T }` declares its
+                        // member in terms of `T`; resolving it in the subclass's (possibly empty) scope
+                        // wrongly reported `T` as an unresolved reference (skipping the whole file).
+                        let bctp = TParams::erased(&bc.type_params);
                         for p in bc.props.iter().filter(|p| p.is_property) {
                             props.push((
                                 p.name.clone(),
-                                ty_of_ref(&p.ty, &class_names, &ctp, diags),
+                                ty_of_ref(&p.ty, &class_names, &bctp, diags),
                                 p.is_var,
                             ));
                         }
                         for bp in &bc.body_props {
                             let ty = match &bp.ty {
-                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                Some(r) => ty_of_ref(r, &class_names, &bctp, diags),
                                 None => bp
                                     .init
                                     .map(|i| infer_lit_ty_p(file, i, &class_names, &fun_rets, &[]))
@@ -7952,6 +7961,17 @@ mod tests {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
     }
+    #[test]
+    fn subclass_resolves_generic_base_property_type() {
+        // A base class declares a member in terms of its OWN type parameter (`val some: T`); a
+        // subclass that fixes the type arg (`I : A<String>()`) must not see `T` as an unresolved
+        // reference when collect_signatures pulls the base's props into the subclass's inference
+        // scope. (Regression: base props were resolved with the SUBCLASS's type params.)
+        ok("abstract class A<T> { abstract val some: T }\n\
+            class I : A<String>() { override val some: String get() = \"OK\" }\n\
+            fun box(): String = I().some");
+    }
+
     fn err_contains(src: &str, needle: &str) {
         let (errs, _) = check(src);
         assert!(
