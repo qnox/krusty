@@ -413,6 +413,30 @@ sufficient** — the goal's "show the surface is enough" is demonstrated by two 
 executed tests (KSP-from-jar + functional serialization). The 69-corpus "all pass" is a separate
 language-coverage milestone, not an extension-surface gap.
 
+### MEASURED conformance survey (2026-06-24, post encode/decode/companion + member-return inference)
+
+Ran krusty's front end over all 69 `boxIr` files (single-file subset; multi-`// MODULE:`/`// FILE:`
+skipped) with `kotlin-stdlib` + `kotlinx-serialization-{core,json}` + JDK modules on the classpath.
+**9/69 now COMPILE** (front end) — up from the old audit's **0/69**, attributable to companion-instance
+resolution, the encode/decode plumbing, and the erased-generic-member-return inference landed this arc:
+`constValInSerialName, contextualByDefault, inlineClasses, intrinsicsNonReified,
+intrinsicsStarProjections, multiFieldValueClasses, polymorphic, starProjectionsSealed, uuidSerializer`.
+
+Of those 9, runtime `box()` status: **1 is a single feature from green** — `constValInSerialName`
+encode/decodes correctly but emits `{"bar":...}` instead of `{"foo.bar":...}` because `@SerialName` is
+not applied to the descriptor element name (needs annotation-ARGUMENT capture: the parser currently
+records annotation *names* only, `Vec<String>`, discarding args — a parser→AST→IR→plugin feature, plus
+const-template folding for `@SerialName("$prefix.bar")`). The other 8 fail at runtime needing custom/
+polymorphic/sealed/value-class serializers or reflection.
+
+First-blocker histogram for the 38 that DON'T compile (top entries): `unresolved 'Encoder'`/`'Decoder'`
+(7 — custom `KSerializer` objects, also need interface-body abstract members), `elementDescriptors`/
+`getElementName` SerialDescriptor introspection (4), reflection (`typeOf`, `parameters`, class-literal
+forms), annotations with array members, default arguments referencing other parameters, enum members,
+contextual/`@Serializable(with=)`. Each is an independent language/stdlib feature; "all 69" remains a
+multi-feature roadmap. **Nearest single win: annotation-argument capture → `@SerialName` →
+`constValInSerialName` green.** (Survey is reproducible; not yet a committed test harness.)
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
