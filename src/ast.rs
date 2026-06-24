@@ -345,6 +345,9 @@ pub struct Param {
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted trailing
     /// arguments. Defaults that reference another parameter are rejected (see resolve.rs).
     pub default: Option<ExprId>,
+    /// Simple names of annotations applied to the parameter (`@IntroducedAt("1") b: String` →
+    /// `["IntroducedAt"]`). Annotation arguments are discarded. Used by the compiler-extension surface.
+    pub annotations: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
