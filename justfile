@@ -97,7 +97,43 @@ test *ARGS:
     # The `gate` profile (opt-level 0, but overflow-checks + debuginfo OFF) is the intended test profile:
     # krusty relies on wrapping arithmetic, so overflow-checks are pure overhead on its (arithmetic-heavy)
     # compile, and dropping debuginfo links faster. Same fast build as dev, ~1.5-2x faster run.
-    cargo test --profile gate {{ARGS}}
+    #
+    # `cargo test` runs the ~57 test BINARIES sequentially, so the full suite (JVM/kotlinc-bound e2e
+    # tests, each with its own per-binary persistent JVM runner) summed to ~64s — over the <60s budget.
+    # With a filter argument, defer to plain `cargo test` (a single binary gains nothing). For the full
+    # no-arg suite (what the pre-push hook runs), build once then run the binaries in PARALLEL (each
+    # binary keeps its shared-JVM optimization), bringing wall-clock under 60s. Any binary's non-zero
+    # exit fails the whole run and its captured output is printed.
+    if [ -n "{{ARGS}}" ]; then
+        cargo test --profile gate {{ARGS}}
+        exit $?
+    fi
+    cargo test --profile gate --no-run
+    mapfile -t bins < <(cargo test --profile gate --no-run 2>&1 \
+        | sed -nE 's/.*[Ee]xecutable [^(]*\(([^)]+)\)/\1/p' | sort -u)
+    logdir="$(mktemp -d)"
+    run_one() { # $1=logdir $2=binary[:extra-args]
+        local b="${2%%::*}" extra="" name
+        [ "$2" != "$b" ] && extra="${2#*::}"
+        name="$(basename "$b")"
+        if "$b" $extra >"$1/$name.log" 2>&1; then :; else echo "$b" >>"$1/FAILED"; fi
+    }
+    export -f run_one
+    # The conformance gate binary is internally rayon-parallel (saturates every core on its own), so
+    # run it FIRST/alone — bundling it into the parallel batch only contends. Then run the remaining
+    # (JVM/kotlinc-bound) binaries in parallel, each with its own per-binary persistent JVM runner.
+    gate="$(printf '%s\n' "${bins[@]}" | grep conformance || true)"
+    [ -n "$gate" ] && run_one "$logdir" "$gate"
+    printf '%s\n' "${bins[@]}" | grep -v conformance \
+        | xargs -P "$(nproc)" -I{} bash -c 'run_one "$0" "$1::--test-threads=2"' "$logdir" {}
+    if [ -f "$logdir/FAILED" ]; then
+        echo "=== FAILED TEST BINARIES ==="
+        while read -r b; do echo "----- $b -----"; cat "$logdir/$(basename "$b").log"; done <"$logdir/FAILED"
+        rm -rf "$logdir"
+        exit 1
+    fi
+    rm -rf "$logdir"
+    echo "all test binaries passed"
 
 # Download + unpack the reference Kotlin compiler distribution into one self-contained dir
 # (.kotlinc/<ver>/), and print the path to its `bin/kotlinc`. Idempotent — a no-op once unpacked

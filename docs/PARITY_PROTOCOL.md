@@ -56,11 +56,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     (kotlinc differential). NOTE: `range_step`/`secondary_ctor_noprimary` previously hard-asserted krusty
     compile success; via the helper a compile failure now flows to the `None`-skip branch (consistent with
     the rest of the suite's "skip-on-unsupported"), a slight loosening to revisit if either regresses.
-  - Heavy tier (was ~220–290s): the full `cargo test`. PROFILED — the cost is NOT kotlinc (1–6 spawns,
-    compile-once-batched) but (a) the conformance gate (~38s, optimal) and (b) the execution e2e — now
-    being moved onto the P8 persistent runner. nextest (installed) parallelizes binaries; the gate
-    saturates the cores. Remaining gap to full-suite <60s: convert `suspend_e2e` (the big one) onto the
-    same runner.
+  - Heavy tier — the full `cargo test`. PROFILED (2026-06-24, 4 cores): the cost is NOT kotlinc (1–6
+    spawns, compile-once-batched) but the ~57 JVM-bound e2e BINARIES, which `cargo test` runs
+    SEQUENTIALLY (~64s summed). `cargo nextest` is WORSE (~82s — its process-per-test model loses each
+    binary's shared persistent JVM). FIX (P23): `just test` (the pre-push tier) now builds once then runs
+    the binaries in PARALLEL (`xargs -P $(nproc)`), each keeping its per-binary shared JVM. The
+    conformance gate binary is internally rayon-parallel (saturates every core alone), so it runs
+    FIRST/alone — bundling it into the batch only contends; then the rest run in parallel. Wall-clock
+    **~57s (<60s ✓)**; any binary's non-zero exit fails the run and prints its captured log. (A filter
+    arg defers to plain `cargo test`.) The conformance/validation gate alone stays ~8–38s.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log
