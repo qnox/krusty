@@ -592,6 +592,41 @@ pub fn collect_signatures_with_cp(
         }
     }
 
+    // Explicit imports disambiguate a simple name that classpath ambiguity PRUNED from the global seed
+    // (`Encoder` collides with `java.beans.Encoder` once the JDK is on the classpath). For a name ABSENT
+    // from the seed (and not user-defined), resolve it to its imported full internal — verified to exist
+    // on the classpath — so the SIGNATURE phase's `ty_of_ref` matches the Checker's import-aware
+    // resolution. This only ADDS entries for otherwise-unresolved names (never overrides a resolving
+    // one), so it cannot regress an accepted file. A name imported INCONSISTENTLY across files (different
+    // full internals) is left pruned (ambiguous) rather than guessed.
+    {
+        let mut from_import: HashMap<String, Option<String>> = HashMap::new();
+        for file in files {
+            for (simple, full) in import_map(file) {
+                if class_names.contains_key(simple.as_str()) || user_defined.contains(&simple) {
+                    continue;
+                }
+                if libraries.resolve_type(&full).is_none() {
+                    continue;
+                }
+                match from_import.get(&simple) {
+                    None => {
+                        from_import.insert(simple, Some(full));
+                    }
+                    Some(Some(prev)) if *prev != full => {
+                        from_import.insert(simple, None); // conflicting imports → leave unresolved
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (simple, full) in from_import {
+            if let Some(full) = full {
+                class_names.insert(simple, full);
+            }
+        }
+    }
+
     // Top-level function return types (explicit annotations only), collected first so a property
     // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
     let mut fun_rets: HashMap<String, Ty> = HashMap::new();

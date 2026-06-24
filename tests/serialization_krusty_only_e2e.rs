@@ -241,6 +241,45 @@ fun box(): String {
 }
 
 #[test]
+fn ambiguous_import_resolves_in_signature_phase() {
+    // `Encoder`/`Decoder` collide with `java.beans.Encoder`/`Decoder` once the JDK modules are on the
+    // classpath, so the simple name is ambiguity-pruned from the global type seed. An EXPLICIT import
+    // must still resolve it — in the SIGNATURE phase (function parameter types), not just the checker.
+    // (Prerequisite for custom-serializer files, which declare `serialize(encoder: Encoder, …)`.)
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping: no stdlib");
+        return;
+    };
+    let Some(core) = find("kotlinx-serialization-core-jvm") else {
+        eprintln!("skipping: no serialization core jar");
+        return;
+    };
+    let Some(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME")
+        .ok()
+        .or_else(|| std::env::var("JAVA_HOME").ok())
+    else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let modules = PathBuf::from(&java_home).join("lib/modules");
+    if !modules.exists() {
+        eprintln!("skipping: no JDK lib/modules (needed to reproduce the ambiguity)");
+        return;
+    }
+    let src = "import kotlinx.serialization.encoding.Encoder\n\
+               import kotlinx.serialization.encoding.Decoder\n\
+               fun f(e: Encoder, d: Decoder) {}\n\
+               fun box(): String = \"OK\"\n";
+    let classes = common::compile_in_process(src, "AmbigImp", &[stdlib, core], Some(&modules));
+    assert!(
+        classes.is_some(),
+        "explicit import of an ambiguously-named class (Encoder) must resolve in the signature phase \
+         even with the JDK on the classpath"
+    );
+    eprintln!("ambiguous explicit import resolves in signature phase OK");
+}
+
+#[test]
 fn enum_serializer_entirely_in_krusty() {
     // A `@Serializable enum`'s `serializer()` returns a runtime `EnumSerializer(name, E.values())`
     // (not a generated `$serializer`), so the enum round-trips by entry name: `E.B` → `"B"`.
