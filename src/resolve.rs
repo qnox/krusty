@@ -1848,6 +1848,8 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
+        Expr::UIntLit(_) => Ty::UInt,
+        Expr::ULongLit(_) => Ty::ULong,
         Expr::DoubleLit(_) => Ty::Double,
         Expr::FloatLit(_) => Ty::Float,
         Expr::BoolLit(_) => Ty::Boolean,
@@ -1988,6 +1990,8 @@ fn infer_lit_ty_p(
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
+        Expr::UIntLit(_) => Ty::UInt,
+        Expr::ULongLit(_) => Ty::ULong,
         Expr::DoubleLit(_) => Ty::Double,
         Expr::FloatLit(_) => Ty::Float,
         Expr::BoolLit(_) => Ty::Boolean,
