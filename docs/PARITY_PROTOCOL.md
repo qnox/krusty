@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1690 OK / 0 FAIL** (scanned 7351, Phase 434).
+  repo's `compiler/testData/codegen/box`). Current gate: **1691 OK / 0 FAIL** (scanned 7351, Phase 435).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P58 — generic delegated member property: coerce `getValue`'s erased return (gate 1690 → 1691, +1,
+  FAIL=0).** A generic delegate (`class Del<T> { operator fun getValue(…): T }`) returns the ERASED `Object`;
+  a delegated member property `val s: String by Del(…)` previously bailed (the lowering guard rejected
+  `getValue.ret != property type`). Now the getter coerces the `getValue` result to the property type via the
+  existing `coerce_erased` (a `checkcast` for a reference property, unbox for a primitive) — exactly kotlinc's
+  emit. Guard relaxed to allow an erased-REFERENCE return (still bails on a concrete mismatch). A `var`'s
+  `setValue` whose value param erased to a reference while the property is a PRIMITIVE still bails (the value
+  would need boxing first — the read-only half lands now). e2e `generic_delegate_e2e`.
 - **Phase P57 — unsigned (`UInt`/`ULong`) value-class extension resolution via `@Metadata` (gate 1616 → 1690,
   +74, FAIL=0).** A value-class extension (`UInt.coerceAtMost`/`coerceIn`/…) has a `@JvmName`-MANGLED bytecode
   name (`coerceAtMost-J1ME1BU`) in a multifile PART class, indexed under the ERASED underlying descriptor —
