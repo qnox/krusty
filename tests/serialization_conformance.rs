@@ -54,6 +54,58 @@ fn krusty_compile(src: &str, cp: &str, out: &str) -> (bool, String) {
     )
 }
 
+/// The JDK `lib/modules` jimage (JDK classpath), from `JAVA_HOME`. krusty resolves `java.*` via it.
+fn jimage() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var("JAVA_HOME").ok()?).join("lib/modules");
+    p.exists().then_some(p)
+}
+
+/// Gap #2 (closed): constructing a classpath class with a `null` argument for a reference parameter —
+/// `PluginGeneratedSerialDescriptor(name, null, count)` — now resolves. A `$serializer` builds its
+/// descriptor this way. Verifies the constructor-overload null-match end-to-end.
+#[test]
+fn classpath_ctor_with_null_arg_resolves() {
+    let Some((core, _json, std)) = runtime_jars() else {
+        eprintln!("skipping: serialization runtime jars not in local cache");
+        return;
+    };
+    let Some(jimage) = jimage() else {
+        eprintln!("skipping: no JAVA_HOME/lib/modules");
+        return;
+    };
+    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    if !bin.exists() {
+        eprintln!("skipping: krusty binary not built");
+        return;
+    }
+    let out = std::env::temp_dir().join(format!("krusty_ctornull_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let src = out.join("Gap2.kt");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        &src,
+        "import kotlinx.serialization.internal.PluginGeneratedSerialDescriptor\n\
+         fun build(): Int {\n\
+         \x20   val d = PluginGeneratedSerialDescriptor(\"Foo\", null, 2)\n\
+         \x20   d.addElement(\"a\", false)\n\
+         \x20   return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let cp = format!("{}:{}:{}", core.display(), std.display(), jimage.display());
+    let o = Command::new(&bin)
+        .args(["-cp", &cp, "-d"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run krusty");
+    assert!(
+        out.join("Gap2Kt.class").exists(),
+        "PluginGeneratedSerialDescriptor(name, null, n) must compile; stderr:\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 /// The real conformance round-trip. IGNORED until the documented blockers close; remove `#[ignore]`
 /// (or set `KRUSTY_SER_CONFORMANCE=1`) to run it. Kept compiling so it can't bit-rot.
 #[test]
