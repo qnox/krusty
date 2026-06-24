@@ -396,6 +396,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 fq_name: internal.clone(),
                 serial_names: serial_names_of(file, c),
                 custom_serializer: lo.custom_serializer_of(c),
+                field_serializers: lo.field_serializers_of(c),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -767,6 +768,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let comp_id = lo.ir.add_class(IrClass {
                     serial_names: Vec::new(),
                     custom_serializer: None,
+                    field_serializers: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -2015,6 +2017,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let sub_id = lo.ir.add_class(IrClass {
                             serial_names: Vec::new(),
                             custom_serializer: None,
+                            field_serializers: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -3730,6 +3733,7 @@ impl<'a> Lower<'a> {
             fq_name: internal.clone(),
             serial_names: Vec::new(),
             custom_serializer: None,
+            field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![None; n_fields],
@@ -4950,6 +4954,34 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// Per-property explicit serializers from `@Serializable(with = X::class)` on constructor
+    /// properties of `c`, as `(property_name, X_internal)`. Mirrors [`custom_serializer_of`] but per
+    /// field; `X`'s internal name comes from the symbol table (annotation args aren't type-checked).
+    fn field_serializers_of(&self, c: &ast::ClassDecl) -> Vec<(String, String)> {
+        c.props
+            .iter()
+            .filter_map(|p| {
+                let i = p
+                    .annotations
+                    .iter()
+                    .position(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))?;
+                let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
+                if let Expr::CallableRef {
+                    receiver: Some(r),
+                    name,
+                } = self.afile.expr(*arg)
+                {
+                    if name == "class" {
+                        if let Expr::Name(x) = self.afile.expr(*r) {
+                            return Some((p.name.clone(), self.syms.class_names.get(x)?.clone()));
+                        }
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
     fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
         self.afile
             .decls
@@ -5351,6 +5383,7 @@ impl<'a> Lower<'a> {
             fq_name: synth_fq,
             serial_names: Vec::new(),
             custom_serializer: None,
+            field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],
@@ -5616,6 +5649,7 @@ impl<'a> Lower<'a> {
             fq_name: synth_fq,
             serial_names: Vec::new(),
             custom_serializer: None,
+            field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             field_type_params: vec![],

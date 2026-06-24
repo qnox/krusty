@@ -295,6 +295,48 @@ fn is_nullable(ty: &IrType) -> bool {
     matches!(ty, IrType::Class { nullable: true, .. })
 }
 
+/// An instance of an explicit element serializer `X` (from `@Serializable(with = X::class)` on a
+/// property): an `object` serializer is its `INSTANCE`; a class serializer is `new X()` (no-arg ctor,
+/// as user-defined property serializers in the corpus have). Mirrors `add_custom_serializer_accessor`
+/// but for the no-arg class case.
+fn build_field_serializer_instance(ir: &mut IrFile, internal: &str) -> ExprId {
+    if let Some(oid) = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name == internal && c.is_object)
+    {
+        ir.add_expr(IrExpr::StaticInstance {
+            owner: oid as u32,
+            ty: oid as u32,
+            field: "INSTANCE",
+        })
+    } else {
+        ir.add_expr(IrExpr::NewExternal {
+            internal: internal.to_string(),
+            ctor_desc: "()V".to_string(),
+            args: vec![],
+        })
+    }
+}
+
+/// Wrap an element serializer in `.nullable` (`BuiltinSerializersKt.getNullable(s)`), the way kotlinc
+/// builds the element serializer for a NULLABLE property carrying an explicit serializer — the nullable
+/// descriptor's `serialName` gains the trailing `?`.
+fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
+    ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: "kotlinx/serialization/builtins/BuiltinSerializersKt".to_string(),
+            name: "getNullable".to_string(),
+            descriptor: "(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;"
+                .to_string(),
+            inline: false,
+            must_inline: false,
+        },
+        dispatch_receiver: None,
+        args: vec![base],
+    })
+}
+
 /// The internal name of the kotlinx builtin `KSerializer` singleton (`…INSTANCE`) for a directly
 /// serializable element type — used as the element serializer for a NULLABLE property, which goes
 /// through `encode/decodeNullableSerializableElement` (there is no `encodeNullable<Prim>Element`).
@@ -799,6 +841,13 @@ impl IrPlugin for SerializationPlugin {
                 })
                 .collect();
             let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
+            // Per-property explicit serializers (`@Serializable(with = X::class)` on a field).
+            let field_sers: std::collections::HashMap<String, String> = ir.classes
+                [class_id as usize]
+                .field_serializers
+                .iter()
+                .cloned()
+                .collect();
             let class_internal = ir.classes[class_id as usize].fq_name.clone();
             let ser_fq = serializer_fq(&ir.classes[class_id as usize].fq_name);
             let Some(ser_idx) = ir.classes.iter().position(|c| c.fq_name == ser_fq) else {
@@ -1350,7 +1399,16 @@ impl IrPlugin for SerializationPlugin {
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| {
-                                if let Some(nsid) = nested[i] {
+                                if let Some(internal) = field_sers.get(&fields[i].0) {
+                                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
+                                    // wrapped `.nullable` for a nullable property.
+                                    let base = build_field_serializer_instance(ir, internal);
+                                    if is_nullable(&field_types[i]) {
+                                        wrap_nullable_serializer(ir, base)
+                                    } else {
+                                        base
+                                    }
+                                } else if let Some(nsid) = nested[i] {
                                     ir.add_expr(IrExpr::StaticInstance {
                                         owner: nsid,
                                         ty: nsid,
