@@ -397,10 +397,13 @@ language-coverage milestone, not an extension-surface gap.
 #### Implemented so far (rounds 12–19, all gate-verified 0-FAIL, real JVM round-trips)
 Full primitive set (Int/Long/Boolean/Float/Double/String, incl. 2-slot locals) + **nested
 `@Serializable` composites** (`encodeSerializableElement`/`decodeSerializableElement` with the nested
-type's krusty-generated `$serializer.INSTANCE`) + **nullable reference elements (`String?`)** via
-`encode/decodeNullableSerializableElement` against the builtin `StringSerializer.INSTANCE`, encode+decode
-(present *and* `null`, e.g. `{"a":2,"b":null}` round-trips), arbitrary field count, plugin wired into
-the main compile path.
+type's krusty-generated `$serializer.INSTANCE`) + **nullable elements — both reference (`String?`) and
+primitive (`Int?`/`Long?`/`Boolean?`/…)** via `encode/decodeNullableSerializableElement` against the
+builtin `{String,Int,Long,…}Serializer.INSTANCE`, encode+decode (present *and* `null`, e.g.
+`{"a":2,"b":null}` and all-null `{"a":null,"b":null,"c":null}` round-trip), arbitrary field count,
+plugin wired into the main compile path. (Nullable primitives are lowered to their boxed fq name —
+`Int?` → `java/lang/Integer` — so the getter/field/local are already references; `slot_width` accounts
+for boxed `Long?`/`Double?` being one slot, not two.)
 
 #### The classpath static-field brick — BUILT (round 19)
 The previously-blocking gap ("no IR node to getstatic a *classpath* object's `INSTANCE`") is closed: a
@@ -412,11 +415,9 @@ no stackmap frame). This unblocked nullable reference elements — the element s
 real reference passed to `encode/decodeNullableSerializableElement`.
 
 #### Next bricks
-- **Nullable primitives (`Int?`, `Long?`, …):** need the property's getter/field to be the boxed type
-  (`Integer`) end-to-end so the value is a reference at the `encodeNullableSerializableElement(…,
-  Object)` call. The `ExternalStaticInstance` machinery + `{Int,Long,…}Serializer.INSTANCE` names are
-  ready; the open piece is nullable-primitive boxing across the emitter. Currently bails to a clean
-  no-op (never wrong bytecode).
+- **Default values (`val a: Int = 5`):** the most common remaining corpus shape. Needs the `seen`
+  bitmask machinery — `addElement(name, isOptional=true)`, the synthesized `C(int seen, …fields,
+  SerializationConstructorMarker)` constructor, and a decode that reconstructs defaults from the mask.
 - Then enum/collection (`ListSerializer`, `EnumSerializer`)/generic/sealed serialization, then the
   language features for the rest of the 69-corpus.
 

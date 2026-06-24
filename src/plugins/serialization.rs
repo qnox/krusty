@@ -126,12 +126,36 @@ fn getter_name(prop: &str) -> String {
     }
 }
 
-/// The JVM descriptor for a property type (just what `serialize`'s getter calls need).
+/// The boxed reference descriptor for a primitive fq name, or `None` if it isn't a primitive.
+fn boxed_descriptor(fq: &str) -> Option<&'static str> {
+    Some(match fq {
+        "kotlin/Int" => "Ljava/lang/Integer;",
+        "kotlin/Long" => "Ljava/lang/Long;",
+        "kotlin/Boolean" => "Ljava/lang/Boolean;",
+        "kotlin/Double" => "Ljava/lang/Double;",
+        "kotlin/Float" => "Ljava/lang/Float;",
+        "kotlin/Char" => "Ljava/lang/Character;",
+        "kotlin/Byte" => "Ljava/lang/Byte;",
+        "kotlin/Short" => "Ljava/lang/Short;",
+        _ => return None,
+    })
+}
+
+/// The JVM descriptor for a property type (just what `serialize`'s getter calls need). A nullable
+/// primitive is carried as its boxed type (`Int?` → `Ljava/lang/Integer;`), matching the getter krusty
+/// emits for a nullable primitive property.
 fn ty_descriptor(ty: &IrType) -> String {
-    let fq = match ty {
-        IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => "kotlin/Any",
+    let (fq, nullable) = match ty {
+        IrType::Class {
+            fq_name, nullable, ..
+        } => (fq_name.as_str(), *nullable),
+        _ => ("kotlin/Any", false),
     };
+    if nullable {
+        if let Some(boxed) = boxed_descriptor(fq) {
+            return boxed.to_string();
+        }
+    }
     match fq {
         "kotlin/Int" => "I".to_string(),
         "kotlin/Long" => "J".to_string(),
@@ -180,12 +204,15 @@ fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// JVM local-slot width of a field type (Long/Double take two slots).
+/// JVM local-slot width of a field type. Long/Double take two slots — but a NULLABLE Long?/Double? is
+/// carried boxed (`java.lang.Long`/`Double`), a one-slot reference.
 fn slot_width(ty: &IrType) -> u32 {
     match ty {
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Long" || fq_name == "kotlin/Double" => {
-            2
-        }
+        IrType::Class {
+            fq_name,
+            nullable: false,
+            ..
+        } if fq_name == "kotlin/Long" || fq_name == "kotlin/Double" => 2,
         _ => 1,
     }
 }
@@ -271,19 +298,31 @@ fn is_nullable(ty: &IrType) -> bool {
 /// serializable element type — used as the element serializer for a NULLABLE property, which goes
 /// through `encode/decodeNullableSerializableElement` (there is no `encodeNullable<Prim>Element`).
 ///
-/// Restricted to reference types whose getter already returns a reference (`String` → `Ljava/lang/
-/// String;`), so no autoboxing is required at the call site. Nullable PRIMITIVES (`Int?` etc.) need
-/// the property's getter/field to be the boxed type end-to-end; that boxing is a separate follow-up,
-/// so they return `None` here and the caller emits a clean no-op rather than wrong bytecode.
+/// Covers `String` (reference) and the primitive set. For a nullable primitive the property's getter
+/// and field are the boxed type (`Int?` → `getX()Ljava/lang/Integer;`, verified what krusty emits), so
+/// the value reaching `encode/decodeNullableSerializableElement(…, Object)` is already a reference — no
+/// extra autoboxing. The serializer singleton itself serializes the unboxed primitive.
 fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
     let fq = match ty {
         IrType::Class { fq_name, .. } => fq_name.as_str(),
         _ => return None,
     };
-    match fq {
-        "kotlin/String" => Some("kotlinx/serialization/internal/StringSerializer"),
-        _ => None,
-    }
+    // A nullable primitive is lowered to its BOXED fq name (`Int?` → `java/lang/Integer`), so match
+    // both the Kotlin primitive name and the boxed name.
+    Some(match fq {
+        "kotlin/String" | "java/lang/String" => "kotlinx/serialization/internal/StringSerializer",
+        "kotlin/Int" | "java/lang/Integer" => "kotlinx/serialization/internal/IntSerializer",
+        "kotlin/Long" | "java/lang/Long" => "kotlinx/serialization/internal/LongSerializer",
+        "kotlin/Boolean" | "java/lang/Boolean" => {
+            "kotlinx/serialization/internal/BooleanSerializer"
+        }
+        "kotlin/Double" | "java/lang/Double" => "kotlinx/serialization/internal/DoubleSerializer",
+        "kotlin/Float" | "java/lang/Float" => "kotlinx/serialization/internal/FloatSerializer",
+        "kotlin/Char" | "java/lang/Character" => "kotlinx/serialization/internal/CharSerializer",
+        "kotlin/Byte" | "java/lang/Byte" => "kotlinx/serialization/internal/ByteSerializer",
+        "kotlin/Short" | "java/lang/Short" => "kotlinx/serialization/internal/ShortSerializer",
+        _ => return None,
+    })
 }
 
 impl SerializationPlugin {
@@ -914,10 +953,19 @@ impl IrPlugin for SerializationPlugin {
                             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
                             ir.add_expr(IrExpr::Block { stmts, value: None })
                         } else {
-                            // fallback: default-construct stub (no decode emitted for unsupported shapes)
+                            // fallback: default-construct stub (no decode emitted for unsupported shapes).
+                            // Nullable fields default to null, matching the real decode path (and so a
+                            // future non-null default in `default_const` can't leak into a nullable slot).
                             let args: Vec<ExprId> = field_types
                                 .iter()
-                                .map(|ty| ir.add_expr(IrExpr::Const(default_const(ty))))
+                                .map(|ty| {
+                                    let dc = if is_nullable(ty) {
+                                        IrConst::Null
+                                    } else {
+                                        default_const(ty)
+                                    };
+                                    ir.add_expr(IrExpr::Const(dc))
+                                })
                                 .collect();
                             let new = ir.add_expr(IrExpr::New {
                                 class: foo_id,
@@ -1025,6 +1073,29 @@ mod tests {
         assert!(
             calls_method(&ir, "encodeIntElement") && calls_method(&ir, "decodeIntElement"),
             "non-null Int still uses encode/decodeIntElement"
+        );
+    }
+
+    #[test]
+    fn nullable_primitive_uses_boxed_name_and_builtin_serializer() {
+        // krusty lowers a nullable primitive to its BOXED fq name (`Int?` → `java/lang/Integer`,
+        // nullable). The plugin must still route it through encodeNullableSerializableElement with the
+        // builtin IntSerializer singleton — this guards the boxed-name mapping.
+        let (mut ir, ctx, id) = serializable_class("P", &["kotlin/Int"]);
+        ir.classes[id as usize].fields[0].1 = IrType::Class {
+            fq_name: "java/lang/Integer".to_string(),
+            type_args: vec![],
+            nullable: true,
+        };
+        run(&mut ir, &ctx);
+        assert!(
+            calls_method(&ir, "encodeNullableSerializableElement")
+                && calls_method(&ir, "decodeNullableSerializableElement"),
+            "nullable Int? must use the nullable serializable calls"
+        );
+        assert!(
+            refs_external_static(&ir, "kotlinx/serialization/internal/IntSerializer"),
+            "nullable Int? must reference IntSerializer.INSTANCE"
         );
     }
 
