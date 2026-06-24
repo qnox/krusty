@@ -9,6 +9,7 @@ pub mod ast;
 pub mod backend;
 pub mod call_resolver;
 pub mod cli;
+pub mod conformance;
 pub mod diag;
 pub mod features;
 pub mod ir;

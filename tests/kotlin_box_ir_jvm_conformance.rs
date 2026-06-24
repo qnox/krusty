@@ -118,29 +118,9 @@ class TestClassLoader extends ClassLoader {
 }
 "#;
 
-/// Whether a box test applies to the given backend(s), per kotlinc's directives:
-/// `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all);
-/// `// IGNORE_BACKEND[_K1|_K2]:` excludes the listed backends. `names` is the set of backend tokens
-/// the current run identifies as (e.g. `["JVM", "JVM_IR"]` or `["JS", "JS_IR"]`).
-pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    let mentions = |line: &str| line.split(',').any(|t| names.contains(&t.trim()));
-    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
-    }
-    for l in src.lines().filter(|l| {
-        l.starts_with("// IGNORE_BACKEND:")
-            || l.starts_with("// IGNORE_BACKEND_K1:")
-            || l.starts_with("// IGNORE_BACKEND_K2:")
-    }) {
-        let rest = l.split_once(':').map(|x| x.1).unwrap_or("");
-        if mentions(rest.trim()) {
-            return false;
-        }
-    }
-    true
-}
+// Backend-applicability + classpath directives are the SINGLE source of truth in
+// `krusty::conformance` (shared with the `survey` bin so the two never drift).
+use krusty::conformance::backend_applicable;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

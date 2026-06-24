@@ -385,6 +385,22 @@ pub fn conversion_target(name: &str) -> Option<Ty> {
     })
 }
 
+/// The return type of a builtin bitwise/shift operator method on an `Int`/`Long` receiver — the named
+/// forms of Kotlin's primitive operators (`a shl b`, `a and b`, `a.inv()`), which compile to JVM
+/// `ishl`/`iand`/… intrinsics, NOT classpath method calls (so they don't appear in the federated
+/// `functions()` index). `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one argument. The
+/// single source of truth shared by the checker and the signature-inference pre-pass.
+pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
+    if !matches!(recv, Ty::Int | Ty::Long) {
+        return None;
+    }
+    match (name, n_args) {
+        ("inv", 0) => Some(recv),
+        ("shl" | "shr" | "ushr" | "and" | "or" | "xor", 1) => Some(recv),
+        _ => None,
+    }
+}
+
 /// Map a file's imports `simple name -> internal name` (e.g. `Calc -> util/Calc`).
 pub fn import_map(file: &File) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -598,8 +614,14 @@ pub fn collect_signatures_with_cp(
                                         )]
                                     })
                                     .unwrap_or_default();
-                                let t =
-                                    infer_lit_ty_p(file, *e, &class_names, &fun_rets, &this_scope);
+                                let t = infer_lit_ty_p(
+                                    file,
+                                    *e,
+                                    &class_names,
+                                    &fun_rets,
+                                    &this_scope,
+                                    &*libraries,
+                                );
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -788,13 +810,18 @@ pub fn collect_signatures_with_cp(
                             // `getValue` return type.
                             match &bp.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => {
-                                    infer_lit_ty_p(file, de, &class_names, &fun_rets, &init_scope)
-                                        .obj_internal()
-                                        .and_then(|i| table.method_of(i, "getValue"))
-                                        .map(|s| s.ret)
-                                        .unwrap_or(Ty::Error)
-                                }
+                                None => infer_lit_ty_p(
+                                    file,
+                                    de,
+                                    &class_names,
+                                    &fun_rets,
+                                    &init_scope,
+                                    &*libraries,
+                                )
+                                .obj_internal()
+                                .and_then(|i| table.method_of(i, "getValue"))
+                                .map(|s| s.ret)
+                                .unwrap_or(Ty::Error),
                             }
                         } else {
                             match (&bp.ty, &bp.getter) {
@@ -815,6 +842,7 @@ pub fn collect_signatures_with_cp(
                                             &class_names,
                                             &fun_rets,
                                             &init_scope,
+                                            &*libraries,
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -881,7 +909,16 @@ pub fn collect_signatures_with_cp(
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                                 None => bp
                                     .init
-                                    .map(|i| infer_lit_ty_p(file, i, &class_names, &fun_rets, &[]))
+                                    .map(|i| {
+                                        infer_lit_ty_p(
+                                            file,
+                                            i,
+                                            &class_names,
+                                            &fun_rets,
+                                            &[],
+                                            &*libraries,
+                                        )
+                                    })
                                     .unwrap_or(Ty::Error),
                             };
                             if ty != Ty::Error {
@@ -970,6 +1007,7 @@ pub fn collect_signatures_with_cp(
                                             &class_names,
                                             &local_rets,
                                             &scope,
+                                            &*libraries,
                                         );
                                         if t != Ty::Error {
                                             return t;
@@ -1103,7 +1141,13 @@ pub fn collect_signatures_with_cp(
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
                                     if let FunBody::Expr(e) = &m.body {
-                                        let t = infer_lit_ty(file, *e, &class_names, &fun_rets);
+                                        let t = infer_lit_ty(
+                                            file,
+                                            *e,
+                                            &class_names,
+                                            &fun_rets,
+                                            &*libraries,
+                                        );
                                         if t != Ty::Error {
                                             t
                                         } else {
@@ -1157,7 +1201,7 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets)).unwrap_or(Ty::Error),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -1256,9 +1300,13 @@ pub fn collect_signatures_with_cp(
                             p.ty.as_ref()
                                 .map(|r| ty_of_ref(r, &class_names, &Default::default(), diags))
                                 .or_else(|| match &p.getter {
-                                    Some(FunBody::Expr(g)) => {
-                                        Some(infer_lit_ty(file, *g, &class_names, &fun_rets))
-                                    }
+                                    Some(FunBody::Expr(g)) => Some(infer_lit_ty(
+                                        file,
+                                        *g,
+                                        &class_names,
+                                        &fun_rets,
+                                        &*libraries,
+                                    )),
                                     _ => None,
                                 })
                                 .unwrap_or(Ty::Error);
@@ -1294,7 +1342,7 @@ pub fn collect_signatures_with_cp(
                     let ty = if let Some(de) = p.delegate {
                         match &p.ty {
                             Some(r) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            None => infer_lit_ty(file, de, &class_names, &fun_rets)
+                            None => infer_lit_ty(file, de, &class_names, &fun_rets, &*libraries)
                                 .obj_internal()
                                 .and_then(|i| table.method_of(i, "getValue"))
                                 .map(|s| s.ret)
@@ -1306,7 +1354,7 @@ pub fn collect_signatures_with_cp(
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
                             (None, Some(FunBody::Expr(g))) if is_computed => {
-                                infer_lit_ty(file, *g, &class_names, &fun_rets)
+                                infer_lit_ty(file, *g, &class_names, &fun_rets, &*libraries)
                             }
                             (None, _) => p
                                 .init
@@ -1317,7 +1365,7 @@ pub fn collect_signatures_with_cp(
                                             return *t;
                                         }
                                     }
-                                    infer_lit_ty(file, i, &class_names, &fun_rets)
+                                    infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
                                 })
                                 .unwrap_or(Ty::Error),
                         }
@@ -1965,26 +2013,9 @@ fn infer_lit_ty(
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
+    src: &dyn crate::libraries::LibrarySet,
 ) -> Ty {
-    infer_lit_ty_p(file, e, class_names, fun_rets, &[])
-}
-
-/// As [`infer_lit_ty`], but with the enclosing class's properties in scope so an expression-bodied
-/// member (`fun get() = v`, where `v` is a constructor property) infers the property's type.
-/// The primitive return type of a Kotlin primitive-conversion method (`toByte`/`toInt`/…), or `None`
-/// for any other name. The conversions are total and receiver-independent, so a property initializer
-/// `2.toByte()` infers to `Byte` without resolving the receiver.
-fn prim_conversion_ret(name: &str) -> Option<Ty> {
-    Some(match name {
-        "toByte" => Ty::Byte,
-        "toShort" => Ty::Short,
-        "toInt" => Ty::Int,
-        "toLong" => Ty::Long,
-        "toFloat" => Ty::Float,
-        "toDouble" => Ty::Double,
-        "toChar" => Ty::Char,
-        _ => return None,
-    })
+    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src)
 }
 
 /// The common type of two branch values for the lightweight signature inferer: identical types
@@ -2005,7 +2036,29 @@ fn infer_lit_ty_p(
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
+    src: &dyn crate::libraries::LibrarySet,
 ) -> Ty {
+    // Resolve the (single) return type of `name` applied to `receiver` (a method/extension when
+    // `receiver` is `Some`, a top-level function when `None`) through the FEDERATED symbol source — the
+    // same classpath/stdlib resolution the full checker uses. Returns a type only when every applicable
+    // overload AGREES on the return type (no arg-based overload selection here); otherwise `None`, so the
+    // caller falls back to `Error` (skip) rather than guess. NO stdlib symbol names are hardcoded.
+    fn resolved_ret(
+        src: &dyn crate::libraries::LibrarySet,
+        name: &str,
+        receiver: Option<Ty>,
+    ) -> Option<Ty> {
+        let fs = src.functions(name, receiver);
+        let mut ret: Option<Ty> = None;
+        for o in &fs.overloads {
+            match ret {
+                None => ret = Some(o.callable.ret),
+                Some(r) if r == o.callable.ret => {}
+                Some(_) => return None, // overloads disagree on return type — needs arg selection
+            }
+        }
+        ret
+    }
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -2032,12 +2085,14 @@ fn infer_lit_ty_p(
         }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
-            UnOp::Neg | UnOp::Plus => infer_lit_ty_p(file, *operand, class_names, fun_rets, props),
+            UnOp::Neg | UnOp::Plus => {
+                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src)
+            }
         },
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props),
-                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props),
+                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src),
+                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src),
             );
             match op {
                 BinOp::Lt
@@ -2067,36 +2122,51 @@ fn infer_lit_ty_p(
                     if let Some(internal) = class_names.get(n.as_str()) {
                         return Ty::obj(internal);
                     }
-                }
-                // A primitive conversion method (`2.toByte()`, `n.toLong()`) returns its named
-                // primitive regardless of receiver — Kotlin's `Number`/`Char` conversion family.
-                // `toString()` is `String` on any receiver (`Any.toString`).
-                Expr::Member { receiver, name } => {
-                    if let Some(t) = prim_conversion_ret(name) {
+                    // A top-level library/stdlib function — federated resolution (no hardcoded names).
+                    if let Some(t) = resolved_ret(src, n, None) {
                         return t;
                     }
-                    if name == "toString" {
-                        return Ty::String;
-                    }
-                    // `this.method()` — resolve the receiver-`this` method via the rets map (extended
-                    // with this class's + superclasses' methods at the method-inference call site).
+                }
+                // A method/extension call (`n.toLong()`, `s.uppercase()`, `r shl 8` → `r.shl(8)`,
+                // `x.toString()`): resolve the return type through the FEDERATED symbol source (the same
+                // classpath/stdlib resolution the full checker uses) — NO stdlib symbol names hardcoded.
+                Expr::Member { receiver, name } => {
+                    // `this.method()` — a method of the CURRENT module's class; the federated source
+                    // doesn't carry the module's own (in-progress) signatures, so use the rets map.
                     if matches!(file.expr(*receiver), Expr::Name(r) if r == "this") {
                         if let Some(ret) = fun_rets.get(name.as_str()) {
                             return *ret;
                         }
                     }
-                    // Builtin bitwise/shift infix methods (`r shl 8` parses to `r.shl(8)`): on an
-                    // `Int`/`Long` receiver they return the receiver's type — mirrors the checker's
-                    // builtin handling. `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one arg.
-                    let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props);
-                    if matches!(rt, Ty::Int | Ty::Long) {
-                        if name == "inv" && args.is_empty() {
-                            return rt;
-                        }
-                        if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor")
-                            && args.len() == 1
+                    let recv_ty =
+                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src);
+                    if recv_ty != Ty::Error {
+                        // Builtin primitive intrinsics — the SAME shared helpers the full checker uses
+                        // (NOT classpath functions, which don't carry these): numeric/char/unsigned
+                        // conversions (`toLong`/`toChar`/…) and the named bitwise/shift operators.
+                        if args.is_empty()
+                            && (recv_ty.is_numeric()
+                                || recv_ty == Ty::Char
+                                || recv_ty.is_unsigned())
                         {
-                            return rt;
+                            if let Some(t) = conversion_target(name) {
+                                return t;
+                            }
+                        }
+                        if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
+                            return t;
+                        }
+                        // Everything else (`s.uppercase()`, library members/extensions): federated
+                        // classpath/stdlib resolution — no hardcoded symbol names.
+                        if let Some(t) = resolved_ret(src, name, Some(recv_ty)) {
+                            return t;
+                        }
+                        // A USER receiver type (a module class — not in the library source, so the call
+                        // above found nothing) can still call an `Any`-inherited member (`toString`,
+                        // `hashCode`, `equals`): resolve it on `kotlin/Any`, the universal supertype the
+                        // source DOES carry. Still real classpath resolution — no member name hardcoded.
+                        if let Some(t) = resolved_ret(src, name, Some(Ty::obj("kotlin/Any"))) {
+                            return t;
                         }
                     }
                 }
@@ -2112,8 +2182,8 @@ fn infer_lit_ty_p(
             else_branch: Some(eb),
             ..
         } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props);
-            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props);
+            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src);
+            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src);
             common_lit_ty(t, e)
         }
         // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
@@ -2124,7 +2194,7 @@ fn infer_lit_ty_p(
             }
             let mut acc: Option<Ty> = None;
             for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props);
+                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src);
                 if bt == Ty::Error {
                     return Ty::Error;
                 }
@@ -2139,12 +2209,12 @@ fn infer_lit_ty_p(
         // tracked here, so a trailing referring to a local infers `Error` (safe skip).
         Expr::Block {
             trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props),
+        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props);
-            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props);
+            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src);
+            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src);
             let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
             match (lt, rt) {
                 (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
@@ -6221,30 +6291,20 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Builtin bitwise/shift infix methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`).
-                // These have no operator symbol in Kotlin (only the named form), so there's no
-                // shadowing concern — resolve to the receiver's type. Shifts take an `Int` amount;
-                // `and`/`or`/`xor` take the same type; `inv` is unary.
-                if matches!(rt, Ty::Int | Ty::Long) {
-                    if name == "inv" && arg_tys.is_empty() {
-                        return rt;
-                    }
-                    if matches!(name.as_str(), "shl" | "shr" | "ushr" | "and" | "or" | "xor")
-                        && arg_tys.len() == 1
-                    {
+                // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
+                // `a.inv()`) — the named primitive operators (no symbol form), resolved via the shared
+                // `builtin_bitwise_ret` (also used by signature inference). The arg-type rule is the
+                // checker's: a shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+                if let Some(ret) = builtin_bitwise_ret(rt, &name, arg_tys.len()) {
+                    if let Some(arg0) = arg_tys.first() {
                         let expected = if matches!(name.as_str(), "shl" | "shr" | "ushr") {
                             Ty::Int
                         } else {
                             rt
                         };
-                        self.expect_assignable(
-                            expected,
-                            arg_tys[0],
-                            self.span(args[0]),
-                            "argument",
-                        );
-                        return rt;
+                        self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
                     }
+                    return ret;
                 }
                 // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
                 // primitive operator, which *beats* any same-named user extension (in Kotlin a

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1592 OK / 0 FAIL** (scanned 7351, Phase 422).
+  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 423).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,23 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P46 — member return-type inference via federated resolution (no hardcoded names); shared
+  conformance directives (gate 1592 → 1610, +18, FAIL=0).** Two related fixes:
+  (1) `infer_lit_ty_p` (the signature-collection pre-pass that infers an expression-bodied member's
+  return type) name-matched stdlib symbols (`toString`, `shl`/`or`/`xor`, `toLong`, …) — prohibited
+  hardcoding. Now it resolves method/extension/function return types through the FEDERATED `SymbolSource`
+  (`src.functions(name, receiver)`, the same classpath/stdlib resolution the full checker uses), so
+  `s.uppercase()`, `x.toString()`, library members type with ZERO hardcoded names. Genuine primitive
+  INTRINSICS (the named bitwise operators `shl`/`and`/…, numeric/char conversions) — which compile to JVM
+  opcodes, not classpath methods, so they're absent from `functions()` — go through the SHARED helpers
+  the checker also uses (`conversion_target`, and a new `builtin_bitwise_ret` extracted so the checker and
+  the pre-pass share ONE list, not two). Deleted the duplicated `prim_conversion_ret`. +14 corpus.
+  (2) Gate/survey directive drift: extracted `krusty::conformance` as the SINGLE source of truth for
+  backend applicability (`TARGET_BACKEND`/`IGNORE_BACKEND*`/`DONT_TARGET_EXACT_BACKEND` — the last newly
+  honored, matching kotlinc's runner, which excludes the JVM_IR backend krusty emits, e.g.
+  `@EagerInitialization`) and the per-test EXTRA-library set (`extra_libs`). The gate, the `survey` bin,
+  and `tests/common` classpath now all consult it, so survey no longer over-counts by compiling against
+  libraries a test didn't request.
 - **Phase P45 — local classes (slice 2b: named local objects) (gate 1592 → 1592, +0 corpus, FAIL=0).**
   Completes the local-type-decl surface: a NAMED local object (`object Counter { … }`) now parses + hoists
   like the other local types. Distinguished from an anonymous-object EXPRESSION (`object { … }` /
