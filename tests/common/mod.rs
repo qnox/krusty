@@ -117,18 +117,11 @@ pub fn stdlib_classpath() -> Classpath {
     }
 }
 
-/// Whether a box-test directive (`// NAME` …) is present.
+/// Whether a box-test directive (`// NAME` …) is present. Single source of truth in the lib
+/// (`krusty::conformance`), shared with the gate + survey so directive parsing never drifts.
 #[allow(dead_code)]
 pub fn directive(src: &str, name: &str) -> bool {
-    src.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with("//")
-            && l.trim_start_matches('/')
-                .trim_start()
-                .split([' ', ':'])
-                .next()
-                == Some(name)
-    })
+    krusty::conformance::directive(src, name)
 }
 
 /// Locate the newest jar whose file name starts with `prefix` and ends with `.jar`, excluding
@@ -305,21 +298,23 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
             jars.push(j);
         }
     }
-    if directive(src, "WITH_REFLECT") {
+    // EXTRA libraries beyond stdlib — selected per directive from the shared `conformance` decision.
+    let extra = krusty::conformance::extra_libs(src);
+    if extra.reflect {
         if let Some(j) = dist_jar("kotlin-reflect.jar")
             .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-reflect", &v))
         {
             jars.push(j);
         }
     }
-    if directive(src, "STDLIB_JDK8") {
+    if extra.stdlib_jdk8 {
         if let Some(j) = dist_jar("kotlin-stdlib-jdk8.jar")
             .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib-jdk8", &v))
         {
             jars.push(j);
         }
     }
-    if directive(src, "WITH_COROUTINES") {
+    if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
         if let Some(j) = ensure_maven(
             "org.jetbrains.kotlinx",
