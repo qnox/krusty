@@ -259,20 +259,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
                 }
-                // A `var`'s `setValue` value param erased to a reference (`<T> setValue(…, i: T)`) while the
-                // property is a PRIMITIVE needs the value boxed before the call — not yet modeled, so bail
-                // (the getter coercion above is the read-only half). A reference property passes through.
-                if p.is_var {
-                    if let Some(sv) = syms.method_of(di, "setValue") {
-                        if sv
-                            .params
-                            .last()
-                            .is_some_and(|vp| vp.is_reference() && prop_ty.is_primitive())
-                        {
-                            return None;
-                        }
-                    }
-                }
             }
             // Synthetic `x$delegate` instance fields for delegated member properties — one per delegated
             // body property, in declaration order, placed AFTER the real backing-field props (so the
@@ -1448,6 +1434,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
                         let pref = make_propref(&mut lo);
                         let value_arg = lo.ir.add_expr(IrExpr::GetValue(1));
+                        // A generic delegate's `setValue` takes the ERASED value param (`<T> setValue(…, i:
+                        // T)`); a PRIMITIVE property value boxes into it (`Integer.valueOf`), exactly as
+                        // kotlinc does. A reference value passes through.
+                        let value_arg = match sv.params.last() {
+                            Some(vp) if vp.is_reference() && prop_ty.is_primitive() => {
+                                lo.ir.add_expr(IrExpr::TypeOp {
+                                    op: IrTypeOp::ImplicitCoercion,
+                                    arg: value_arg,
+                                    type_operand: ty_to_ir(*vp),
+                                })
+                            }
+                            _ => value_arg,
+                        };
                         let call = lo.ir.add_expr(IrExpr::Call {
                             callee: crate::ir::Callee::Virtual {
                                 owner: delegate_internal.clone(),
