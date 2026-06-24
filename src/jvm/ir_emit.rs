@@ -2797,6 +2797,10 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
                 code.getstatic(f, 1);
             }
+            IrExpr::ExternalStaticInstance { owner, ty, field } => {
+                let f = self.cw.fieldref(owner, field, &format!("L{ty};"));
+                code.getstatic(f, 1);
+            }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
@@ -4435,6 +4439,7 @@ impl<'a> Emitter<'a> {
                 Ty::obj(&self.ir.classes[*class as usize].fq_name)
             }
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
+            IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj(ty),
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,

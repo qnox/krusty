@@ -394,23 +394,31 @@ sufficient** — the goal's "show the surface is enough" is demonstrated by two 
 executed tests (KSP-from-jar + functional serialization). The 69-corpus "all pass" is a separate
 language-coverage milestone, not an extension-surface gap.
 
-#### Implemented so far (rounds 12–17, all gate-verified 0-FAIL, real JVM round-trips)
+#### Implemented so far (rounds 12–19, all gate-verified 0-FAIL, real JVM round-trips)
 Full primitive set (Int/Long/Boolean/Float/Double/String, incl. 2-slot locals) + **nested
 `@Serializable` composites** (`encodeSerializableElement`/`decodeSerializableElement` with the nested
-type's krusty-generated `$serializer.INSTANCE`), encode+decode, arbitrary field count, plugin wired
-into the main compile path.
+type's krusty-generated `$serializer.INSTANCE`) + **nullable reference elements (`String?`)** via
+`encode/decodeNullableSerializableElement` against the builtin `StringSerializer.INSTANCE`, encode+decode
+(present *and* `null`, e.g. `{"a":2,"b":null}` round-trips), arbitrary field count, plugin wired into
+the main compile path.
 
-#### Next brick (confirmed precisely) — classpath static-field access
-nullable/enum/collection fields need an **element-serializer reference to a builtin serializer**, e.g.
-`kotlinx.serialization.internal.StringSerializer.INSTANCE` (verified getstatic-able: public static
-field, JVM-accessible) passed to `encodeNullableSerializableElement` / wrapped by
-`BuiltinSerializersKt.getNullable`. Nested composites worked only because their element serializer is
-a *krusty-generated* `$serializer` (a `StaticInstance` of a krusty ClassId); a builtin is a *classpath*
-object, and krusty has **no IR node to getstatic a classpath object's `INSTANCE`** (same gap as
-`Json.Default`). Adding it is a new `IrExpr` variant touching the emit match + IR walkers
-(`ir_emit`/`suspend`/`value_classes`) — a real, bounded compiler feature, but gate-risky and to be
-done as dedicated work, not rushed. Past it: enum/collection/generic/sealed serialization, then the
-language features for the rest of the 69-corpus.
+#### The classpath static-field brick — BUILT (round 19)
+The previously-blocking gap ("no IR node to getstatic a *classpath* object's `INSTANCE`") is closed: a
+new `IrExpr::ExternalStaticInstance { owner, ty, field }` getstatics a classpath class's static
+singleton by internal name (vs `StaticInstance`, which resolves a krusty `ClassId`). It emits in
+`ir_emit` (getstatic + `value_ty`); IR walkers fall through their `_` arms correctly (getstatic pushes
+no stackmap frame). This unblocked nullable reference elements — the element serializer
+(`kotlinx.serialization.internal.StringSerializer.INSTANCE`, verified public/getstatic-able) is now a
+real reference passed to `encode/decodeNullableSerializableElement`.
+
+#### Next bricks
+- **Nullable primitives (`Int?`, `Long?`, …):** need the property's getter/field to be the boxed type
+  (`Integer`) end-to-end so the value is a reference at the `encodeNullableSerializableElement(…,
+  Object)` call. The `ExternalStaticInstance` machinery + `{Int,Long,…}Serializer.INSTANCE` names are
+  ready; the open piece is nullable-primitive boxing across the emitter. Currently bails to a clean
+  no-op (never wrong bytecode).
+- Then enum/collection (`ListSerializer`, `EnumSerializer`)/generic/sealed serialization, then the
+  language features for the rest of the 69-corpus.
 
 The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
 (an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
