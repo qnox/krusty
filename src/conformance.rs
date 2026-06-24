@@ -21,11 +21,14 @@ pub fn directive(src: &str, name: &str) -> bool {
     })
 }
 
-/// Whether a box test applies to the backend tokens `names`, per kotlinc's directives:
-/// `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all); `// IGNORE_BACKEND
-/// [_K1|_K2]:` and `// DONT_TARGET_EXACT_BACKEND:` exclude the listed backends. kotlinc's own runner
-/// skips a `DONT_TARGET_EXACT_BACKEND: JVM_IR` test for the JVM_IR backend krusty emits, so it must not
-/// count against the gate.
+/// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
+/// krusty's configuration: **Kotlin 2.4.0 (K2) frontend + JVM_IR backend**.
+/// - `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all).
+/// - `// IGNORE_BACKEND:` mutes the test on the listed backends for ALL frontends → exclude.
+/// - `// IGNORE_BACKEND_K2[_MULTI_MODULE]:` mutes it under the K2 frontend → exclude (krusty is K2).
+/// - `// DONT_TARGET_EXACT_BACKEND:` the test doesn't target that backend → exclude.
+/// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
+///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
     let mentions = |line: &str| line.split(',').any(|t| names.contains(&t.trim()));
     if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
@@ -36,8 +39,8 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
-                || l.starts_with("// IGNORE_BACKEND_K1:")
                 || l.starts_with("// IGNORE_BACKEND_K2:")
+                || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
         .all(|l| !mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim()))
