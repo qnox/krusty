@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 430).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 431).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P54 — metadata-primary resolution of an `inline` value-class extension (`Result.getOrThrow`) (gate
+  1611 → 1611, +0, FAIL=0).** An `inline` extension on a value class is PRIVATE in bytecode (so the
+  literal-name `find_extensions` finds it only at the receiver's erased `Object`/underlying rung, then
+  rejects it for non-public visibility), but PUBLIC per `@Metadata`. `functions()` now, for a BYTECODE-private
+  extension candidate only (the public ones already resolve, untouched — keeps the 1611 intact), consults
+  `package_functions`: if the candidate is metadata-public + `inline` and its `@Metadata` extension receiver
+  is EXACTLY this value class, it resolves as public (with `must_inline` still keyed on the bytecode
+  visibility — no legal `invokestatic`, so the body is spliced). The metadata receiver disambiguates the
+  erased-`Object` rung so `getOrThrow` binds only a `Result`, never an unrelated receiver. Verified by
+  `metadata_reader_e2e`: `resolve_callable("getOrThrow", Result)` → `kotlin/ResultKt.getOrThrow` inline;
+  `resolve_callable("getOrThrow", String)` → none. The body splices correctly (`throwOnFailure`; unbox).
+  Byte-equal codegen for a `Result`-typed value additionally needs classpath value-class param/local erasure
+  (`Result`→`Object`, layer 4) and the companion inline-splice for construction (`Result.success`); the
+  target `result_e2e` stays `#[ignore]`d for those.
 - **Phase P53 — metadata reader for classpath `@JvmInline value class` detection (gate 1611 → 1611, +0,
   FAIL=0).** Layer 2 prerequisite for `kotlin.Result`: krusty's unboxed value-class ABI pass
   (`jvm/value_classes.rs`) already lowers USER value classes, but had no way to recognize a CLASSPATH type as

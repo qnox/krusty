@@ -837,6 +837,35 @@ impl SymbolSource for JvmLibraries {
                     let (params, pret) = parse_method_desc(&c.descriptor);
                     let inline = self.cp.is_inline_method(&c.owner, &c.name);
                     let ret_nullable = self.cp.metadata_return_nullable(&c.owner, &c.name);
+                    // Metadata-primary visibility for a value-class extension. An `inline` extension on a
+                    // value class (`Result.getOrThrow`) is PRIVATE in bytecode but PUBLIC per @Metadata —
+                    // kotlinc resolves it, then inlines (no legal `invokestatic`). ONLY consider a
+                    // bytecode-private candidate here (the public ones already resolve unchanged); among
+                    // those, accept only the metadata-public `inline` extension whose @Metadata receiver is
+                    // EXACTLY this value class (the candidate was found at the erased Object/underlying
+                    // rung, so an unrelated receiver must not bind it). `must_inline` stays on the bytecode
+                    // visibility (no callable `invokestatic` → must splice).
+                    let mut public = c.public;
+                    if !c.public {
+                        let meta_fn = self.cp.find(&c.owner).and_then(|ci| {
+                            crate::jvm::metadata::package_functions(&ci)
+                                .into_iter()
+                                .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
+                        });
+                        let value_recv_match = meta_fn
+                            .as_ref()
+                            .filter(|m| m.is_public && m.is_inline)
+                            .and_then(|m| m.receiver_class.as_ref())
+                            .is_some_and(|rc| {
+                                receiver.obj_internal() == Some(rc.as_str())
+                                    && self.cp.find(rc).is_some_and(|ci| {
+                                        crate::jvm::metadata::class_inline(&ci).is_some()
+                                    })
+                            });
+                        if value_recv_match {
+                            public = true;
+                        }
+                    }
                     // Logical return, recovered RECEIVER-substituted (arg-independent): `<T> T.takeIf(…): T?`
                     // → `receiver`. A type var the receiver doesn't bind (`fold`'s `R`) stays as the erased
                     // physical type — an arg-binding selector (`resolve_callable`) refines that.
@@ -865,7 +894,7 @@ impl SymbolSource for JvmLibraries {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
                         ret_nullable,
-                        public: c.public,
+                        public,
                         receiver_rank: rank as u32,
                         call_sig: crate::libraries::CallSig::default(),
                         flags: FnFlags {

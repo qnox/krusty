@@ -6,9 +6,13 @@
 mod common;
 
 use krusty::jvm::classpath::Classpath;
+use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::metadata::{
     class_companion_name, class_functions, class_inline, package_functions,
 };
+use krusty::libraries::LibrarySet;
+use krusty::types::Ty;
+use std::rc::Rc;
 
 fn cp() -> Option<Classpath> {
     let sl = common::stdlib_jar()?;
@@ -95,5 +99,32 @@ fn inline_class_underlying_types_from_metadata() {
     assert!(
         class_inline(&pair_ci).is_none(),
         "Pair is not a value class"
+    );
+}
+
+#[test]
+fn result_get_or_throw_resolves_as_inline_extension() {
+    // Metadata-primary extension resolution: `getOrThrow` is PRIVATE in bytecode (it's `inline`) but
+    // PUBLIC per @Metadata with an extension receiver of `kotlin/Result`. It must resolve as an inline
+    // extension on a `Result` receiver — found at the erased `Object` rung, disambiguated by the
+    // @Metadata receiver. (Byte-equal codegen additionally needs value-class param erasure.)
+    let Some(sl) = common::stdlib_jar() else {
+        eprintln!("no stdlib jar; skipping");
+        return;
+    };
+    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
+    let c = libs
+        .resolve_callable("getOrThrow", Some(Ty::obj("kotlin/Result")), &[], &[])
+        .expect("getOrThrow resolves on a Result receiver via @Metadata");
+    assert_eq!(c.owner, "kotlin/ResultKt");
+    assert_eq!(c.name, "getOrThrow");
+    assert!(c.is_inline, "getOrThrow is inline");
+
+    // The same name must NOT resolve on an unrelated receiver (the erased-Object candidate is gated by
+    // the @Metadata receiver class).
+    assert!(
+        libs.resolve_callable("getOrThrow", Some(Ty::obj("kotlin/String")), &[], &[])
+            .is_none(),
+        "getOrThrow must not bind a non-Result receiver"
     );
 }
