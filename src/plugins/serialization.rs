@@ -325,6 +325,34 @@ fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
     })
 }
 
+/// Plain `Encoder.encode*` / `Decoder.decode*` for a value class's underlying type (`encodeInt` /
+/// `decodeInt`), as `(enc_name, enc_desc, dec_name, dec_desc)`. `None` for an unsupported underlying.
+fn inline_prim_methods(
+    ty: &IrType,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    let fq = match ty {
+        IrType::Class { fq_name, .. } => fq_name.as_str(),
+        _ => return None,
+    };
+    Some(match fq {
+        "kotlin/Int" | "java/lang/Integer" => ("encodeInt", "(I)V", "decodeInt", "()I"),
+        "kotlin/Long" | "java/lang/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),
+        "kotlin/Boolean" | "java/lang/Boolean" => ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z"),
+        "kotlin/Double" | "java/lang/Double" => ("encodeDouble", "(D)V", "decodeDouble", "()D"),
+        "kotlin/Float" | "java/lang/Float" => ("encodeFloat", "(F)V", "decodeFloat", "()F"),
+        "kotlin/Char" | "java/lang/Character" => ("encodeChar", "(C)V", "decodeChar", "()C"),
+        "kotlin/Byte" | "java/lang/Byte" => ("encodeByte", "(B)V", "decodeByte", "()B"),
+        "kotlin/Short" | "java/lang/Short" => ("encodeShort", "(S)V", "decodeShort", "()S"),
+        "kotlin/String" | "java/lang/String" => (
+            "encodeString",
+            "(Ljava/lang/String;)V",
+            "decodeString",
+            "()Ljava/lang/String;",
+        ),
+        _ => return None,
+    })
+}
+
 impl SerializationPlugin {
     /// Add `static serializer(): KSerializer<C>` returning a fresh instance of the explicit serializer
     /// `X` from `@Serializable(with = X::class)`: `new X(Reflection.getOrCreateKotlinClass(C.class))`.
@@ -517,37 +545,81 @@ impl IrPlugin for SerializationPlugin {
             //   val d = PluginGeneratedSerialDescriptor("<fq>", null, n)   [local 1, this=0]
             //   d.addElement("<prop>", false) ...
             //   this.descriptor = d
+            // A value class uses the inline descriptor ONLY when its underlying is a directly-supported
+            // primitive/String — the same condition the inline serialize/deserialize arms require, so an
+            // unsupported underlying falls back consistently to the PGSD path (never a mismatched mix).
+            let is_value = ir.classes[class_id as usize].is_value
+                && foo_fields
+                    .first()
+                    .and_then(|(_, t)| inline_prim_methods(t))
+                    .is_some();
             let pgsd_internal = "kotlinx/serialization/internal/PluginGeneratedSerialDescriptor";
-            let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
-            let pgsd_null = ir.add_expr(IrExpr::Const(IrConst::Null));
-            let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
-            let pgsd = ir.add_expr(IrExpr::NewExternal {
-                internal: pgsd_internal.to_string(),
-                ctor_desc:
-                    "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V"
-                        .to_string(),
-                args: vec![pgsd_name, pgsd_null, pgsd_n],
-            });
-            let dvar = ir.add_expr(IrExpr::Variable {
-                index: 1,
-                ty: class_ty(pgsd_internal),
-                init: Some(pgsd),
-            });
-            let mut init_stmts = vec![dvar];
-            for (pname, _) in &foo_fields {
-                let d = ir.add_expr(IrExpr::GetValue(1));
-                let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name(pname))));
-                let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                init_stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: pgsd_internal.to_string(),
-                        name: "addElement".to_string(),
-                        descriptor: "(Ljava/lang/String;Z)V".to_string(),
-                        interface: false,
+            let mut init_stmts;
+            if is_value {
+                // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
+                // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
+                let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+                let under_ser = foo_fields
+                    .first()
+                    .and_then(|(_, t)| builtin_element_serializer(t));
+                let ser_inst = match under_ser {
+                    Some(s) => ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: s.to_string(),
+                        ty: s.to_string(),
+                        field: "INSTANCE".to_string(),
+                    }),
+                    // Unsupported underlying (e.g. a nested @Serializable) — leave the default below.
+                    None => ir.add_expr(IrExpr::Const(IrConst::Null)),
+                };
+                let d = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: "kotlinx/serialization/internal/InlineClassDescriptorKt".to_string(),
+                        name: "InlinePrimitiveDescriptor".to_string(),
+                        descriptor: "(Ljava/lang/String;Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
+                        inline: false,
+                        must_inline: false,
                     },
-                    dispatch_receiver: Some(d),
-                    args: vec![nm, opt],
-                }));
+                    dispatch_receiver: None,
+                    args: vec![name, ser_inst],
+                });
+                init_stmts = vec![ir.add_expr(IrExpr::Variable {
+                    index: 1,
+                    ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                    init: Some(d),
+                })];
+            } else {
+                let pgsd_name =
+                    ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+                let pgsd_null = ir.add_expr(IrExpr::Const(IrConst::Null));
+                let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
+                let pgsd = ir.add_expr(IrExpr::NewExternal {
+                    internal: pgsd_internal.to_string(),
+                    ctor_desc:
+                        "(Ljava/lang/String;Lkotlinx/serialization/internal/GeneratedSerializer;I)V"
+                            .to_string(),
+                    args: vec![pgsd_name, pgsd_null, pgsd_n],
+                });
+                let dvar = ir.add_expr(IrExpr::Variable {
+                    index: 1,
+                    ty: class_ty(pgsd_internal),
+                    init: Some(pgsd),
+                });
+                init_stmts = vec![dvar];
+                for (pname, _) in &foo_fields {
+                    let d = ir.add_expr(IrExpr::GetValue(1));
+                    let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name(pname))));
+                    let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                    init_stmts.push(ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner: pgsd_internal.to_string(),
+                            name: "addElement".to_string(),
+                            descriptor: "(Ljava/lang/String;Z)V".to_string(),
+                            interface: false,
+                        },
+                        dispatch_receiver: Some(d),
+                        args: vec![nm, opt],
+                    }));
+                }
             }
             let this0 = ir.add_expr(IrExpr::GetValue(0));
             let dval = ir.add_expr(IrExpr::GetValue(1));
@@ -658,6 +730,60 @@ impl IrPlugin for SerializationPlugin {
                         let ret = ir.add_expr(IrExpr::Return(Some(d)));
                         let body = ir.add_expr(IrExpr::Block {
                             stmts: vec![ret],
+                            value: None,
+                        });
+                        ir.functions[fid as usize].body = Some(body);
+                    }
+                    "serialize"
+                        if ir.classes[foo_id as usize].is_value
+                            && fields
+                                .first()
+                                .and_then(|(_, t)| inline_prim_methods(t))
+                                .is_some() =>
+                    {
+                        // A `@JvmInline value class`: serialize inline, no CompositeEncoder —
+                        //   encoder.encodeInline(this.descriptor).encode<U>(value.get<prop>())
+                        let (pname, uty) = fields[0].clone();
+                        let (enc_name, enc_desc, _, _) = inline_prim_methods(&uty).unwrap();
+                        let this = ir.add_expr(IrExpr::GetValue(0));
+                        let desc = ir.add_expr(IrExpr::GetField {
+                            receiver: this,
+                            class: ser_idx as u32,
+                            index: 0,
+                        });
+                        let enc = ir.add_expr(IrExpr::GetValue(1));
+                        let inline_enc = ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/Encoder",
+                                "encodeInline",
+                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Encoder;",
+                            ),
+                            dispatch_receiver: Some(enc),
+                            args: vec![desc],
+                        });
+                        let vrecv = ir.add_expr(IrExpr::GetValue(2));
+                        let v = ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner: class_internal.clone(),
+                                name: getter_name(&pname),
+                                descriptor: format!("(){}", ty_descriptor(&uty)),
+                                interface: false,
+                            },
+                            dispatch_receiver: Some(vrecv),
+                            args: vec![],
+                        });
+                        let call = ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/Encoder",
+                                enc_name,
+                                enc_desc,
+                            ),
+                            dispatch_receiver: Some(inline_enc),
+                            args: vec![v],
+                        });
+                        let ret = ir.add_expr(IrExpr::Return(None));
+                        let body = ir.add_expr(IrExpr::Block {
+                            stmts: vec![call, ret],
                             value: None,
                         });
                         ir.functions[fid as usize].body = Some(body);
@@ -798,6 +924,54 @@ impl IrPlugin for SerializationPlugin {
                             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
                             ir.functions[fid as usize].body = Some(body);
                         }
+                    }
+                    "deserialize"
+                        if ir.classes[foo_id as usize].is_value
+                            && fields
+                                .first()
+                                .and_then(|(_, t)| inline_prim_methods(t))
+                                .is_some() =>
+                    {
+                        // A `@JvmInline value class`: deserialize inline —
+                        //   return new Foo(decoder.decodeInline(this.descriptor).decode<U>())
+                        let (_, uty) = fields[0].clone();
+                        let (_, _, dec_name, dec_desc) = inline_prim_methods(&uty).unwrap();
+                        let this = ir.add_expr(IrExpr::GetValue(0));
+                        let desc = ir.add_expr(IrExpr::GetField {
+                            receiver: this,
+                            class: ser_idx as u32,
+                            index: 0,
+                        });
+                        let dec = ir.add_expr(IrExpr::GetValue(1));
+                        let inline_dec = ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/Decoder",
+                                "decodeInline",
+                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Decoder;",
+                            ),
+                            dispatch_receiver: Some(dec),
+                            args: vec![desc],
+                        });
+                        let u = ir.add_expr(IrExpr::Call {
+                            callee: virtual_iface(
+                                "kotlinx/serialization/encoding/Decoder",
+                                dec_name,
+                                dec_desc,
+                            ),
+                            dispatch_receiver: Some(inline_dec),
+                            args: vec![],
+                        });
+                        let new = ir.add_expr(IrExpr::New {
+                            class: foo_id,
+                            args: vec![u],
+                            ctor_params: None,
+                        });
+                        let ret = ir.add_expr(IrExpr::Return(Some(new)));
+                        let body = ir.add_expr(IrExpr::Block {
+                            stmts: vec![ret],
+                            value: None,
+                        });
+                        ir.functions[fid as usize].body = Some(body);
                     }
                     "deserialize" => {
                         // deserialize(decoder=1):
