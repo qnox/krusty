@@ -2006,7 +2006,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> TypeRef {
+        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
+        // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
+        // Without this, an `@` before a type would fail to parse. NOTE: a following `(` is NOT consumed
+        // as an annotation argument list here — in type position it belongs to a function type
+        // (`@Composable () -> Unit`); an argument-bearing type annotation (`@Foo(1) Bar`, rare) is not
+        // yet handled.
+        let mut type_anns = Vec::new();
+        while self.at(TokenKind::At) {
+            self.bump(); // '@'
+            let qname = self.parse_qualified_name();
+            self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
+            if !qname.is_empty() {
+                type_anns.push(qname.rsplit('.').next().unwrap_or(&qname).to_string());
+            }
+        }
         let span = self.tok().span;
+        if !type_anns.is_empty() {
+            self.file.type_annotations.insert(span.lo, type_anns);
+        }
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
         let mut fun_suspend = false;
         if self.at(TokenKind::Ident) && self.text() == "suspend" {
@@ -4703,6 +4721,44 @@ mod tests {
         assert!(
             anns("B").is_empty(),
             "annotation must not leak to the next function"
+        );
+    }
+
+    #[test]
+    fn captures_annotations_on_a_function_type() {
+        // `@Composable () -> Unit` (an annotated function TYPE) parses, and the annotation is recorded
+        // by the type's start offset; an unannotated function-type param has none.
+        let mut d = DiagSink::new();
+        let src = "fun W(content: @Composable () -> Unit, plain: () -> Unit) {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+
+        let w = file
+            .decl_arena
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Fun(f) if f.name == "W" => Some(f),
+                _ => None,
+            })
+            .expect("fun W");
+        let ty_of = |name: &str| {
+            &w.params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("param {name}"))
+                .ty
+        };
+        let anns_of = |name: &str| {
+            file.type_annotations
+                .get(&ty_of(name).span.lo)
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(anns_of("content"), vec!["Composable".to_string()]);
+        assert!(
+            anns_of("plain").is_empty(),
+            "an unannotated function type has no recorded annotations"
         );
     }
 

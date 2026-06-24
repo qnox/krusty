@@ -624,6 +624,11 @@ pub struct File {
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
     pub spread_arg_ids: std::collections::HashSet<u32>,
+    /// Annotations written on a TYPE (`@Composable () -> Unit`, `@UnsafeVariance T`), keyed by the
+    /// type's start offset (`TypeRef.span.lo`). The parser consumes leading `@Foo` before a type and
+    /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
+    /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
+    pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
 }
 
 impl File {
