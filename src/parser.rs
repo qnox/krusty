@@ -259,7 +259,12 @@ impl<'a> Parser<'a> {
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
-                    let d = self.parse_top_property(mods.iter().any(|m| m == "lateinit"), false);
+                    let d = self.parse_top_property_c(
+                        mods.iter().any(|m| m == "lateinit"),
+                        false,
+                        mods.iter().any(|m| m == "const"),
+                        false,
+                    );
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
