@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1555 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1556 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P29 — interface property reads in default methods (gate 1555 → 1556, +1, FAIL=0; removes a
+  bail).** An unqualified property read inside an interface DEFAULT method now routes through the getter
+  (`invokeinterface getX`) instead of a (nonexistent) interface field — an interface has no backing
+  fields, its properties are abstract getters. The unqualified-`Name` read path skips the own-field
+  lookup when `cur_class` is an interface. This LETS the P28 conservative guard be REMOVED (defaults on
+  interfaces that declare abstract properties are now handled, e.g. `traits/genericMethod`: a default
+  `fun a() = property`). New `interface_default_method_e2e::default_method_reads_abstract_property`.
 - **Phase P28 — call an inherited interface default through the concrete class (gate 1549 → 1555, +6,
   FAIL=0).** Completes P27's follow-up: `C().f()` where `C : I` doesn't override `I`'s default `f`.
   `resolve_method` now, after the superclass chain, walks the class's interfaces transitively and returns

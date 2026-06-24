@@ -33,3 +33,22 @@ fun box(): String {\n\
     let out = run(SRC).expect("interface default method should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn default_method_reads_abstract_property() {
+    // Corpus traits/genericMethod shape: a default method reads an abstract interface property — it
+    // must route through the getter (invokeinterface), not a (nonexistent) interface field.
+    const SRC: &str = "interface Named {\n\
+    val who: String\n\
+    fun hello(): String = \"hi \" + who\n\
+}\n\
+class P(override val who: String) : Named\n\
+fun box(): String {\n\
+    val p: Named = P(\"k\")\n\
+    if (p.hello() != \"hi k\") return \"fail: \" + p.hello()\n\
+    if (P(\"c\").hello() != \"hi c\") return \"fail concrete\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC).expect("default method reading an abstract property should compile + run");
+    assert_eq!(out, "OK");
+}

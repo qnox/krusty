@@ -4932,14 +4932,11 @@ impl<'a> Lower<'a> {
     }
 
     /// Whether a same-file interface's method is a DEFAULT method (declared with a body) — checked on
-    /// the AST so it's independent of pass-2 lowering order. Conservatively excludes interfaces that
-    /// declare (abstract) properties: a default reading such a property lowers it as a (nonexistent)
-    /// interface field — until interface property reads route through the getter, skip those.
+    /// the AST so it's independent of pass-2 lowering order.
     fn iface_method_is_default(&self, iface_internal: &str, name: &str) -> bool {
         self.afile.decls.iter().any(|&d| {
             matches!(self.afile.decl(d), Decl::Class(c) if c.is_interface
                 && class_internal(self.afile, &c.name) == iface_internal
-                && c.body_props.is_empty()
                 && c.methods.iter().any(|m| m.name == name && !matches!(m.body, FunBody::None)))
         })
     }
@@ -8984,12 +8981,23 @@ impl<'a> Lower<'a> {
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let read = if let Some(cur) = self.cur_class.clone() {
-                        let field = self.classes.get(&cur).and_then(|ci| {
-                            ci.fields
-                                .iter()
-                                .position(|(fn_, _)| *fn_ == n)
-                                .map(|i| (ci.id, i as u32))
-                        });
+                        // An interface has no backing fields — its properties are abstract getters, so
+                        // an unqualified property read in a default method routes through the getter
+                        // (`invokeinterface getX`), never a (nonexistent) interface field.
+                        let cur_is_iface = self
+                            .classes
+                            .get(&cur)
+                            .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
+                        let field = if cur_is_iface {
+                            None
+                        } else {
+                            self.classes.get(&cur).and_then(|ci| {
+                                ci.fields
+                                    .iter()
+                                    .position(|(fn_, _)| *fn_ == n)
+                                    .map(|i| (ci.id, i as u32))
+                            })
+                        };
                         if let Some((class, idx)) = field {
                             self.ir.add_expr(IrExpr::GetField {
                                 receiver: recv,
