@@ -307,11 +307,12 @@ blocked **downstream of the surface** by core compiler capability. Proven concre
 trying to compile a HAND-WRITTEN `KSerializer` with krusty (`tests/fixtures/serialization/
 ManualSerializer.kt`) — it fails on three core gaps, none about the plugin:
 
-1. **object self-reference** — `object S { … S … }` fails to resolve `S` inside its own body; a
-   `$serializer` references its own `INSTANCE` (verified: `object Bar { … }` referenced from elsewhere
-   works, but self-reference does not).
-2. **classpath `internal` class construction** — `kotlinx.serialization.internal.
-   PluginGeneratedSerialDescriptor(...)` does not resolve.
+1. **object self-reference** — `object S { … S … }` failed to resolve `S` inside its own body; a
+   `$serializer` references its own `INSTANCE`. **FIXED (round 9, gate-verified 0 FAIL):** a bare
+   object name used as a value now resolves to the singleton.
+2. **classpath class construction by imported name** — `PluginGeneratedSerialDescriptor(...)` does not
+   resolve; isolation showed this is **general** (even `import java.util.ArrayList; ArrayList()` fails
+   — "unresolved function"), so it is a broad compiler feature, not serialization-specific.
 3. **`Json` companion methods** — `Json.encodeToString(serializer, value)` / `decodeFromString` are
    resolved as a Java *static* instead of the `Json` object's (reified/inherited) members.
 
