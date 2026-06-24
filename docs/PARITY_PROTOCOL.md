@@ -21,7 +21,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `KRUSTY_KOTLINC` (`.kotlinc/2.4.0/kotlinc/bin/kotlinc`), `KRUSTY_SURVEY_STDLIB`,
   `KRUSTY_SURVEY_JDK_MODULES` (`$JAVA_HOME/lib/modules`), `JAVA_HOME`.
 - Reference repo: `~/external-projects/kotlin` (5.6G full Kotlin source; box corpus mirrored under
-  `.kotlin-box/<ver>/compiler/testData/codegen/box`).
+  `.kotlin-box/<ver>/compiler/testData/codegen/box`). VERIFIED byte-identical to
+  `~/external-projects/kotlin/compiler/testData/codegen/box` (same 174 dirs; sample-file `diff` empty) —
+  the gate validates against the directive's conformance tests, just via a stable local mirror so a
+  `git checkout` of the 5.6G source can't shift results mid-run.
 
 ## Constraints / open items
 
