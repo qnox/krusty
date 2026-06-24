@@ -130,6 +130,22 @@ pub trait IrPlugin {
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
+/// Run the natively-supported compiler-extension plugins over a freshly-lowered `IrFile`, driven by
+/// the file's source annotations. Called from the JVM backend between `ir_lower` and the JVM IR
+/// passes. A **fast no-op** when no trigger annotation is present (the common case) — so a module
+/// with no `@Serializable` is unaffected (the box gate stays `0 FAIL`). Production note: the active
+/// set + each plugin's config (e.g. serialization ABI) should come from `registry`/`cli`
+/// (`-Xplugin`/`-classpath`); this wires the built-in serialization plugin directly for now.
+pub fn run_enabled(ir: &mut IrFile, file: &crate::ast::File) {
+    let ctx = PluginContext::from_source(file, ir);
+    if ctx.classes_with_simple("Serializable").is_empty() {
+        return;
+    }
+    let mut host = PluginHost::new();
+    host.register(Box::new(serialization::SerializationPlugin::default()));
+    host.run(ir, &ctx);
+}
+
 /// Runs registered plugins over an `IrFile`, phase by phase **globally** (all plugins' supertypes,
 /// then all declarations, then all bodies) — matching kotlinc's phase ordering, so one plugin can
 /// rely on another's supertypes being in place before its declarations run.

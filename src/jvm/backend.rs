@@ -49,6 +49,9 @@ impl Backend for JvmBackend {
             );
             return outputs;
         };
+        // Compiler-extension plugins (kotlinx.serialization): synthesize declarations from the file's
+        // annotations before the JVM IR transforms. No-op when no trigger annotation is present.
+        crate::plugins::run_enabled(&mut ir, file);
         // JVM-only IR→IR transform: realize `@JvmInline value class`es as their unboxed underlying type
         // (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected). A
         // value-class shape it can't yet lower → skip the file (same as any unsupported construct).
