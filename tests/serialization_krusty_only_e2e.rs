@@ -270,6 +270,42 @@ fun box(): String {
 }
 
 #[test]
+fn sealed_class_polymorphic_serializer_in_krusty() {
+    // A `@Serializable sealed class` base: `Base.serializer()` returns a runtime `SealedClassSerializer`
+    // over its `@Serializable` subclasses, so `Json.encodeToString(Base.serializer(), A(1))` emits the
+    // polymorphic form `{"type":"A","x":1}` (default `"type"` discriminator = each subclass serialName).
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable
+sealed class Base
+
+@Serializable
+class A(val x: Int) : Base()
+
+@Serializable
+class B(val y: String) : Base()
+
+fun box(): String {
+    val a = Json.encodeToString(Base.serializer(), A(1))
+    if (a != "{\"type\":\"A\",\"x\":1}") return "a=$a"
+    val b = Json.encodeToString(Base.serializer(), B("hi"))
+    if (b != "{\"type\":\"B\",\"y\":\"hi\"}") return "b=$b"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerSealed") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "sealed polymorphic serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty sealed polymorphic serializer OK");
+}
+
+#[test]
 fn property_level_custom_serializer_introspection_in_krusty() {
     // `@Serializable(with = X::class)` on a PROPERTY (not the class): the generated `childSerializers()`
     // must return an instance of `X` for that element (a `new X()` for a no-arg class serializer),

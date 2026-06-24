@@ -512,6 +512,10 @@ pub struct IrClass {
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,
+    /// `true` for a `sealed class`/`sealed interface`. The serialization extension routes a sealed
+    /// `@Serializable` base's `serializer()` to a runtime `SealedClassSerializer` over its `@Serializable`
+    /// subclasses (polymorphic), instead of generating an empty `$serializer`. Ignored by the core backend.
+    pub is_sealed: bool,
     /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum, or a
     /// user base class for `class B : A(args)`).
     pub superclass: String,
