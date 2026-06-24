@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1691 OK / 0 FAIL** (scanned 7351, Phase 435).
+  repo's `compiler/testData/codegen/box`). Current gate: **1702 OK / 0 FAIL** (scanned 7351, Phase 436).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P59 — `var` generic delegated property: box the value into `setValue`'s erased param (gate 1691 →
+  1702, +11, FAIL=0).** A generic delegate's `setValue(…, i: T)` takes the ERASED `Object`; a `var Int by
+  Del(…)` previously bailed because the primitive value wasn't boxed before the call (VerifyError). The setter
+  now boxes a primitive property value into `setValue`'s reference param via `ImplicitCoercion` (`Integer.
+  valueOf`), exactly as kotlinc emits; the P58 read-side coercion handles `getValue`. Removes the var-bail
+  guard. e2e `generic_delegate_e2e::generic_delegate_var_primitive_property`. +11 delegated-property box files.
 
 - **Phase P58 — generic delegated member property: coerce `getValue`'s erased return (gate 1690 → 1691, +1,
   FAIL=0).** A generic delegate (`class Del<T> { operator fun getValue(…): T }`) returns the ERASED `Object`;
