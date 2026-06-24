@@ -6255,7 +6255,24 @@ impl<'a> Checker<'a> {
                                             // LOWERING resolves this as an instance call on the
                                             // getstatic'd companion value (`Random` → `Random$Default`).
                                             self.set(receiver, Ty::obj(&cty));
-                                            m.ret
+                                            // A generic member whose return ERASED to `Any`
+                                            // (`Json.decodeFromString(KSerializer<Foo>, String): T`)
+                                            // recovers its substituted return (`Foo`) from the arguments.
+                                            // Only when erased — a concrete return (`encodeToString: String`)
+                                            // keeps the canonical `m.ret` (the recovered form would be a
+                                            // non-canonical `Obj("kotlin/String")`).
+                                            if m.ret == Ty::obj("kotlin/Any") {
+                                                self.syms
+                                                    .libraries
+                                                    .instance_call_return(
+                                                        Ty::obj(&cty),
+                                                        &name,
+                                                        &arg_tys,
+                                                    )
+                                                    .unwrap_or(m.ret)
+                                            } else {
+                                                m.ret
+                                            }
                                         }
                                         None => {
                                             self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));

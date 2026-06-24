@@ -54,6 +54,96 @@ fn find(prefix: &str) -> Option<PathBuf> {
     out
 }
 
+/// Compile `src` (whose `box(): String` is the entry point) entirely in krusty, run it on the JVM
+/// against the kotlinx-serialization runtime, and return the trimmed stdout — or `None` if any runtime
+/// dependency is absent (test self-skips). Shared by the encode and the round-trip tests.
+fn run_box_in_krusty(src: &str, stem: &str) -> Option<(String, String)> {
+    let stdlib = common::stdlib_jar()?;
+    let (Some(core), Some(json)) = (
+        find("kotlinx-serialization-core-jvm"),
+        find("kotlinx-serialization-json-jvm"),
+    ) else {
+        return None;
+    };
+    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
+        .ok()
+        .or_else(|| std::env::var("JAVA_HOME").ok())?;
+    let java = PathBuf::from(&java_home).join("bin/java");
+    let cp_jars = vec![stdlib.clone(), core.clone(), json.clone()];
+
+    let classes = common::compile_in_process(src, stem, &cp_jars, None)
+        .unwrap_or_else(|| panic!("krusty failed to compile the pure-krusty program ({stem})"));
+
+    let out = std::env::temp_dir().join(format!("krusty_ser_{stem}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    for (internal, bytes) in &classes {
+        let p = out.join(format!("{internal}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+    let launcher = out.join("Run.java");
+    std::fs::write(
+        &launcher,
+        format!(
+            r#"public class Run {{ public static void main(String[] a) throws Exception {{
+        System.out.println(Class.forName("{stem}Kt").getMethod("box").invoke(null)); }} }}"#
+        ),
+    )
+    .unwrap();
+    let javac = PathBuf::from(&java_home).join("bin/javac");
+    assert!(Command::new(&javac)
+        .args(["-d", out.to_str().unwrap()])
+        .arg(&launcher)
+        .status()
+        .unwrap()
+        .success());
+    let run = Command::new(&java)
+        .arg("-cp")
+        .arg(format!(
+            "{}:{}:{}:{}",
+            out.display(),
+            stdlib.display(),
+            core.display(),
+            json.display()
+        ))
+        .arg("Run")
+        .output()
+        .unwrap();
+    let res = (
+        String::from_utf8_lossy(&run.stdout).trim().to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+    );
+    let _ = std::fs::remove_dir_all(&out);
+    Some(res)
+}
+
+#[test]
+fn serializable_class_round_trips_through_json_entirely_in_krusty() {
+    // The full BIDIRECTIONAL round-trip, no kotlinc: encode `Foo` to JSON, then decode it back and read
+    // the reconstructed fields. Decode is the hard half — `decodeFromString(KSerializer<Foo>, String)`
+    // returns the generic `T`, which the front end must infer as `Foo` (not the erased `Any`) so that
+    // `back.a`/`back.b` resolve.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val j = Json.encodeToString(Foo.serializer(), Foo(7, "hi"))
+    val back = Json.decodeFromString(Foo.serializer(), j)
+    return back.b + back.a.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerRoundTrip") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "hi7",
+        "krusty-only serialization round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty serialization round-trip OK: {stdout}");
+}
+
 #[test]
 fn serializable_class_encodes_to_json_entirely_in_krusty() {
     let Some(stdlib) = common::stdlib_jar() else {

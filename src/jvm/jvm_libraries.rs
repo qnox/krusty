@@ -28,6 +28,34 @@ impl JvmLibraries {
         JvmLibraries { cp }
     }
 
+    /// Whether reference argument `arg`'s erased class is `param`'s erased class or a classpath subtype
+    /// of it — `KSerializer<Foo>` is assignable to a `DeserializationStrategy<…>` parameter.
+    fn erased_subtype(&self, arg: &Ty, param: &Ty) -> bool {
+        match (arg.obj_internal(), param.obj_internal()) {
+            (Some(a), Some(p)) => self.is_cp_subtype(a, p, 0),
+            _ => false,
+        }
+    }
+
+    /// `sub` equals or transitively extends/implements `super_` on the classpath. Depth-bounded to
+    /// terminate on a malformed (cyclic) hierarchy.
+    fn is_cp_subtype(&self, sub: &str, super_: &str, depth: u32) -> bool {
+        if sub == super_ {
+            return true;
+        }
+        if depth > 64 {
+            return false;
+        }
+        match self.cp.find(sub) {
+            Some(ci) => ci
+                .interfaces
+                .iter()
+                .chain(ci.super_class.iter())
+                .any(|s| self.is_cp_subtype(s, super_, depth + 1)),
+            None => false,
+        }
+    }
+
     /// The erased JVM descriptor of a classpath value class's underlying (`kotlin/UInt` → `"I"`,
     /// `kotlin/Result` → `"Ljava/lang/Object;"`), or `None` if `internal` is not a value class. Its
     /// mangled extensions are indexed under this descriptor.
@@ -1423,6 +1451,54 @@ impl LibrarySet for JvmLibraries {
                 for i in ci.interfaces.iter().chain(ci.super_class.iter()) {
                     q.push_back((i.clone(), vec![]));
                 }
+            }
+        }
+        None
+    }
+
+    fn instance_call_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
+        let Ty::Obj(start, _) = recv else {
+            return None;
+        };
+        // Walk `recv`'s class hierarchy for a public instance method `name` whose arity matches and whose
+        // every parameter ACCEPTS the actual argument — exact/erased (`arg_fits`) OR a reference subtype
+        // (`KSerializer<Foo>` where `DeserializationStrategy<? extends T>` is declared). Then bind the
+        // method's type variables by unifying its generic parameter signatures against the argument types
+        // (positional type-arg unify ignores the parameter's class name, so the subtype's `<Foo>` still
+        // binds `T`), and substitute the generic return.
+        let mut seen = std::collections::HashSet::new();
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(to_jvm_internal(start).to_string());
+        while let Some(internal) = q.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&internal) else {
+                continue;
+            };
+            let found = ci
+                .methods
+                .iter()
+                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
+                .find(|m| {
+                    let (params, _) = parse_method_desc(&m.descriptor);
+                    params.len() == args.len()
+                        && params
+                            .iter()
+                            .zip(args)
+                            .all(|(p, a)| arg_fits(p, a) || self.erased_subtype(a, p))
+                });
+            if let Some(m) = found {
+                let sig = m.signature.as_deref()?;
+                let (_, psigs, rsig) = parse_method_gsig(sig)?;
+                let mut binds = std::collections::HashMap::new();
+                for (ps, a) in psigs.iter().zip(args) {
+                    unify_gsig(ps, *a, &mut binds);
+                }
+                return Some(gsig_to_ty(&rsig, &binds));
+            }
+            for s in ci.interfaces.iter().chain(ci.super_class.iter()) {
+                q.push_back(s.clone());
             }
         }
         None

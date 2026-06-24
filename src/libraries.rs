@@ -404,6 +404,17 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
+    /// The substituted return of instance member `name(args)` whose type variable binds from the
+    /// ARGUMENTS rather than the receiver — `Json.decodeFromString(KSerializer<Foo>, String): T` → `Foo`.
+    /// Finds the member up `recv`'s class hierarchy (allowing a SUBTYPE argument where a supertype
+    /// parameter is declared — `KSerializer<Foo>` for a `DeserializationStrategy<? extends T>` param),
+    /// then unifies the member's generic parameter signatures against the actual argument types and
+    /// substitutes the generic return. `None` when no such generic member resolves (caller uses the
+    /// erased return). Complements [`member_return`] (which binds from the receiver's type arguments).
+    fn instance_call_return(&self, _recv: Ty, _name: &str, _args: &[Ty]) -> Option<Ty> {
+        None
+    }
+
     /// The return `Ty` of a BUILTIN type's class member (`internal` e.g. `kotlin/String`), by name +
     /// argument types, read from the type's builtins declarations rather than a hardcoded table. `None`
     /// if the name isn't a declared member there (e.g. a `StringsKt` extension on `String`).
