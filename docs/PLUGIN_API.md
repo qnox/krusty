@@ -430,6 +430,13 @@ names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lowe
 element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
 value-class serializers or reflection.
 
+**Enum serializer landed** (krusty-only e2e green): a `@Serializable enum`'s `serializer()` returns a
+runtime `EnumSerializer(name, E.values())` (not a generated `$serializer`) — `E.B` round-trips as `"B"`.
+Also a GENERAL emit fix: `emit_enum_class` now honors `is_static` (a synthetic static member like
+`serializer()` was emitted as an instance method → `IncompatibleClassChangeError` on `E.serializer()`).
+The corpus `enumsAreCached` file needs more (the `GeneratedSerializer` cast, `childSerializers` content,
+`@SerialName` on enum entries, enum-entry-annotation parsing) — plain enum serialization is the core.
+
 **Value-class FIELD landed → `inlineClasses` green (4th corpus file).** krusty unboxes a `@JvmInline
 value class`-typed field to its underlying (`Holder.f: Foo` → `int`), so the serializer treats such a
 field AS its terminal underlying (`value_class_underlying`, recursive) — `encodeIntElement` → `{"f":42}`

@@ -241,6 +241,31 @@ fun box(): String {
 }
 
 #[test]
+fn enum_serializer_entirely_in_krusty() {
+    // A `@Serializable enum`'s `serializer()` returns a runtime `EnumSerializer(name, E.values())`
+    // (not a generated `$serializer`), so the enum round-trips by entry name: `E.B` → `"B"`.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+enum class E { A, B }
+fun box(): String {
+    val s = Json.encodeToString(E.serializer(), E.B)
+    if (s != "\"B\"") return "enc: $s"
+    return if (Json.decodeFromString(E.serializer(), s) == E.B) "OK" else "dec"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerEnum") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "enum serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty enum serializer OK");
+}
+
+#[test]
 fn value_class_as_field_entirely_in_krusty() {
     // A `@JvmInline value class` used as a FIELD of a normal `@Serializable` class. krusty unboxes the
     // field to the value class's underlying (`Holder.f: Foo` → `int`), so the serializer encodes/decodes

@@ -1451,7 +1451,10 @@ fn emit_enum_class(
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
-            emit_method(ir, fid, &fq, facade, &mut cw, true, bodies);
+            // Honor `is_static` (an extension-synthesized `static` member like serialization's
+            // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
+            // static call (`IncompatibleClassChangeError`).
+            emit_method(ir, fid, &fq, facade, &mut cw, !f.is_static, bodies);
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
