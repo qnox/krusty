@@ -26,6 +26,7 @@ class Loud : Greeter {\n\
 fun box(): String {\n\
     val e: Greeter = En()\n\
     if (e.greet() != \"hi\") return \"fail inherit: \" + e.greet()\n\
+    if (En().greet() != \"hi\") return \"fail concrete: \" + En().greet()\n\
     if (Loud().greet() != \"HI\") return \"fail override: \" + Loud().greet()\n\
     return \"OK\"\n\
 }\n";
