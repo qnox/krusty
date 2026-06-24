@@ -19,6 +19,7 @@
 //! PoC runs all three phases over `IrFile` for testability; the phase split is documented per-hook.
 
 pub mod cli;
+pub mod deps;
 pub mod ksp;
 pub mod registry;
 pub mod serialization;
