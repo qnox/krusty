@@ -4733,6 +4733,26 @@ impl<'a> Checker<'a> {
                 // arity = method args) or unbound `Type::m` (receiver is the class → first parameter).
                 if let Some(r) = receiver {
                     if let Expr::Name(rn) = self.file.expr(r).clone() {
+                        // bound `this::m` / `this::prop` — the enclosing receiver (a class member).
+                        // `this` isn't a scope local, so resolve via `this_ty` (the lowering already
+                        // captures `this` = value 0 in `lower_method_ref`/`lower_prop_ref`).
+                        if rn == "this" {
+                            if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                                if let Some(sig) = self.syms.method_of(internal, &name) {
+                                    if !sig.vararg && sig.params.len() == sig.required {
+                                        return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                                    }
+                                }
+                                if let Some((_, is_var)) = self.lookup_prop(internal, &name) {
+                                    let iface = if is_var {
+                                        "kotlin/reflect/KMutableProperty0"
+                                    } else {
+                                        "kotlin/reflect/KProperty0"
+                                    };
+                                    return self.set(e, Ty::obj(iface));
+                                }
+                            }
+                        }
                         // bound: `obj::m` where `obj` is an in-scope value
                         if let Some(loc) = self.lookup(&rn) {
                             if let Some(internal) = loc.ty.obj_internal() {

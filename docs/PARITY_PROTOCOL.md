@@ -71,6 +71,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P26 — bound callable references with a `this` receiver (`this::method`/`this::prop`) (gate
+  1537, FAIL=0; correctness/de-bail, gate-neutral for now).** The resolver rejected `this::foo` as
+  "callable references are not supported" because `this` isn't a scope local (`lookup("this")` is
+  `None`); now it resolves via `this_ty` — `this::method` → its function type, `this::prop` →
+  `KProperty0`/`KMutableProperty0`. The LOWERING already captured `this`=value 0 (`lower_method_ref`/
+  `lower_prop_ref`), so no codegen change was needed. New `this_callable_ref_e2e` (a `this::method` passed
+  to a HOF, run end-to-end). Gate-neutral so far — the corpus `this::` tests carry ADDITIONAL blockers
+  (invoking a returned function value `expr()()`, `::equals`/`O::method` object refs, enum-entry bound
+  refs) — this is one slice of the larger callable-reference feature (the next-biggest coherent bucket:
+  ~103 "callable references are not supported" + ~36 mislabeled). Survey-driven: callable refs are the
+  top remaining yield but need several slices to convert whole tests.
 - **Phase P25 — range-typed property inference (gate 1530 → 1537, +7, FAIL=0).** A range value used to
   initialize a property (`val r = 1..10`, `'a'..'c'`, `0 until n`, `4 downTo 1`) now infers its stdlib
   range type at signature-collection time — `infer_lit_ty` gained an `Expr::RangeTo` arm mirroring the
