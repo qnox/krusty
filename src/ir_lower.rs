@@ -9085,6 +9085,36 @@ impl<'a> Lower<'a> {
                 if let Some(recv) = receiver {
                     return self.lower_method_ref(recv, &name, &sig.params, sig.ret);
                 }
+                // Local function reference `::localFun` (the checker mapped this ref to its decl): a
+                // closure over the lifted static method, capturing the same outer locals the method
+                // takes as leading params. A `Unit`/`Nothing` SAM-return needs a wrapper — skip for now.
+                if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
+                    if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
+                        if sig.ret == Ty::Unit || sig.ret == Ty::Nothing {
+                            return None;
+                        }
+                        let caps = self
+                            .info
+                            .local_fun_captures
+                            .get(&stmt_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let captures: Vec<u32> = caps
+                            .iter()
+                            .map(|(n, _)| {
+                                self.lookup(n)
+                                    .map(|(cv, _)| self.ir.add_expr(IrExpr::GetValue(cv)))
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        return Some(self.ir.add_expr(IrExpr::Lambda {
+                            impl_fn: fid,
+                            arity: arity as u8,
+                            captures,
+                            sam: None,
+                            inline_body: None,
+                        }));
+                    }
+                }
                 // Constructor reference `::A` (the name is a class, not a function): synthesize a
                 // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
                 // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional

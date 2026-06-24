@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1566 OK / 0 FAIL** (scanned 7351, Phase 415).
+  repo's `compiler/testData/codegen/box`). Current gate: **1572 OK / 0 FAIL** (scanned 7351, Phase 416).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P40 — local function references `::localFun` (gate 1566 → 1572, +6, FAIL=0).** A reference to
+  a local function (`fun inc(x) = …; ::inc`) was rejected. It lowers to a closure over the function's
+  lifted static method: the checker maps the ref to the local fun's decl (reusing `local_call_map`, the
+  same map a local-fun CALL uses) and types it `(args) -> ret`; the lowering builds an `IrExpr::Lambda`
+  whose `impl_fn` IS the lifted method and whose `captures` are the same outer locals the method takes as
+  leading params — so a CAPTURING local fun ref (`val base = …; fun shift(x) = x + base; ::shift`) carries
+  `base` into the closure (the metafactory binds captures, `invoke` supplies the declared args). A
+  `Unit`/`Nothing` SAM-return is skipped for now (needs an adapter wrapper). New `local_fun_ref_e2e`
+  (no-capture, capturing, `.map(::shift)`, val binding). +6 corpus, all real `box()=="OK"`.
 - **Phase P39 — object/singleton method references `O::m` (gate 1565 → 1566, +1, FAIL=0).** An
   `O::method` where `O` is an `object` was rejected ("callable references are not supported" /
   "unresolved reference 'O'") — the callable-ref resolver explicitly skipped objects. It's a BOUND

@@ -4809,6 +4809,15 @@ impl<'a> Checker<'a> {
                 // UNAMBIGUOUS (single-overload) name resolves here; an overloaded `::foo` needs an
                 // expected function type to disambiguate, which krusty doesn't model.
                 if receiver.is_none() {
+                    // Local function reference `::localFun` (shadows a same-named top-level fn). Map the
+                    // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
+                    // find the lifted static method and prepend its captures.
+                    if let Some((stmt_id, sig)) = self.lookup_local_fun(&name) {
+                        if !sig.vararg && sig.params.len() == sig.required {
+                            self.local_call_map.insert(e, stmt_id);
+                            return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                        }
+                    }
                     if let Some(sig) = self
                         .syms
                         .funs
