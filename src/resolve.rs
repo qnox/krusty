@@ -1096,7 +1096,7 @@ pub fn collect_signatures_with_cp(
                         c.supertypes.iter().map(&mut resolve_super).collect();
                     let super_internal = c.base_class.as_ref().map(|b| resolve_super(b));
                     // `companion object` members → static methods/props on this class.
-                    let static_methods: HashMap<String, Signature> = c
+                    let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
                         .iter()
                         .map(|m| {
@@ -1160,6 +1160,38 @@ pub fn collect_signatures_with_cp(
                             })
                         })
                         .collect();
+                    // PLUGIN SIGNATURE PHASE (kotlinx.serialization): a `@Serializable class C` gains a
+                    // synthesized `static serializer(): KSerializer<C>`. The plugin emits its IR body at
+                    // the backend phase (after lowering), but its SIGNATURE must be visible to the
+                    // type-checker NOW so user references `C.serializer()` resolve. The lowering emits the
+                    // call by signature (`invokestatic C.serializer()`); the plugin supplies the method
+                    // before emit. Mirrors kotlinc's FIR declaration-generation extension point. The
+                    // detection matches the PLUGIN's exactly (simple name of the annotation, fq or not —
+                    // `plugins::PluginContext::classes_with_simple("Serializable")`), so the checker
+                    // exposes `serializer()` IFF the plugin will emit it (never a missing method at emit).
+                    if c.annotations
+                        .iter()
+                        .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
+                    {
+                        static_methods.insert(
+                            "serializer".to_string(),
+                            Signature {
+                                params: vec![],
+                                ret: Ty::obj_args(
+                                    "kotlinx/serialization/KSerializer",
+                                    &[Ty::obj(&internal)],
+                                ),
+                                vararg: false,
+                                required: 0,
+                                param_defaults: vec![],
+                                param_names: vec![],
+                                lambda_param_types: vec![],
+                                is_inline: false,
+                                is_final: true,
+                                is_suspend: false,
+                            },
+                        );
+                    }
                     let static_props: HashMap<String, Ty> = c
                         .companion_props
                         .iter()
@@ -8026,6 +8058,15 @@ mod tests {
         ok("abstract class A<T> { abstract val some: T }\n\
             class I : A<String>() { override val some: String get() = \"OK\" }\n\
             fun box(): String = I().some");
+    }
+
+    #[test]
+    fn serializable_class_exposes_static_serializer() {
+        // The serialization plugin's SIGNATURE phase: a `@Serializable` class gains a static
+        // `serializer(): KSerializer<C>` visible to the type-checker, so a user reference
+        // `C.serializer()` resolves (the plugin emits the body at the backend phase).
+        ok("@Serializable class Foo(val a: Int)\n\
+            fun box(): String { val s = Foo.serializer(); return \"OK\" }");
     }
 
     #[test]
