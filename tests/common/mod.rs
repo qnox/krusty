@@ -65,6 +65,10 @@ pub fn compile_in_process(
     }
     let facade = file_class_name(stem, file.package.as_deref());
     let mut ir = krusty::ir_lower::lower_file(file, &info, &syms)?;
+    // Compiler-extension plugins (kotlinx.serialization) — run them here exactly as the real backend
+    // does (jvm/backend.rs), between lowering and the value-class pass. A no-op without `@Serializable`,
+    // so non-serialization snippets are unaffected; with it, `compile_in_process` matches the binary.
+    krusty::plugins::run_enabled(&mut ir, file);
     if !krusty::jvm::value_classes::lower_value_classes(&mut ir) {
         return None; // value-class shape not lowered — skip, don't miscompile
     }
