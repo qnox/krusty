@@ -1014,6 +1014,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
                 }
+                // Register parameter defaults for a plain top-level function (no extension receiver, no
+                // vararg, ≤31 params) so a transform/plugin can read the lowered default exprs. Lowered
+                // with the STATIC value layout — params at values `0..n` (no `this`), the layout these
+                // bodies already use. This does NOT emit a `name$default` stub: stub emission runs only on
+                // the class path (`emit_default_stub`), never the facade, so a top-level function's codegen
+                // is unchanged (top-level calls keep filling omitted args at the call site).
+                if f.receiver.is_none()
+                    && f.params.iter().any(|p| p.default.is_some())
+                    && !f.params.iter().any(|p| p.is_vararg)
+                    && f.params.len() <= 31
+                {
+                    let mut defaults = Vec::new();
+                    for (p, t) in f.params.iter().zip(&sig.params) {
+                        match p.default {
+                            Some(d) => defaults.push(Some(lo.lower_arg(d, &ty_to_ir(*t))?)),
+                            None => defaults.push(None),
+                        }
+                    }
+                    lo.ir.fn_param_defaults.insert(fid, defaults);
+                    lo.ir
+                        .fn_param_names
+                        .insert(fid, f.params.iter().map(|p| p.name.clone()).collect());
+                }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
                 // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
