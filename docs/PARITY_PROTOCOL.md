@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 424).
+  repo's `compiler/testData/codegen/box`). Current gate: **1610 OK / 0 FAIL** (scanned 7351, Phase 425).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P48 — member property-read inference via federated resolution (gate 1610 → 1610, +0, FAIL=0).**
+  Completes P46: `infer_lit_ty_p`'s property-read arm (`s.length`, `list.size`, `vc.value`) now resolves
+  through the FEDERATED source too — `String`/`CharSequence` members via the source's builtin-member API
+  (`builtin_member_ret`), object properties via the shared `call_resolver::resolve_instance` trying the
+  property name, its `getX` accessor (new shared `property_getter_name`), and any mapped collection
+  accessor — exactly the full checker's property-read path. NO hardcoded property names. +0 corpus (the
+  member-expr-body property reads in the corpus carry other blockers), but it removes the last
+  name-matching temptation from member inference (calls AND properties now federated) and is regression-
+  free (full `just test` green). Foundation for the eventual `infer_lit_ty_p` retirement once the
+  SymbolSource redesign federates the module's own declarations.
 - **Phase P47 — faithful K2 backend-mute directive semantics (gate 1610 → 1610, +0, FAIL=0).** krusty
   targets Kotlin 2.4.0 = the **K2 frontend** + JVM_IR backend, so the conformance harness mutes tests as
   kotlinc's K2 runner does: honor `// IGNORE_BACKEND` (all frontends), `// IGNORE_BACKEND_K2
