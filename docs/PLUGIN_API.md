@@ -373,10 +373,26 @@ removed the Json gap and the emit primitives were already present. The verifier 
 real bytecode bugs — abstract-forcing empty bodies, unreturned block values, private-field access vs
 getters, ctor-receiver typing, local-slot declaration order, Unit-When statement discard.)
 
-Remaining for *full* conformance: 2-slot types (Long/Double), nullable/nested/richer types + real
-`childSerializers`/`decodeSerializableElement`, wiring the plugin into the main compile path, and the
-language features the 69-case `testData/boxIr` corpus needs. The flat round-trip proves the surface +
-emitter are sufficient end-to-end; the rest is incremental codegen.
+Update: the plugin is now **wired into the main compile path** (`krusty -cp <runtime> Foo.kt` emits a
+working serializer in a normal invocation; box gate 0-FAIL), and the round-trip generalizes across the
+primitive set + arbitrary field count (`Foo(Int,String)`, `Rich(Int,Boolean,Float,String)`).
+
+Remaining for *full* conformance splits into two very different efforts:
+- **Incremental serializer codegen** (on the proven foundation): 2-slot types (Long/Double),
+  nullable/nested/richer types + real `childSerializers`/`decodeSerializableElement`.
+- **The literal 69-case `testData/boxIr` corpus is NOT flat round-trips — it is an edge-case suite.**
+  Surveyed: the *smallest* files use `suspend () -> Unit` property defaults, `@Polymorphic`,
+  star-projections, contextual serializers, generics, sealed hierarchies. krusty cannot compile the
+  `@Serializable` *classes themselves* (those language features) before any serializer logic runs. So
+  "all 69 pass" is gated on krusty's **broad Kotlin language support** (suspend/polymorphism/generics/
+  contextual/sealed) — months of core-compiler work, **independent of the extension surface**. Running
+  the corpus also needs either gap #3 (krusty compiling the `Json` `box()` drivers) or a per-file
+  split-compile harness.
+
+The working encode+decode round-trips prove the **extension surface and serializer codegen are
+sufficient** — the goal's "show the surface is enough" is demonstrated by two extensions with real
+executed tests (KSP-from-jar + functional serialization). The 69-corpus "all pass" is a separate
+language-coverage milestone, not an extension-surface gap.
 
 The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
 (an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
