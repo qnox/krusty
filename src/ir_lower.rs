@@ -693,6 +693,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 dispatch_receiver: Some(internal.clone()),
                                 param_checks: vec![],
                             });
+                            // `var x = …; private set` — the setter is emitted `private`.
+                            if c.body_props.iter().any(|p| {
+                                &p.name == pname && p.setter.as_ref().is_some_and(|s| s.is_private)
+                            }) {
+                                lo.ir.private_methods.insert(fid);
+                            }
                             if let Some(tp) = field_tp.get(pname) {
                                 lo.ir.signatures.insert(
                                     fid,
@@ -2241,7 +2247,9 @@ fn is_plain_body_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
         && p.getter.is_none()
-        && p.setter.is_none()
+        // A visibility-only setter (`var x = 1; private set`, no body) is still a plain backing field — the
+        // only difference is the setter's access flag (handled at emit). A setter with a BODY is not plain.
+        && p.setter.as_ref().is_none_or(|s| s.body.is_none())
         && p.init.is_some()
 }
 

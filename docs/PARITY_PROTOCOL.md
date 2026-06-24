@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1705 OK / 0 FAIL** (scanned 7351, Phase 437).
+  repo's `compiler/testData/codegen/box`). Current gate: **1723 OK / 0 FAIL** (scanned 7351, Phase 438).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P61 — visibility-only property setter (`var x = 0; private set`) (gate 1705 → 1723, +18, FAIL=0).**
+  A property with a visibility-only setter (no body — `private`/`protected`/`internal set`) bailed because
+  `is_plain_body_prop` required `setter.is_none()`. It's still a plain backing-field property; only the
+  setter's access flag differs. `is_plain_body_prop` now allows a body-less setter; the synthesized `setX`
+  for a `private set` is recorded in a new `IrFile.private_methods` set and emitted `private final` (mirrors
+  `open_methods`). e2e `private_set_e2e`. +18 box files (all visibility-only setters).
 
 - **Phase P60 — inferred-type computed property (`val xx get() = x`) (gate 1702 → 1705, +3, FAIL=0).** A
   computed property without an explicit type annotation (the type is inferred from the getter body) bailed —
