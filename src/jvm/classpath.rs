@@ -36,6 +36,64 @@ fn kotlin_name_to_ty(name: &str) -> Ty {
     }
 }
 
+/// Map a `@Metadata` SOURCE value-parameter type internal name to a `Ty` for call matching. A function
+/// type (`kotlin/Function0`) maps to the JVM `kotlin/jvm/functions/FunctionN` namespace so a lambda arg
+/// fits via `arg_fits`; a type-parameter param (`None`) erases to `kotlin/Any` (accepts any arg).
+fn meta_param_ty(name: Option<&str>) -> Ty {
+    let Some(n) = name else {
+        return Ty::obj("kotlin/Any");
+    };
+    if let Some(arity) = n.strip_prefix("kotlin/Function") {
+        if !arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit()) {
+            return Ty::obj(&format!("kotlin/jvm/functions/Function{arity}"));
+        }
+    }
+    kotlin_name_to_ty(n)
+}
+
+/// Whether `meta` (a `@Metadata` source value param `Ty`) aligns with `desc` (a JVM-descriptor param
+/// `Ty`) when matching an overload structurally. Exact when equal; a generic/erased param (`kotlin/Any`
+/// or its erased `java/lang/Object`) on either side matches any reference type; otherwise the class
+/// names must match (so a `Function0` source param anchors to a `Function0` descriptor param and won't
+/// be confused with an `Any`/`Object` one).
+fn ty_compat(meta: &Ty, desc: &Ty) -> bool {
+    if meta == desc {
+        return true;
+    }
+    let erased =
+        |t: &Ty| matches!(t, Ty::Obj(n, _) if *n == "kotlin/Any" || *n == "java/lang/Object");
+    if (erased(meta) && desc.is_reference()) || (erased(desc) && meta.is_reference()) {
+        return true;
+    }
+    // A `@Metadata` `vararg` param is typed as a Kotlin array class (`kotlin/Array` for an object array,
+    // `kotlin/IntArray` … for a primitive one); the descriptor carries the JVM array (`[Ljava/lang/Object;`,
+    // `[I`). Align them so a vararg overload matches its descriptor (otherwise an empty-vparam sibling
+    // overload would prefix-match and wrongly truncate the array param).
+    matches!(meta, Ty::Obj(n, _) if is_kotlin_array_class(n)) && matches!(desc, Ty::Array(_))
+}
+
+/// Whether `name` is one of the nine Kotlin array builtin classes (`kotlin/Array` and the eight
+/// primitive arrays). These are the `@Metadata` types of a `vararg` parameter.
+fn is_kotlin_array_class(name: &str) -> bool {
+    matches!(
+        name,
+        "kotlin/Array"
+            | "kotlin/IntArray"
+            | "kotlin/LongArray"
+            | "kotlin/ShortArray"
+            | "kotlin/ByteArray"
+            | "kotlin/CharArray"
+            | "kotlin/BooleanArray"
+            | "kotlin/FloatArray"
+            | "kotlin/DoubleArray"
+    )
+}
+
+/// Whether every `@Metadata` source value param prefix-matches the corresponding descriptor param.
+fn compat_prefix(meta: &[Ty], desc: &[Ty]) -> bool {
+    meta.len() == desc.len() && meta.iter().zip(desc).all(|(m, d)| ty_compat(m, d))
+}
+
 enum Entry {
     Dir(PathBuf),
     Jar(PathBuf),
@@ -145,6 +203,13 @@ type MetaTypeCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>
 /// Per-class `@Metadata` cache for an overloaded property: class internal name → (function name → ALL its
 /// Kotlin extension-receiver names). Used by [`Classpath::metadata_receiver_types`].
 type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>;
+/// Per-class `@Metadata` cache for SOURCE value-parameter types: class internal name → every function's
+/// `(JVM name, has-extension-receiver, source value-param `Ty`s)`. One entry per OVERLOAD (a name
+/// repeats), in declaration order. The `Vec<Ty>` length is the source arity (excludes the synthetic
+/// params the descriptor appends). The receiver flag comes from the SAME `MetaFn` (not a separate query
+/// that could disagree), so an extension's descriptor-leading receiver param is accounted for. Used by
+/// [`Classpath::metadata_kept_params`] to align an overload to a bytecode candidate by its descriptor.
+type MetaParamCache = RefCell<HashMap<String, std::rc::Rc<Vec<(String, bool, Vec<Ty>)>>>>;
 /// Per-class `@Metadata` cache for return-type nullability: class internal name → (function name →
 /// whether its Kotlin return type is nullable `T?`). Used by [`Classpath::metadata_return_nullable`].
 type MetaNullableCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, bool>>>>;
@@ -187,6 +252,9 @@ pub struct Classpath {
     /// Cache of each class's `@Metadata` function name → Kotlin return-type internal name (decodes the
     /// read-only/mutable distinction the JVM signature erases — `mutableListOf` → `MutableList`).
     meta_returns: MetaTypeCache,
+    /// Cache of each class's `@Metadata` function name → SOURCE value-parameter types (drops the
+    /// synthetic params the descriptor appends — a `suspend` Continuation, a `@Composable` Composer/int).
+    meta_param_tys: MetaParamCache,
     /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
     /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
     meta_receivers: MetaReceiverCache,
@@ -236,6 +304,7 @@ impl Classpath {
             inline_names: RefCell::new(HashMap::new()),
             suspend_names: RefCell::new(HashMap::new()),
             meta_returns: RefCell::new(HashMap::new()),
+            meta_param_tys: RefCell::new(HashMap::new()),
             meta_receivers: RefCell::new(HashMap::new()),
             meta_ret_nullable: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
@@ -269,6 +338,91 @@ impl Classpath {
             return super::jvm_class_map::wrapper_internal(ty).map(Ty::obj);
         }
         Some(ty)
+    }
+
+    /// The SOURCE value-parameter types of `internal.fn_name` from `@Metadata`, as `Ty`s — the signature
+    /// a CALL is matched against. `@Metadata` records only the source `value_parameter`s, so this DROPS
+    /// the synthetic params the JVM descriptor appends (a `suspend` Continuation, a `@Composable`
+    /// Composer/int) — the same role `strip_continuation_param` played for suspend, now generic. A
+    /// function-type param maps to its JVM `kotlin/jvm/functions/FunctionN` so a lambda arg fits via
+    /// `arg_fits`; a type-parameter param erases to `kotlin/Any` (accepts anything). `None` when the
+    /// class has no `@Metadata` entry for `fn_name` (a Java method, a synthetic) — the caller then keeps
+    /// the descriptor params unchanged.
+    /// The `@Metadata` SOURCE value-parameter count of the `internal.fn_name` OVERLOAD that the bytecode
+    /// candidate with parameter types `desc_params` denotes — i.e. how many of the descriptor's params
+    /// are real source params, the rest being synthetic trailing params the descriptor appends (a
+    /// `@Composable` Composer/int). `@Metadata` omits no source param but records no `method_signature`
+    /// for these runtime functions, so the overload is aligned STRUCTURALLY: its mapped source value
+    /// params must be a compatible prefix of the descriptor's params after `recv_off` leading params (a
+    /// `1` when the function is an extension — its receiver is the descriptor's first param, absent from
+    /// `@Metadata`'s `value_parameter`s). Returns the matched source arity, or `None` when nothing aligns
+    /// (a Java method, a synthetic, or a normal function whose arity already equals the descriptor's).
+    pub fn metadata_kept_params(
+        &self,
+        internal: &str,
+        fn_name: &str,
+        desc_params: &[Ty],
+    ) -> Option<usize> {
+        let all = self.metadata_overload_params(internal);
+        // For each same-named overload, the descriptor's REAL leading params are its extension receiver
+        // (one slot, if any) followed by its source value params; any params beyond that are synthetic
+        // trailing ones the descriptor appends (a `@Composable` Composer/int). Align the overload by
+        // requiring its source value params to prefix-match the descriptor after the receiver slot, and
+        // return how many leading params are real (`receiver? + source arity`). Prefer the LONGEST such
+        // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
+        // skipped — a normal function whose arity already equals the descriptor's).
+        all.iter()
+            .filter_map(|(n, has_recv, vp)| {
+                if n != fn_name {
+                    return None;
+                }
+                let off = *has_recv as usize;
+                let end = off + vp.len();
+                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
+                    .then_some(end)
+            })
+            .max()
+    }
+
+    /// The cached per-overload `(JVM name, has-extension-receiver, source value-param `Ty`s)` of every
+    /// function in `internal` (with the multifile-facade part merge), in declaration order.
+    fn metadata_overload_params(
+        &self,
+        internal: &str,
+    ) -> std::rc::Rc<Vec<(String, bool, Vec<Ty>)>> {
+        if let Some(m) = self.meta_param_tys.borrow().get(internal) {
+            return m.clone();
+        }
+        let ci = self.find(internal);
+        let mut fns = ci
+            .as_ref()
+            .map(super::metadata::package_functions)
+            .unwrap_or_default();
+        if fns.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        fns.extend(super::metadata::package_functions(&pci));
+                    }
+                }
+            }
+        }
+        let v: Vec<(String, bool, Vec<Ty>)> = fns
+            .into_iter()
+            .map(|f| {
+                let tys = f
+                    .value_param_types
+                    .iter()
+                    .map(|o| meta_param_ty(o.as_deref()))
+                    .collect();
+                (f.jvm_name, f.receiver_class.is_some(), tys)
+            })
+            .collect();
+        let rc = std::rc::Rc::new(v);
+        self.meta_param_tys
+            .borrow_mut()
+            .insert(internal.to_string(), rc.clone());
+        rc
     }
 
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
