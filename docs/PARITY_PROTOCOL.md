@@ -71,6 +71,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P31 — smart-cast within an `||` condition (gate 1557, FAIL=0; correctness, gate-neutral).**
+  Completes P30: in `a || b`, the RHS is reached when `a` is FALSE, so it gets `a`'s NEGATED narrowing —
+  `x !is String || x.length != 1` (reaching the RHS means `x` IS a `String`). The `&&`/`||` checker arm now
+  narrows via `smartcast_binding(lhs, for_else = (op == Or))` (same value-class guard). Common
+  `if (x !is T || …) return` idiom; gate-neutral so far (corpus uses carry other blockers) but e2e-verified
+  (`smartcast_and_e2e`). 
 - **Phase P30 — smart-cast within an `&&` condition (gate 1556 → 1557, +1, FAIL=0).** After `x is T`
   (or `x != null`) on the left of `&&`, `x` is now narrowed to `T` while checking the right operand
   (`x is String && x.length == 1`) — previously "unresolved member 'length' on kotlin/Any". The checker's

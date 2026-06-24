@@ -4369,12 +4369,15 @@ impl<'a> Checker<'a> {
                 self.check_unary(op, ot, self.span(e))
             }
             Expr::Binary { op, lhs, rhs } => {
-                // `a && b`: a smart-cast established by `a` (`x is T`, `x != null`) holds while checking
-                // `b` (`x is String && x.length == 1`). Narrow `x` in a scope for the right operand —
-                // mirrors the `if`-then narrowing. (`||` doesn't narrow the RHS in the same sense.)
-                if matches!(op, BinOp::And) {
+                // `a && b` / `a || b`: a smart-cast established by `a` holds while checking `b`. In `&&`,
+                // the RHS is reached when `a` is TRUE (`x is String && x.length`); in `||`, when `a` is
+                // FALSE, so the RHS gets `a`'s NEGATED narrowing (`x !is String || x.length` — reaching
+                // the RHS means `x` IS a `String`). Narrow `x` in a scope for the right operand, mirroring
+                // the `if`-then/else narrowing.
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    let for_else = matches!(op, BinOp::Or);
                     let lt = self.expr(lhs);
-                    let cast = self.smartcast_binding(lhs, false);
+                    let cast = self.smartcast_binding(lhs, for_else);
                     self.push_scope();
                     if let Some((n, t)) = &cast {
                         // Don't narrow to a VALUE class: it's erased to its underlying type, and a
