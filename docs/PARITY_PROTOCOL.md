@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 428).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 429).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P52 — metadata-primary function reader: signatures from `@Metadata`, bytecode is fallback (gate
+  1611 → 1611, +0, FAIL=0).** Foundation for `kotlin.Result` (and every `inline` stdlib member). An `inline`
+  function is `private`/synthetic in bytecode, so its *public* signature exists only in `@Metadata` — krusty
+  built `companion`/members from the bytecode method table and never saw `Result.Companion.success`/`failure`
+  or the `ResultKt` extensions (`getOrThrow`, …). Verified kotlinc's model in `JvmProtoBufUtil.
+  getJvmMethodSignature`: name/params/return/visibility/`inline`/receiver come from the proto `Function`/
+  `Class`/`Package` messages; the `method_signature` extension only *overrides* the JVM descriptor, else it's
+  computed from proto types. New `metadata.rs` reader: `class_functions`/`package_functions` →
+  `Vec<MetaFn{kotlin_name, jvm_name, jvm_desc, is_public, is_inline, is_suspend, receiver_class}>` (visibility
+  decoded from `Flags`), and `class_companion_name`. When metadata omits the JVM descriptor (no `@JvmName`
+  mangling), the bytecode method of that name is the fallback — covers value-class members erased to
+  `(Object)Object` (`success`). `metadata_reader_e2e` validates against the real stdlib: `Result.Companion.
+  success` is public+inline with desc `(Ljava/lang/Object;)Ljava/lang/Object;`; `ResultKt.getOrThrow` is a
+  public inline extension on `kotlin/Result`. Reader only so far (not yet wired into resolution) — the two
+  remaining Result layers are the inline-class unboxed ABI and inline-fn splicing of these bodies (target
+  e2e `result_e2e`, `#[ignore]`d with that reason).
 - **Phase P51 — wildcard imports `import a.b.*` were silently dropped (gate 1611 → 1611, +0, FAIL=0).**
   `parse_qualified_name` only keeps a path segment when an `Ident` follows the `.`, so for `import
   kotlin.coroutines.*` it consumed `kotlin.coroutines` and left the cursor on `*`, which the import
