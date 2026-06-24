@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1582 OK / 0 FAIL** (scanned 7351, Phase 418).
+  repo's `compiler/testData/codegen/box`). Current gate: **1590 OK / 0 FAIL** (scanned 7351, Phase 420).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P43 — local classes (slice 1: non-capturing) (gate 1582 → 1590, +8, FAIL=0).** A `class`/
+  `data class`/`interface` declared inside a function body was unparsed (`class` in a block → "expected
+  an expression"). Now parsed as `Stmt::LocalClass(ClassDecl)` (parser detects a local type decl via
+  lookahead — `class`/soft-keyword `data`/`enum`/`sealed`/`annotation`/`value` + `class`, or
+  `interface Name`) and HOISTED post-parse (`hoist_local_classes`) to a top-level-equivalent
+  `Decl::Class`, so signature collection, checking, and lowering treat it like any other class — the
+  in-body `Stmt::LocalClass` is a no-op. A CAPTURING local class is checked with no enclosing scope, so
+  its outer references fail to resolve and the file cleanly skips (never miscompiles). SOUND SLICE
+  BOUNDARY: a local class with super-constructor ARGS (`class Z : C(s)`) isn't hoisted (its base-arg
+  capture isn't rejected by the outer-scope-free check → would miscompile, VerifyError); modifier-
+  prefixed (`open`/`abstract`) local classes stay on the expr path (skip) — both are slice 2. Also fixed
+  a latent scope leak: `check_file` now resets to the base scope depth before each top-level decl (a
+  prior function's locals must not be visible to a hoisted class). New `local_class_e2e` (fields/methods,
+  `data class` equality, local `interface` + impl).
 - **Phase P42 — function references as `FunctionReferenceImpl` subclasses → real reference EQUALITY
   (gate 1576 → 1582, +6, FAIL=0).** Top-level (`::f`) and member (`obj::m`, `Type::m`, `O::m`,
   `this::m`) function references were emitted as bare `LambdaMetafactory` closures — which gave NO Kotlin

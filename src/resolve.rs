@@ -1576,6 +1576,8 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
             FunBody::Expr(e) | FunBody::Block(e) => bc_complex_e(file, *e, true),
             FunBody::None => false,
         },
+        // A local class is hoisted + checked separately; no enclosing-loop break/continue in its body.
+        Stmt::LocalClass(_) => false,
     }
 }
 
@@ -1679,6 +1681,7 @@ fn lambda_body_writes_outer(
             Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
             Stmt::Expr(e) => r(*e),
             Stmt::LocalFun(_) => false,
+            Stmt::LocalClass(_) => false,
         }
     }
     check_e(file, e, outer_names)
@@ -1799,7 +1802,11 @@ fn collect_lambda_outer_writes(
                 ce(file, *body, outer, out);
             }
             Stmt::Expr(e) => ce(file, *e, outer, out),
-            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalFun(_) => {}
+            Stmt::Return(None, _)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::LocalFun(_)
+            | Stmt::LocalClass(_) => {}
         }
     }
     ce(file, e, outer_names, out);
@@ -2494,7 +2501,13 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         .collect();
     c.check_no_erased_clash(&top_funs, true);
 
+    // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
+    // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
+    // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
+    // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
+    let base_scope_depth = c.scopes.len();
     for &d in &file.decls {
+        c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
                 c.tparams = TParams::from_decl(&f.type_params, &f.type_param_bounds);
@@ -7785,6 +7798,9 @@ impl<'a> Checker<'a> {
             Stmt::LocalFun(f) => {
                 self.check_local_fun(&f.clone(), s);
             }
+            // A local class is hoisted to a top-level `Decl::Class` (see `hoist_local_classes`) and
+            // checked there — nothing to do for the in-body statement.
+            Stmt::LocalClass(_) => {}
         }
     }
 
