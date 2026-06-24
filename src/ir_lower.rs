@@ -7478,7 +7478,7 @@ impl<'a> Lower<'a> {
                         index: idx,
                         value: val,
                     }))
-                } else if let Some((facade, ty, is_var)) =
+                } else if let Some((facade, ty, is_var, _)) =
                     self.syms.prop_facades.get(&name).cloned()
                 {
                     // A `var` from ANOTHER file → call its facade's `setX(v)` (the field is private).
@@ -9758,19 +9758,32 @@ impl<'a> Lower<'a> {
                     })
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
-                } else if let Some((facade, ty, _)) = self.syms.prop_facades.get(&n).cloned() {
-                    // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
-                    // private), reusing the backend-agnostic cross-file callee.
-                    self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::CrossFile {
-                            facade,
-                            name: getter_name(&n),
-                            params: vec![],
-                            ret: ty_to_ir(ty),
-                        },
-                        dispatch_receiver: None,
-                        args: vec![],
-                    })
+                } else if let Some((facade, ty, _, is_const)) =
+                    self.syms.prop_facades.get(&n).cloned()
+                {
+                    if is_const {
+                        // A `const val` from another file has a PUBLIC field and NO accessor — read it as
+                        // `getstatic <facade>.X` (kotlinc inlines the constant; a field read is equivalent
+                        // and avoids a `NoSuchMethodError` on the non-existent `getX`).
+                        self.ir.add_expr(IrExpr::ExternalStaticField {
+                            owner: facade,
+                            name: n.clone(),
+                            descriptor: ty.descriptor(),
+                        })
+                    } else {
+                        // A top-level property from ANOTHER file → call its facade's `getX()` (the field is
+                        // private), reusing the backend-agnostic cross-file callee.
+                        self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::CrossFile {
+                                facade,
+                                name: getter_name(&n),
+                                params: vec![],
+                                ret: ty_to_ir(ty),
+                            },
+                            dispatch_receiver: None,
+                            args: vec![],
+                        })
+                    }
                 } else if let Some(class) = self
                     .classes
                     .get(&class_internal(self.afile, &n))

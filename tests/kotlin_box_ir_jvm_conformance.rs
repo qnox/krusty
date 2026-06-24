@@ -330,8 +330,9 @@ fn compile_multifile(
         syms.fn_facades.insert(name, facade);
     }
     for (name, facade) in props {
-        if let Some(&(ty, is_var)) = syms.props.get(&name) {
-            syms.prop_facades.insert(name, (facade, ty, is_var));
+        if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
+            syms.prop_facades
+                .insert(name, (facade, ty, is_var, is_const));
         }
     }
 
