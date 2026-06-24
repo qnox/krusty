@@ -241,6 +241,35 @@ fun box(): String {
 }
 
 #[test]
+fn descriptor_element_introspection_in_krusty() {
+    // The generated `$serializer` now implements `GeneratedSerializer` and builds its descriptor with
+    // `this`, so the framework can derive ELEMENT descriptors — `descriptor.getElementDescriptor(i)`
+    // returns the i-th property's serializer descriptor (`Int.serializer().descriptor` → "kotlin.Int").
+    let src = r#"import kotlinx.serialization.Serializable
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val d = Foo.serializer().descriptor
+    val a = d.getElementDescriptor(0).serialName
+    val b = d.getElementDescriptor(1).serialName
+    if (a != "kotlin.Int") return "a=$a"
+    if (b != "kotlin.String") return "b=$b"
+    if (d.getElementName(0) != "a") return "name0"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerIntrospect") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "descriptor element introspection wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty descriptor element introspection OK");
+}
+
+#[test]
 fn serializable_with_object_serializer_in_krusty() {
     // `@Serializable(with = MyObj::class)` where `MyObj` is a user `object : KSerializer<C>`:
     // `C.serializer()` returns `MyObj.INSTANCE` (an object serializer has no ctor). Exercises a user
