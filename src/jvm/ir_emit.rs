@@ -729,7 +729,19 @@ fn emit_enum_entry_subclass(
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
-    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`.
+    // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
+    for (i, (name, ty)) in c.fields.iter().enumerate() {
+        let acc = 0x0002
+            | if c.field_final.get(i).copied().unwrap_or(false) {
+                0x0010
+            } else {
+                0
+            };
+        cw.add_field(acc, name, &ir_ty_to_jvm(ty).descriptor());
+    }
+
+    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
+    // initializers (`this.<prop> = <init>`, from `init_body`).
     let user_jvm: Vec<Ty> = user_tys.iter().map(ir_ty_to_jvm).collect();
     let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
         .chain(std::iter::once(Ty::Int))
@@ -750,8 +762,26 @@ fn emit_enum_entry_subclass(
     );
     let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     ctor.invokespecial(super_init, argw, 0);
+    let mut ctor_max = 1 + ctor_words;
+    if let Some(init_body) = c.init_body {
+        let mut e = Emitter {
+            ir,
+            cw: &mut cw,
+            bodies,
+            owner: c.fq_name.clone(),
+            facade: facade.to_string(),
+            slots: HashMap::new(),
+            var_types: collect_var_types(ir),
+            next_slot: 1 + ctor_words,
+            ret: Ty::Unit,
+            loop_stack: Vec::new(),
+        };
+        e.slots.insert(0, (0, Ty::obj(&c.fq_name))); // `this`
+        e.emit(init_body, &mut ctor);
+        ctor_max = e.next_slot;
+    }
     ctor.ret_void();
-    ctor.ensure_locals(1 + ctor_words);
+    ctor.ensure_locals(ctor_max);
     ctor.link();
     cw.add_method(
         0x0000,
@@ -760,7 +790,7 @@ fn emit_enum_entry_subclass(
         &ctor,
     );
 
-    // The overriding methods (always concrete — an entry body has bodied overrides only).
+    // The overriding methods + synthesized property getters.
     for &fid in &c.methods {
         emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
     }
