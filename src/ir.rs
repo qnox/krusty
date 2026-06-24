@@ -501,6 +501,11 @@ pub struct IrClass {
     /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
     /// Object` override that reads the referenced property via its getter.
     pub prop_ref: Option<PropRef>,
+    /// When `Some`, this class is a synthesized function-reference subclass (`<Owner>$ref$N extends
+    /// kotlin/jvm/internal/FunctionReferenceImpl implements Function<arity>`), emitted by
+    /// `emit_func_ref_class`. Gives callable references real Kotlin reference EQUALITY (the base class
+    /// compares owner/name/signature/boundReceiver) — `::f == ::f`, `a::m != b::m`.
+    pub func_ref: Option<FuncRef>,
     /// Synthetic bridge methods: an override whose erased signature differs from the supertype's
     /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
     /// that adapts arguments and delegates to the concrete override.
@@ -538,10 +543,46 @@ pub struct IrClass {
     pub has_primary_ctor: bool,
 }
 
+/// How a function-reference subclass's `invoke` dispatches to its target.
+#[derive(Clone, Debug)]
+pub enum FrDispatch {
+    /// Top-level / static target: `invokestatic call_owner.call_name(call_desc)`. All invoke params are
+    /// the call arguments.
+    Static,
+    /// Unbound member `Type::m`: the FIRST invoke param is the receiver; `invokevirtual` on it.
+    VirtualUnbound,
+    /// Bound member `obj::m`: the receiver is captured (`this.receiver`); `invokevirtual` on it. All
+    /// invoke params are the call arguments.
+    VirtualBound,
+}
+
+/// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
+/// `emit_func_ref_class`. `param_tys`/`ret_ty` are the LOGICAL `invoke` signature (for `VirtualUnbound`,
+/// `param_tys[0]` is the receiver); the SAM interface erases them to `Object`, so `invoke` casts.
+#[derive(Clone, Debug)]
+pub struct FuncRef {
+    pub bound: bool,
+    pub arity: u8,
+    /// Class passed to `super(...)` (the reference's declaring class); empty = the file facade.
+    pub owner_class: String,
+    pub fn_name: String,
+    pub flags: i32,
+    pub dispatch: FrDispatch,
+    /// Class the target method is invoked on; empty = the file facade.
+    pub call_owner: String,
+    pub call_name: String,
+    /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
+    pub call_interface: bool,
+    /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
+    /// (excluded from the method descriptor / signature). The emitter derives the JVM signature and
+    /// call descriptor from these + `ret_ty`.
+    pub param_tys: Vec<IrType>,
+    pub ret_ty: IrType,
+}
+
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
 /// property's owner, name, getter, and value type. The backend emits the `PropertyReference1Impl`
-/// subclass from this — the `super(owner.class, name, "getName()desc", 0)` constructor and the
-/// `get(Object)` override that reads `((Owner) it).getName()` (boxing a primitive result).
+/// subclass from this.
 #[derive(Clone, Debug)]
 pub struct PropRef {
     pub owner_internal: String,

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1576 OK / 0 FAIL** (scanned 7351, Phase 417).
+  repo's `compiler/testData/codegen/box`). Current gate: **1582 OK / 0 FAIL** (scanned 7351, Phase 418).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P42 — function references as `FunctionReferenceImpl` subclasses → real reference EQUALITY
+  (gate 1576 → 1582, +6, FAIL=0).** Top-level (`::f`) and member (`obj::m`, `Type::m`, `O::m`,
+  `this::m`) function references were emitted as bare `LambdaMetafactory` closures — which gave NO Kotlin
+  reference equality (`::f != ::f`, breaking `callableReference/equality/*` + any program comparing
+  refs). They now lower to synthesized subclasses of `kotlin/jvm/internal/FunctionReferenceImpl`
+  (mirroring the existing `PropertyReference*Impl` machinery): a new `IrClass{func_ref: Some(FuncRef…)}`
+  emitted by `emit_func_ref_class`, instantiated as `<Synth>.INSTANCE` (unbound singleton) or
+  `new <Synth>(receiver)` (bound). Each carries `super(arity, [receiver,] owner.class, name, signature,
+  flags)` so the base class's `equals`/`hashCode` compare owner+name+signature+boundReceiver — `::f==::f`,
+  `a::m==a::m`, `a::m!=b::m`, `a::m!=Type::m`. The single erased `invoke(Object…)Object` casts/unboxes its
+  args and dispatches: `invokestatic` (top-level, flags=1), `invokevirtual`/`invokeinterface` on the
+  first arg (unbound member) or `this.receiver` (bound member), boxing the result or returning the `Unit`
+  singleton for a `void` target. This SUBSUMES `Unit`-returning member refs (no longer skipped). Caught
+  during bring-up via the gate: interface-member refs need `invokeinterface` (an `IncompatibleClass
+  ChangeError` otherwise). Local-fun / extension / expression-receiver refs stay `LambdaMetafactory` for
+  now (no equality test exercises them). New `callable_ref_equality_e2e` (equality + still-invokes).
 - **Phase P41 — bound callable references on an expression receiver (gate 1572 → 1576, +4, FAIL=0).**
   A bound reference whose receiver is an arbitrary EXPRESSION (`1::foo`, `mk()::dbl`), not just an
   in-scope name. The receiver is evaluated once and captured. Two cases: (a) a bound EXTENSION function

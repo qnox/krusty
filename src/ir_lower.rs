@@ -400,6 +400,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 enum_entry_subclass: vec![None; c.enum_entries.len()],
                 enum_entry_of: None,
                 prop_ref: None,
+                func_ref: None,
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object,
@@ -722,6 +723,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     enum_entry_subclass: vec![],
                     enum_entry_of: None,
                     prop_ref: None,
+                    func_ref: None,
                     bridges: vec![],
                     interfaces: vec![],
                     is_object: false,
@@ -1847,6 +1849,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             enum_entry_subclass: vec![],
                             enum_entry_of: Some(field_tys.clone()),
                             prop_ref: None,
+                            func_ref: None,
                             bridges: vec![],
                             interfaces: vec![],
                             is_object: false,
@@ -3331,6 +3334,7 @@ impl<'a> Lower<'a> {
             enum_entry_subclass: vec![],
             enum_entry_of: None,
             prop_ref: None,
+            func_ref: None,
             bridges: vec![],
             interfaces: vec![format!("kotlin/jvm/functions/Function{jvm_arity}")],
             is_object: false,
@@ -4784,6 +4788,7 @@ impl<'a> Lower<'a> {
                 prop_ty,
                 bound,
             }),
+            func_ref: None,
             bridges: vec![],
             interfaces: vec![],
             is_object: false,
@@ -4818,24 +4823,56 @@ impl<'a> Lower<'a> {
     /// as a lambda `{ a -> obj.m(a) }` / `{ r, a -> r.m(a) }` would lower. `params`/`ret` are the
     /// reference's function type. Only user-class methods are modeled (the receiver/method must
     /// resolve in the IR class table); a `Unit`/`Nothing` return is skipped.
+    /// Wrap a `Unit`-returning target function in a SAM impl `(target params) -> { target(params);
+    /// return Unit.INSTANCE }`. A `Unit` method handle returns `void`, but a functional interface's
+    /// `invoke` must yield the `kotlin/Unit` singleton — `LambdaMetafactory` won't adapt `void`. `uniq`
+    /// (the ref's AST id) keeps the synthesized name distinct across overloaded enclosing functions.
+    fn unit_ref_wrapper(&mut self, target_fid: u32, uniq: u32) -> u32 {
+        let params = self.ir.functions[target_fid as usize].params.clone();
+        let argvals: Vec<u32> = (0..params.len() as u32)
+            .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
+            .collect();
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(target_fid),
+            dispatch_receiver: None,
+            args: argvals,
+        });
+        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![call, ret_e],
+            value: None,
+        });
+        let impl_name = format!("{}$unitref${}", self.cur_fn_name, uniq);
+        self.ir.add_fun(IrFunction {
+            name: impl_name,
+            params,
+            ret: ty_to_ir(Ty::obj("kotlin/Unit")),
+            body: Some(block),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        })
+    }
+
     fn lower_method_ref(
         &mut self,
+        e: AstExprId,
         recv: AstExprId,
         name: &str,
         params: &[Ty],
         ret: Ty,
     ) -> Option<u32> {
-        if ret == Ty::Unit || ret == Ty::Nothing {
+        if ret == Ty::Nothing {
             return None;
         }
         let Expr::Name(rn) = self.afile.expr(recv).clone() else {
             return None;
         };
-        // Bound `obj::m` (`rn` is an in-scope value) / `O::m` (`rn` is an object → its singleton
-        // `INSTANCE`): the receiver is CAPTURED into the closure. Unbound `Type::m` (`rn` is a class):
-        // the receiver becomes the reference's first parameter. `bound_capture` holds the already-built
-        // capture EXPR for the bound forms.
-        let (bound_capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
+        // Bound `obj::m` (`rn` an in-scope value) / `O::m` (`rn` an object → its `INSTANCE`): the
+        // receiver is CAPTURED. Unbound `Type::m` (`rn` a class): the receiver is the reference's first
+        // parameter (`param_tys[0]`). `capture` holds the bound receiver expression.
+        let (capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
             Some((v, ty)) => (Some(self.ir.add_expr(IrExpr::GetValue(v))), ty),
             None => {
                 let internal = class_internal(self.afile, &rn);
@@ -4853,54 +4890,36 @@ impl<'a> Lower<'a> {
             }
         };
         let internal = recv_ty.obj_internal()?.to_string();
-        let (class_id, index, _fid, _mret) = self.resolve_method(&internal, name)?;
-        // The method's own parameter types: all of `params` for a bound ref (the receiver is captured),
-        // `params[1..]` for an unbound ref (the receiver is the first parameter).
-        let method_params: Vec<Ty> = if bound_capture.is_some() {
-            params.to_vec()
+        // Only a user-class method is modeled (the invoke does `invokevirtual`/`invokeinterface
+        // internal.name`); a classpath/library receiver fails here → bail (skip), never miscompile.
+        self.resolve_method(&internal, name)?;
+        // Dispatch on the receiver's STATIC type: an interface receiver needs `invokeinterface`.
+        let call_interface = self
+            .classes
+            .get(&internal)
+            .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
+        let bound = capture.is_some();
+        let dispatch = if bound {
+            crate::ir::FrDispatch::VirtualBound
         } else {
-            params[1..].to_vec()
+            crate::ir::FrDispatch::VirtualUnbound
         };
-        // Impl value layout: value 0 = receiver, values 1.. = the method arguments.
-        let recv_v = self.ir.add_expr(IrExpr::GetValue(0));
-        let arg_vs: Vec<Option<u32>> = (0..method_params.len() as u32)
-            .map(|i| Some(self.ir.add_expr(IrExpr::GetValue(i + 1))))
-            .collect();
-        let mc = self.ir.add_expr(IrExpr::MethodCall {
-            class: class_id,
-            index,
-            receiver: recv_v,
-            args: arg_vs,
-        });
-        let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
-        let block = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret_e],
-            value: None,
-        });
-        let impl_name = format!("{}$methodref${}", self.cur_fn_name, self.lambda_seq);
-        self.lambda_seq += 1;
-        let mut impl_params: Vec<IrType> = vec![ty_to_ir(recv_ty)];
-        impl_params.extend(method_params.iter().map(|t| ty_to_ir(*t)));
-        let fid = self.ir.add_fun(IrFunction {
-            name: impl_name,
-            params: impl_params,
-            ret: ty_to_ir(ret),
-            body: Some(block),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let captures = match bound_capture {
-            Some(cap) => vec![cap],
-            None => vec![],
-        };
-        Some(self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: fid,
-            arity: params.len() as u8,
-            captures,
-            sam: None,
-            inline_body: None,
-        }))
+        let param_tys: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
+        Some(self.make_func_ref(
+            e.0,
+            bound,
+            params.len() as u8,
+            internal.clone(),
+            name.to_string(),
+            0, // member
+            dispatch,
+            internal,
+            name.to_string(),
+            call_interface,
+            param_tys,
+            ty_to_ir(ret),
+            capture,
+        ))
     }
 
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
@@ -4916,17 +4935,23 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         ret: Ty,
     ) -> Option<u32> {
-        if ret == Ty::Unit || ret == Ty::Nothing {
+        if ret == Ty::Nothing {
             return None;
         }
         let rty = self.info.ty(recv);
         // Bound extension reference: the extension is a lifted static `name(recv, args…)`. Capture the
         // receiver; the metafactory binds it and `invoke(args)` supplies the rest (same as a local-fun
-        // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter).
+        // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter). A
+        // `Unit` return is wrapped so `invoke` yields the `Unit` singleton.
         if let Some(&fid) = self.ext_fun_ids.get(&(rty.descriptor(), name.to_string())) {
             let cap = self.expr(recv)?;
+            let impl_fn = if ret == Ty::Unit {
+                self.unit_ref_wrapper(fid, e.0)
+            } else {
+                fid
+            };
             return Some(self.ir.add_expr(IrExpr::Lambda {
-                impl_fn: fid,
+                impl_fn,
                 arity: params.len() as u8,
                 captures: vec![cap],
                 sam: None,
@@ -4948,11 +4973,15 @@ impl<'a> Lower<'a> {
             receiver: recv_v,
             args: arg_vs,
         });
-        let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
-        let block = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![ret_e],
-            value: None,
-        });
+        let (stmts, impl_ret) = if ret == Ty::Unit {
+            let unit = self.ir.add_expr(IrExpr::UnitInstance);
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
+            (vec![mc, ret_e], ty_to_ir(Ty::obj("kotlin/Unit")))
+        } else {
+            let ret_e = self.ir.add_expr(IrExpr::Return(Some(mc)));
+            (vec![ret_e], ty_to_ir(ret))
+        };
+        let block = self.ir.add_expr(IrExpr::Block { stmts, value: None });
         // Name with the ref's globally-unique AST expr id (not the per-function `lambda_seq`): two
         // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
         let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
@@ -4961,7 +4990,7 @@ impl<'a> Lower<'a> {
         let bfid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: impl_params,
-            ret: ty_to_ir(ret),
+            ret: impl_ret,
             body: Some(block),
             is_static: true,
             dispatch_receiver: None,
@@ -4974,6 +5003,83 @@ impl<'a> Lower<'a> {
             sam: None,
             inline_body: None,
         }))
+    }
+
+    /// Build a synthesized function-reference subclass of `FunctionReferenceImpl` (real Kotlin reference
+    /// EQUALITY) and return the expression that produces an instance: `new <Synth>(receiver)` for a bound
+    /// ref, or `<Synth>.INSTANCE` for an unbound one. See `crate::ir::FuncRef` / `emit_func_ref_class`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_func_ref(
+        &mut self,
+        uniq: u32,
+        bound: bool,
+        arity: u8,
+        owner_class: String,
+        fn_name: String,
+        flags: i32,
+        dispatch: crate::ir::FrDispatch,
+        call_owner: String,
+        call_name: String,
+        call_interface: bool,
+        param_tys: Vec<IrType>,
+        ret_ty: IrType,
+        capture: Option<u32>,
+    ) -> u32 {
+        let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
+        let synth_id = self.ir.add_class(IrClass {
+            fq_name: synth_fq,
+            is_value: false,
+            type_param_bounds: vec![],
+            field_type_params: vec![],
+            supertypes: vec![],
+            fields: vec![],
+            ctor_param_count: 0,
+            ctor_args: vec![],
+            init_body: None,
+            methods: vec![],
+            is_interface: false,
+            superclass: "kotlin/jvm/internal/FunctionReferenceImpl".to_string(),
+            super_args: vec![],
+            enum_entries: vec![],
+            enum_entry_subclass: vec![],
+            enum_entry_of: None,
+            prop_ref: None,
+            func_ref: Some(crate::ir::FuncRef {
+                bound,
+                arity,
+                owner_class,
+                fn_name,
+                flags,
+                dispatch,
+                call_owner,
+                call_name,
+                call_interface,
+                param_tys,
+                ret_ty,
+            }),
+            bridges: vec![],
+            interfaces: vec![],
+            is_object: false,
+            ctor_param_checks: vec![],
+            is_companion: false,
+            companion_class: None,
+            field_final: vec![],
+            field_private: vec![],
+            secondary_ctors: vec![],
+            has_primary_ctor: true,
+        });
+        match capture {
+            Some(cap) => self.ir.add_expr(IrExpr::New {
+                class: synth_id,
+                args: vec![cap],
+                ctor_params: Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+            }),
+            None => self.ir.add_expr(IrExpr::StaticInstance {
+                owner: synth_id,
+                ty: synth_id,
+                field: "INSTANCE",
+            }),
+        }
     }
 
     /// For an unqualified call inside an inner class, resolve `name` as an ENCLOSING method (reached
@@ -9159,17 +9265,18 @@ impl<'a> Lower<'a> {
                     // `lower_method_ref` handles Name receivers (bound local/object, unbound class). An
                     // arbitrary expression receiver (`"abc"::get`, `1::foo`) or a bound extension falls
                     // through to `lower_bound_expr_ref`, which evaluates+captures the receiver once.
-                    if let Some(r) = self.lower_method_ref(recv, &name, &sig.params, sig.ret) {
+                    if let Some(r) = self.lower_method_ref(e, recv, &name, &sig.params, sig.ret) {
                         return Some(r);
                     }
                     return self.lower_bound_expr_ref(e, recv, &name, &sig.params, sig.ret);
                 }
                 // Local function reference `::localFun` (the checker mapped this ref to its decl): a
                 // closure over the lifted static method, capturing the same outer locals the method
-                // takes as leading params. A `Unit`/`Nothing` SAM-return needs a wrapper — skip for now.
+                // takes as leading params. A `Unit` SAM-return is wrapped (`invoke` yields the `Unit`
+                // singleton); `Nothing` stays unmodeled.
                 if let Some(&stmt_id) = self.info.local_call_map.get(&e) {
                     if let Some(&fid) = self.local_fun_ids.get(&stmt_id) {
-                        if sig.ret == Ty::Unit || sig.ret == Ty::Nothing {
+                        if sig.ret == Ty::Nothing {
                             return None;
                         }
                         let caps = self
@@ -9185,8 +9292,13 @@ impl<'a> Lower<'a> {
                                     .map(|(cv, _)| self.ir.add_expr(IrExpr::GetValue(cv)))
                             })
                             .collect::<Option<Vec<_>>>()?;
+                        let impl_fn = if sig.ret == Ty::Unit {
+                            self.unit_ref_wrapper(fid, e.0)
+                        } else {
+                            fid
+                        };
                         return Some(self.ir.add_expr(IrExpr::Lambda {
-                            impl_fn: fid,
+                            impl_fn,
                             arity: arity as u8,
                             captures,
                             sam: None,
@@ -9254,8 +9366,9 @@ impl<'a> Lower<'a> {
                     .find(|((n, _), _)| n == &name)
                     .map(|(_, id)| id)?;
                 let ret = self.ir.functions[fid as usize].ret.clone();
+                let fn_params = self.ir.functions[fid as usize].params.clone();
                 // A generic referenced function erases its type parameters — not modeled.
-                if self.ir.functions[fid as usize].params.len() != arity {
+                if fn_params.len() != arity {
                     return None;
                 }
                 if self
@@ -9264,55 +9377,27 @@ impl<'a> Lower<'a> {
                 {
                     return None;
                 }
-                // A `Unit`-returning function's method handle returns `void`; the SAM's `invoke` must
-                // return the `kotlin/Unit` singleton (LambdaMetafactory would adapt `void` to `null`).
-                // Synthesize a wrapper `(params) -> { foo(params); return Unit.INSTANCE }`. `Nothing`
-                // (every path throws) stays unmodeled.
                 if ret == IrType::Nothing {
                     return None;
                 }
-                if ret == IrType::Unit {
-                    let params = self.ir.functions[fid as usize].params.clone();
-                    let argvals: Vec<u32> = (0..arity as u32)
-                        .map(|i| self.ir.add_expr(IrExpr::GetValue(i)))
-                        .collect();
-                    let call = self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Local(fid),
-                        dispatch_receiver: None,
-                        args: argvals,
-                    });
-                    let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                    let ret_e = self.ir.add_expr(IrExpr::Return(Some(unit)));
-                    let block = self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![call, ret_e],
-                        value: None,
-                    });
-                    let impl_name = format!("{}$funref${}", self.cur_fn_name, self.lambda_seq);
-                    self.lambda_seq += 1;
-                    let wfid = self.ir.add_fun(IrFunction {
-                        name: impl_name,
-                        params,
-                        ret: ty_to_ir(Ty::obj("kotlin/Unit")),
-                        body: Some(block),
-                        is_static: true,
-                        dispatch_receiver: None,
-                        param_checks: Vec::new(),
-                    });
-                    return Some(self.ir.add_expr(IrExpr::Lambda {
-                        impl_fn: wfid,
-                        arity: arity as u8,
-                        captures: vec![],
-                        sam: None,
-                        inline_body: None,
-                    }));
-                }
-                return Some(self.ir.add_expr(IrExpr::Lambda {
-                    impl_fn: fid,
-                    arity: arity as u8,
-                    captures: vec![],
-                    sam: None,
-                    inline_body: None,
-                }));
+                // A top-level function reference → a `FunctionReferenceImpl` subclass whose `invoke`
+                // calls `invokestatic <facade>.foo(args)` (empty owner = facade). Unbound (an `INSTANCE`
+                // singleton), top-level flags = 1. The subclass carries real reference equality.
+                return Some(self.make_func_ref(
+                    e.0,
+                    false,
+                    arity as u8,
+                    String::new(),
+                    name.clone(),
+                    1,
+                    crate::ir::FrDispatch::Static,
+                    String::new(),
+                    name.clone(),
+                    false,
+                    fn_params,
+                    ret,
+                    None,
+                ));
             }
             Expr::Name(n) => {
                 // A local delegated property: read through the delegate's `getValue(null, propref)`.

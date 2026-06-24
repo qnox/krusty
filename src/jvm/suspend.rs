@@ -1766,6 +1766,7 @@ fn build_continuation_class(
         enum_entry_subclass: vec![],
         enum_entry_of: None,
         prop_ref: None,
+        func_ref: None,
         bridges: vec![],
         interfaces: vec![],
         is_object: false,
