@@ -1151,7 +1151,21 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // `kotlin/Unit` singleton the erased bridge must return.
                 let f = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
                 code.getstatic(f, 1);
-            } // reference→reference: concrete return is a subtype of erased — no cast needed
+            } else if er.is_reference()
+                && !matches!(er, Ty::Array(_))
+                && ref_internal(cr) == "java/lang/Object"
+            {
+                // Covariant generic DIAMOND: the inherited concrete getter returns the erased
+                // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
+                // a NARROWER reference type (`override val x: String`). This bridge's declared return
+                // (`er`) is that narrower type, so the `Object` on the stack must be `checkcast` to it
+                // before `areturn` — otherwise the verifier rejects it ("Bad return type"). The usual
+                // direction (concrete is a SUBtype of erased) needs no cast; this is the inverse.
+                // Restricted to a plain object type (`Ty::Obj`): an array `er` would need a descriptor-
+                // form class ref, and that narrowing direction doesn't arise here.
+                let ci = cw.class_ref(&ref_internal(er));
+                code.checkcast(ci);
+            } // reference→reference (concrete is a subtype of erased): no cast needed
         }
         emit_return(er, &mut code);
         code.ensure_locals(1 + pw);
