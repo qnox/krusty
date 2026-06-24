@@ -474,6 +474,29 @@ contextual/`@Serializable(with=)`. Each is an independent language/stdlib featur
 multi-feature roadmap. **Nearest single win: annotation-argument capture → `@SerialName` →
 `constValInSerialName` green.** (Survey is reproducible; not yet a committed test harness.)
 
+#### Update (2026-06-24) — committed survey harness + property-level `@Serializable(with=)` → 5/69 GREEN
+
+The corpus survey is now a committed, reproducible script — `ser-survey.sh` (run from the worktree):
+drives every single-file `boxIr` case through `krusty -d … -cp …`, javac's a `<Facade>.box()` launcher
+(JVM facade capitalizes the file-name initial + honors a `package` decl), runs it on the published
+runtime, and asserts `box() == "OK"`. Current tally: **5 PASS / 42 FAIL** (single-file subset) —
+`constValInSerialName, contextualByDefault, customFixedNonSerializableArguments, inlineClasses,
+polymorphic`.
+
+**New this round: per-property `@Serializable(with = X::class)` element serializers** (greens
+`customFixedNonSerializableArguments`, box()=OK). A `@Serializable(with=X)` annotation on a *constructor
+property* (not the class) now routes that element through an instance of `X`: `IrClass.field_serializers`
+(`(prop, serializer_internal)`, populated by `ir_lower::field_serializers_of`, mirroring
+`custom_serializer_of` but per field) is consumed in the plugin's `childSerializers()` builder — it emits
+`new X()` (no-arg class serializer) or `X.INSTANCE` (object serializer), wrapped `.nullable`
+(`BuiltinSerializersKt.getNullable`) for a nullable property so the element descriptor's `serialName`
+gains the trailing `?` (`"AnyMap?"`). This unblocks descriptor introspection
+(`descriptor.getElementDescriptor(i).serialName`) that previously NPE'd on a null element serializer.
+Test: `serialization_krusty_only_e2e::property_level_custom_serializer_introspection_in_krusty`. Box gate
+**1741/0** (additive — property-level custom serializers don't appear in the main box corpus). Known
+limitation (documented in code): a property serializer with a *parameterized* constructor isn't handled
+(the corpus uses only no-arg class / object serializers).
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

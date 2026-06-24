@@ -1752,6 +1752,7 @@ fn build_continuation_class(
         fq_name: internal.to_string(),
         serial_names: Vec::new(),
         custom_serializer: None,
+        field_serializers: Vec::new(),
         is_value: false,
         type_param_bounds: vec![],
         field_type_params,

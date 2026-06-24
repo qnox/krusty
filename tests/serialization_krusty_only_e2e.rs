@@ -270,6 +270,45 @@ fun box(): String {
 }
 
 #[test]
+fn property_level_custom_serializer_introspection_in_krusty() {
+    // `@Serializable(with = X::class)` on a PROPERTY (not the class): the generated `childSerializers()`
+    // must return an instance of `X` for that element (a `new X()` for a no-arg class serializer),
+    // wrapped `.nullable` for a nullable property — so `getElementDescriptor(i).serialName` is X's
+    // descriptor name (with a trailing `?` when nullable), not an NPE. Mirrors corpus
+    // `customFixedNonSerializableArguments`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+
+class AnyMapSerializer: KSerializer<Map<String, Any?>> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("AnyMap", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Map<String, Any?>) = encoder.encodeString(value.toString())
+    override fun deserialize(decoder: Decoder): Map<String, Any?> = emptyMap()
+}
+@Serializable
+data class Test(
+    @Serializable(with = AnyMapSerializer::class) val map: Map<String, Any>?,
+    @Serializable(with = AnyMapSerializer::class) val map2: Map<String, Any>
+)
+fun box(): String {
+    val d = Test.serializer().descriptor
+    if (d.getElementDescriptor(0).serialName != "AnyMap?") return "0=" + d.getElementDescriptor(0).serialName
+    if (d.getElementDescriptor(1).serialName != "AnyMap") return "1=" + d.getElementDescriptor(1).serialName
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerPropCustom") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "property-level @Serializable(with=) introspection wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty property-level @Serializable(with=) OK");
+}
+
+#[test]
 fn serializable_with_object_serializer_in_krusty() {
     // `@Serializable(with = MyObj::class)` where `MyObj` is a user `object : KSerializer<C>`:
     // `C.serializer()` returns `MyObj.INSTANCE` (an object serializer has no ctor). Exercises a user
