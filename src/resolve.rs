@@ -2548,6 +2548,9 @@ pub struct TypeInfo {
     /// A bare `Name` expr that resolves to a CLASSPATH `object` used as a value → the object's internal
     /// name. Lowering emits `getstatic <internal>.INSTANCE` (`ExternalStaticField`) for it.
     pub obj_value_refs: HashMap<ExprId, String>,
+    /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
+    /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
+    pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     /// Inferred return types for expression-body functions that lacked an explicit return annotation.
     /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
     pub fun_ret_overrides: HashMap<String, Ty>,
@@ -2640,6 +2643,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_sigs: HashMap::new(),
         local_call_map: HashMap::new(),
         obj_value_refs: HashMap::new(),
+        companion_calls: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
@@ -3091,6 +3095,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_sigs: c.local_fun_sigs,
         local_call_map: c.local_call_map,
         obj_value_refs: c.obj_value_refs,
+        companion_calls: c.companion_calls,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
         bridges: c.bridges,
@@ -3128,6 +3133,7 @@ struct Checker<'a> {
     local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     local_call_map: HashMap<ExprId, StmtId>,
     obj_value_refs: HashMap<ExprId, String>,
+    companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
@@ -5994,6 +6000,28 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             return Ty::obj(&cls.internal);
+                        }
+                    }
+                }
+                // Classpath value-class COMPANION call `Result.success(args)`: `Result` is a classpath
+                // value class whose companion declares `success` (an `inline` fn — private in bytecode,
+                // public per `@Metadata`). Resolve metadata-first; lowering emits the companion `getstatic`
+                // receiver + an inline-splice of the companion method.
+                if let Expr::Name(root) = self.file.expr(receiver).clone() {
+                    if self.lookup(&root).is_none() {
+                        if let Some(internal) = self.imported_type_internal(&root) {
+                            if let Some(cf) =
+                                self.syms
+                                    .libraries
+                                    .value_companion_fn(&internal, &name, args.len())
+                            {
+                                for &a in args {
+                                    self.expr(a);
+                                }
+                                let ret = cf.ret;
+                                self.companion_calls.insert(call, cf);
+                                return ret;
+                            }
                         }
                     }
                 }

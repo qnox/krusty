@@ -11,11 +11,10 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_box(src, "C", &[sl], Some(&jdk))
 }
 
-// Target e2e for full kotlin.Result support. Ignored until the three required layers land: (1)
-// metadata-primary companion/extension resolution [reader done — metadata_reader_e2e], (2) the
-// inline-class unboxed ABI so `Result` flows as `Ljava/lang/Object;`, (3) splicing the inline
-// `success`/`getOrThrow` bodies at the call site.
-#[ignore = "needs inline-class unboxed ABI + inline-fn splicing of Result.success/getOrThrow"]
+// Full kotlin.Result support end-to-end: construction via the inline `Result.success` (a Companion
+// instance inline-splice) and read via the inline extension `getOrThrow` (a value-class extension
+// resolved through @Metadata + spliced), with `Result` erased to `Object`. Round-trips under
+// `-Xverify:all`.
 #[test]
 fn result_success_get_or_throw() {
     const SRC: &str = "fun box(): String {\n\

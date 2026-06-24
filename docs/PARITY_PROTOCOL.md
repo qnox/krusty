@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1612 OK / 0 FAIL** (scanned 7351, Phase 432).
+  repo's `compiler/testData/codegen/box`). Current gate: **1616 OK / 0 FAIL** (scanned 7351, Phase 433).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P56 — full `kotlin.Result` end-to-end: construction + extension + erasure, byte-equal (gate 1612 →
+  1616, +4, FAIL=0).** `Result.success(42)` then `getOrThrow()` now compiles, runs under `-Xverify:all`, and
+  is byte-equal to kotlinc. Pieces: (1) the checker resolves a value-class COMPANION call (`Result.success`)
+  via a new `LibrarySet::value_companion_fn` (metadata: `class_companion_name` + `class_functions`, the
+  companion fn is bytecode-private + public-inline), recorded in `TypeInfo.companion_calls`; (2) lowering
+  emits the companion `getstatic <class>.Companion` receiver + an inline `Callee::Static` with
+  `dispatch_receiver`; (3) emit's `try_inline_static_as` splices an INSTANCE inline method — the real
+  descriptor fetches the body, a receiver-prepended `splice_desc` maps `this`=local0/params=local1.., and the
+  splicer drops the unused `this` (`pop`) + inlines the single-use arg, exactly like kotlinc. Three
+  kotlinc-faithful value-class rules completed the byte-equality: RETURN mangling applies to a `Result`-
+  returning member (`C.foo(): Result` → `foo-d1pmJ48`, kotlinc `hasMangledReturnType`) but NOT a file-class
+  (top-level) fn, while PARAM mangling stays exempt for `Result`; an external value class's bridge returns
+  the underlying directly (no `box-impl`); and `as Result`/`is Result` erase to the underlying (no
+  `checkcast Result`). `result_e2e` is green (un-`#[ignore]`d); `inlineClasses/returnResult/class*Override`
+  box files pass.
 - **Phase P55 — classpath value-class type erasure (`Result`→`Object`): the value-class pass now unboxes
   classpath value classes (gate 1611 → 1612, +1, FAIL=0).** krusty's unboxed value-class ABI pass
   (`jvm/value_classes.rs`) erased only USER value classes; a CLASSPATH value class typed in the file
