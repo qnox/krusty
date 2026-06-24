@@ -497,6 +497,22 @@ Test: `serialization_krusty_only_e2e::property_level_custom_serializer_introspec
 limitation (documented in code): a property serializer with a *parameterized* constructor isn't handled
 (the corpus uses only no-arg class / object serializers).
 
+#### Update (2026-06-24) — sealed/polymorphic serializer → main box gate +4 (1741 → 1745)
+
+A `@Serializable sealed class` / `sealed interface` base now generates a `serializer()` returning a runtime
+`SealedClassSerializer(serialName, Base::class, [Sub::class…], [Sub.serializer()…])` over its direct
+`@Serializable` subclasses (found by `superclass == base` or `interfaces.contains(base)`), instead of an
+empty `$serializer` — so `Json.encodeToString(Base.serializer(), A(1))` emits the polymorphic form
+`{"type":"A","x":1}` (default `"type"` discriminator = each subclass's `serialName`). New
+`IrClass.is_sealed` (threaded from `ast::ClassDecl.is_sealed`); the plugin skips both `$serializer`
+generation and `transform_bodies` for a sealed base. Test:
+`serialization_krusty_only_e2e::sealed_class_polymorphic_serializer_in_krusty`. **Main box gate 1741 → 1745
+(+4), 0 FAIL** (sealed `@Serializable` bases in the main corpus now serialize). No NEW *serialization*-corpus
+green alone — the corpus sealed files additionally need sealed-INTERFACE IR lowering
+(`sealedInterfaces`/`polymorphicTypeParameter`: "construct not yet supported"), `data object` parsing
+(`serializerFactory`), or the `elementDescriptors` extension property (`starProjections`) — each a separate
+feature. The sealed serializer foundation itself is proven by the e2e test + the +4 main-gate lift.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

@@ -1764,6 +1764,7 @@ fn build_continuation_class(
         init_body,
         methods: vec![inv_fid],
         is_interface: false,
+        is_sealed: false,
         superclass: CONTINUATION_IMPL.to_string(),
         super_args: vec![super_arg],
         enum_entries: vec![],
