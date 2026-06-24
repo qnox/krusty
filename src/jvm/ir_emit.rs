@@ -286,6 +286,9 @@ fn emit_class(
     if c.prop_ref.is_some() {
         return emit_prop_ref_class(c);
     }
+    if c.func_ref.is_some() {
+        return emit_func_ref_class(c, facade);
+    }
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
@@ -875,6 +878,200 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     get.ensure_locals(1);
     get.link();
     cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+    cw.finish()
+}
+
+/// The wrapper class internal name for a primitive (`Int` → `java/lang/Integer`), for casting an
+/// erased `Object` argument before unboxing.
+fn wrapper_internal(t: Ty) -> &'static str {
+    match t {
+        Ty::Int => "java/lang/Integer",
+        Ty::Long => "java/lang/Long",
+        Ty::Double => "java/lang/Double",
+        Ty::Float => "java/lang/Float",
+        Ty::Boolean => "java/lang/Boolean",
+        Ty::Char => "java/lang/Character",
+        Ty::Byte => "java/lang/Byte",
+        Ty::Short => "java/lang/Short",
+        _ => "java/lang/Object",
+    }
+}
+
+/// Emit a synthesized function-reference subclass (`<Owner>$ref$N extends FunctionReferenceImpl
+/// implements Function<arity>`): an UNBOUND ref gets a `public static final INSTANCE` + a no-arg ctor
+/// `super(arity, owner.class, name, sig, flags)`; a BOUND ref gets a `(Object)` ctor delegating to
+/// `super(arity, receiver, owner.class, name, sig, flags)` (the base stores the receiver). The single
+/// erased `invoke(Object…)Object` casts/unboxes its args and dispatches to the target, boxing the
+/// result (or returning the `Unit` singleton for a `void` target). Reference EQUALITY (`::f == ::f`,
+/// `a::m != b::m`) is inherited from `FunctionReferenceImpl` (compares owner/name/signature/receiver).
+fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+    use crate::ir::FrDispatch;
+    let fr = c.func_ref.as_ref().unwrap();
+    // An empty `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
+    // file facade, whose name isn't known until emit) — resolve it here.
+    let owner_class: &str = if fr.owner_class.is_empty() {
+        facade
+    } else {
+        &fr.owner_class
+    };
+    let call_owner: &str = if fr.call_owner.is_empty() {
+        facade
+    } else {
+        &fr.call_owner
+    };
+    let fq = c.fq_name.clone();
+    let self_desc = format!("L{fq};");
+    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+    cw.add_interface(&format!("kotlin/jvm/functions/Function{}", fr.arity));
+
+    // The call argument param types begin AFTER the receiver for an unbound member ref.
+    let first_arg = match fr.dispatch {
+        FrDispatch::VirtualUnbound => 1usize,
+        _ => 0,
+    };
+    let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
+    let returns_void = matches!(fr.ret_ty, IrType::Unit | IrType::Nothing);
+    // JVM method descriptor of the target call (`(argDescs)retDesc`) and the kotlin reference signature
+    // (`name(argDescs)retDesc`) — both over the CALL arguments (the receiver, if any, is excluded).
+    let mut call_desc = String::from("(");
+    for pt in fr.param_tys.iter().skip(first_arg) {
+        call_desc.push_str(&ir_ty_to_jvm(pt).descriptor());
+    }
+    call_desc.push(')');
+    let ret_desc = if returns_void {
+        "V".to_string()
+    } else {
+        ret_jvm.descriptor()
+    };
+    call_desc.push_str(&ret_desc);
+    let signature = format!("{}{}", fr.fn_name, call_desc);
+
+    if fr.bound {
+        // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
+        let mut ctor = CodeBuilder::new(2);
+        ctor.aload(0);
+        ctor.push_int(fr.arity as i32, &mut cw);
+        ctor.aload(1);
+        ctor.ldc_class(owner_class, &mut cw);
+        ctor.push_string(&fr.fn_name, &mut cw);
+        ctor.push_string(&signature, &mut cw);
+        ctor.push_int(fr.flags, &mut cw);
+        let sup = cw.methodref(
+            &c.superclass,
+            "<init>",
+            "(ILjava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+        );
+        ctor.invokespecial(sup, 6, 0);
+        ctor.ret_void();
+        ctor.ensure_locals(2);
+        ctor.link();
+        cw.add_method(0x0000, "<init>", "(Ljava/lang/Object;)V", &ctor);
+    } else {
+        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC|STATIC|FINAL
+                                                      // `<init>()V`: super(arity, owner.class, name, sig, flags).
+        let mut ctor = CodeBuilder::new(1);
+        ctor.aload(0);
+        ctor.push_int(fr.arity as i32, &mut cw);
+        ctor.ldc_class(owner_class, &mut cw);
+        ctor.push_string(&fr.fn_name, &mut cw);
+        ctor.push_string(&signature, &mut cw);
+        ctor.push_int(fr.flags, &mut cw);
+        let sup = cw.methodref(
+            &c.superclass,
+            "<init>",
+            "(ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+        );
+        ctor.invokespecial(sup, 5, 0);
+        ctor.ret_void();
+        ctor.ensure_locals(1);
+        ctor.link();
+        cw.add_method(0x0000, "<init>", "()V", &ctor);
+        // `<clinit>`: INSTANCE = new <self>().
+        let mut clinit = CodeBuilder::new(0);
+        let cls = cw.class_ref(&fq);
+        clinit.new_obj(cls);
+        clinit.dup();
+        let init = cw.methodref(&fq, "<init>", "()V");
+        clinit.invokespecial(init, 0, 0);
+        let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
+        clinit.putstatic(fref, 1);
+        clinit.ret_void();
+        clinit.ensure_locals(0);
+        clinit.link();
+        cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+    }
+
+    // The erased `invoke(Object×arity)Object`.
+    let arity = fr.arity as u16;
+    let mut invoke_desc = String::from("(");
+    for _ in 0..arity {
+        invoke_desc.push_str("Ljava/lang/Object;");
+    }
+    invoke_desc.push_str(")Ljava/lang/Object;");
+    let mut inv = CodeBuilder::new(1 + arity);
+    // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).
+    match fr.dispatch {
+        FrDispatch::VirtualBound => {
+            inv.aload(0);
+            let recv_f = cw.fieldref(&c.superclass, "receiver", "Ljava/lang/Object;");
+            inv.getfield(recv_f, 1);
+            let owner_ref = cw.class_ref(call_owner);
+            inv.checkcast(owner_ref);
+        }
+        FrDispatch::VirtualUnbound => {
+            inv.aload(1);
+            let owner_ref = cw.class_ref(call_owner);
+            inv.checkcast(owner_ref);
+        }
+        FrDispatch::Static => {}
+    };
+    // Push the call arguments (cast/unbox each erased `Object`).
+    let mut call_arg_words = 0i32;
+    for (k, pt) in fr.param_tys.iter().enumerate().skip(first_arg) {
+        inv.aload(1 + k as u16);
+        let jt = ir_ty_to_jvm(pt);
+        if jt.is_primitive() {
+            let wref = cw.class_ref(wrapper_internal(jt));
+            inv.checkcast(wref);
+            unbox_prim(&mut cw, &mut inv, jt);
+        } else if let Some(internal) = checkcast_internal(jt) {
+            let cref = cw.class_ref(&internal);
+            inv.checkcast(cref);
+        }
+        call_arg_words += slot_words(jt) as i32;
+    }
+    // Dispatch to the target.
+    let ret_words = if returns_void {
+        0
+    } else {
+        slot_words(ret_jvm) as i32
+    };
+    match fr.dispatch {
+        FrDispatch::Static => {
+            let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
+            inv.invokestatic(m, call_arg_words, ret_words);
+        }
+        _ if fr.call_interface => {
+            let m = cw.interface_methodref(call_owner, &fr.call_name, &call_desc);
+            inv.invokeinterface(m, call_arg_words, ret_words);
+        }
+        _ => {
+            let m = cw.methodref(call_owner, &fr.call_name, &call_desc);
+            inv.invokevirtual(m, call_arg_words, ret_words);
+        }
+    }
+    // Adapt the result: a `void` target yields the `Unit` singleton; a primitive is boxed.
+    if returns_void {
+        let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        inv.getstatic(unit, 1);
+    } else if ret_jvm.is_primitive() {
+        box_prim_free(&mut cw, &mut inv, ret_jvm);
+    }
+    inv.areturn();
+    inv.ensure_locals(1 + arity);
+    inv.link();
+    cw.add_method(0x0001, "invoke", &invoke_desc, &inv);
     cw.finish()
 }
 
