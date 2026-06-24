@@ -2407,9 +2407,29 @@ impl<'a> Emitter<'a> {
                 let (name, fty) = c.fields[*index as usize].clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
+                let is_lateinit = c.lateinit_fields.contains(index);
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
                 code.getfield(fref, slot_words(jt) as i32);
+                // A `lateinit var` read throws `UninitializedPropertyAccessException` while the field is
+                // still null (kotlinc inserts this at every access): `dup; ifnonnull L; ldc name;
+                // invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`.
+                if is_lateinit {
+                    code.dup();
+                    let lbl = code.new_label();
+                    code.ifnonnull(lbl);
+                    code.push_string(&name, self.cw);
+                    let m = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "throwUninitializedPropertyAccessException",
+                        "(Ljava/lang/String;)V",
+                    );
+                    code.invokestatic(m, 1, 0);
+                    // At the join the field value (non-null on the taken path) is on the stack.
+                    let st = self.verif_stack(jt);
+                    self.frame(lbl, st, code);
+                    code.bind(lbl);
+                }
             }
             IrExpr::GetStatic(i) => {
                 let s = &self.ir.statics[*i as usize];

@@ -270,6 +270,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .chain(body_fields)
                 .chain(delegate_fields.iter().cloned())
                 .collect();
+            // Field indices backing a `lateinit var` (matched by name in the final `fields`, so any
+            // `this$0` offset is handled). The backend null-checks every read of these fields.
+            let lateinit_names: std::collections::HashSet<&str> = c
+                .body_props
+                .iter()
+                .filter(|p| p.is_lateinit)
+                .map(|p| p.name.as_str())
+                .collect();
+            let lateinit_fields: Vec<u32> = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, (n, _))| lateinit_names.contains(n.as_str()))
+                .map(|(i, _)| i as u32)
+                .collect();
             // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
             // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
             // backing-field body props). Neutral metadata for the value-class pass's bound resolution.
@@ -422,6 +436,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .chain(delegate_fields.iter().map(|_| true))
                     .collect(),
                 field_private: vec![], // user backing fields are all private (default)
+                lateinit_fields,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
             });
@@ -613,6 +628,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].1.clone();
                     let gname = getter_name(pname);
                     if !methods.contains_key(&gname) {
+                        // A plain field read; if the field is `lateinit` the backend's `GetField`
+                        // emission inserts the uninitialized null-check throw (so does every other read).
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(0));
                         let gf = lo.ir.add_expr(IrExpr::GetField {
                             receiver: this_e,
@@ -732,6 +749,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     companion_class: None,
                     field_final: vec![],
                     field_private: vec![],
+                    lateinit_fields: Vec::new(),
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
                 });
@@ -1881,6 +1899,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             companion_class: None,
                             field_final: vec![],
                             field_private: vec![],
+                            lateinit_fields: Vec::new(),
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                         });
@@ -2099,7 +2118,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -2240,6 +2259,20 @@ fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
     !p.is_var
         && p.receiver.is_none()
         && !p.is_lateinit
+        && p.init.is_none()
+        && p.getter.is_none()
+        && p.setter.is_none()
+        && !p.is_abstract
+        && p.ty.is_some()
+}
+
+/// A `lateinit var x: T` — a mutable backing-field property with no initializer (the field defaults to
+/// `null`); the synthesized getter throws `UninitializedPropertyAccessException` when the field is still
+/// `null`. The declared type is non-null but the JVM field is a plain (nullable-at-runtime) reference.
+fn is_lateinit_prop(p: &ast::PropDecl) -> bool {
+    p.is_lateinit
+        && p.is_var
+        && p.receiver.is_none()
         && p.init.is_none()
         && p.getter.is_none()
         && p.setter.is_none()
@@ -3427,6 +3460,7 @@ impl<'a> Lower<'a> {
                 .map(|i| i < (n_cap + arity as u32) as usize)
                 .collect(),
             field_private: vec![false; n_fields],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         };
@@ -4878,6 +4912,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             field_final: vec![],
             field_private: vec![],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
@@ -5146,6 +5181,7 @@ impl<'a> Lower<'a> {
             companion_class: None,
             field_final: vec![],
             field_private: vec![],
+            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });

@@ -469,6 +469,10 @@ pub struct IrClass {
     /// parameters (stored directly from args, in order); any after them are class-body properties
     /// initialized by `init_body`.
     pub fields: Vec<(String, IrType)>,
+    /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
+    /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
+    /// matching kotlinc, which inserts the check at each access site (not only the property getter).
+    pub lateinit_fields: Vec<u32>,
     /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
