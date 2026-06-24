@@ -1949,11 +1949,34 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // enum's field/`this` scope (so a read of a constructor `val` becomes a getfield on
                     // the enum). The entry is then constructed as `new Enum$ENTRY(...)`.
                     for (ei, body) in c.enum_entry_bodies.iter().enumerate() {
-                        if body.is_empty() {
+                        let eprops = c.enum_entry_props.get(ei).cloned().unwrap_or_default();
+                        if body.is_empty() && eprops.is_empty() {
                             continue;
                         }
                         let entry_name = &c.enum_entries[ei];
                         let sub_fq = format!("{internal}${entry_name}");
+                        // Entry-body PROPERTIES become backing fields (+ getters + ctor init) on the
+                        // subclass. Only a plainly-initialized `val`/`var` is modeled; a getter/setter/
+                        // delegate/lateinit prop bails (skip, never miscompile).
+                        let mut prop_fields: Vec<(String, Ty)> = Vec::new();
+                        for p in &eprops {
+                            if p.init.is_none()
+                                || p.getter.is_some()
+                                || p.setter.is_some()
+                                || p.delegate.is_some()
+                                || p.is_lateinit
+                            {
+                                return None;
+                            }
+                            let ty = match &p.ty {
+                                Some(r) => ty_of(lo.afile, r),
+                                None => lo.info.ty(p.init.unwrap()),
+                            };
+                            if ty == Ty::Error {
+                                return None;
+                            }
+                            prop_fields.push((p.name.clone(), ty));
+                        }
                         let sub_id = lo.ir.add_class(IrClass {
                             serial_names: Vec::new(),
                             custom_serializer: None,
@@ -1962,7 +1985,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             type_param_bounds: vec![],
                             field_type_params: vec![],
                             supertypes: vec![],
-                            fields: vec![],
+                            fields: prop_fields
+                                .iter()
+                                .map(|(n, t)| (n.clone(), ty_to_ir(*t)))
+                                .collect(),
                             ctor_param_count: 0,
                             ctor_args: vec![],
                             init_body: None,
@@ -1981,12 +2007,59 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ctor_param_checks: vec![],
                             is_companion: false,
                             companion_class: None,
-                            field_final: vec![],
+                            field_final: eprops.iter().map(|p| !p.is_var).collect(),
                             field_private: vec![],
                             lateinit_fields: Vec::new(),
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                         });
+                        // Register the subclass so an override body resolves a prop as `this.<field>` and
+                        // getter synthesis can attach. Methods are filled in below.
+                        lo.classes.insert(
+                            sub_fq.clone(),
+                            ClassInfo {
+                                id: sub_id,
+                                internal: sub_fq.clone(),
+                                fields: prop_fields.clone(),
+                                methods: HashMap::new(),
+                                super_internal: Some(internal.clone()),
+                            },
+                        );
+                        // A body that reads a prop resolves it as a subclass field → `cur_class` must be
+                        // the subclass; a property-less entry keeps the enum scope (unchanged behavior).
+                        // (When the subclass scope is used, a bare read of an INHERITED enum constructor
+                        // property routes through its `getX()` getter; a shape that resolution can't
+                        // reach cleanly skips the file — never a miscompile.)
+                        let body_cur = if prop_fields.is_empty() {
+                            internal.clone()
+                        } else {
+                            sub_fq.clone()
+                        };
+                        // Subclass ctor init: `this.<prop> = <init>` for each property (run after super()).
+                        if !prop_fields.is_empty() {
+                            lo.scope.clear();
+                            lo.next_value = 0;
+                            lo.cur_class = Some(sub_fq.clone());
+                            lo.cur_fn_name = "<init>".to_string();
+                            lo.lambda_seq = 0;
+                            let this_v = lo.fresh_value();
+                            lo.scope
+                                .push(("this".to_string(), this_v, Ty::obj(&sub_fq)));
+                            let mut stmts = Vec::new();
+                            for (fi, (_, fty)) in prop_fields.iter().enumerate() {
+                                let init = eprops[fi].init.unwrap();
+                                let val = lo.lower_arg(init, &ty_to_ir(*fty))?;
+                                let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                                stmts.push(lo.ir.add_expr(IrExpr::SetField {
+                                    receiver: recv,
+                                    class: sub_id,
+                                    index: fi as u32,
+                                    value: val,
+                                }));
+                            }
+                            let blk = lo.ir.add_expr(IrExpr::Block { stmts, value: None });
+                            lo.ir.classes[sub_id as usize].init_body = Some(blk);
+                        }
                         let mut mfids = Vec::new();
                         for bm in body {
                             // The override conforms to the abstract member it overrides — use that
@@ -2005,12 +2078,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             });
                             lo.scope.clear();
                             lo.next_value = 0;
-                            lo.cur_class = Some(internal.clone());
+                            lo.cur_class = Some(body_cur.clone());
                             lo.cur_fn_name = bm.name.clone();
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
-                                .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                                .push(("this".to_string(), this_v, Ty::obj(&body_cur)));
                             for (p, t) in bm.params.iter().zip(&sig.params) {
                                 let v = lo.fresh_value();
                                 lo.scope.push((p.name.clone(), v, *t));
@@ -2020,6 +2093,26 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             mfids.push(fid);
                         }
                         lo.ir.classes[sub_id as usize].methods = mfids;
+                        // Property getters (`getX()` → `return this.<field>`), kotlinc emits them on the
+                        // subclass. Appended after the overrides (add_synth_method pushes onto methods).
+                        for (fi, (pname, pty)) in prop_fields.iter().enumerate() {
+                            let getter = getter_name(pname);
+                            let get = lo.this_field(sub_id, fi as u32);
+                            let ret = lo.ir.add_expr(IrExpr::Return(Some(get)));
+                            let gbody = lo.ir.add_expr(IrExpr::Block {
+                                stmts: vec![ret],
+                                value: None,
+                            });
+                            lo.add_synth_method(
+                                &sub_fq,
+                                sub_id,
+                                &getter,
+                                vec![],
+                                *pty,
+                                gbody,
+                                true,
+                            );
+                        }
                         lo.ir.classes[class_id as usize].enum_entry_subclass[ei] = Some(sub_fq);
                     }
                 }
