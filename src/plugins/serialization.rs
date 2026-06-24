@@ -401,6 +401,16 @@ impl IrPlugin for SerializationPlugin {
             );
 
             let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            // `@SerialName("x")` overrides a property's descriptor element name (and thus its JSON key).
+            let serial_names: Vec<(String, String)> =
+                ir.classes[class_id as usize].serial_names.clone();
+            let element_name = |prop: &str| -> String {
+                serial_names
+                    .iter()
+                    .find(|(p, _)| p == prop)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| prop.to_string())
+            };
 
             let mut ser = synthetic_class(&ser_fq);
             ser.is_object = true; // `$serializer` is a singleton object (INSTANCE)
@@ -474,7 +484,7 @@ impl IrPlugin for SerializationPlugin {
             let mut init_stmts = vec![dvar];
             for (pname, _) in &foo_fields {
                 let d = ir.add_expr(IrExpr::GetValue(1));
-                let nm = ir.add_expr(IrExpr::Const(IrConst::String(pname.clone())));
+                let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name(pname))));
                 let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
                 init_stmts.push(ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {

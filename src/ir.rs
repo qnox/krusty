@@ -478,6 +478,10 @@ pub struct IrClass {
     /// parameters (stored directly from args, in order); any after them are class-body properties
     /// initialized by `init_body`.
     pub fields: Vec<(String, IrType)>,
+    /// Per-property serial-name overrides from `@SerialName("x")` on a constructor property, as
+    /// `(property_name, serial_name)`. Empty for a class with no such annotation. Consumed by the
+    /// serialization extension to name descriptor elements; ignored by the core backend.
+    pub serial_names: Vec<(String, String)>,
     /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
     /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
     /// matching kotlinc, which inserts the check at each access site (not only the property getter).

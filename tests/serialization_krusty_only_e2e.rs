@@ -145,6 +145,41 @@ fun box(): String {
 }
 
 #[test]
+fn serial_name_overrides_json_key_entirely_in_krusty() {
+    // `@SerialName("…")` on a constructor property renames its descriptor element (and thus its JSON
+    // key) — including a const-folded value (`@SerialName("$prefix.bar")` with `const val prefix`).
+    // Mirrors the kotlinc `constValInSerialName` boxIr conformance case (KT-54994). Round-trips and
+    // checks data-class equality, all in krusty.
+    let src = r#"import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+const val prefix = "foo"
+
+@Serializable
+data class Bar(@SerialName("$prefix.bar") val bar: String)
+
+fun box(): String {
+    val expected = Bar("hello")
+    val json = Json.encodeToString(Bar.serializer(), expected)
+    if (json != "{\"foo.bar\":\"hello\"}") return "Fail-encode: $json"
+    val actual = Json.decodeFromString(Bar.serializer(), json)
+    if (expected != actual) return "Fail-decode: $actual"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerName") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "@SerialName round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty @SerialName round-trip OK");
+}
+
+#[test]
 fn serializable_class_encodes_to_json_entirely_in_krusty() {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping: no kotlin-stdlib jar located");

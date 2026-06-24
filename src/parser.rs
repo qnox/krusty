@@ -28,6 +28,7 @@ pub fn parse_with_features(
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
         pending_annotations: Vec::new(),
+        pending_annotation_args: Vec::new(),
     };
     p.parse_file();
     hoist_local_classes(&mut p.file);
@@ -115,6 +116,10 @@ struct Parser<'a> {
     /// to the declaration that follows (e.g. `@Serializable` → `["Serializable"]`). A `parse_X` reads
     /// it via `take_pending_annotations()` *before* parsing members (member prefixes overwrite it).
     pending_annotations: Vec<String>,
+    /// The argument expressions of each pending annotation (parallel to `pending_annotations`). Only the
+    /// direct, ordinary-expression args are kept (array/nested-annotation args record an empty vec), which
+    /// is all an extension reading a value annotation (`@SerialName("x")`) needs.
+    pending_annotation_args: Vec<Vec<ExprId>>,
 }
 
 impl<'a> Parser<'a> {
@@ -385,11 +390,14 @@ impl<'a> Parser<'a> {
     fn skip_decl_prefix(&mut self) -> Vec<String> {
         let mut mods = Vec::new();
         self.pending_annotations.clear();
+        self.pending_annotation_args.clear();
         loop {
             self.skip_newlines();
             if self.at(TokenKind::At) {
-                if let Some(name) = self.skip_annotation() {
+                let (name, args) = self.skip_annotation();
+                if let Some(name) = name {
                     self.pending_annotations.push(name);
+                    self.pending_annotation_args.push(args);
                 }
             } else if self.at(TokenKind::Ident) && is_modifier(self.text()) {
                 mods.push(self.text().to_string());
@@ -405,6 +413,12 @@ impl<'a> Parser<'a> {
     /// `parse_class`/`parse_enum`/… call this FIRST so member-prefix parsing doesn't clobber them.
     fn take_pending_annotations(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_annotations)
+    }
+
+    /// Take the per-annotation argument expressions captured by the preceding `skip_decl_prefix`
+    /// (parallel to [`take_pending_annotations`]), clearing the buffer.
+    fn take_pending_annotation_args(&mut self) -> Vec<Vec<ExprId>> {
+        std::mem::take(&mut self.pending_annotation_args)
     }
 
     /// Parse a nested type declaration (`class`/`object`/`interface`/`data|enum|annotation class`/
@@ -477,7 +491,7 @@ impl<'a> Parser<'a> {
     /// Consume one `@Foo(...)` annotation; returns its **simple name** (last path segment) so a plugin
     /// can match it (`@kotlinx.serialization.Serializable` → `"Serializable"`). `None` for a use-site
     /// `@file:`/`@get:`… target annotation, which doesn't apply to the declaration.
-    fn skip_annotation(&mut self) -> Option<String> {
+    fn skip_annotation(&mut self) -> (Option<String>, Vec<ExprId>) {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
         let mut use_site = false;
@@ -493,19 +507,24 @@ impl<'a> Parser<'a> {
         }
         let qname = self.parse_qualified_name();
         self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
-        self.parse_annotation_args();
+        let args = self.parse_annotation_args();
         if use_site || qname.is_empty() {
-            None
+            (None, args)
         } else {
-            Some(qname.rsplit('.').next().unwrap_or(&qname).to_string())
+            (
+                Some(qname.rsplit('.').next().unwrap_or(&qname).to_string()),
+                args,
+            )
         }
     }
 
-    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar.
-    /// Annotations carry no codegen meaning, so the parsed values are discarded.
-    fn parse_annotation_args(&mut self) {
+    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar, returning
+    /// the ordinary-expression arguments (array/nested-annotation values contribute nothing). The exprs
+    /// are real AST nodes so an extension can const-fold a value (`@SerialName("$prefix.bar")`).
+    fn parse_annotation_args(&mut self) -> Vec<ExprId> {
+        let mut out = Vec::new();
         if !self.eat(TokenKind::LParen) {
-            return;
+            return out;
         }
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
@@ -519,7 +538,9 @@ impl<'a> Parser<'a> {
                 self.bump(); // name
                 self.bump(); // '='
             }
-            self.parse_annotation_value();
+            if let Some(e) = self.parse_annotation_value() {
+                out.push(e);
+            }
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -527,11 +548,13 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
+        out
     }
 
     /// A single annotation argument value: an array literal `[…]`, a nested annotation `@Foo(…)`,
-    /// or an ordinary expression (incl. `Foo::class`).
-    fn parse_annotation_value(&mut self) {
+    /// or an ordinary expression (incl. `Foo::class`). Returns the expr for the ordinary case (kept for
+    /// const-folding by extensions); array/nested values return `None`.
+    fn parse_annotation_value(&mut self) -> Option<ExprId> {
         if self.at(TokenKind::LBracket) {
             self.bump(); // '['
             self.skip_newlines();
@@ -544,10 +567,12 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
             }
             self.expect(TokenKind::RBracket, "']'");
+            None
         } else if self.at(TokenKind::At) {
             self.skip_annotation();
+            None
         } else {
-            let _ = self.parse_expr();
+            Some(self.parse_expr())
         }
     }
 
@@ -826,6 +851,8 @@ impl<'a> Parser<'a> {
                     is_var,
                     is_property,
                     default: None,
+                    annotations: Vec::new(),
+                    annotation_args: Vec::new(),
                 });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
@@ -1199,12 +1226,14 @@ impl<'a> Parser<'a> {
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             let mut pmods = Vec::new();
             let mut pannos = Vec::new();
+            let mut pannos_args = Vec::new();
             // `value` is a valid parameter name in Kotlin; only collect real parameter modifiers.
             if self.at(TokenKind::At)
                 || (self.at(TokenKind::Ident) && is_modifier(self.text()) && self.text() != "value")
             {
                 pmods = self.skip_decl_prefix(); // `@Anno`, `vararg`, `noinline`, … on a parameter
                 pannos = self.take_pending_annotations();
+                pannos_args = self.take_pending_annotation_args();
             }
             let is_vararg = pmods.iter().any(|m| m == "vararg");
             let pname = if self.at(TokenKind::Ident) {
@@ -1229,6 +1258,7 @@ impl<'a> Parser<'a> {
                 is_vararg,
                 default,
                 annotations: pannos,
+                annotation_args: pannos_args,
             });
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
@@ -1304,12 +1334,16 @@ impl<'a> Parser<'a> {
         if has_primary_ctor_parens {
             self.skip_newlines();
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                let mut pannos = Vec::new();
+                let mut pannos_args = Vec::new();
                 if self.at(TokenKind::At)
                     || (self.at(TokenKind::Ident)
                         && is_modifier(self.text())
                         && self.text() != "value")
                 {
                     self.skip_decl_prefix(); // `private val x`, `@Anno val y`, ...
+                    pannos = self.take_pending_annotations();
+                    pannos_args = self.take_pending_annotation_args();
                 }
                 let (is_property, is_var) = match self.kind() {
                     TokenKind::KwVal => {
@@ -1337,6 +1371,8 @@ impl<'a> Parser<'a> {
                     is_var,
                     is_property,
                     default,
+                    annotations: pannos,
+                    annotation_args: pannos_args,
                 });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {

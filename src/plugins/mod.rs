@@ -195,6 +195,7 @@ impl PluginHost {
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
     crate::ir::IrClass {
         fq_name: fq_name.into(),
+        serial_names: Vec::new(),
         is_value: false,
         type_param_bounds: Vec::new(),
         field_type_params: Vec::new(),
