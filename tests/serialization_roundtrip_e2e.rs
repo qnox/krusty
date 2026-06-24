@@ -117,7 +117,8 @@ fn serializable_class_encode_round_trips() {
                    @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)\n\
                    @Serializable class Wide(val big: Long, val d: Double, val tag: String)\n\
                    @Serializable class Inner(val v: Int)\n\
-                   @Serializable class Outer(val inner: Inner, val label: String)";
+                   @Serializable class Outer(val inner: Inner, val label: String)\n\
+                   @Serializable class Nul(val a: Int, val b: String?)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -177,6 +178,16 @@ fun box(): String {
     if (oj != "{\"inner\":{\"v\":5},\"label\":\"n\"}") return "OUTER ENC FAIL: $oj"
     val ob = Json.decodeFromString(os, oj)
     if (ob.inner.v != 5 || ob.label != "n") return "OUTER DEC FAIL: ${ob.inner.v},${ob.label}"
+    // Nullable element (String?): present and null, both via encode/decodeNullableSerializableElement.
+    val ns = Nul.serializer() as KSerializer<Nul>
+    val nj = Json.encodeToString(ns, Nul(1, "x"))
+    if (nj != "{\"a\":1,\"b\":\"x\"}") return "NUL ENC FAIL: $nj"
+    val nb = Json.decodeFromString(ns, nj)
+    if (nb.a != 1 || nb.b != "x") return "NUL DEC FAIL: ${nb.a},${nb.b}"
+    val nj2 = Json.encodeToString(ns, Nul(2, null))
+    if (nj2 != "{\"a\":2,\"b\":null}") return "NUL NULL ENC FAIL: $nj2"
+    val nb2 = Json.decodeFromString(ns, nj2)
+    if (nb2.a != 2 || nb2.b != null) return "NUL NULL DEC FAIL: ${nb2.a},${nb2.b}"
     return "OK"
 }
 fun main() { println(box()) }

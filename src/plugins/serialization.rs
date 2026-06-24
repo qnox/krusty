@@ -263,21 +263,26 @@ fn kserializer_of(arg: IrType) -> IrType {
     }
 }
 
-/// The element-serializer FqName for a field type — the runtime serializer for each property. Kept
-/// for the future `childSerializers`/decode path (the encode round-trip drives the encoder directly
-/// and doesn't consult it yet).
-#[allow(dead_code)]
-fn element_serializer_fq(field_ty: &IrType) -> String {
-    let fq = match field_ty {
+fn is_nullable(ty: &IrType) -> bool {
+    matches!(ty, IrType::Class { nullable: true, .. })
+}
+
+/// The internal name of the kotlinx builtin `KSerializer` singleton (`…INSTANCE`) for a directly
+/// serializable element type — used as the element serializer for a NULLABLE property, which goes
+/// through `encode/decodeNullableSerializableElement` (there is no `encodeNullable<Prim>Element`).
+///
+/// Restricted to reference types whose getter already returns a reference (`String` → `Ljava/lang/
+/// String;`), so no autoboxing is required at the call site. Nullable PRIMITIVES (`Int?` etc.) need
+/// the property's getter/field to be the boxed type end-to-end; that boxing is a separate follow-up,
+/// so they return `None` here and the caller emits a clean no-op rather than wrong bytecode.
+fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
+    let fq = match ty {
         IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => "kotlin/Any",
+        _ => return None,
     };
     match fq {
-        "kotlin/Int" => "kotlinx/serialization/builtins/IntSerializer".to_string(),
-        "kotlin/Long" => "kotlinx/serialization/builtins/LongSerializer".to_string(),
-        "kotlin/Boolean" => "kotlinx/serialization/builtins/BooleanSerializer".to_string(),
-        "kotlin/String" => "kotlinx/serialization/builtins/StringSerializer".to_string(),
-        other => serializer_fq(other), // a nested @Serializable type uses its own $serializer
+        "kotlin/String" => Some("kotlinx/serialization/internal/StringSerializer"),
+        _ => None,
     }
 }
 
@@ -616,6 +621,30 @@ impl IrPlugin for SerializationPlugin {
                                     dispatch_receiver: Some(c),
                                     args: vec![d, idx, inst, v],
                                 }));
+                            } else if is_nullable(ty) {
+                                // Nullable element: encodeNullableSerializableElement(desc, i,
+                                // <Elem>Serializer.INSTANCE, value.getX()) — the encoder writes JSON
+                                // null when the value is null. Only reference elements (no boxing) for
+                                // now; nullable primitives bail to a clean no-op.
+                                if let Some(ser) = builtin_element_serializer(ty) {
+                                    let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
+                                        owner: ser.to_string(),
+                                        ty: ser.to_string(),
+                                        field: "INSTANCE",
+                                    });
+                                    stmts.push(ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeEncoder",
+                                            "encodeNullableSerializableElement",
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                        ),
+                                        dispatch_receiver: Some(c),
+                                        args: vec![d, idx, inst, v],
+                                    }));
+                                } else {
+                                    bail = true;
+                                    break;
+                                }
                             } else if let Some((mname, mdesc)) = encode_element_method(ty) {
                                 stmts.push(ir.add_expr(IrExpr::Call {
                                     callee: virtual_iface(
@@ -669,7 +698,13 @@ impl IrPlugin for SerializationPlugin {
                         // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
                         let decodable = fields.iter().enumerate().all(|(i, (_, t))| {
-                            decode_element_method(t).is_some() || nested[i].is_some()
+                            if nested[i].is_some() {
+                                return true;
+                            }
+                            if is_nullable(t) {
+                                return builtin_element_serializer(t).is_some();
+                            }
+                            decode_element_method(t).is_some()
                         });
                         // Field-local slot for each property — `this`=0, decoder=1, c=2, i=3, then the
                         // field locals from slot 4, advancing by each type's JVM width (Long/Double=2).
@@ -714,9 +749,14 @@ impl IrPlugin for SerializationPlugin {
                                 ty: class_ty("kotlin/Int"),
                                 init: Some(izero),
                             }));
-                            // field locals (4 + k), defaulted
+                            // field locals (4 + k), defaulted (nullable refs start as null)
                             for (k, (_, ty)) in fields.iter().enumerate() {
-                                let init = ir.add_expr(IrExpr::Const(default_const(ty)));
+                                let dc = if is_nullable(ty) {
+                                    IrConst::Null
+                                } else {
+                                    default_const(ty)
+                                };
+                                let init = ir.add_expr(IrExpr::Const(dc));
                                 stmts.push(ir.add_expr(IrExpr::Variable {
                                     index: slots[k],
                                     ty: ty.clone(),
@@ -779,6 +819,30 @@ impl IrPlugin for SerializationPlugin {
                                         callee: virtual_iface(
                                             "kotlinx/serialization/encoding/CompositeDecoder",
                                             "decodeSerializableElement",
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc, inst, prev],
+                                    });
+                                    ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::Cast,
+                                        arg: raw,
+                                        type_operand: ty.clone(),
+                                    })
+                                } else if is_nullable(ty) {
+                                    // f_k = (T) c.decodeNullableSerializableElement(desc, k,
+                                    // <Elem>Serializer.INSTANCE, null) — yields the element or null.
+                                    let ser = builtin_element_serializer(ty).unwrap();
+                                    let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
+                                        owner: ser.to_string(),
+                                        ty: ser.to_string(),
+                                        field: "INSTANCE",
+                                    });
+                                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let raw = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            "decodeNullableSerializableElement",
                                             "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
                                         ),
                                         dispatch_receiver: Some(cdk),
@@ -921,6 +985,47 @@ mod tests {
             .iter()
             .find(|c| c.fq_name == fq)
             .unwrap_or_else(|| panic!("class {fq} not found"))
+    }
+
+    fn calls_method(ir: &IrFile, name: &str) -> bool {
+        ir.exprs.iter().any(|e| {
+            matches!(e, IrExpr::Call { callee: Callee::Virtual { name: n, .. }, .. } if n == name)
+        })
+    }
+
+    fn refs_external_static(ir: &IrFile, owner: &str) -> bool {
+        ir.exprs
+            .iter()
+            .any(|e| matches!(e, IrExpr::ExternalStaticInstance { owner: o, .. } if o == owner))
+    }
+
+    #[test]
+    fn nullable_string_field_routes_through_nullable_serializable_calls() {
+        // `@Serializable class N(val a: Int, val b: String?)` — the nullable element must go through
+        // encode/decodeNullableSerializableElement with the builtin StringSerializer singleton, not
+        // the plain encode/decodeStringElement path (which can't represent null).
+        let (mut ir, ctx, id) = serializable_class("N", &["kotlin/Int", "kotlin/String"]);
+        if let IrType::Class { nullable, .. } = &mut ir.classes[id as usize].fields[1].1 {
+            *nullable = true;
+        }
+        run(&mut ir, &ctx);
+        assert!(
+            calls_method(&ir, "encodeNullableSerializableElement"),
+            "serialize must use encodeNullableSerializableElement for String?"
+        );
+        assert!(
+            calls_method(&ir, "decodeNullableSerializableElement"),
+            "deserialize must use decodeNullableSerializableElement for String?"
+        );
+        assert!(
+            refs_external_static(&ir, "kotlinx/serialization/internal/StringSerializer"),
+            "must getstatic StringSerializer.INSTANCE as the element serializer"
+        );
+        // The non-null Int element still uses the direct primitive path.
+        assert!(
+            calls_method(&ir, "encodeIntElement") && calls_method(&ir, "decodeIntElement"),
+            "non-null Int still uses encode/decodeIntElement"
+        );
     }
 
     #[test]

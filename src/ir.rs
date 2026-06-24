@@ -311,6 +311,15 @@ pub enum IrExpr {
         ctor_desc: String,
         args: Vec<ExprId>,
     },
+    /// Read a static field holding a singleton on a class defined OUTSIDE this compilation (a classpath
+    /// class with no `IrClass`): `getstatic <owner>.<field>:L<ty>;`. Like `StaticInstance` but the owner
+    /// and field type are given by internal name directly (e.g. a kotlinx builtin serializer's
+    /// `kotlinx/serialization/internal/StringSerializer.INSTANCE`), not resolved through `ir.classes`.
+    ExternalStaticInstance {
+        owner: String,
+        ty: String,
+        field: &'static str,
+    },
     /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
     /// invokespecial internal.<init>(params)V`. Like `NewExternal` but carries the ctor parameter types
     /// as `IrType`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
