@@ -143,8 +143,10 @@ pub struct SymbolTable {
     pub funs: HashMap<String, Vec<Signature>>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
-    /// Top-level properties (name → type, is_var), backed by static fields on the file facade.
-    pub props: HashMap<String, (Ty, bool)>,
+    /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
+    /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
+    /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
+    pub props: HashMap<String, (Ty, bool, bool)>,
     /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
     pub computed_props: std::collections::HashSet<String>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
@@ -174,7 +176,7 @@ pub struct SymbolTable {
     /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
     /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
     /// single-file callers; a property in the file being lowered is resolved locally (its static) first.
-    pub prop_facades: HashMap<String, (String, Ty, bool)>,
+    pub prop_facades: HashMap<String, (String, Ty, bool, bool)>,
 }
 
 impl Default for SymbolTable {
@@ -1435,7 +1437,7 @@ pub fn collect_signatures_with_cp(
                                 .map(|i| {
                                     // `val a = other` referencing an already-collected top-level property.
                                     if let Expr::Name(n) = file.expr(i) {
-                                        if let Some((t, _)) = table.props.get(n) {
+                                        if let Some((t, _, _)) = table.props.get(n) {
                                             return *t;
                                         }
                                     }
@@ -1450,7 +1452,9 @@ pub fn collect_signatures_with_cp(
                     if is_computed {
                         table.computed_props.insert(p.name.clone());
                     }
-                    table.props.insert(p.name.clone(), (ty, p.is_var));
+                    table
+                        .props
+                        .insert(p.name.clone(), (ty, p.is_var, p.is_const));
                 }
             }
         }
@@ -3120,11 +3124,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 }
                 if let Some(init) = p.init {
                     let it = c.expr(init);
-                    if let Some((declared, _)) = syms
+                    if let Some((declared, _, _)) = syms
                         .props
                         .get(&p.name)
                         .copied()
-                        .filter(|(t, _)| *t != Ty::Error)
+                        .filter(|(t, _, _)| *t != Ty::Error)
                     {
                         if p.ty.is_some() {
                             c.expect_assignable(declared, it, c.span(init), "property initializer");
@@ -4504,7 +4508,7 @@ impl<'a> Checker<'a> {
                     match self
                         .lookup(&name)
                         .map(|l| (l.ty, l.is_var))
-                        .or_else(|| self.syms.props.get(&name).copied())
+                        .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
                     {
                         Some((_, is_var)) => {
                             if !is_var {
@@ -4723,7 +4727,7 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::obj(&cls.internal));
                         }
                     }
-                    if let Some(&(ty, _)) = self.syms.props.get(&n) {
+                    if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                         ty // top-level property
                     } else if n == "Unit" {
                         // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
@@ -7816,7 +7820,7 @@ impl<'a> Checker<'a> {
                     .lookup(&name)
                     .map(|l| (l.ty, l.is_var))
                     .or_else(inherited)
-                    .or_else(|| self.syms.props.get(&name).copied());
+                    .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)));
                 match found {
                     Some((ty, is_var)) => {
                         if !is_var {
@@ -7885,7 +7889,9 @@ impl<'a> Checker<'a> {
                             } else {
                                 None
                             };
-                            match inherited.or_else(|| self.syms.props.get(&name).copied()) {
+                            match inherited
+                                .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
+                            {
                                 Some((lty, is_var)) => {
                                     if !is_var {
                                         self.diags
