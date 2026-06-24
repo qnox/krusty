@@ -469,8 +469,11 @@ pub struct ClassDecl {
     pub enum_entry_args: Vec<Vec<ExprId>>,
     /// Per-entry class body (`ENTRY { override fun m() = … }`) — the overriding methods of the
     /// anonymous subclass kotlinc emits as `Enum$ENTRY`. Parallel to `enum_entries`; an empty `Vec`
-    /// means the entry has no body. Only method overrides are captured (property overrides bail).
+    /// means the entry has no body.
     pub enum_entry_bodies: Vec<Vec<FunDecl>>,
+    /// Per-entry class-body PROPERTIES (`ENTRY { val y = … ; override fun m() = y }`) — backing fields +
+    /// getters on the `Enum$ENTRY` subclass. Parallel to `enum_entries`; empty `Vec` for none.
+    pub enum_entry_props: Vec<Vec<PropDecl>>,
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
     /// convertible to it.
     pub is_fun_interface: bool,

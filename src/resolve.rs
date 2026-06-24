@@ -2927,13 +2927,38 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 for m in &cl.methods {
                     c.check_method(m, &props);
                 }
-                // Enum entry bodies (`ENTRY { override fun m() = … }`): each override is checked like
-                // a method of the enum — `this` is the enum type, its properties are in scope (so an
-                // override can read a constructor `val`), and the return type comes from the abstract
-                // member it overrides.
-                for body in &cl.enum_entry_bodies {
+                // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
+                // checked like a method of the enum — `this` is the enum type, the enum's properties AND
+                // the entry's own body properties are in scope, and the return type comes from the
+                // abstract member it overrides.
+                for (ei, body) in cl.enum_entry_bodies.iter().enumerate() {
+                    // Type each entry-body property's initializer, then make it visible (as a member) to
+                    // that entry's override methods.
+                    let mut entry_props = props.clone();
+                    if let Some(bprops) = cl.enum_entry_props.get(ei) {
+                        c.push_scope();
+                        for (n, t, v) in &props {
+                            c.declare(n, *t, *v);
+                        }
+                        for bp in bprops {
+                            let ty = match (&bp.ty, bp.init) {
+                                (Some(r), _) => c.resolve_ty(r),
+                                (None, Some(init)) => c.expr(init),
+                                _ => Ty::Error,
+                            };
+                            if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
+                                let declared = c.resolve_ty(r);
+                                let it = c.expr(init);
+                                let sp = c.span(init);
+                                c.expect_assignable(declared, it, sp, "property initializer");
+                            }
+                            c.declare(&bp.name, ty, bp.is_var);
+                            entry_props.push((bp.name.clone(), ty, bp.is_var));
+                        }
+                        c.pop_scope();
+                    }
                     for bm in body {
-                        c.check_method(bm, &props);
+                        c.check_method(bm, &entry_props);
                     }
                 }
                 // Secondary constructors: their parameters + the class properties are in scope; the

@@ -1221,6 +1221,7 @@ impl<'a> Parser<'a> {
         let mut entries = Vec::new();
         let mut entry_args: Vec<Vec<ExprId>> = Vec::new();
         let mut entry_bodies: Vec<Vec<FunDecl>> = Vec::new();
+        let mut entry_props: Vec<Vec<PropDecl>> = Vec::new();
         let mut methods = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
@@ -1243,8 +1244,9 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RParen, "')'");
                 }
                 // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
-                // Capture its method overrides; any non-method member bails (file skips cleanly).
+                // Capture its method overrides and `val`/`var` properties; anything else bails cleanly.
                 let mut body = Vec::new();
+                let mut bprops = Vec::new();
                 if self.eat(TokenKind::LBrace) {
                     self.skip_newlines();
                     while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
@@ -1264,10 +1266,17 @@ impl<'a> Parser<'a> {
                                 bmods.iter().any(|m| m == "suspend"),
                                 bmods.iter().any(|m| m == "tailrec"),
                             ));
+                        } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
+                            bprops.push(
+                                self.parse_top_property(
+                                    bmods.iter().any(|m| m == "lateinit"),
+                                    false,
+                                ),
+                            );
                         } else {
                             self.diags.error(
                                 self.tok().span,
-                                "krusty: only method overrides are supported in an enum entry body",
+                                "krusty: only methods and properties are supported in an enum entry body",
                             );
                             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                                 self.bump();
@@ -1278,6 +1287,7 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RBrace, "'}'");
                 }
                 entry_bodies.push(body);
+                entry_props.push(bprops);
                 entry_args.push(args);
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
@@ -1368,6 +1378,7 @@ impl<'a> Parser<'a> {
             enum_entries: entries,
             enum_entry_args: entry_args,
             enum_entry_bodies: entry_bodies,
+            enum_entry_props: entry_props,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1940,6 +1951,7 @@ impl<'a> Parser<'a> {
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
+            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -2143,6 +2155,7 @@ impl<'a> Parser<'a> {
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
+            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -2267,6 +2280,7 @@ impl<'a> Parser<'a> {
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
+            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -2394,6 +2408,7 @@ impl<'a> Parser<'a> {
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
+            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
