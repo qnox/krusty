@@ -1,29 +1,23 @@
-//! Serialization conformance harness + the concrete blockers (TDD: the `#[ignore]`d test is the
-//! executable specification of the remaining work — it goes green once the gaps below close).
+//! Serialization conformance — diagnostics + the executable spec of the remaining work.
 //!
-//! Goal end-state: krusty compiles a `@Serializable` class (the native serialization plugin
-//! synthesizing its `$serializer`), links the REAL published `kotlinx-serialization-core/-json`
-//! runtime, and a `box()` round-trip returns "OK". This is the kotlinx.serialization conformance
-//! contract (`docs/PLUGIN_API.md`).
+//! STATUS: the **encode** round-trip is GREEN — `tests/serialization_roundtrip_e2e.rs` compiles
+//! `@Serializable Foo` with krusty (plugin emits a functional `$serializer`), a real-`kotlinc` driver
+//! runs `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` against the published runtime, and the
+//! JSON is correct. The serializer currently implements: the descriptor (built in `<init>` via
+//! `PluginGeneratedSerialDescriptor` + `addElement`), `getDescriptor`, and `serialize` (drives the
+//! `CompositeEncoder`). `deserialize` is a default-construct stub and `childSerializers` a null stub
+//! (both honestly scoped — encode-only; neither is consulted on the encode path).
 //!
-//! What works today (verified, on master): the extension surface synthesizes the `$serializer`
-//! structure + `serializer()` + per-field `childSerializers`, activated from real `@Serializable`
-//! source (`tests/plugins_e2e.rs`).
+//! This file holds: the emit diagnostic (`serializer_object_emits_wellformed_bytecode`), the
+//! ctor-null-arg test, and a guard that a HAND-WRITTEN serializer still fails to compile (the
+//! source-path gaps — object self-ref FIXED, ctor-null FIXED; remaining: `Json` companion/reified
+//! resolution + `run{}`), plus an `#[ignore]`d *pure-krusty* round-trip spec that needs those
+//! source-path gaps closed. The real working round-trip is the split-compilation one in
+//! `serialization_roundtrip_e2e`.
 //!
-//! What blocks a real round-trip — proven by compiling a HAND-WRITTEN serializer with krusty
-//! (`tests/fixtures/serialization/ManualSerializer.kt`), i.e. these are core compiler gaps DOWNSTREAM
-//! of the plugin, not surface gaps:
-//!   1. object self-reference — `object S { ... S ... }` fails to resolve `S` inside its own body
-//!      (a `$serializer` references its own `INSTANCE` for the descriptor's generated-serializer arg).
-//!   2. classpath `internal` class construction — `kotlinx.serialization.internal.
-//!      PluginGeneratedSerialDescriptor(...)` does not resolve.
-//!   3. `Json` companion methods — `Json.encodeToString(serializer, value)` /
-//!      `Json.decodeFromString(...)` resolve as a Java static instead of the `Json` object's
-//!      (reified/inherited) members.
-//!
-//! Plus the plugin must emit real `serialize`/`deserialize` bodies and be wired into the emit path.
-//!
-//! `KRUSTY_SER_CONFORMANCE=1` opts the (currently-ignored) real run in once the above land.
+//! Remaining for full conformance: real `deserialize` (decode state machine), nullable/nested/richer
+//! types + real `childSerializers`, wiring the plugin into the main compile path, and the language
+//! features the 69-case `testData/boxIr` corpus needs.
 
 use std::path::PathBuf;
 use std::process::Command;
