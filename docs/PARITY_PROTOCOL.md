@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1731 OK / 0 FAIL** (scanned 7351, Phase 442).
+  repo's `compiler/testData/codegen/box`). Current gate: **1733 OK / 0 FAIL** (scanned 7351, Phase 443).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P66 — infer a property/local type from a classpath `object` value (gate 1731 → 1733, +2,
+  FAIL=0).** `val ctx = EmptyCoroutineContext` (an `object` used as a value, no explicit type) failed
+  with "cannot infer the type of property". The signature-time inferer `infer_lit_ty_p` (resolve.rs)
+  only typed a bare `Name` against the local property list → `Error` for a classpath singleton. Added a
+  fallback: a bare name in `class_names` whose `resolve_type(internal).is_object()` infers to
+  `Ty::obj(internal)` — the object's own type, the same value the full checker's `classpath_object_value`
+  yields. SOUND: only an `object` is a value, so a plain class name (not a value) stays `Error` → the
+  file skips, never a mistype; a current-module object isn't in the library `src` so it also stays
+  `Error` (unchanged). General inference fix (not coroutine-specific). This is coroutine helper gap #4 of
+  5 (see [[project-suspend]]); #1 (`Continuation()` factory), #2 (`startCoroutine`), #3 (generic `T` in
+  anon), #5 (function-typed capture) still gate the 502 `WITH_COROUTINES` files. TDD:
+  tests/object_value_inference_e2e.rs.
 
 - **Phase P65 — anonymous-object capture, slice 1+2 (gate 1729 → 1731, +2, FAIL=0).** An
   `object : I { … }` expression is desugared (parser `parse_anon_object`) to a hoisted top-level synth
