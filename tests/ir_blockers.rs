@@ -72,13 +72,13 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 if c.is_data {
                     out.push("class: data");
                 }
-                if c.is_object {
+                if c.is_object() {
                     out.push("class: object");
                 }
-                if c.is_enum {
+                if c.is_enum() {
                     out.push("class: enum");
                 }
-                if c.is_interface {
+                if c.is_interface() {
                     out.push("class: interface");
                 }
                 if c.is_abstract {

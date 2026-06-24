@@ -178,8 +178,10 @@ pub struct FunctionSet {
 /// knowing the target ABI.
 pub struct LibraryType {
     pub is_public: bool,
-    pub is_interface: bool,
-    pub is_annotation: bool,
+    /// The declaration kind (class / interface / annotation / object). One field instead of parallel
+    /// booleans — read it through the `is_*` accessors, which encode the JVM reality that an annotation
+    /// is also an interface.
+    pub kind: TypeKind,
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: Vec<String>,
     pub constructors: Vec<LibraryMember>,
@@ -187,6 +189,30 @@ pub struct LibraryType {
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
+}
+
+/// What a library type *is*. Mutually exclusive at the source level; at the JVM level an `Annotation`
+/// also carries `ACC_INTERFACE`, which `is_interface()` reflects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeKind {
+    Class,
+    Interface,
+    Annotation,
+    /// A Kotlin `object` (singleton) — has a `public static final INSTANCE` field of its own type, read
+    /// as `getstatic <Type>.INSTANCE` when the object is referenced as a value.
+    Object,
+}
+
+impl LibraryType {
+    pub fn is_interface(&self) -> bool {
+        matches!(self.kind, TypeKind::Interface | TypeKind::Annotation)
+    }
+    pub fn is_annotation(&self) -> bool {
+        self.kind == TypeKind::Annotation
+    }
+    pub fn is_object(&self) -> bool {
+        self.kind == TypeKind::Object
+    }
 }
 
 /// Whether a member's parameter list matches `args` as a prefix — the loose match the JVM resolver
@@ -257,7 +283,7 @@ impl LibraryType {
 
     /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
     pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
-        if !self.is_annotation {
+        if !self.is_annotation() {
             return None;
         }
         let mut out = Vec::new();

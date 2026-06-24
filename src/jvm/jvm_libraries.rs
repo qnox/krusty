@@ -702,10 +702,24 @@ impl SymbolSource for JvmLibraries {
         if let Some(s) = &ci.super_class {
             supertypes.push(s.clone());
         }
+        // A Kotlin `object` has a `public static final INSTANCE` field of its own type.
+        let self_desc = format!("L{internal};");
+        let is_object = ci.fields.iter().any(|f| {
+            f.name == "INSTANCE" && f.descriptor == self_desc && f.access & 0x0008 != 0
+            // ACC_STATIC
+        });
+        let kind = if ci.access & 0x2000 != 0 {
+            crate::libraries::TypeKind::Annotation
+        } else if ci.is_interface() {
+            crate::libraries::TypeKind::Interface
+        } else if is_object {
+            crate::libraries::TypeKind::Object
+        } else {
+            crate::libraries::TypeKind::Class
+        };
         Some(LibraryType {
             is_public: ci.is_public(),
-            is_interface: ci.is_interface(),
-            is_annotation: ci.access & 0x2000 != 0,
+            kind,
             supertypes,
             constructors,
             members,

@@ -1134,10 +1134,10 @@ pub fn collect_signatures_with_cp(
                             },
                         );
                     }
-                    if c.is_object {
+                    if c.is_object() {
                         table.objects.insert(c.name.clone());
                     }
-                    if c.is_enum {
+                    if c.is_enum() {
                         table.enums.insert(c.name.clone(), c.enum_entries.clone());
                     }
                     // Resolve each supertype to a JVM internal name via `class_names` (user/classpath
@@ -1307,7 +1307,7 @@ pub fn collect_signatures_with_cp(
                             props,
                             ctor_params,
                             methods,
-                            is_interface: c.is_interface,
+                            is_interface: c.is_interface(),
                             is_sealed: c.is_sealed,
                             inner_of,
                             static_methods,
@@ -1315,7 +1315,7 @@ pub fn collect_signatures_with_cp(
                             lateinit_props,
                             interfaces,
                             super_internal,
-                            is_annotation: c.is_annotation,
+                            is_annotation: c.is_annotation(),
                             ctor_defaults,
                             secondary_ctors,
                             tparam_names,
@@ -2545,6 +2545,9 @@ pub struct TypeInfo {
     pub local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     /// Maps a call `ExprId` to the `StmtId` of the local function it dispatches to.
     pub local_call_map: HashMap<ExprId, StmtId>,
+    /// A bare `Name` expr that resolves to a CLASSPATH `object` used as a value → the object's internal
+    /// name. Lowering emits `getstatic <internal>.INSTANCE` (`ExternalStaticField`) for it.
+    pub obj_value_refs: HashMap<ExprId, String>,
     /// Inferred return types for expression-body functions that lacked an explicit return annotation.
     /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
     pub fun_ret_overrides: HashMap<String, Ty>,
@@ -2636,6 +2639,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_funs: Vec::new(),
         local_fun_sigs: HashMap::new(),
         local_call_map: HashMap::new(),
+        obj_value_refs: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
         bridges: HashMap::new(),
@@ -2695,7 +2699,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // An annotation with an array member needs content-based equals/hashCode
                 // (`Arrays.equals`/`Arrays.hashCode`) per the annotation contract — krusty's synthesized
                 // members use reference equality, so reject it rather than miscompile equality.
-                if cl.is_annotation
+                if cl.is_annotation()
                     && cl
                         .props
                         .iter()
@@ -2944,7 +2948,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 c.this_ty = None;
                 // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
                 // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
-                if cl.is_enum {
+                if cl.is_enum() {
                     let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
                     for args in &cl.enum_entry_args {
                         for (a, expected_ty) in args.iter().zip(&ctor_tys) {
@@ -3086,6 +3090,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         expr_types: c.expr_types,
         local_fun_sigs: c.local_fun_sigs,
         local_call_map: c.local_call_map,
+        obj_value_refs: c.obj_value_refs,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
         bridges: c.bridges,
@@ -3122,6 +3127,7 @@ struct Checker<'a> {
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     local_call_map: HashMap<ExprId, StmtId>,
+    obj_value_refs: HashMap<ExprId, String>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
@@ -3225,6 +3231,17 @@ impl<'a> Checker<'a> {
     /// Build a class reference type, carrying any generic arguments from the syntactic type
     /// (`C<A, …>` → `Ty::obj_args(internal, [A, …])`; raw → `Ty::obj`). Arguments erase in JVM
     /// descriptors but let the front end recover member/element types.
+    /// If bare `name` resolves (through imports/defaults) to a CLASSPATH Kotlin `object`, its internal
+    /// name — so the object can be referenced as a value (`getstatic <internal>.INSTANCE` in lowering).
+    fn classpath_object_value(&self, name: &str) -> Option<String> {
+        let internal = self.imported_type_internal(name)?;
+        if self.syms.libraries.resolve_type(&internal)?.is_object() {
+            Some(internal)
+        } else {
+            None
+        }
+    }
+
     /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
     /// the classpath — covering names the global simple-name index dropped as ambiguous (e.g.
     /// `Continuation`). Checks the explicit import first, then each wildcard-imported package. Existence
@@ -4629,6 +4646,11 @@ impl<'a> Checker<'a> {
                         // Unit`) — the `kotlin/Unit` object, read as its `INSTANCE` in lowering. Only a
                         // fallback: any local/property/object named `Unit` was resolved above.
                         Ty::obj("kotlin/Unit")
+                    } else if let Some(internal) = self.classpath_object_value(&n) {
+                        // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`): its type is
+                        // the object type; lowering reads `getstatic <internal>.INSTANCE`.
+                        self.obj_value_refs.insert(e, internal.clone());
+                        Ty::obj(&internal)
                     } else {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));

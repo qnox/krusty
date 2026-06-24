@@ -436,18 +436,15 @@ pub struct ClassDecl {
     /// Constructor init steps in source order: a body-property initializer (index into `body_props`)
     /// or an `init { … }` block.
     pub init_order: Vec<ClassInit>,
+    /// The declaration kind (plain class / interface / object / enum / annotation). One field instead
+    /// of parallel `is_*` booleans; read it through the `is_*` accessor methods.
+    pub kind: ClassKind,
     /// `data class` — synthesizes equals/hashCode/toString/componentN/copy.
     pub is_data: bool,
     /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
     /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
     pub is_value: bool,
-    /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
-    /// instantiation (`A("x")`) synthesizes a `<facade>$annotationImpl$A$0` impl class.
-    pub is_annotation: bool,
-    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
-    pub is_object: bool,
     /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
-    pub is_enum: bool,
     pub enum_entries: Vec<String>,
     /// Constructor arguments per enum entry (parallel to `enum_entries`; empty for `A` with no args).
     /// The enum's primary-constructor parameters are in `props`.
@@ -456,8 +453,6 @@ pub struct ClassDecl {
     /// anonymous subclass kotlinc emits as `Enum$ENTRY`. Parallel to `enum_entries`; an empty `Vec`
     /// means the entry has no body. Only method overrides are captured (property overrides bail).
     pub enum_entry_bodies: Vec<Vec<FunDecl>>,
-    /// `interface Name { … }` — a JVM interface (abstract methods).
-    pub is_interface: bool,
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
     /// convertible to it.
     pub is_fun_interface: bool,
@@ -487,6 +482,38 @@ pub struct ClassDecl {
     /// `class A()`, `class A(...)`), including a `class A() { constructor(...) : this(...) }`.
     pub has_primary_ctor: bool,
     pub span: Span,
+}
+
+/// What a declaration *is*. Mutually exclusive at the source level (`data`/`value` are modifiers on a
+/// `Class`, `fun interface` is `Interface` + `is_fun_interface`). An `annotation class` compiles to a
+/// JVM interface, but the front end keeps it distinct from `Interface` — `is_interface()` is `false`
+/// for it (matching the parser, which never set `is_interface` on annotations).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClassKind {
+    Class,
+    Interface,
+    /// `object Name { … }` — a singleton (one `INSTANCE`, private constructor).
+    Object,
+    /// `enum class Name { A, B }` — extends `java/lang/Enum`.
+    Enum,
+    /// `annotation class` — emitted as an interface extending `java/lang/annotation/Annotation`;
+    /// instantiation (`A("x")`) synthesizes a `<facade>$annotationImpl$A$0` impl class.
+    Annotation,
+}
+
+impl ClassDecl {
+    pub fn is_interface(&self) -> bool {
+        self.kind == ClassKind::Interface
+    }
+    pub fn is_object(&self) -> bool {
+        self.kind == ClassKind::Object
+    }
+    pub fn is_enum(&self) -> bool {
+        self.kind == ClassKind::Enum
+    }
+    pub fn is_annotation(&self) -> bool {
+        self.kind == ClassKind::Annotation
+    }
 }
 
 /// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
@@ -771,14 +798,14 @@ impl File {
                 }
                 out.push(')');
             }
-            Decl::Class(c) if c.is_interface => {
+            Decl::Class(c) if c.is_interface() => {
                 out.push_str(&format!("(interface {}", c.name));
                 for m in &c.methods {
                     out.push_str(&format!(" (absfun {})", m.name));
                 }
                 out.push(')');
             }
-            Decl::Class(c) if c.is_enum => {
+            Decl::Class(c) if c.is_enum() => {
                 out.push_str(&format!("(enum {}", c.name));
                 for e in &c.enum_entries {
                     out.push_str(&format!(" {e}"));
@@ -786,11 +813,12 @@ impl File {
                 out.push(')');
             }
             Decl::Class(c) => {
-                out.push_str(&format!(
-                    "({} {}",
-                    if c.is_object { "object" } else { "class" },
-                    c.name
-                ));
+                let keyword = match c.kind {
+                    ClassKind::Object => "object",
+                    ClassKind::Annotation => "annotation",
+                    _ => "class",
+                };
+                out.push_str(&format!("({} {}", keyword, c.name));
                 for p in &c.props {
                     out.push_str(&format!(
                         " ({} {} {})",
