@@ -119,7 +119,8 @@ fn serializable_class_encode_round_trips() {
                    @Serializable class Inner(val v: Int)\n\
                    @Serializable class Outer(val inner: Inner, val label: String)\n\
                    @Serializable class Nul(val a: Int, val b: String?)\n\
-                   @Serializable class NulP(val a: Int?, val b: Long?, val c: Boolean?)";
+                   @Serializable class NulP(val a: Int?, val b: Long?, val c: Boolean?)\n\
+                   @Serializable class NestN(val inner: Inner?, val label: String)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -199,6 +200,17 @@ fun box(): String {
     if (pj2 != "{\"a\":null,\"b\":null,\"c\":null}") return "NULP NULL ENC FAIL: $pj2"
     val pb2 = Json.decodeFromString(ps, pj2)
     if (pb2.a != null || pb2.b != null || pb2.c != null) return "NULP NULL DEC FAIL: ${pb2.a},${pb2.b},${pb2.c}"
+    // Nullable NESTED composite (Inner?): present and null via encode/decodeNullableSerializableElement
+    // against the nested type's krusty-generated $serializer.INSTANCE.
+    val es = NestN.serializer() as KSerializer<NestN>
+    val ej = Json.encodeToString(es, NestN(Inner(5), "n"))
+    if (ej != "{\"inner\":{\"v\":5},\"label\":\"n\"}") return "NESTN ENC FAIL: $ej"
+    val eb = Json.decodeFromString(es, ej)
+    if (eb.inner?.v != 5 || eb.label != "n") return "NESTN DEC FAIL: ${eb.inner?.v},${eb.label}"
+    val ej2 = Json.encodeToString(es, NestN(null, "m"))
+    if (ej2 != "{\"inner\":null,\"label\":\"m\"}") return "NESTN NULL ENC FAIL: $ej2"
+    val eb2 = Json.decodeFromString(es, ej2)
+    if (eb2.inner != null || eb2.label != "m") return "NESTN NULL DEC FAIL: ${eb2.inner},${eb2.label}"
     return "OK"
 }
 fun main() { println(box()) }

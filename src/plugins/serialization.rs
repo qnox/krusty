@@ -645,16 +645,24 @@ impl IrPlugin for SerializationPlugin {
                             });
                             let c = ir.add_expr(IrExpr::GetValue(3));
                             if let Some(nsid) = nested[i] {
-                                // Nested @Serializable: encodeSerializableElement(desc, i, <T>$serializer.INSTANCE, value.getX())
+                                // Nested @Serializable: encode[Nullable]SerializableElement(desc, i,
+                                // <T>$serializer.INSTANCE, value.getX()). The nullable variant has the
+                                // SAME descriptor — it just writes JSON null when the value is null — so
+                                // it's a method-name swap for an `Inner?` field.
                                 let inst = ir.add_expr(IrExpr::StaticInstance {
                                     owner: nsid,
                                     ty: nsid,
                                     field: "INSTANCE",
                                 });
+                                let method = if is_nullable(ty) {
+                                    "encodeNullableSerializableElement"
+                                } else {
+                                    "encodeSerializableElement"
+                                };
                                 stmts.push(ir.add_expr(IrExpr::Call {
                                     callee: virtual_iface(
                                         "kotlinx/serialization/encoding/CompositeEncoder",
-                                        "encodeSerializableElement",
+                                        method,
                                         "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
                                     ),
                                     dispatch_receiver: Some(c),
@@ -847,17 +855,24 @@ impl IrPlugin for SerializationPlugin {
                                 let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                                 let cdk = ir.add_expr(IrExpr::GetValue(2));
                                 let decoded = if let Some(nsid) = nested[k] {
-                                    // f_k = (T) c.decodeSerializableElement(desc, k, T$serializer.INSTANCE, null)
+                                    // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
+                                    // T$serializer.INSTANCE, null). Same descriptor; the nullable
+                                    // variant yields null for a JSON-null `Inner?` element.
                                     let inst = ir.add_expr(IrExpr::StaticInstance {
                                         owner: nsid,
                                         ty: nsid,
                                         field: "INSTANCE",
                                     });
                                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let method = if is_nullable(ty) {
+                                        "decodeNullableSerializableElement"
+                                    } else {
+                                        "decodeSerializableElement"
+                                    };
                                     let raw = ir.add_expr(IrExpr::Call {
                                         callee: virtual_iface(
                                             "kotlinx/serialization/encoding/CompositeDecoder",
-                                            "decodeSerializableElement",
+                                            method,
                                             "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
                                         ),
                                         dispatch_receiver: Some(cdk),
@@ -1096,6 +1111,48 @@ mod tests {
         assert!(
             refs_external_static(&ir, "kotlinx/serialization/internal/IntSerializer"),
             "nullable Int? must reference IntSerializer.INSTANCE"
+        );
+    }
+
+    #[test]
+    fn nullable_nested_composite_uses_nullable_serializable_calls() {
+        // `@Serializable class Outer(val inner: Inner?, val label: String)` where Inner is itself
+        // @Serializable — the nullable nested element must go through encode/decodeNullable-
+        // SerializableElement (not the plain serializable element, which can't represent null).
+        let mut ir = IrFile::default();
+        let mut inner = synthetic_class("Inner");
+        inner.fields = vec![("v".to_string(), class_ty("kotlin/Int"))];
+        inner.ctor_param_count = 1;
+        let inner_id = ir.add_class(inner);
+        let mut outer = synthetic_class("Outer");
+        outer.fields = vec![
+            (
+                "inner".to_string(),
+                IrType::Class {
+                    fq_name: "Inner".to_string(),
+                    type_args: vec![],
+                    nullable: true,
+                },
+            ),
+            ("label".to_string(), class_ty("kotlin/String")),
+        ];
+        outer.ctor_param_count = 2;
+        let outer_id = ir.add_class(outer);
+        let mut ctx = PluginContext::default();
+        ctx.class_annotations
+            .insert(inner_id, vec![SERIALIZABLE_FQ.to_string()]);
+        ctx.class_annotations
+            .insert(outer_id, vec![SERIALIZABLE_FQ.to_string()]);
+        run(&mut ir, &ctx);
+        assert!(
+            calls_method(&ir, "encodeNullableSerializableElement")
+                && calls_method(&ir, "decodeNullableSerializableElement"),
+            "Inner? must use the nullable serializable element calls"
+        );
+        // The non-null String field still uses the direct primitive path.
+        assert!(
+            calls_method(&ir, "encodeStringElement"),
+            "non-null String still uses encodeStringElement"
         );
     }
 
