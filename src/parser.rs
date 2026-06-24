@@ -27,6 +27,7 @@ pub fn parse_with_features(
         file: File::default(),
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
+        pending_annotations: Vec::new(),
     };
     p.parse_file();
     fixup_parenless_base_classes(&mut p.file);
@@ -81,6 +82,10 @@ struct Parser<'a> {
     diags: &'a mut DiagSink,
     /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
     name_based_destructuring: bool,
+    /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
+    /// to the declaration that follows (e.g. `@Serializable` → `["Serializable"]`). A `parse_X` reads
+    /// it via `take_pending_annotations()` *before* parsing members (member prefixes overwrite it).
+    pending_annotations: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -343,10 +348,13 @@ impl<'a> Parser<'a> {
     /// skipped, so those declarations remain unsupported (and the file is cleanly skipped).
     fn skip_decl_prefix(&mut self) -> Vec<String> {
         let mut mods = Vec::new();
+        self.pending_annotations.clear();
         loop {
             self.skip_newlines();
             if self.at(TokenKind::At) {
-                self.skip_annotation();
+                if let Some(name) = self.skip_annotation() {
+                    self.pending_annotations.push(name);
+                }
             } else if self.at(TokenKind::Ident) && is_modifier(self.text()) {
                 mods.push(self.text().to_string());
                 self.bump();
@@ -355,6 +363,12 @@ impl<'a> Parser<'a> {
             }
         }
         mods
+    }
+
+    /// Take the annotations captured by the preceding `skip_decl_prefix`, clearing the buffer.
+    /// `parse_class`/`parse_enum`/… call this FIRST so member-prefix parsing doesn't clobber them.
+    fn take_pending_annotations(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_annotations)
     }
 
     /// Parse a nested type declaration (`class`/`object`/`interface`/`data|enum|annotation class`/
@@ -386,9 +400,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn skip_annotation(&mut self) {
+    /// Consume one `@Foo(...)` annotation; returns its **simple name** (last path segment) so a plugin
+    /// can match it (`@kotlinx.serialization.Serializable` → `"Serializable"`). `None` for a use-site
+    /// `@file:`/`@get:`… target annotation, which doesn't apply to the declaration.
+    fn skip_annotation(&mut self) -> Option<String> {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
+        let mut use_site = false;
         if self.at(TokenKind::Ident)
             && self
                 .t
@@ -397,10 +415,16 @@ impl<'a> Parser<'a> {
         {
             self.bump();
             self.bump(); // ':'
+            use_site = true;
         }
-        let _ = self.parse_qualified_name();
+        let qname = self.parse_qualified_name();
         self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
         self.parse_annotation_args();
+        if use_site || qname.is_empty() {
+            None
+        } else {
+            Some(qname.rsplit('.').next().unwrap_or(&qname).to_string())
+        }
     }
 
     /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar.
@@ -703,6 +727,7 @@ impl<'a> Parser<'a> {
 
     /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
     fn parse_enum(&mut self) -> ClassDecl {
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'enum'
         self.bump(); // 'class'
@@ -870,6 +895,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            annotations,
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props,
@@ -1158,6 +1184,7 @@ impl<'a> Parser<'a> {
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
     /// Every primary-constructor parameter must be a `val`/`var` property (no plain params yet).
     fn parse_class(&mut self) -> ClassDecl {
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'class'
         let name = if self.at(TokenKind::Ident) {
@@ -1423,6 +1450,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            annotations,
             type_params,
             type_param_bounds,
             props,
@@ -1547,6 +1575,7 @@ impl<'a> Parser<'a> {
 
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
     fn parse_interface(&mut self) -> ClassDecl {
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
@@ -1625,6 +1654,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            annotations,
             type_params,
             type_param_bounds: Vec::new(),
             props: Vec::new(),
@@ -1750,6 +1780,7 @@ impl<'a> Parser<'a> {
         let name = format!("Anon$anon${}", span.lo);
         let synth = ClassDecl {
             name: name.clone(),
+            annotations: Vec::new(),
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props: Vec::new(),
@@ -1793,6 +1824,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object(&mut self) -> ClassDecl {
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'object'
         let name = self.ident_or_error("object name");
@@ -1876,6 +1908,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
             name,
+            annotations,
             type_params: Vec::new(),
             type_param_bounds: Vec::new(),
             props: Vec::new(),
