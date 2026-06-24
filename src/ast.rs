@@ -389,6 +389,10 @@ pub struct FunDecl {
     /// `tailrec` modifier — a self-recursive function whose tail calls the lowerer rewrites into a loop
     /// (param reassignment + `continue`), so deep recursion doesn't overflow the stack.
     pub is_tailrec: bool,
+    /// Simple names of annotations applied to this function (`@Composable fun f()` → `["Composable"]`),
+    /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
+    /// find annotated functions.
+    pub annotations: Vec<String>,
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).

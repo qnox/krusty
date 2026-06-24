@@ -1051,6 +1051,9 @@ impl<'a> Parser<'a> {
         is_suspend: bool,
         is_tailrec: bool,
     ) -> FunDecl {
+        // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
+        // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
+        let annotations = self.take_pending_annotations();
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -1086,6 +1089,7 @@ impl<'a> Parser<'a> {
                 is_private: false,
                 is_suspend: false,
                 is_tailrec: false,
+                annotations,
             };
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
@@ -1176,6 +1180,7 @@ impl<'a> Parser<'a> {
             is_private: false,
             is_suspend,
             is_tailrec,
+            annotations,
         }
     }
 
@@ -4679,6 +4684,31 @@ mod tests {
         assert_eq!(
             tree("fun add(a: Int, b: Int): Int = a + b"),
             "(fun add (param a Int) (param b Int) :Int (+ a b))\n"
+        );
+    }
+
+    #[test]
+    fn captures_function_annotations() {
+        // Function annotations are captured on FunDecl (mirroring class capture) and don't leak.
+        let mut d = DiagSink::new();
+        let src = "@Composable fun A() {}\nfun B() {}";
+        let toks = lex(src, &mut d);
+        let file = parse(src, &toks, &mut d);
+        assert!(!d.has_errors(), "{}", d.render("test", src));
+
+        let anns = |name: &str| {
+            file.decl_arena
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::Fun(f) if f.name == name => Some(f.annotations.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("fun {name} not found"))
+        };
+        assert_eq!(anns("A"), vec!["Composable".to_string()]);
+        assert!(
+            anns("B").is_empty(),
+            "annotation must not leak to the next function"
         );
     }
 

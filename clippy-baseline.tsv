@@ -1,4 +1,4 @@
-1	src/ast.rs	large size difference between variants: the entire enum is at least 408 bytes
+1	src/ast.rs	large size difference between variants: the entire enum is at least 432 bytes
 1	src/bin/blockers.rs	consider using `sort_by_key`
 1	src/bin/survey.rs	consider using `sort_by_key`
 1	src/ir_lower.rs	calling `as_bytes` after slicing a string: help: try: `&desc.as_bytes()[1..end]`
