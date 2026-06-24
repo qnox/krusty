@@ -4831,16 +4831,25 @@ impl<'a> Lower<'a> {
         let Expr::Name(rn) = self.afile.expr(recv).clone() else {
             return None;
         };
-        // Bound `obj::m`: `rn` is an in-scope value, captured into the closure. Unbound `Type::m`:
-        // `rn` is a class; the receiver is the reference's first parameter.
+        // Bound `obj::m` (`rn` is an in-scope value) / `O::m` (`rn` is an object → its singleton
+        // `INSTANCE`): the receiver is CAPTURED into the closure. Unbound `Type::m` (`rn` is a class):
+        // the receiver becomes the reference's first parameter. `bound_capture` holds the already-built
+        // capture EXPR for the bound forms.
         let (bound_capture, recv_ty): (Option<u32>, Ty) = match self.lookup(&rn) {
-            Some((v, ty)) => (Some(v), ty),
+            Some((v, ty)) => (Some(self.ir.add_expr(IrExpr::GetValue(v))), ty),
             None => {
                 let internal = class_internal(self.afile, &rn);
-                if !self.classes.contains_key(&internal) {
-                    return None;
+                let cid = self.classes.get(&internal)?.id;
+                if self.ir.classes[cid as usize].is_object {
+                    let inst = self.ir.add_expr(IrExpr::StaticInstance {
+                        owner: cid,
+                        ty: cid,
+                        field: "INSTANCE",
+                    });
+                    (Some(inst), Ty::obj(&internal))
+                } else {
+                    (None, *params.first()?)
                 }
-                (None, *params.first()?)
             }
         };
         let internal = recv_ty.obj_internal()?.to_string();
@@ -4882,7 +4891,7 @@ impl<'a> Lower<'a> {
             param_checks: Vec::new(),
         });
         let captures = match bound_capture {
-            Some(v) => vec![self.ir.add_expr(IrExpr::GetValue(v))],
+            Some(cap) => vec![cap],
             None => vec![],
         };
         Some(self.ir.add_expr(IrExpr::Lambda {
