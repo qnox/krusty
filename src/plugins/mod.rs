@@ -195,6 +195,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         companion_class: None,
         field_final: Vec::new(),
         field_private: Vec::new(),
+        lateinit_fields: Vec::new(),
         func_ref: None,
         secondary_ctors: Vec::new(),
         has_primary_ctor: true,
