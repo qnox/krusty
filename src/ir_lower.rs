@@ -55,6 +55,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         companions: HashMap::new(),
         computed_props: HashMap::new(),
         local_delegated: HashMap::new(),
+        cur_tailrec: None,
         expr_depth: 0,
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
@@ -1005,12 +1006,25 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .get(&(f.name.clone(), crate::resolve::erased_params_key(sig)))?;
                     (fid, sig)
                 };
+                let mut param_vals = Vec::new();
                 for (p, t) in f.params.iter().zip(&sig.params) {
                     let v = lo.fresh_value();
+                    param_vals.push(v);
                     lo.scope.push((p.name.clone(), v, *t));
                 }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
-                lo.lower_body(&f.body, &ret_ty, fid)?;
+                // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
+                // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
+                // An EXTENSION/infix `tailrec` (receiver) isn't transformed here — skip the file rather
+                // than emit stack-overflowing recursion.
+                if f.is_tailrec {
+                    if f.receiver.is_some() {
+                        return None;
+                    }
+                    lo.lower_tailrec_body(f, &ret_ty, fid, param_vals, sig.params.clone())?;
+                } else {
+                    lo.lower_body(&f.body, &ret_ty, fid)?;
+                }
             }
             Decl::Class(c) => {
                 let internal = class_internal(file, &c.name);
@@ -1219,6 +1233,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // An abstract method has no body — leave its `IrFunction.body` as `None`.
                     if matches!(m.body, FunBody::None) {
                         continue;
+                    }
+                    // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
+                    // skip the file rather than emit stack-overflowing recursion.
+                    if m.is_tailrec {
+                        return None;
                     }
                     let (_, fid, _) = lo.classes[&internal].methods[&m.name];
                     lo.scope.clear();
@@ -2206,6 +2225,15 @@ struct LocalDelegate {
     ret_desc: String,
 }
 
+/// Context for lowering a `tailrec` function into a `while(true)` loop.
+#[derive(Clone)]
+struct TailrecCtx {
+    name: String,
+    param_vals: Vec<u32>,
+    param_tys: Vec<Ty>,
+    label: String,
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     info: &'a TypeInfo,
@@ -2256,6 +2284,10 @@ pub(crate) struct Lower<'a> {
     /// `getValue` (a `var`'s write to `setValue`); there is no value slot for the property itself, only
     /// the synthesized `$delegate` local (its value index is held here).
     local_delegated: HashMap<String, LocalDelegate>,
+    /// Active `tailrec` function being lowered: its (unqualified) name, the value indices of its
+    /// parameters (to reassign), and their types. A tail-position `return f(args)` to this same function
+    /// becomes "reassign the params, `continue` the wrapping `while(true)`" instead of a real call.
+    cur_tailrec: Option<TailrecCtx>,
     /// Current expression-lowering recursion depth — guards against a stack overflow on a pathologically
     /// deep expression (a stress test with thousands of nested operators): past the limit, lowering
     /// bails (the file is skipped, never miscompiled or crashed).
@@ -6227,6 +6259,130 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Lower a `tailrec fun` body: rewrite tail-position self-calls into a `while(true)` loop (reassign
+    /// the param slots, then `continue`). Bails (skip file) if a self-call appears in a non-tail position
+    /// the transform can't handle — never miscompiles into stack-overflowing recursion.
+    fn lower_tailrec_body(
+        &mut self,
+        f: &ast::FunDecl,
+        ret_ty: &IrType,
+        fid: u32,
+        param_vals: Vec<u32>,
+        param_tys: Vec<Ty>,
+    ) -> Option<()> {
+        self.cur_ret_ty = ret_ty.clone();
+        self.try_finally_stack.clear();
+        self.local_delegated.clear();
+        // A `Unit`-returning `tailrec` calls itself with a bare expression STATEMENT (not `return f(…)`),
+        // which the return-driven transform below doesn't rewrite — skip rather than emit recursion.
+        // (Value-returning tailrec, the common case, is fully handled.)
+        if *ret_ty == IrType::Unit {
+            return None;
+        }
+        let label = "$tailrec".to_string();
+        self.cur_tailrec = Some(TailrecCtx {
+            name: f.name.clone(),
+            param_vals,
+            param_tys,
+            label: label.clone(),
+        });
+        let loop_body = match &f.body {
+            FunBody::Expr(e) => self.lower_tail_expr(*e, ret_ty),
+            FunBody::Block(blk) => self.block_as_body(*blk, ret_ty),
+            FunBody::None => None,
+        };
+        self.cur_tailrec = None;
+        let loop_body = loop_body?;
+        let cond = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let whilexpr = self.ir.add_expr(IrExpr::While {
+            cond,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(label),
+        });
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![whilexpr],
+            value: None,
+        });
+        self.ir.functions[fid as usize].body = Some(body);
+        Some(())
+    }
+
+    /// Whether `callee(args)` is a tail self-call to the current `tailrec` function (same unqualified
+    /// name, not shadowed by a local, matching arity).
+    fn is_tail_self_call(&self, callee: AstExprId, args: &[AstExprId]) -> bool {
+        let Some(ctx) = &self.cur_tailrec else {
+            return false;
+        };
+        matches!(self.afile.expr(callee), Expr::Name(n) if *n == ctx.name)
+            && self.lookup(&ctx.name).is_none()
+            && args.len() == ctx.param_vals.len()
+    }
+
+    /// Emit a tail self-call: evaluate the args into temps (so reassignment can't alias), reassign each
+    /// parameter slot, then `continue` the wrapping loop.
+    fn tail_update_continue(&mut self, args: &[AstExprId]) -> Option<u32> {
+        let ctx = self.cur_tailrec.clone()?;
+        let mut stmts = Vec::new();
+        let mut temps = Vec::new();
+        for (a, t) in args.iter().zip(&ctx.param_tys) {
+            let v = self.lower_arg(*a, &ty_to_ir(*t))?;
+            let tmp = self.fresh_value();
+            stmts.push(self.ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty: ty_to_ir(*t),
+                init: Some(v),
+            }));
+            temps.push(tmp);
+        }
+        for (pv, tmp) in ctx.param_vals.iter().zip(&temps) {
+            let read = self.ir.add_expr(IrExpr::GetValue(*tmp));
+            stmts.push(self.ir.add_expr(IrExpr::SetValue {
+                var: *pv,
+                value: read,
+            }));
+        }
+        stmts.push(self.ir.add_expr(IrExpr::Continue {
+            label: Some(ctx.label.clone()),
+        }));
+        Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
+    }
+
+    /// Lower an expression in TAIL position of a `tailrec` body: an `if` recurses into both branches; a
+    /// self-call becomes update+continue; any other expression returns its value (bailing if it still
+    /// contains a self-call — that would be non-tail recursion).
+    fn lower_tail_expr(&mut self, e: AstExprId, ret_ty: &IrType) -> Option<u32> {
+        match self.afile.expr(e).clone() {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch: Some(eb),
+            } => {
+                let c = self.expr(cond)?;
+                let t = self.lower_tail_expr(then_branch, ret_ty)?;
+                let el = self.lower_tail_expr(eb, ret_ty)?;
+                Some(self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(c), t), (None, el)],
+                }))
+            }
+            Expr::Call { callee, args } if self.is_tail_self_call(callee, &args) => {
+                self.tail_update_continue(&args)
+            }
+            Expr::Block { .. } => self.block_as_body(e, ret_ty),
+            _ => {
+                // Base case: a non-recursive value. If it still references the function (a non-tail
+                // self-call, e.g. `f(x) + 1`), we can't loop-ize it — skip the file rather than recurse.
+                let ctx_name = self.cur_tailrec.as_ref()?.name.clone();
+                if crate::resolve::expr_uses_name_pub(self.afile, e, &ctx_name) {
+                    return None;
+                }
+                let v = self.lower_arg(e, ret_ty)?;
+                Some(self.ir.add_expr(IrExpr::Return(Some(v))))
+            }
+        }
+    }
+
     /// Lower a compound assignment the checker marked as a user `opAssign` operator call (`plus_assign`):
     /// `target op= rhs` → `target.plusAssign(rhs)` (member `invokevirtual`, or extension `invokestatic`
     /// with the receiver as the first argument). `value` is the parser's desugared `Binary { op, lhs, rhs }`
@@ -6310,6 +6466,23 @@ impl<'a> Lower<'a> {
         match self.afile.stmt(s).clone() {
             Stmt::Expr(e) => self.expr(e),
             Stmt::Return(e, ret_label) => {
+                // Inside a `tailrec` function (no spliced-lambda label): a `return f(args)` to the same
+                // function is a tail call — reassign the params and `continue` the loop. A `return` whose
+                // value otherwise references the function is non-tail recursion the loop can't model →
+                // bail (skip file) rather than stack-overflow.
+                if ret_label.is_none() && self.cur_tailrec.is_some() {
+                    if let Some(ve) = e {
+                        if let Expr::Call { callee, args } = self.afile.expr(ve).clone() {
+                            if self.is_tail_self_call(callee, &args) {
+                                return self.tail_update_continue(&args);
+                            }
+                        }
+                        let name = self.cur_tailrec.as_ref().unwrap().name.clone();
+                        if crate::resolve::expr_uses_name_pub(self.afile, ve, &name) {
+                            return None;
+                        }
+                    }
+                }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the

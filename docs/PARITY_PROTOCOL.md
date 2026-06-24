@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1560 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1561 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P34 — `tailrec` value-returning functions → loop (gate 1560 → 1561, +1, FAIL=0).** `tailrec`
+  was deliberately unparsed (ignoring it = no TCO = stack overflow = miscompile). Now PARSED
+  (`is_modifier` + `FunDecl.is_tailrec`, threaded through all `parse_fun` callers) AND TRANSFORMED: a
+  top-level value-returning `tailrec fun` is lowered to `while(true) { … }` where a tail self-call
+  reassigns the param slots (via temps, alias-safe) and `continue`s — so 1,000,000-deep recursion runs
+  flat (verified). Handles expr bodies (`= if(c) base else f(args)`, recursing into `if` branches) and
+  block bodies (`return f(args)` intercepted). SOUND SKIPS (each was a real StackOverflow in the first
+  cut): extension/infix `tailrec` (receiver), MEMBER `tailrec`, `Unit`-returning `tailrec` (tail call is
+  a bare statement, not a `return`), default-param self-calls, and any non-tail self-call (bailed). New
+  `tailrec_e2e` (deep recursion). Modest net (+1) — most corpus `tailrec` tests are `Unit`/extension/
+  member (now cleanly skipped); value-returning is the common real-world case.
 - **Phase P33 — `Pair`/`Triple` constructors (gate 1559 → 1560, +1, FAIL=0).** `Pair(a, b)` / `Triple(a,
   b, c)` were "unresolved function" — the classpath scan indexes these auto-imported `kotlin.*` classes by
   FQ name only (they're otherwise reached via `to`), so `class_names` lacked the simple-name mapping.
