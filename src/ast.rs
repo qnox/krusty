@@ -404,6 +404,9 @@ pub struct PropParam {
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
+    /// Simple names of annotations applied to the class (`@Serializable` → `["Serializable"]`).
+    /// Used by the compiler-extension surface (`crate::plugins`) to find annotated declarations.
+    pub annotations: Vec<String>,
     /// Generic type-parameter names (`class C<T>`), erased to `Any`/`Object`.
     pub type_params: Vec<String>,
     /// Declared non-`Any` upper bounds (`<T: String>` → `("T", String)`). A value class's underlying

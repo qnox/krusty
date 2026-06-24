@@ -20,6 +20,7 @@ pub mod libraries;
 pub mod metadata;
 pub mod module_symbols;
 pub mod parser;
+pub mod plugins;
 pub mod resolve;
 pub mod symbol_source;
 pub mod synthetics;
