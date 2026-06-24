@@ -323,8 +323,24 @@ ManualSerializer.kt`) — it fails on three core gaps, none about the plugin:
    plugin must still emit correct IR bodies and be wired into the emit path.
 
 Progress this session: blockers #1 (object self-ref) and #2 (ctor null-match) are **closed and
-gate-verified (0 FAIL)**. #3 (a cluster) and #4 (plugin codegen + emit wiring) remain — multi-round
-core-compiler work.
+gate-verified (0 FAIL)**. Further probing surfaced MORE independent compiler gaps the serializer
+needs, confirming this is multi-session core-compiler work:
+
+5. **FQ resolution of an ambiguous-simple-name type** — `scan_types` drops a simple name that maps to
+   multiple classpath internals (several `Encoder`/`Decoder` exist across the serialization jars), and
+   type refs resolve via that simple-name map, so even fully-qualified
+   `kotlinx.serialization.encoding.Encoder` fails to resolve (a JDK interface like `Runnable` and the
+   concrete `PluginGeneratedSerialDescriptor` both resolve — it's specifically the ambiguous ones).
+6. classpath **static-field read** (`Json.Default`), **companion-instance dispatch**
+   (`Json.encodeToString`), **companion extensions** (`Int.serializer()`) — the Json cluster (#3),
+   side-steppable via a real-kotlinc round-trip driver.
+7. the **plugin codegen** itself (#4): emit a functional `$serializer` object implementing the generic
+   `KSerializer` interface — `clinit`-built descriptor, encode calls, decode state machine, erased
+   bridges — and wire `PluginHost` into the emit path.
+
+Each of #5–#7 is a separate resolver/backend feature requiring its own 1303-test gate verification.
+The conformance bar ("all 69 boxIr round-trips") additionally needs sealed/polymorphic/generic/
+inline-class/contextual language support. This is a multi-day, multi-round track, not a single session.
 
 Plus: real `serialize`/`deserialize` bytecode bodies and wiring the plugin into the emit path. And the
 full 69 `testData/boxIr` corpus additionally needs sealed/polymorphic/generic/inline-class/contextual
