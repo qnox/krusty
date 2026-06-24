@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1702 OK / 0 FAIL** (scanned 7351, Phase 436).
+  repo's `compiler/testData/codegen/box`). Current gate: **1705 OK / 0 FAIL** (scanned 7351, Phase 437).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P60 — inferred-type computed property (`val xx get() = x`) (gate 1702 → 1705, +3, FAIL=0).** A
+  computed property without an explicit type annotation (the type is inferred from the getter body) bailed —
+  `is_computed_prop` required `p.ty.is_some()` (else the type derivation `info.ty(p.init.unwrap())` panicked
+  on `init == None`). New `body_prop_ty` helper derives the type from the annotation, else the getter body,
+  else the initializer; `is_computed_prop` drops the annotation requirement. Both lowering sites (facade
+  static + class-instance getter) use it. Covers a plain class and a value-class member (`@JvmInline value
+  class Z(val x: Int) { val xx get() = x }`). e2e `inferred_computed_prop_e2e`.
 
 - **Phase P59 — `var` generic delegated property: box the value into `setValue`'s erased param (gate 1691 →
   1702, +11, FAIL=0).** A generic delegate's `setValue(…, i: T)` takes the ERASED `Object`; a `var Int by
