@@ -175,6 +175,71 @@ spawn the JVM when no registered processor's trigger annotation appears), and **
 bypassing the JVM entirely** (serialization/Compose are native passes — only true APs spin a sidecar).
 Drop daemon/incremental/zero-copy machinery for CI; it's dev-loop tooling.
 
+## Drop-in extension management — two layers, like kotlinc
+
+Extensions have **two registration layers**, mirroring kotlinc exactly:
+
+1. **Extension registration (general)** — `plugins::registry::PluginRegistry`. Records which compiler
+   plugins krusty knows about, independent of any compilation — the analogue of a plugin's
+   `CompilerPluginRegistrar` declaring its extensions to the compiler. Each known plugin maps a
+   kotlinc plugin id to either a **native** reimplementation (`IrPlugin`, run in-process) or a
+   **codegen host** (KSP, run via sidecar). `with_builtins()` ships serialization (native) + KSP
+   (host); `register()` is open, so a third party can add a native extension (proven by test).
+2. **Per-compilation activation** — `plugins::cli::PluginConfig`. The **exact switches kotlinc uses**,
+   so an existing Gradle/Maven build works unchanged:
+
+   ```
+   -Xplugin=/…/kotlinx-serialization-compiler-plugin.jar
+   -Xplugin=/…/symbol-processing.jar
+   -P plugin:com.google.devtools.ksp.symbol-processing:apclasspath=/…/processor.jar
+   -P plugin:com.google.devtools.ksp.symbol-processing:kspOutputDir=build/generated/ksp
+   ```
+
+`PluginRegistry::resolve(Activation)` **joins them** — registry × this unit's switches → the plugins
+to run. Drop-in rules it enforces:
+
+- **Activation = a jar on `-Xplugin`** (or `-P` under the plugin id), never a krusty flag.
+- **Versions are not flags.** Serialization's ABI comes from the `kotlinx-serialization-core` jar on
+  `-classpath` (`SerializationAbi::from_classpath`); KSP's from its jar coordinate (`KspToolchain`,
+  tied to the targeted kotlinc version). Same inputs as kotlinc → same codegen.
+
+### Reliable diagnostics (drop-in safety)
+
+`resolve` returns `diagnostics: Vec<PluginDiagnostic>` the driver forwards to the `DiagSink`. Because
+silently dropping a plugin would emit wrong bytecode, each activated plugin gets an explicit verdict:
+
+| Situation | Diagnostic | Severity |
+|---|---|---|
+| native reimpl (serialization) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
+| hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
+| unknown `-Xplugin` jar (Compose, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+
+So a build that pulls in Compose fails loudly with a clear message ("remove the plugin or compile this
+module with kotlinc") instead of producing a silently-broken artifact, and a serialization build is
+told plainly that krusty substituted its own implementation for the original plugin.
+
+## Reusing kotlinc's own plugin tests for conformance
+
+krusty's correctness is defined differentially vs real `kotlinc` (`docs/SPEC.md`), and that extends to
+plugins — **reuse the upstream suites rather than writing fresh ones** (both are Apache-2.0):
+
+- **kotlinx.serialization** — the compiler plugin ships a box-test corpus at
+  `plugins/kotlinx-serialization/testData/boxIr/*.kt` in the Kotlin source tree (present locally under
+  `external-projects/kotlin-2.4.0/…`). These are `fun box(): String` round-trip tests in **exactly the
+  format krusty's existing box harness (`tests/kotlin_box_ir_jvm_conformance.rs`, `just box-corpus`)
+  already runs**. Point the harness at that directory, link the real `kotlinx-serialization-core/-json`
+  runtime (the jars are in the local gradle cache), and a passing `box()=="OK"` is end-to-end proof the
+  synthesized `$serializer` is correct. NOTE: requires the real `serialize`/`deserialize` bodies (the
+  PoC stubs them), so this is the conformance *path*, lit up once bodies land — not green today.
+  Available now with the same harness: a **bytecode/ABI diff** of krusty's `$serializer` vs kotlinc's.
+- **KSP** — KSP's `test-utils` golden-symbol tests feed source to a test processor and assert on the
+  resolved symbol model it observes. Under the **orchestrator** strategy they pass by construction
+  (real KSP runs). Under the **native shim**, they are precisely the conformance suite for krusty's
+  `Resolver` fidelity (does `getSymbolsWithAnnotation` / type resolution match kotlinc?). Downstream
+  framework suites (Dagger, Room) run on the host as black-box e2e.
+
+The same `box()` corpus the rest of krusty is gated on absorbs serialization for free — no new harness.
+
 ## The AST/signature layer is dual-use: KSP *and* a future LSP
 
 A KSP host and an LSP server want the **same substrate**: a queryable resolved-symbol view over the
