@@ -4369,6 +4369,32 @@ impl<'a> Checker<'a> {
                 self.check_unary(op, ot, self.span(e))
             }
             Expr::Binary { op, lhs, rhs } => {
+                // `a && b`: a smart-cast established by `a` (`x is T`, `x != null`) holds while checking
+                // `b` (`x is String && x.length == 1`). Narrow `x` in a scope for the right operand —
+                // mirrors the `if`-then narrowing. (`||` doesn't narrow the RHS in the same sense.)
+                if matches!(op, BinOp::And) {
+                    let lt = self.expr(lhs);
+                    let cast = self.smartcast_binding(lhs, false);
+                    self.push_scope();
+                    if let Some((n, t)) = &cast {
+                        // Don't narrow to a VALUE class: it's erased to its underlying type, and a
+                        // smart-cast use in the same boolean expr (`x is V && x == …`) would take the
+                        // unboxed-equals path the `&&`-narrowing lowering doesn't model — miscompile.
+                        let is_value = t
+                            .obj_internal()
+                            .and_then(|i| self.syms.class_by_internal(i))
+                            .is_some_and(|c| c.value_field.is_some());
+                        if !is_value {
+                            self.declare(n, *t, false);
+                        }
+                    }
+                    let rt = self.expr(rhs);
+                    self.pop_scope();
+                    // `check_binary` enforces both operands are `Boolean` (and reports the same
+                    // "operator cannot be applied" error as the non-`&&` path otherwise).
+                    let bt = self.check_binary(op, lt, rt, self.span(e));
+                    return self.set(e, bt);
+                }
                 let lt = self.expr(lhs);
                 let rt = self.expr(rhs);
                 // User-defined extension operator on a primitive receiver overrides built-in arithmetic.

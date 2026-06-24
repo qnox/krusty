@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1556 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1557 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P30 — smart-cast within an `&&` condition (gate 1556 → 1557, +1, FAIL=0).** After `x is T`
+  (or `x != null`) on the left of `&&`, `x` is now narrowed to `T` while checking the right operand
+  (`x is String && x.length == 1`) — previously "unresolved member 'length' on kotlin/Any". The checker's
+  `Binary` `&&` arm evaluates the left, applies `smartcast_binding` in a pushed scope (as the `if`-then
+  path does), checks the right, then types via `check_binary` (preserving the "operator cannot be applied"
+  error for non-Boolean operands). GUARD: don't narrow to a VALUE class — its erased unboxed-equals use
+  in the same boolean expr (`x is V && x == …`) miscompiled (the +2 FAIL the first cut produced).
+  New `smartcast_and_e2e`.
 - **Phase P29 — interface property reads in default methods (gate 1555 → 1556, +1, FAIL=0; removes a
   bail).** An unqualified property read inside an interface DEFAULT method now routes through the getter
   (`invokeinterface getX`) instead of a (nonexistent) interface field — an interface has no backing
