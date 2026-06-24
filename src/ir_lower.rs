@@ -249,7 +249,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|(_, t, _)| *t)
                     })
                     .unwrap_or(Ty::Error);
-                if gv.ret != prop_ty {
+                // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
+                // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
+                // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
+                // return isn't, so bail on that.
+                if gv.ret != prop_ty && !gv.ret.is_reference() {
                     return None;
                 }
                 if prop_ty.obj_internal().is_some_and(is_value_cls) {
@@ -1398,7 +1402,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         dispatch_receiver: Some(dele),
                         args: vec![this_arg, pref],
                     });
-                    let ret = lo.ir.add_expr(IrExpr::Return(Some(call)));
+                    // A generic delegate's `getValue` returns the erased `Object`; coerce to the property
+                    // type (`checkcast`/unbox), exactly as kotlinc does.
+                    let coerced = lo.coerce_erased(call, prop_ty, gv.ret);
+                    let ret = lo.ir.add_expr(IrExpr::Return(Some(coerced)));
                     let body = lo.ir.add_expr(IrExpr::Block {
                         stmts: vec![ret],
                         value: None,
@@ -1427,6 +1434,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let this_arg = lo.ir.add_expr(IrExpr::GetValue(0));
                         let pref = make_propref(&mut lo);
                         let value_arg = lo.ir.add_expr(IrExpr::GetValue(1));
+                        // A generic delegate's `setValue` takes the ERASED value param (`<T> setValue(…, i:
+                        // T)`); a PRIMITIVE property value boxes into it (`Integer.valueOf`), exactly as
+                        // kotlinc does. A reference value passes through.
+                        let value_arg = match sv.params.last() {
+                            Some(vp) if vp.is_reference() && prop_ty.is_primitive() => {
+                                lo.ir.add_expr(IrExpr::TypeOp {
+                                    op: IrTypeOp::ImplicitCoercion,
+                                    arg: value_arg,
+                                    type_operand: ty_to_ir(*vp),
+                                })
+                            }
+                            _ => value_arg,
+                        };
                         let call = lo.ir.add_expr(IrExpr::Call {
                             callee: crate::ir::Callee::Virtual {
                                 owner: delegate_internal.clone(),
