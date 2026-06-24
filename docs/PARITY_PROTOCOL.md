@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1562 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1562 OK / 0 FAIL** (scanned 7351, Phase 412).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P36 — `Unit`-returning `tailrec` → loop (gate 1562 → 1562, +0 corpus, FAIL=0).** Removes the
+  P34 bail (`if ret_ty == Unit { return None }` — which dropped the whole file). A `Unit` body recurses
+  with a bare *statement* (`if (c) f(args)` / `{ …; f(args) }`), never `return f(args)`, so the
+  return-driven value transform couldn't see it. New `lower_tail_unit` walks to the tail position —
+  trailing expr, or last statement — and rewrites a tail self-call into the same param-reassign +
+  `continue` (alias-safe temps), recursing through `if`/`else` branches and nested `{ … }` blocks.
+  Tracks whether each path always transfers control: fall-through paths get a synthesized `return` (Unit)
+  to exit the `while(true)` loop, diverging paths don't (no dead/unverifiable code). Any self-call
+  outside tail position still bails (skip file) — never miscompiles into stack-overflowing recursion.
+  +0 on the corpus (its only non-`return` `Unit`-tailrec box tests are under `coroutines/` =
+  suspend-blocked), but the feature is real and proven by `tailrec_unit_returning_runs` (1,000,000-deep,
+  bare-tail + if/else shapes, runs flat under `-Xverify:all`). Closes a documented "bail".
 - **Phase P35 — numeric primitive → `Number` assignability (gate 1561 → 1562, +1, FAIL=0).** A numeric
   primitive (`Int`/`Long`/`Double`/…) is a subtype of `Number` — it boxes to its wrapper, which IS a
   `Number` — so `fun f(n: Number)` accepts `5`, `val n: Number = 5L` type-checks. `expect_assignable`

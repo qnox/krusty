@@ -6273,12 +6273,6 @@ impl<'a> Lower<'a> {
         self.cur_ret_ty = ret_ty.clone();
         self.try_finally_stack.clear();
         self.local_delegated.clear();
-        // A `Unit`-returning `tailrec` calls itself with a bare expression STATEMENT (not `return f(…)`),
-        // which the return-driven transform below doesn't rewrite — skip rather than emit recursion.
-        // (Value-returning tailrec, the common case, is fully handled.)
-        if *ret_ty == IrType::Unit {
-            return None;
-        }
         let label = "$tailrec".to_string();
         self.cur_tailrec = Some(TailrecCtx {
             name: f.name.clone(),
@@ -6286,10 +6280,16 @@ impl<'a> Lower<'a> {
             param_tys,
             label: label.clone(),
         });
+        let unit = *ret_ty == IrType::Unit;
         let loop_body = match &f.body {
-            FunBody::Expr(e) => self.lower_tail_expr(*e, ret_ty),
-            FunBody::Block(blk) => self.block_as_body(*blk, ret_ty),
-            FunBody::None => None,
+            // A `Unit` body recurses with a bare expression STATEMENT (`if (c) f(args)`), not
+            // `return f(args)` — handled by a tail-statement walk (`lower_tail_unit`); a value body uses
+            // the return-driven transform (`lower_tail_expr` for an expr body, `block_as_body` +
+            // `Stmt::Return` interception for a block body).
+            FunBody::Block(blk) if unit => self.lower_tail_unit(*blk),
+            FunBody::Expr(e) if !unit => self.lower_tail_expr(*e, ret_ty),
+            FunBody::Block(blk) if !unit => self.block_as_body(*blk, ret_ty),
+            _ => None, // a `Unit` expr-body tailrec / no body — not modeled, skip
         };
         self.cur_tailrec = None;
         let loop_body = loop_body?;
@@ -6379,6 +6379,161 @@ impl<'a> Lower<'a> {
                 }
                 let v = self.lower_arg(e, ret_ty)?;
                 Some(self.ir.add_expr(IrExpr::Return(Some(v))))
+            }
+        }
+    }
+
+    /// Lower a `Unit`-returning `tailrec` body block. A `Unit` body recurses with a bare statement
+    /// (`if (c) f(args)` / `{ …; f(args) }`), not `return f(args)`: walk to the tail position and rewrite
+    /// its self-calls into update+continue, then exit the loop via a trailing `return` on fall-through.
+    /// Bails (skip file) on any self-call outside tail position — never miscompiles into recursion.
+    fn lower_tail_unit(&mut self, block: AstExprId) -> Option<u32> {
+        let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else {
+            return None;
+        };
+        if stmts.is_empty() && trailing.is_none() {
+            return None;
+        }
+        let (body, diverges) = self.lower_tail_unit_block(&stmts, trailing)?;
+        let mut out = vec![body];
+        if !diverges {
+            // No tail self-call fired on this path → return `Unit`, exiting the `while(true)` loop.
+            out.push(self.ir.add_expr(IrExpr::Return(None)));
+        }
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: out,
+            value: None,
+        }))
+    }
+
+    /// Lower a block's statements + optional trailing expression in TAIL position. Only the final
+    /// element — the trailing expr, or the last statement when there is none — is the tail. Returns the
+    /// block IR and whether every path through it transfers control (`continue`/`return`/`throw`), i.e.
+    /// never falls through. A self-call in any non-tail position → bail.
+    fn lower_tail_unit_block(
+        &mut self,
+        stmts: &[crate::ast::StmtId],
+        trailing: Option<AstExprId>,
+    ) -> Option<(u32, bool)> {
+        let name = self.cur_tailrec.as_ref()?.name.clone();
+        let depth = self.scope.len();
+        let mut out = Vec::new();
+        // Leading non-tail statements: all of them when a trailing expr is the tail, else all but the last.
+        let non_tail = if trailing.is_some() {
+            stmts.len()
+        } else {
+            stmts.len().saturating_sub(1)
+        };
+        for &s in &stmts[..non_tail] {
+            if self.afile.any_child_stmt(s, &mut |e| {
+                crate::resolve::expr_uses_name_pub(self.afile, e, &name)
+            }) {
+                self.scope.truncate(depth);
+                return None;
+            }
+            if self.append_stmt(s, &mut out).is_none() {
+                self.scope.truncate(depth);
+                return None;
+            }
+            if self.stmt_diverges(s) {
+                // A non-tail statement that always transfers control makes the tail dead — stop here.
+                self.scope.truncate(depth);
+                return Some((
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: out,
+                        value: None,
+                    }),
+                    true,
+                ));
+            }
+        }
+        let tail = match trailing {
+            Some(t) => self.lower_tail_unit_expr(t),
+            None => self.lower_tail_unit_stmt(*stmts.last()?),
+        };
+        let Some((ir, diverges)) = tail else {
+            self.scope.truncate(depth);
+            return None;
+        };
+        out.push(ir);
+        self.scope.truncate(depth);
+        Some((
+            self.ir.add_expr(IrExpr::Block {
+                stmts: out,
+                value: None,
+            }),
+            diverges,
+        ))
+    }
+
+    /// Lower the TAIL statement of a `Unit` `tailrec` body. Returns `(ir, always_transfers_control)`.
+    fn lower_tail_unit_stmt(&mut self, s: crate::ast::StmtId) -> Option<(u32, bool)> {
+        if let Stmt::Expr(e) = self.afile.stmt(s).clone() {
+            return self.lower_tail_unit_expr(e);
+        }
+        // A non-`Expr` tail statement (assignment, etc.) is never a tail self-call — bail if it still
+        // references the function, else lower it normally (the loop's `return` exits afterward).
+        let name = self.cur_tailrec.as_ref()?.name.clone();
+        if self.afile.any_child_stmt(s, &mut |e| {
+            crate::resolve::expr_uses_name_pub(self.afile, e, &name)
+        }) {
+            return None;
+        }
+        let mut tmp = Vec::new();
+        self.append_stmt(s, &mut tmp)?;
+        let d = self.stmt_diverges(s);
+        Some((
+            self.ir.add_expr(IrExpr::Block {
+                stmts: tmp,
+                value: None,
+            }),
+            d,
+        ))
+    }
+
+    /// Lower a `Unit`-typed expression in TAIL position: `if` recurses into both branches (a no-`else`
+    /// `if` whose condition is false falls through), a self-call becomes update+continue, a `{ … }`
+    /// block recurses; anything else runs for effect (bailing on a non-tail self-call).
+    fn lower_tail_unit_expr(&mut self, e: AstExprId) -> Option<(u32, bool)> {
+        match self.afile.expr(e).clone() {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let c = self.expr(cond)?;
+                let (t, td) = self.lower_tail_unit_expr(then_branch)?;
+                match else_branch {
+                    Some(eb) => {
+                        let (el, ed) = self.lower_tail_unit_expr(eb)?;
+                        Some((
+                            self.ir.add_expr(IrExpr::When {
+                                branches: vec![(Some(c), t), (None, el)],
+                            }),
+                            td && ed,
+                        ))
+                    }
+                    // No `else`: a false condition falls through past the `when` → never diverges.
+                    None => Some((
+                        self.ir.add_expr(IrExpr::When {
+                            branches: vec![(Some(c), t)],
+                        }),
+                        false,
+                    )),
+                }
+            }
+            Expr::Call { callee, args } if self.is_tail_self_call(callee, &args) => {
+                Some((self.tail_update_continue(&args)?, true))
+            }
+            Expr::Block { stmts, trailing } => self.lower_tail_unit_block(&stmts, trailing),
+            _ => {
+                // Base case: run for effect. A lingering self-call here is non-tail → bail.
+                let name = self.cur_tailrec.as_ref()?.name.clone();
+                if crate::resolve::expr_uses_name_pub(self.afile, e, &name) {
+                    return None;
+                }
+                let v = self.expr(e)?;
+                Some((v, false))
             }
         }
     }
