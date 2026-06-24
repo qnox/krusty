@@ -18,7 +18,9 @@
 //! future LSP. Only body/expression rewrite genuinely belongs at the IR level. This self-contained
 //! PoC runs all three phases over `IrFile` for testability; the phase split is documented per-hook.
 
+pub mod cli;
 pub mod ksp;
+pub mod registry;
 pub mod serialization;
 
 use std::collections::HashMap;
@@ -89,6 +91,19 @@ impl PluginHost {
 
     pub fn register(&mut self, plugin: Box<dyn IrPlugin>) {
         self.plugins.push(plugin);
+    }
+
+    pub fn len(&self) -> usize {
+        self.plugins.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+
+    /// Names of the registered plugins, in run order (introspection / tests).
+    pub fn plugin_names(&self) -> Vec<&str> {
+        self.plugins.iter().map(|p| p.name()).collect()
     }
 
     pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext) {

@@ -456,6 +456,18 @@ mod tests {
     }
 
     #[test]
+    fn is_consistent_rejects_partial_version_match() {
+        // A prefix that isn't a whole version component must NOT pass: kotlin "2.0.2" is a string
+        // prefix of "2.0.21-..." but a different version — the '-' boundary check rejects it.
+        assert!(!KspToolchain::new("2.0.2", "2.0.21-1.0.28").is_consistent());
+        // Missing the '-<ksp>' suffix entirely is rejected.
+        assert!(!KspToolchain::new("2.0.21", "2.0.21").is_consistent());
+        // Empty kotlin version can't anchor a coordinate.
+        assert!(!KspToolchain::new("", "2.0.21-1.0.28").is_consistent());
+        assert!(!KspToolchain::new("", "").is_consistent());
+    }
+
+    #[test]
     fn terminates_with_no_annotated_symbols() {
         let mut ir = IrFile::default();
         ir.add_class(synthetic_class("demo/Plain"));

@@ -36,6 +36,40 @@ pub enum SerializationAbi {
     V1_6Plus,
 }
 
+impl SerializationAbi {
+    /// Pick the ABI from a `kotlinx-serialization-core` version string (`"1.8.1"`, `"1.5.0"`). As a
+    /// kotlinc drop-in, krusty derives this from the runtime jar on `-classpath` — NOT a krusty flag —
+    /// so the same inputs kotlinc gets select the same codegen. `< 1.6` → `V1_0`, else `V1_6Plus`.
+    pub fn from_core_version(version: &str) -> SerializationAbi {
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        let major = parts.next().unwrap_or(0);
+        let minor = parts.next().unwrap_or(0);
+        if (major, minor) < (1, 6) {
+            SerializationAbi::V1_0
+        } else {
+            SerializationAbi::V1_6Plus
+        }
+    }
+
+    /// Detect the ABI from a `-classpath` jar list by finding the `kotlinx-serialization-core[-jvm]`
+    /// jar and reading its version. Returns `None` if the runtime isn't on the classpath (then the
+    /// `@Serializable` annotation itself wouldn't resolve — a user error kotlinc also reports).
+    pub fn from_classpath(cp_jars: &[String]) -> Option<SerializationAbi> {
+        cp_jars
+            .iter()
+            .filter_map(|j| {
+                let name = j.rsplit('/').next().unwrap_or(j);
+                let stem = name.strip_suffix(".jar")?;
+                // kotlinx-serialization-core-jvm-1.8.1  /  kotlinx-serialization-core-1.8.1
+                let rest = stem.strip_prefix("kotlinx-serialization-core")?;
+                let rest = rest.strip_prefix("-jvm").unwrap_or(rest);
+                let ver = rest.strip_prefix('-')?;
+                Some(SerializationAbi::from_core_version(ver))
+            })
+            .next()
+    }
+}
+
 /// The serialization extension, pinned to a target runtime ABI + the compilation's module name
 /// (needed for the >=1.6 `write$Self$<module>` mangling).
 pub struct SerializationPlugin {
@@ -511,6 +545,44 @@ mod tests {
         assert!(names(SerializationAbi::V1_6Plus).contains(&"write$Self$app".to_string()));
         // ...and the two versions do NOT produce the same helper name.
         assert!(!names(SerializationAbi::V1_0).contains(&"write$Self$app".to_string()));
+    }
+
+    #[test]
+    fn abi_detected_from_classpath_runtime() {
+        // Drop-in: the ABI follows the kotlinx-serialization-core jar on -classpath, not a flag.
+        assert_eq!(
+            SerializationAbi::from_core_version("1.5.0"),
+            SerializationAbi::V1_0
+        );
+        assert_eq!(
+            SerializationAbi::from_core_version("1.6.0"),
+            SerializationAbi::V1_6Plus
+        );
+        assert_eq!(
+            SerializationAbi::from_core_version("1.8.1"),
+            SerializationAbi::V1_6Plus
+        );
+
+        let cp = vec![
+            "/x/kotlin-stdlib.jar".to_string(),
+            "/x/kotlinx-serialization-core-jvm-1.8.1.jar".to_string(),
+        ];
+        assert_eq!(
+            SerializationAbi::from_classpath(&cp),
+            Some(SerializationAbi::V1_6Plus)
+        );
+
+        let old = vec!["/x/kotlinx-serialization-core-1.5.0.jar".to_string()];
+        assert_eq!(
+            SerializationAbi::from_classpath(&old),
+            Some(SerializationAbi::V1_0)
+        );
+
+        // No serialization runtime on the classpath → no ABI (annotation wouldn't resolve either).
+        assert_eq!(
+            SerializationAbi::from_classpath(&["/x/kotlin-stdlib.jar".to_string()]),
+            None
+        );
     }
 
     #[test]
