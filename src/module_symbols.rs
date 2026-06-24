@@ -282,6 +282,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             constructors,
             members,
             companion,
+            value_underlying: None,
         })
     }
 }

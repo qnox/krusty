@@ -174,6 +174,7 @@ mod tests {
                     constructors: vec![],
                     members: vec![],
                     companion: vec![],
+                    value_underlying: None,
                 })
             } else {
                 None

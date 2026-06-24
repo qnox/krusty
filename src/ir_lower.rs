@@ -1983,6 +1983,64 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     if nothing_bridge {
         return None;
     }
+    // Discover classpath `@JvmInline value class`es referenced by type in this file and record their
+    // REFERENCE underlying (`Result` → `Object`), so the value-class pass erases them like a user value
+    // class. A primitive-underlying value class (`UInt`/`ULong` → `Int`/`Long`) is EXCLUDED — it keeps
+    // its existing dedicated handling, and erasing it here would disturb that.
+    {
+        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let note = |t: &IrType, set: &mut std::collections::HashSet<String>| {
+            if let IrType::Class { fq_name, .. } = t {
+                set.insert(fq_name.clone());
+            }
+        };
+        for f in &lo.ir.functions {
+            for p in &f.params {
+                note(p, &mut referenced);
+            }
+            note(&f.ret, &mut referenced);
+        }
+        for c in &lo.ir.classes {
+            for (_, t) in &c.fields {
+                note(t, &mut referenced);
+            }
+            for (t, _) in &c.ctor_args {
+                note(t, &mut referenced);
+            }
+        }
+        for s in &lo.ir.statics {
+            note(&s.ty, &mut referenced);
+        }
+        for e in &lo.ir.exprs {
+            if let IrExpr::Variable { ty, .. } = e {
+                note(ty, &mut referenced);
+            }
+        }
+        for fq in referenced {
+            if let Some(under) = lo
+                .syms
+                .libraries
+                .resolve_type(&fq)
+                .and_then(|t| t.value_underlying)
+            {
+                if !under.is_primitive() {
+                    // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
+                    // marks a type-parameter value-class field.
+                    let ir_under = match ty_to_ir(under) {
+                        IrType::Class {
+                            fq_name, type_args, ..
+                        } => IrType::Class {
+                            fq_name,
+                            type_args,
+                            nullable: true,
+                        },
+                        other => other,
+                    };
+                    lo.ir.external_value_classes.insert(fq, ir_under);
+                }
+            }
+        }
+    }
     Some(lo.ir)
 }
 

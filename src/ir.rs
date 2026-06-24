@@ -723,6 +723,12 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     pub field_signatures: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `IrType`) REFERENCED in
+    /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
+    /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
+    /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
+    /// `UInt`/`ULong` keeps its existing dedicated handling).
+    pub external_value_classes: std::collections::HashMap<String, IrType>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
