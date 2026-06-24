@@ -416,10 +416,35 @@ no stackmap frame). This unblocked nullable reference elements — the element s
 (`kotlinx.serialization.internal.StringSerializer.INSTANCE`, verified public/getstatic-able) is now a
 real reference passed to `encode/decodeNullableSerializableElement`.
 
-#### Next bricks
-- **Default values (`val a: Int = 5`):** the most common remaining corpus shape. Needs the `seen`
-  bitmask machinery — `addElement(name, isOptional=true)`, the synthesized `C(int seen, …fields,
-  SerializationConstructorMarker)` constructor, and a decode that reconstructs defaults from the mask.
+#### Definitive 69-corpus audit (2026-06-24) — every file's FIRST blocker
+Ran krusty over all 69 `boxIr` files (stdlib + kotlinx-serialization-{core,json} on `-classpath`).
+Result: **0/69 even COMPILE** (front-end, before any box() run). First-blocker histogram:
+
+| blocker | files | nature |
+|---|---|---|
+| `unresolved reference 'Json'` | **14** | bare `Json` = its companion `Default` (a `static Json$Default Default` field); krusty doesn't resolve a CLASSPATH class's companion via the bare class name (gap #3). Highest single lever. |
+| `unresolved reference '<T>'` (generics) | ~10 | generic `@Serializable class C<T>` / type-param element serializers |
+| `unresolved reference '<Type>'` (other) | ~8 | `PrimitiveKind`, `encodeDefaults`, user types in multi-`// FILE:` blocks |
+| parser: `expected an expression / top-level decl / type / object name` | ~9 | annotation arrays, local @Serializable, `serializer()` factory forms |
+| custom serializer / `@Serializable(with=…)` / contextual | ~6 | `unresolved member`/`function`, descriptor introspection |
+| sealed / polymorphic | ~4 | `sealedInterfaces`, `polymorphic*`, `PolymorphicSerializer` |
+| reflection / `@SerialInfo` annotation-impl | ~3 | `serialInfo`, `enumsAreCached` (EnumSerializer identity) |
+| value/inline classes, callable refs, `by` delegation, multi-module, expect/actual | ~rest | each its own language feature |
+
+**Conclusion (authoritative):** the 69-corpus needs a STACK of features together — Json/companion
+resolution + generics + custom/contextual serializers + sealed + polymorphic + reflection +
+descriptor introspection + several parser gaps. **Every file has ≥1 blocker from this stack, and the
+simple ones have several** — so no single bounded fix moves 0/69 → 1/69. This is a multi-session
+language roadmap, not an extension-surface gap. (Raw per-file data: `/tmp/ser_errs.txt` at audit time;
+reproduce by compiling each `boxIr/*.kt` with the serialization runtime on `-classpath`.)
+
+#### Next bricks (highest leverage first, by the audit)
+- **Classpath companion-object resolution (`Json` = gap #3, 14 files):** resolve a bare classpath
+  class name to its companion instance (`getstatic C.Default`/`.Companion`) + members. General Kotlin
+  feature, not serialization-specific. Won't make a file fully pass alone (secondary blockers) but is
+  the single biggest first-blocker.
+- **Default values (`val a: Int = 5`):** the `seen` bitmask — `addElement(name, isOptional=true)`, the
+  synthesized `C(int seen, …fields, SerializationConstructorMarker)` constructor, decode-from-mask.
 - Then enum/collection (`ListSerializer`, `EnumSerializer`)/generic/sealed serialization, then the
   language features for the rest of the 69-corpus.
 
