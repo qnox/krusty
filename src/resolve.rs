@@ -2171,11 +2171,20 @@ fn infer_lit_ty_p(
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
         // A bare name referring to a property (or `this` — the receiver of an expression-bodied
-        // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry).
+        // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry), or a
+        // classpath/stdlib `object` used as a value (`val ctx = EmptyCoroutineContext`): its value is the
+        // singleton, of the object's own type. Only an `object` is a value, so the classpath fallback
+        // never mistypes a plain class name (which isn't a value and stays `Error` → the file skips).
         Expr::Name(n) => props
             .iter()
             .find(|(pn, _, _)| pn == n)
             .map(|(_, t, _)| *t)
+            .or_else(|| {
+                class_names
+                    .get(n.as_str())
+                    .filter(|internal| src.resolve_type(internal).is_some_and(|t| t.is_object()))
+                    .map(|internal| Ty::obj(internal))
+            })
             .unwrap_or(Ty::Error),
         Expr::Member { receiver, name } => {
             if let Expr::Name(prim) = file.expr(*receiver) {
