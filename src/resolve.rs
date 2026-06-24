@@ -5950,9 +5950,37 @@ impl<'a> Checker<'a> {
                                 &arg_tys,
                             ) {
                                 Some(m) => m.ret,
+                                // Not a companion STATIC — try a companion-object INSTANCE method
+                                // (`Json.encodeToString(…)`/`Random.nextInt(…)` = `<Class>.Default.m(…)`):
+                                // resolve `m` as an instance method on the companion's type.
                                 None => {
-                                    self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
-                                    Ty::Error
+                                    let inst = self
+                                        .syms
+                                        .libraries
+                                        .resolve_type(&internal)
+                                        .and_then(|lt| lt.companion_object)
+                                        .and_then(|(_, cty)| {
+                                            crate::call_resolver::resolve_instance(
+                                                &*self.syms.libraries,
+                                                &cty,
+                                                &name,
+                                                &arg_tys,
+                                            )
+                                            .map(|m| (cty, m))
+                                        });
+                                    match inst {
+                                        Some((cty, m)) => {
+                                            // Record the receiver's type as the companion's type so the
+                                            // LOWERING resolves this as an instance call on the
+                                            // getstatic'd companion value (`Random` → `Random$Default`).
+                                            self.set(receiver, Ty::obj(&cty));
+                                            m.ret
+                                        }
+                                        None => {
+                                            self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
+                                            Ty::Error
+                                        }
+                                    }
                                 }
                             };
                         }

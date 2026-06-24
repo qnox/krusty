@@ -8,6 +8,7 @@ mod common;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::symbol_source::SymbolSource;
+use krusty::types::Ty;
 use std::rc::Rc;
 
 #[test]
@@ -42,5 +43,18 @@ fn classpath_class_companion_object_is_detected() {
     assert_eq!(
         pair.companion_object, None,
         "kotlin/Pair has no companion object"
+    );
+
+    // The companion-INSTANCE method-call path: `Random.nextInt(n)` = `Random.Default.nextInt(n)`.
+    // The companion's type (`Random$Default`) must resolve an instance method `nextInt(Int)`
+    // (inherited from `Random` via the supertype walk) — what the checker/lowering use to lower the
+    // call as `getstatic Random.Default; invokevirtual nextInt`.
+    let (_, cty) = random
+        .companion_object
+        .expect("Random has a companion object");
+    let nextint = krusty::call_resolver::resolve_instance(&libs, &cty, "nextInt", &[Ty::Int]);
+    assert!(
+        nextint.is_some(),
+        "nextInt(Int) resolves as an instance method on the companion type {cty}"
     );
 }
