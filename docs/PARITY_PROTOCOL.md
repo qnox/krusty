@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 429).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 430).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P53 — metadata reader for classpath `@JvmInline value class` detection (gate 1611 → 1611, +0,
+  FAIL=0).** Layer 2 prerequisite for `kotlin.Result`: krusty's unboxed value-class ABI pass
+  (`jvm/value_classes.rs`) already lowers USER value classes, but had no way to recognize a CLASSPATH type as
+  a value class or learn its underlying type. New `metadata.rs` `class_inline(ci) -> Option<InlineClass {
+  underlying_class, property_name }>`, reading the `Class.inline_class_underlying_type`(=18) / `_property_name`
+  (=17) / `_type_id`(=19) proto fields (presence is the value-class marker). `metadata_reader_e2e` validates:
+  `Result` → underlying `kotlin/Any` (`value class Result<T>(val value: Any?)`, erases to Object), `UInt` →
+  `kotlin/Int`, `Pair` → not a value class. Reader only (not yet consumed by the value-class erasure pass).
 - **Phase P52 — metadata-primary function reader: signatures from `@Metadata`, bytecode is fallback (gate
   1611 → 1611, +0, FAIL=0).** Foundation for `kotlin.Result` (and every `inline` stdlib member). An `inline`
   function is `private`/synthetic in bytecode, so its *public* signature exists only in `@Metadata` — krusty
