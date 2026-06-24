@@ -1246,7 +1246,19 @@ impl SymbolSource for JvmLibraries {
                 } else {
                     c.descriptor.clone()
                 };
-                let (params, physical_ret) = parse_method_desc(&descriptor);
+                let (mut params, physical_ret) = parse_method_desc(&descriptor);
+                // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
+                // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
+                // Continuation is already removed above). `@Metadata` records only the source
+                // `value_parameter`s, so its count bounds the source params; keep the descriptor's
+                // leading params (their exact types — an extension receiver, a vararg array) and
+                // truncate the trailing synthetics. A normal function's metadata count equals the
+                // descriptor's param count, so this is a no-op for it (no regression).
+                if let Some(keep) = self.cp.metadata_kept_params(&c.owner, &c.name, &params) {
+                    if keep < params.len() {
+                        params.truncate(keep);
+                    }
+                }
                 // A suspend method's physical return is erased to `Object`; recover the LOGICAL Kotlin
                 // return type from `@Metadata` (`helper(): Int`), so the call types correctly. The
                 // physical (erased) return stays `Object` for the emit.
@@ -1711,10 +1723,10 @@ impl LibrarySet for JvmLibraries {
                 .overloads
                 .iter()
                 .filter(|o| o.kind == FnKind::TopLevel && o.public)
-                .map(|o| {
-                    let (params, ret) = parse_method_desc(&o.callable.descriptor);
-                    (o, params, ret)
-                })
+                // Reuse the params the `functions` query already built — one source of truth. They
+                // carry the `@Metadata` source signature (synthetic trailing params dropped); re-parsing
+                // the descriptor here would reinstate a `@Composable` callee's `(Composer, int)`.
+                .map(|o| (o, o.callable.params.clone(), o.callable.ret))
                 .collect();
             // Exact arity first.
             let pick = parsed
