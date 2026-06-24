@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1729 OK / 0 FAIL** (scanned 7351, Phase 441).
+  repo's `compiler/testData/codegen/box`). Current gate: **1731 OK / 0 FAIL** (scanned 7351, Phase 442).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P65 — anonymous-object capture, slice 1+2 (gate 1729 → 1731, +2, FAIL=0).** An
+  `object : I { … }` expression is desugared (parser `parse_anon_object`) to a hoisted top-level synth
+  class + a no-argument construction, so a body reading an enclosing local previously failed to resolve
+  ("unresolved function 'x'" / "unresolved reference 'T'"). New post-parse pass `rewrite_anon_captures`
+  (parser.rs, run in `parse_with_features` after `hoist_local_classes`) turns each captured enclosing
+  **function parameter** and read-only **local** (type from an explicit annotation or a literal
+  initializer — no inference needed) into a constructor `val` property of the synth class and passes it at
+  the construction; the ordinary class machinery then resolves the body reference as a member and emits the
+  field. SOUND BOUNDARIES (each stays an honest skip, never a miscompile): a captured name WRITTEN inside
+  the anon (`var acc; …{ acc = … }`) needs a shared `Ref` cell (kotlinc's boxing) so it is NOT captured by
+  value (`anon_body_writes` guard); a captured parameter whose type mentions an enclosing TYPE parameter is
+  left alone; an outer LOCAL with a non-literal unannotated initializer (unknown type here) is left alone;
+  a function-typed capture hits the pre-existing lambda→function-typed-ctor-param gap and skips. Non-
+  capturing anon objects are unchanged. NEXT slices: written-`var` capture via `Ref` boxing (the common
+  `object : Runnable { run() { result = … } }` shape), outer-`this`/receiver capture (`this@Outer`),
+  generic/parameterized base classes, and locals with inferred (non-literal) types. TDD:
+  tests/anon_object_capture_e2e.rs (param + read-only-local + non-capturing).
 
 - **Phase P64 — faithful `// WITH_COROUTINES` helper injection (gate 1730 → 1729, −1, FAIL=0).** The
   conformance harness was treating `WITH_COROUTINES` as "add the kotlinx-coroutines-core jar" — wrong:
