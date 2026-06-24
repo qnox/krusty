@@ -1,6 +1,3 @@
 target/
 krusty-out/
 docs/badges/
-.kotlinc/
-.kotlin-box/
-.ksp-toolchain/
