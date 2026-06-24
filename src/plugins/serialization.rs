@@ -326,6 +326,52 @@ fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
 }
 
 impl SerializationPlugin {
+    /// Add `static serializer(): KSerializer<C>` returning a fresh instance of the explicit serializer
+    /// `X` from `@Serializable(with = X::class)`: `new X(Reflection.getOrCreateKotlinClass(C.class))`.
+    /// `ContextualSerializer`/`PolymorphicSerializer` (any serializer with a single `KClass` ctor) take
+    /// the serialized class's `KClass`; their descriptors carry the right `SerialKind`.
+    fn add_custom_serializer_accessor(
+        ir: &mut IrFile,
+        class_id: u32,
+        class_fq: &str,
+        custom: &str,
+    ) {
+        let classlit = ir.add_expr(IrExpr::ClassConst {
+            internal: class_fq.to_string(),
+        });
+        let kclass = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: "kotlin/jvm/internal/Reflection".to_string(),
+                name: "getOrCreateKotlinClass".to_string(),
+                descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+                inline: false,
+                must_inline: false,
+            },
+            dispatch_receiver: None,
+            args: vec![classlit],
+        });
+        let inst = ir.add_expr(IrExpr::NewExternal {
+            internal: custom.to_string(),
+            ctor_desc: "(Lkotlin/reflect/KClass;)V".to_string(),
+            args: vec![kclass],
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(inst)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        let accessor = ir.add_fun(IrFunction {
+            name: "serializer".to_string(),
+            params: vec![],
+            ret: kserializer_of(class_ty(class_fq)),
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.classes[class_id as usize].methods.push(accessor);
+    }
+
     /// Add a method to `ir` and return its `FunId`.
     fn add_method(
         ir: &mut IrFile,
@@ -357,6 +403,12 @@ impl IrPlugin for SerializationPlugin {
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for class_id in ctx.classes_with_simple("Serializable") {
             let class_fq = ir.classes[class_id as usize].fq_name.clone();
+            // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
+            // instance of the explicit serializer `X` (`new X(C::class)`), the way kotlinc compiles it.
+            if let Some(custom) = ir.classes[class_id as usize].custom_serializer.clone() {
+                Self::add_custom_serializer_accessor(ir, class_id, &class_fq, &custom);
+                continue;
+            }
             let ser_fq = serializer_fq(&class_fq);
 
             // Member signatures; bodies are filled in `transform_bodies`.
@@ -564,6 +616,11 @@ impl IrPlugin for SerializationPlugin {
     /// (arity == field count), and `serialize`/`deserialize` with placeholder `return` bodies.
     fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for class_id in ctx.classes_with_simple("Serializable") {
+            // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
+            // `generate_declarations`).
+            if ir.classes[class_id as usize].custom_serializer.is_some() {
+                continue;
+            }
             let fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
             let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
             let class_internal = ir.classes[class_id as usize].fq_name.clone();

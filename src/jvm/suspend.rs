@@ -1751,6 +1751,7 @@ fn build_continuation_class(
     let class = IrClass {
         fq_name: internal.to_string(),
         serial_names: Vec::new(),
+        custom_serializer: None,
         is_value: false,
         type_param_bounds: vec![],
         field_type_params,

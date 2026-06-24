@@ -482,6 +482,10 @@ pub struct IrClass {
     /// `(property_name, serial_name)`. Empty for a class with no such annotation. Consumed by the
     /// serialization extension to name descriptor elements; ignored by the core backend.
     pub serial_names: Vec<(String, String)>,
+    /// The internal name of an explicit serializer from `@Serializable(with = X::class)`, or `None`.
+    /// The serialization extension makes `serializer()` return an instance of `X` instead of generating
+    /// a default `$serializer`. Ignored by the core backend.
+    pub custom_serializer: Option<String>,
     /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
     /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
     /// matching kotlinc, which inserts the check at each access site (not only the property getter).

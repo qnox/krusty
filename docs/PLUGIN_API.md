@@ -430,6 +430,14 @@ names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lowe
 element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
 value-class serializers or reflection.
 
+**`@Serializable(with = X::class)` landed** (greens `contextualByDefault` + `polymorphic`, box()=OK):
+`serializer()` returns an instance of the explicit serializer `X` — `new X(getOrCreateKotlinClass(C.class))`
+(`ContextualSerializer`/`PolymorphicSerializer` take the class's `KClass`; their descriptors carry the
+right `SerialKind`) instead of a generated `$serializer`. Plumbing: ClassDecl/`IrClass.custom_serializer`
+(annotation class-literal arg, resolved via `class_names`). Two GENERAL interface bugs fixed en route: a
+`static` method on an interface emits `public static` (not the illegal `final`), and a `CrossFile`
+invokestatic to an interface uses an `InterfaceMethodref` constant.
+
 **Reified serializer form landed** (krusty-only e2e green): `Json.encodeToString(x)` /
 `Json.decodeFromString<C>(s)` (no explicit serializer) are `reified inline` — uncallable directly
 (`UnsupportedOperationException`). `ir_lower::try_reified_serial` desugars them to the 2-arg member with
