@@ -16,7 +16,7 @@
 //!     published `kotlinx-serialization-core` runtime (`Encoder`/`Decoder`/`SerialDescriptor`); the
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
-use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrType};
+use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp};
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
@@ -519,6 +519,21 @@ impl IrPlugin for SerializationPlugin {
             };
             // The serialized class's ClassId (for constructing it in `deserialize`).
             let foo_id = class_id;
+            // For each field: the ClassId of its element `$serializer` if the field's type is itself a
+            // `@Serializable` class krusty generated a serializer for (nested/composite), else None.
+            let nested: Vec<Option<u32>> = fields
+                .iter()
+                .map(|(_, ty)| match ty {
+                    IrType::Class { fq_name, .. } => {
+                        let s = serializer_fq(fq_name);
+                        ir.classes
+                            .iter()
+                            .position(|c| c.fq_name == s)
+                            .map(|i| i as u32)
+                    }
+                    _ => None,
+                })
+                .collect();
             for fid in ir.classes[ser_idx].methods.clone() {
                 match ir.functions[fid as usize].name.as_str() {
                     "getDescriptor" => {
@@ -567,15 +582,8 @@ impl IrPlugin for SerializationPlugin {
                             init: Some(begin),
                         });
                         let mut stmts = vec![cvar];
+                        let mut bail = false;
                         for (i, (pname, ty)) in fields.iter().enumerate() {
-                            let Some((mname, mdesc)) = encode_element_method(ty) else {
-                                // a field type we can't encode yet — leave serialize a no-op return
-                                // rather than emit a wrong call.
-                                stmts.clear();
-                                let ret = ir.add_expr(IrExpr::Return(None));
-                                stmts.push(ret);
-                                break;
-                            };
                             let d = this_desc(ir);
                             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
                             // Read the property via its PUBLIC getter (`value.getX()`) — the backing
@@ -592,29 +600,61 @@ impl IrPlugin for SerializationPlugin {
                                 args: vec![],
                             });
                             let c = ir.add_expr(IrExpr::GetValue(3));
+                            if let Some(nsid) = nested[i] {
+                                // Nested @Serializable: encodeSerializableElement(desc, i, <T>$serializer.INSTANCE, value.getX())
+                                let inst = ir.add_expr(IrExpr::StaticInstance {
+                                    owner: nsid,
+                                    ty: nsid,
+                                    field: "INSTANCE",
+                                });
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        "encodeSerializableElement",
+                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, inst, v],
+                                }));
+                            } else if let Some((mname, mdesc)) = encode_element_method(ty) {
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        mname,
+                                        mdesc,
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, v],
+                                }));
+                            } else {
+                                bail = true;
+                                break;
+                            }
+                        }
+                        if bail {
+                            // a field type we can't encode yet — emit a clean no-op return (no
+                            // beginStructure/endStructure), not a wrong call.
+                            let ret = ir.add_expr(IrExpr::Return(None));
+                            let body = ir.add_expr(IrExpr::Block {
+                                stmts: vec![ret],
+                                value: None,
+                            });
+                            ir.functions[fid as usize].body = Some(body);
+                        } else {
+                            let dend = this_desc(ir);
+                            let cend = ir.add_expr(IrExpr::GetValue(3));
                             stmts.push(ir.add_expr(IrExpr::Call {
                                 callee: virtual_iface(
                                     "kotlinx/serialization/encoding/CompositeEncoder",
-                                    mname,
-                                    mdesc,
+                                    "endStructure",
+                                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
                                 ),
-                                dispatch_receiver: Some(c),
-                                args: vec![d, idx, v],
+                                dispatch_receiver: Some(cend),
+                                args: vec![dend],
                             }));
+                            let body = ir.add_expr(IrExpr::Block { stmts, value: None });
+                            ir.functions[fid as usize].body = Some(body);
                         }
-                        let dend = this_desc(ir);
-                        let cend = ir.add_expr(IrExpr::GetValue(3));
-                        stmts.push(ir.add_expr(IrExpr::Call {
-                            callee: virtual_iface(
-                                "kotlinx/serialization/encoding/CompositeEncoder",
-                                "endStructure",
-                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-                            ),
-                            dispatch_receiver: Some(cend),
-                            args: vec![dend],
-                        }));
-                        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-                        ir.functions[fid as usize].body = Some(body);
                     }
                     "deserialize" => {
                         // deserialize(decoder=1):
@@ -628,9 +668,9 @@ impl IrPlugin for SerializationPlugin {
                         // Supported only when every field is a decodable type; otherwise fall back to
                         // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
-                        let decodable = fields
-                            .iter()
-                            .all(|(_, t)| decode_element_method(t).is_some());
+                        let decodable = fields.iter().enumerate().all(|(i, (_, t))| {
+                            decode_element_method(t).is_some() || nested[i].is_some()
+                        });
                         // Field-local slot for each property — `this`=0, decoder=1, c=2, i=3, then the
                         // field locals from slot 4, advancing by each type's JVM width (Long/Double=2).
                         let mut slots: Vec<u32> = Vec::with_capacity(fields.len());
@@ -717,7 +757,6 @@ impl IrPlugin for SerializationPlugin {
                                 branches: vec![(Some(is_done), brk_blk)],
                             }));
                             for (k, (_, ty)) in fields.iter().enumerate() {
-                                let (mname, mdesc) = decode_element_method(ty).unwrap();
                                 let iref = ir.add_expr(IrExpr::GetValue(3));
                                 let kc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                                 let is_k = ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -728,15 +767,40 @@ impl IrPlugin for SerializationPlugin {
                                 let dk = this_desc(ir);
                                 let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                                 let cdk = ir.add_expr(IrExpr::GetValue(2));
-                                let decoded = ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeDecoder",
-                                        mname,
-                                        mdesc,
-                                    ),
-                                    dispatch_receiver: Some(cdk),
-                                    args: vec![dk, idxc],
-                                });
+                                let decoded = if let Some(nsid) = nested[k] {
+                                    // f_k = (T) c.decodeSerializableElement(desc, k, T$serializer.INSTANCE, null)
+                                    let inst = ir.add_expr(IrExpr::StaticInstance {
+                                        owner: nsid,
+                                        ty: nsid,
+                                        field: "INSTANCE",
+                                    });
+                                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let raw = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            "decodeSerializableElement",
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc, inst, prev],
+                                    });
+                                    ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::Cast,
+                                        arg: raw,
+                                        type_operand: ty.clone(),
+                                    })
+                                } else {
+                                    let (mname, mdesc) = decode_element_method(ty).unwrap();
+                                    ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            mname,
+                                            mdesc,
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc],
+                                    })
+                                };
                                 let setk = ir.add_expr(IrExpr::SetValue {
                                     var: slots[k],
                                     value: decoded,
