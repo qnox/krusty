@@ -30,8 +30,35 @@ pub fn parse_with_features(
         pending_annotations: Vec::new(),
     };
     p.parse_file();
+    hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     p.file
+}
+
+/// Hoist every local class (`class`/`interface`/… declared inside a function body, parsed as
+/// `Stmt::LocalClass`) to a top-level `Decl::Class`, so signature collection, checking, and lowering
+/// treat it like any other class — zero changes to those passes. The `Stmt::LocalClass` stays in the
+/// body as a no-op. A local class that captures outer locals is checked with no enclosing scope, so its
+/// outer references fail to resolve and the file cleanly skips (never miscompiles). Two same-named local
+/// classes (or a clash with a top-level name) become a "conflicting declarations" skip — also sound.
+fn hoist_local_classes(file: &mut File) {
+    use crate::ast::{Decl, Stmt};
+    let hoisted: Vec<crate::ast::ClassDecl> = file
+        .stmt_arena
+        .iter()
+        .filter_map(|s| match s {
+            // A local class with super-CONSTRUCTOR arguments (`class Z : C(s)`) can capture an outer
+            // local through that call, which the hoisted (outer-scope-free) check doesn't currently
+            // reject — so it would miscompile. Don't hoist those; the reference stays unresolved and the
+            // file skips (sound). Local-class INHERITANCE is a later slice. Everything else hoists.
+            Stmt::LocalClass(c) if c.base_args.is_empty() => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    for c in hoisted {
+        let id = file.add_decl(Decl::Class(c));
+        file.decls.push(id);
+    }
 }
 
 /// A class with NO primary constructor names its base class WITHOUT parentheses (`class A : B { …
@@ -376,6 +403,38 @@ impl<'a> Parser<'a> {
     /// `class`-body/`object`-body/`enum`-body grammar doesn't support nested types, so the caller
     /// discards the result; a *reference* to the (dropped) nested type then fails to resolve and the
     /// file is cleanly skipped, never miscompiled.
+    /// Whether the statement at the cursor begins a local TYPE declaration: a `class` keyword, an
+    /// `interface Name`, or a soft-keyword class form (`data`/`enum`/`sealed`/`annotation`/`value` +
+    /// `class`, possibly through modifiers like `open`/`abstract`/`inner`/`private`). Lookahead only —
+    /// doesn't consume. Excludes `object` (a bare `object` may be an anonymous-object expression).
+    fn looks_like_local_type_decl(&self) -> bool {
+        let mut j = self.i;
+        loop {
+            let Some(tk) = self.t.get(j) else {
+                return false;
+            };
+            if tk.kind == TokenKind::KwClass {
+                return true;
+            }
+            if tk.kind != TokenKind::Ident {
+                return false;
+            }
+            let s = tk.text(self.src);
+            // `interface Name` — a named local interface (the next token is the name).
+            if s == "interface" {
+                return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
+            }
+            // A class-introducing soft keyword — keep scanning toward `class`. (Pure modifiers like
+            // `open`/`abstract` aren't consumed by `parse_nested_type_decl`, so a modifier-prefixed local
+            // class stays on the expression path and the file skips cleanly — slice 1 scope.)
+            if matches!(s, "data" | "enum" | "sealed" | "annotation" | "value") {
+                j += 1;
+                continue;
+            }
+            return false;
+        }
+    }
+
     fn parse_nested_type_decl(&mut self) -> ClassDecl {
         match self.kind() {
             TokenKind::KwClass => self.parse_class(),
@@ -2611,6 +2670,14 @@ impl<'a> Parser<'a> {
                 // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
                 let f = self.parse_fun(false, false, false, false);
                 self.finish_stmt(Stmt::LocalFun(f), start)
+            }
+            // Local class declaration inside a function body (`class`/`data class`/`enum class`/
+            // `sealed class`/`annotation class`/`interface Name`). `parse_nested_type_decl` handles the
+            // soft-keyword kinds. (`object` is omitted — a bare `object` may start an anonymous-object
+            // EXPRESSION, which stays on the expression path.)
+            _ if self.looks_like_local_type_decl() => {
+                let d = self.parse_nested_type_decl();
+                self.finish_stmt(Stmt::LocalClass(d), start)
             }
             _ => {
                 let e = self.parse_expr();

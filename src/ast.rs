@@ -287,6 +287,11 @@ pub enum Stmt {
     /// A local function declaration: `fun name(params): Ret { body }` inside a function body.
     /// Emitted as a private static method on the file/class with a mangled name.
     LocalFun(FunDecl),
+    /// A local class/object/interface declared inside a function body. Hoisted (signature collection
+    /// walks fn bodies) to a top-level-equivalent class with a mangled internal name, so the checker
+    /// and lowering treat it like any other class. A capturing local class fails to resolve its outer
+    /// references (it's checked with no enclosing scope) → the file skips, never miscompiles.
+    LocalClass(ClassDecl),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -726,6 +731,8 @@ impl File {
             Stmt::For { range, body, .. } => fe(range.start) || fe(range.end) || fe(*body),
             Stmt::ForEach { iterable, body, .. } => fe(*iterable) || fe(*body),
             Stmt::LocalFun(f) => matches!(&f.body, FunBody::Expr(b) | FunBody::Block(b) if fe(*b)),
+            // A local class's members are hoisted + walked separately; it has no inline child expr here.
+            Stmt::LocalClass(_) => false,
         }
     }
 }
@@ -1194,6 +1201,9 @@ impl File {
             Stmt::Expr(e) => self.write_expr(*e, out),
             Stmt::LocalFun(f) => {
                 out.push_str(&format!("(local-fun {})", f.name));
+            }
+            Stmt::LocalClass(c) => {
+                out.push_str(&format!("(local-class {})", c.name));
             }
         }
     }

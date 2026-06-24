@@ -7839,6 +7839,12 @@ impl<'a> Lower<'a> {
                 stmts: vec![],
                 value: None,
             })),
+            // A local class is lowered via its hoisted top-level `Decl::Class`; the in-body statement
+            // emits nothing.
+            Stmt::LocalClass(_) => Some(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![],
+                value: None,
+            })),
         }
     }
 
