@@ -241,6 +241,35 @@ fun box(): String {
 }
 
 #[test]
+fn value_class_as_field_entirely_in_krusty() {
+    // A `@JvmInline value class` used as a FIELD of a normal `@Serializable` class. krusty unboxes the
+    // field to the value class's underlying (`Holder.f: Foo` → `int`), so the serializer encodes/decodes
+    // that field AS its underlying — `Holder(Foo(42))` → `{"f":42}`. Mirrors the kotlinx `inlineClasses`
+    // boxIr conformance case (its `descriptor.isInline` half is covered above).
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+@JvmInline
+value class Foo(val i: Int)
+@Serializable
+class Holder(val f: Foo)
+fun box(): String {
+    val s = Json.encodeToString(Holder.serializer(), Holder(Foo(42)))
+    return if (s == "{\"f\":42}") "OK" else "enc: $s"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerValueField") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "value-class-as-field wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty value-class-as-field OK");
+}
+
+#[test]
 fn value_class_inline_serializer_entirely_in_krusty() {
     // A `@JvmInline value class`'s generated serializer uses an `InlinePrimitiveDescriptor`
     // (`descriptor.isInline == true`) and serializes/deserializes inline (encodeInline().encodeInt(),

@@ -325,6 +325,30 @@ fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
     })
 }
 
+/// If `ty` names a `@JvmInline value class` defined in this IR, its TERMINAL underlying type — how
+/// krusty represents a value-class-typed field/value. Recurses through a value-class chain
+/// (`A(val b: B)`, `B(val i: Int)` → `Int`), depth-bounded against a malformed cycle. `None` for any
+/// type that isn't (transitively) a value class.
+fn value_class_underlying(ir: &IrFile, ty: &IrType) -> Option<IrType> {
+    fn rec(ir: &IrFile, ty: &IrType, depth: u32) -> Option<IrType> {
+        if depth > 32 {
+            return None;
+        }
+        let fq = match ty {
+            IrType::Class { fq_name, .. } => fq_name.as_str(),
+            _ => return None,
+        };
+        let c = ir.classes.iter().find(|c| c.fq_name == fq)?;
+        if !c.is_value {
+            return None;
+        }
+        let u = c.fields.first()?.1.clone();
+        // Unwrap a further value-class layer; else this layer's underlying IS the terminal type.
+        Some(rec(ir, &u, depth + 1).unwrap_or(u))
+    }
+    rec(ir, ty, 0)
+}
+
 /// Plain `Encoder.encode*` / `Decoder.decode*` for a value class's underlying type (`encodeInt` /
 /// `decodeInt`), as `(enc_name, enc_desc, dec_name, dec_desc)`. `None` for an unsupported underlying.
 fn inline_prim_methods(
@@ -693,7 +717,21 @@ impl IrPlugin for SerializationPlugin {
             if ir.classes[class_id as usize].custom_serializer.is_some() {
                 continue;
             }
-            let fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            // krusty UNBOXES a `@JvmInline value class`-typed field to its underlying (`Holder.f: Foo`
+            // is emitted as `int`, `getF()I`, `new Holder(int)`). So serialize/deserialize must treat
+            // such a field AS its underlying type — encode/decode the primitive directly (same JSON as
+            // kotlinc's inline serializer), not via the (boxed) `<Foo>$serializer` which would store a
+            // `Foo` reference into the unboxed slot (VerifyError).
+            let fields: Vec<(String, IrType)> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .map(|(n, ty)| {
+                    (
+                        n.clone(),
+                        value_class_underlying(ir, ty).unwrap_or(ty.clone()),
+                    )
+                })
+                .collect();
             let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
             let class_internal = ir.classes[class_id as usize].fq_name.clone();
             let ser_fq = serializer_fq(&ir.classes[class_id as usize].fq_name);
