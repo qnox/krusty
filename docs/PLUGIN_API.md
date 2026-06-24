@@ -292,8 +292,15 @@ Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
 | KSP/codegen host model + fixpoint + toolchain pinning | done (model) | `plugins/ksp.rs` |
 | Real annotation-processor-**from-jar** run (codegen-host mechanism) | done (APT) | `tests/codegen_host_e2e.rs` |
 | Toolchain **provisioning** (detect gradle/mvn/cs → fetch jars to folder) | done | `plugins/deps.rs`, `tests/ksp_provision_e2e.rs` |
+| **Real KSP2 run from a JAR**: provision → compile Kotlin processor → `KotlinSymbolProcessing.execute`; ServiceLoader from jar, annotation query, property inspection, **multi-round**, **generated code compiled** | done | `tests/ksp_real_e2e.rs`, `tests/fixtures/ksp/` |
 
-**Not yet done — the remaining distance to the stated bar:**
+The **KSP** clause of the goal is met: `tests/ksp_real_e2e.rs` runs a real KSP processor loaded from
+a JAR via the actual KSP2 toolchain and verifies the full case matrix — from-jar discovery, annotation
+query, declaration/property inspection, multi-round re-processing of generated code, and that the
+generated code itself compiles. (Opt-in `KRUSTY_KSP_E2E=1`; runs under a JDK ≤ 23 since Kotlin
+2.0.21's compiler rejects JDK 25.)
+
+**Remaining distance to the stated bar — serialization conformance only:**
 
 1. **Serialization conformance round-trips (all 69 `testData/boxIr`)** require (a) real
    `serialize`/`deserialize`/descriptor **bytecode** bodies (currently placeholder `return`), and
@@ -302,9 +309,5 @@ Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
    before any plugin runs. Closing this is real compiler work (the language features) plus the
    encode/decode codegen — well beyond a single session. The harness to run them (real runtime jars +
    `box()=="OK"`) reuses the existing box conformance infra.
-2. **A real KSP2 run over Kotlin source** (vs the APT proof of the same mechanism) needs the full
-   `symbol-processing-aa-embeddable` + `kotlin-compiler-embeddable` closure provisioned (now possible
-   via `deps`) and the `KotlinSymbolProcessing` API invoked from a JVM launcher. The pieces exist;
-   wiring + a Kotlin processor build remain.
 
 This document and the tests state these boundaries explicitly rather than implying the bar is met.
