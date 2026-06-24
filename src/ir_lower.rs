@@ -1210,8 +1210,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }
                     }
                 }
-                // An interface's methods are abstract — leave their bodies `None`; nothing to lower.
-                if c.is_interface {
+                // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
+                // lowered like instance methods (fall through to the normal method-body loop below).
+                if c.is_interface && c.methods.iter().all(|m| matches!(m.body, FunBody::None)) {
                     continue;
                 }
                 for m in &c.methods {
@@ -2059,7 +2060,9 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
         // a property with an initializer or custom getter (an interface can't have a backing field)
         // isn't modeled.
         && c.body_props.iter().all(|p| p.init.is_none() && p.getter.is_none() && p.ty.is_some())
-        && c.methods.iter().all(|m| m.receiver.is_none() && matches!(m.body, FunBody::None))
+        // Non-extension methods only; a method may be abstract (no body) OR a default method (with a
+        // body, emitted as a JVM default method).
+        && c.methods.iter().all(|m| m.receiver.is_none())
 }
 
 /// A class-body property that is a plain backing field: a normal (non-extension) `val`/`var` with an
