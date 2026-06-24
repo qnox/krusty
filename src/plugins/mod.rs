@@ -27,6 +27,12 @@ use std::collections::HashMap;
 
 use crate::ir::{ClassId, IrFile};
 
+/// The unqualified tail of an annotation name (`kotlinx/serialization/Serializable` or
+/// `kotlinx.serialization.Serializable` → `Serializable`).
+pub(crate) fn annotation_simple_name(a: &str) -> &str {
+    a.rsplit(['/', '.']).next().unwrap_or(a)
+}
+
 /// Side table of applied annotations, keyed by `ClassId`. A side table because `IrClass` does not
 /// yet store applied annotations (only known-flag bools like `is_data`). The production integration
 /// adds `annotations: Vec<String>` to `IrClass`, populated in `ir_lower`; then this becomes a thin
@@ -50,10 +56,50 @@ impl PluginContext {
         ids
     }
 
+    /// `ClassId`s carrying an annotation whose **simple name** equals `simple` — so a source
+    /// `@Serializable` (captured as `"Serializable"`) and a fully-qualified
+    /// `kotlinx/serialization/Serializable` both match.
+    pub fn classes_with_simple(&self, simple: &str) -> Vec<ClassId> {
+        let mut ids: Vec<ClassId> = self
+            .class_annotations
+            .iter()
+            .filter(|(_, anns)| anns.iter().any(|a| annotation_simple_name(a) == simple))
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn has_annotation(&self, class: ClassId, fq: &str) -> bool {
         self.class_annotations
             .get(&class)
             .is_some_and(|anns| anns.iter().any(|a| a == fq))
+    }
+
+    /// Build the annotation index from the parsed source: each `IrClass` inherits the annotations the
+    /// AST captured on the matching `ClassDecl` (matched by simple name). This is how the surface is
+    /// driven from REAL `@Serializable`/`@…` in source — no manual injection. (Production would carry
+    /// the annotations on `IrClass` directly; matching by simple name keeps the change localized.)
+    pub fn from_source(file: &crate::ast::File, ir: &IrFile) -> PluginContext {
+        use std::collections::HashMap;
+        let by_name: HashMap<&str, &Vec<String>> = file
+            .decl_arena
+            .iter()
+            .filter_map(|d| match d {
+                crate::ast::Decl::Class(c) if !c.annotations.is_empty() => {
+                    Some((c.name.as_str(), &c.annotations))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut ctx = PluginContext::default();
+        for (i, c) in ir.classes.iter().enumerate() {
+            let simple = c.fq_name.rsplit('/').next().unwrap_or(&c.fq_name);
+            if let Some(anns) = by_name.get(simple) {
+                ctx.class_annotations.insert(i as u32, (*anns).clone());
+            }
+        }
+        ctx
     }
 }
 
