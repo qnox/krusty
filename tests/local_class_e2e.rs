@@ -44,3 +44,23 @@ fn local_data_class_and_interface() {
     let out = run(SRC).expect("local data class + local interface should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn local_class_inheritance_with_modifiers() {
+    // Modifier-prefixed local classes (`open`/`abstract`) and local-class inheritance — none capturing
+    // an outer local (slice 2a).
+    const SRC: &str = "fun box(): String {\n\
+    open class Base { open fun name() = \"base\" }\n\
+    class Derived : Base() { override fun name() = \"derived\" }\n\
+    if (Base().name() != \"base\") return \"fail base\"\n\
+    if (Derived().name() != \"derived\") return \"fail derived\"\n\
+    val b: Base = Derived()\n\
+    if (b.name() != \"derived\") return \"fail virtual\"\n\
+    abstract class Shape { abstract fun area(): Int }\n\
+    class Sq(val s: Int) : Shape() { override fun area() = s * s }\n\
+    if (Sq(3).area() != 9) return \"fail abstract\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC).expect("local class inheritance should compile + run");
+    assert_eq!(out, "OK");
+}

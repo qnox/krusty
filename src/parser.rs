@@ -424,10 +424,11 @@ impl<'a> Parser<'a> {
             if s == "interface" {
                 return matches!(self.t.get(j + 1), Some(n) if n.kind == TokenKind::Ident);
             }
-            // A class-introducing soft keyword — keep scanning toward `class`. (Pure modifiers like
-            // `open`/`abstract` aren't consumed by `parse_nested_type_decl`, so a modifier-prefixed local
-            // class stays on the expression path and the file skips cleanly — slice 1 scope.)
-            if matches!(s, "data" | "enum" | "sealed" | "annotation" | "value") {
+            // A class-introducing soft keyword or a declaration modifier (`open`/`abstract`/`private`/
+            // `inner`/…) — keep scanning toward `class`/`interface`. The scan only returns `true` if it
+            // actually reaches a type keyword, so a soft-keyword used as a value (`data.x`, `value.foo()`)
+            // doesn't misfire.
+            if matches!(s, "data" | "enum" | "sealed" | "annotation" | "value") || is_modifier(s) {
                 j += 1;
                 continue;
             }
@@ -2672,11 +2673,18 @@ impl<'a> Parser<'a> {
                 self.finish_stmt(Stmt::LocalFun(f), start)
             }
             // Local class declaration inside a function body (`class`/`data class`/`enum class`/
-            // `sealed class`/`annotation class`/`interface Name`). `parse_nested_type_decl` handles the
-            // soft-keyword kinds. (`object` is omitted — a bare `object` may start an anonymous-object
-            // EXPRESSION, which stays on the expression path.)
+            // `sealed class`/`annotation class`/`interface Name`, optionally `open`/`abstract`/… prefixed).
+            // Consume leading modifiers/annotations (as the top-level path does), then apply `open`/
+            // `abstract` to the parsed decl. (`object` is omitted — a bare `object` may start an
+            // anonymous-object EXPRESSION, which stays on the expression path.)
             _ if self.looks_like_local_type_decl() => {
-                let d = self.parse_nested_type_decl();
+                let mods = self.skip_decl_prefix();
+                let is_sealed = mods.iter().any(|m| m == "sealed");
+                let is_open = is_sealed || mods.iter().any(|m| m == "open");
+                let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
+                let mut d = self.parse_nested_type_decl();
+                d.is_open = is_open;
+                d.is_abstract = is_abstract;
                 self.finish_stmt(Stmt::LocalClass(d), start)
             }
             _ => {

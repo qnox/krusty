@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1590 OK / 0 FAIL** (scanned 7351, Phase 420).
+  repo's `compiler/testData/codegen/box`). Current gate: **1592 OK / 0 FAIL** (scanned 7351, Phase 421).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P44 — local classes (slice 2a: modifier-prefixed + inheritance) (gate 1590 → 1592, +2,
+  FAIL=0).** Extends P43: a local class may now carry `open`/`abstract`/`private`/… modifiers, enabling
+  local-class inheritance (`open class Base; class Derived : Base()`). The parser's local-type lookahead
+  scans through declaration modifiers to the `class`/`interface` keyword; the statement arm consumes the
+  modifier/annotation prefix (`skip_decl_prefix`, as the top-level path does) and applies `open`/
+  `abstract` to the parsed decl before hoisting. Still non-capturing only: a modifier-prefixed local
+  class that reads an outer local fails to resolve → file skips (sound). New e2e case
+  `local_class_inheritance_with_modifiers` (open override + virtual dispatch through the base type,
+  abstract + impl).
 - **Phase P43 — local classes (slice 1: non-capturing) (gate 1582 → 1590, +8, FAIL=0).** A `class`/
   `data class`/`interface` declared inside a function body was unparsed (`class` in a block → "expected
   an expression"). Now parsed as `Stmt::LocalClass(ClassDecl)` (parser detects a local type decl via
