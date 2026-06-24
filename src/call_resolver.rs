@@ -309,5 +309,52 @@ pub fn resolve_instance(
             return Some(m.clone());
         }
     }
+    // Third pass — SUBTYPE-aware: an argument whose supertype closure includes the parameter type
+    // (e.g. a `KSerializer` passed where `SerializationStrategy` is expected — `KSerializer<T> :
+    // SerializationStrategy<T>`). The exact/widened passes above miss this because `arg_assignable`
+    // only accepts an exact type or an erased `Any`. A pure fallback (runs only after both fail), so it
+    // never changes an existing match — it just resolves calls that were previously unresolvable.
+    for members in by_rank.values() {
+        if let Some(m) = members.iter().filter(|m| m.name == name).find(|m| {
+            m.params.len() == args.len()
+                && m.params
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| arg_subtype_assignable(lib, p, a))
+        }) {
+            return Some(m.clone());
+        }
+    }
     None
+}
+
+/// Whether `arg` is assignable to `param` allowing a reference SUBTYPE (`arg`'s classpath supertype
+/// closure contains `param`). Falls back to exact / `Any` for the trivial cases.
+fn arg_subtype_assignable(lib: &dyn LibrarySet, param: &Ty, arg: &Ty) -> bool {
+    if param == arg || *param == Ty::obj("kotlin/Any") {
+        return true;
+    }
+    match (param.obj_internal(), arg.obj_internal()) {
+        (Some(p), Some(a)) => is_classpath_subtype(lib, a, p, 0),
+        _ => false,
+    }
+}
+
+/// `sub` is `super_` or transitively extends/implements it (via the classpath supertype walk). `depth`
+/// bounds the recursion: real class hierarchies are shallow, and the bound also guarantees termination
+/// on a malformed (cyclic) classpath rather than overflowing the stack.
+fn is_classpath_subtype(lib: &dyn LibrarySet, sub: &str, super_: &str, depth: u32) -> bool {
+    if sub == super_ {
+        return true;
+    }
+    if depth > 64 {
+        return false;
+    }
+    if let Some(t) = lib.resolve_type(sub) {
+        return t
+            .supertypes
+            .iter()
+            .any(|s| is_classpath_subtype(lib, s, super_, depth + 1));
+    }
+    false
 }
