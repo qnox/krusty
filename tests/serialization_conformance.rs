@@ -176,6 +176,49 @@ fn jimage() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Plugin wired into the real compile path: the krusty BINARY compiling `@Serializable Foo` emits
+/// the `Foo$serializer` class (not just in-process tests). Proves the extension works in a normal
+/// `krusty -cp … Foo.kt` invocation.
+#[test]
+fn binary_compiles_serializable_and_emits_serializer() {
+    let Some((core, json, std)) = runtime_jars() else {
+        eprintln!("skipping: serialization runtime jars not in cache");
+        return;
+    };
+    let Some(jimage) = jimage() else {
+        eprintln!("skipping: no JAVA_HOME/lib/modules");
+        return;
+    };
+    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty");
+    if !bin.exists() {
+        eprintln!("skipping: krusty binary not built");
+        return;
+    }
+    let out = std::env::temp_dir().join(format!("krusty_binser_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let src = out.join("Foo.kt");
+    std::fs::write(&src, "@Serializable class Foo(val a: Int, val b: String)\n").unwrap();
+    let cp = format!(
+        "{}:{}:{}:{}",
+        core.display(),
+        json.display(),
+        std.display(),
+        jimage.display()
+    );
+    let o = Command::new(&bin)
+        .args(["-cp", &cp, "-d"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run krusty");
+    assert!(
+        out.join("Foo.class").exists() && out.join("Foo$serializer.class").exists(),
+        "krusty binary must emit Foo.class + Foo$serializer.class; stderr:\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 /// Gap #2 (closed): constructing a classpath class with a `null` argument for a reference parameter —
 /// `PluginGeneratedSerialDescriptor(name, null, count)` — now resolves. A `$serializer` builds its
 /// descriptor this way. Verifies the constructor-overload null-match end-to-end.
