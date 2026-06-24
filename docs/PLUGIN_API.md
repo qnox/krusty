@@ -342,6 +342,25 @@ Each of #5–#7 is a separate resolver/backend feature requiring its own 1303-te
 The conformance bar ("all 69 boxIr round-trips") additionally needs sealed/polymorphic/generic/
 inline-class/contextual language support. This is a multi-day, multi-round track, not a single session.
 
+### CORRECTED critical path (key insight)
+
+The serialization plugin synthesizes the `$serializer` as **IR with full internal type names**, so it
+**never goes through krusty's source type-resolver**. That means the plugin path **bypasses** gaps
+#1, #2, #3, #5 — those only block compiling serializer *source* (a hand-written serializer, or FQ
+type refs, which krusty's `ty_of_ref` also can't resolve). Rounds 9–10 (object self-ref, ctor
+null-match) are real, gate-verified general improvements but are **not on the plugin's critical path**.
+
+The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
+(an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
+the object's `<init>`/`<clinit>` via `NewExternal(PluginGeneratedSerialDescriptor)` + `addElement`
+calls, `serialize` via `invokeinterface` `beginStructure`/`encode*Element`/`endStructure`,
+`deserialize` via a `decodeElementIndex` loop, `childSerializers` of builtin serializer singletons,
+**plus the erased generic bridges** `serialize(Encoder, Object)` / `deserialize(Decoder): Object`),
+and krusty's emitter must accept all of it. Then a **real-kotlinc-compiled `box()` driver** does the
+Json round-trip against krusty's classes (eliminating the Json cluster #3). This is one focused
+codegen track — substantial, but a single track, and the emit primitives (objects, interface calls,
+`while`/`when`, `NewExternal`, bridges) largely exist. The next session should target gap #7 directly.
+
 Plus: real `serialize`/`deserialize` bytecode bodies and wiring the plugin into the emit path. And the
 full 69 `testData/boxIr` corpus additionally needs sealed/polymorphic/generic/inline-class/contextual
 support outside krusty's IR subset (gate 1303/7351). This is multi-day **core-compiler** work, not
