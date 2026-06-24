@@ -4009,6 +4009,16 @@ impl<'a> Checker<'a> {
     /// (`Json` → `Ty::obj("…/Json$Default")`). A bare reference to such a class is its companion
     /// instance; member calls then resolve on the companion's type. `None` for a non-classpath name,
     /// a `__ty/` alias, or a class without a companion.
+    /// The first explicit type argument of `call` (`decodeFromString<Foo>(…)` → `Foo`), resolved to a
+    /// `Ty`, or `None` if the call carries none. Used to type a reified `<T> T` member's return.
+    fn reified_type_arg(&self, call: ExprId) -> Option<Ty> {
+        self.file
+            .call_type_args
+            .get(&call.0)
+            .and_then(|ts| ts.first())
+            .map(|r| self.resolve_ty_no_diag(r))
+    }
+
     fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
         let internal = self.syms.class_names.get(name)?;
         if internal.starts_with("__ty/") {
@@ -6277,13 +6287,17 @@ impl<'a> Checker<'a> {
                                             // keeps the canonical `m.ret` (the recovered form would be a
                                             // non-canonical `Obj("kotlin/String")`).
                                             if m.ret == Ty::obj("kotlin/Any") {
-                                                self.syms
-                                                    .libraries
-                                                    .instance_call_return(
-                                                        Ty::obj(&cty),
-                                                        &name,
-                                                        &arg_tys,
-                                                    )
+                                                // A reified member (`<T> T decodeFromString(…)`) called
+                                                // with an explicit type argument (`decodeFromString<C>`)
+                                                // returns that type; else recover it from the arguments.
+                                                self.reified_type_arg(call)
+                                                    .or_else(|| {
+                                                        self.syms.libraries.instance_call_return(
+                                                            Ty::obj(&cty),
+                                                            &name,
+                                                            &arg_tys,
+                                                        )
+                                                    })
                                                     .unwrap_or(m.ret)
                                             } else {
                                                 m.ret

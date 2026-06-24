@@ -4759,6 +4759,127 @@ impl<'a> Lower<'a> {
             })
     }
 
+    /// The IR fq name of a `@Serializable` USER class for `ty` (the value/type-arg of a reified
+    /// serialization call), or `None`. Detection mirrors the plugin/checker (annotation simple name).
+    fn serializable_internal(&self, ty: Ty) -> Option<String> {
+        let internal = ty.obj_internal()?;
+        let simple = internal.rsplit('/').next().unwrap_or(internal);
+        let cd = self.class_decl(simple)?;
+        let is_ser = cd
+            .annotations
+            .iter()
+            .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"));
+        if !is_ser {
+            return None;
+        }
+        self.classes
+            .get(&class_internal(self.afile, simple))
+            .map(|ci| self.ir.classes[ci.id as usize].fq_name.clone())
+    }
+
+    /// `C.serializer()` as an `invokestatic C.serializer()LKSerializer;` (the plugin fills the body
+    /// before emit) — the same form the explicit `C.serializer()` call lowers to.
+    fn serializer_crossfile(&mut self, c_internal: &str) -> u32 {
+        let ret = ty_to_ir(Ty::obj_args(
+            "kotlinx/serialization/KSerializer",
+            &[Ty::obj(c_internal)],
+        ));
+        self.ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFile {
+                facade: c_internal.to_string(),
+                name: "serializer".to_string(),
+                params: vec![],
+                ret,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        })
+    }
+
+    /// Whether classpath type `internal` is a kotlinx `StringFormat` — detected structurally by the
+    /// presence of the 2-arg `encodeToString(SerializationStrategy, Any)` member (no hardcoded subtype).
+    fn is_string_format(&self, internal: &str) -> bool {
+        crate::call_resolver::resolve_instance(
+            &*self.syms.libraries,
+            internal,
+            "encodeToString",
+            &[
+                Ty::obj("kotlinx/serialization/SerializationStrategy"),
+                Ty::obj("kotlin/Any"),
+            ],
+        )
+        .is_some()
+    }
+
+    /// Desugar a REIFIED kotlinx serialization round-trip call — `fmt.encodeToString(x)` /
+    /// `fmt.decodeFromString<C>(s)` — into the 2-arg member with a synthesized `C.serializer()`. The
+    /// reified inline form can't be called directly (`UnsupportedOperationException` at runtime), so
+    /// krusty rewrites it the way kotlinc's inliner would. `None` (fall through) unless the receiver is a
+    /// `StringFormat` and `C` is a `@Serializable` user class.
+    fn try_reified_serial(
+        &mut self,
+        receiver: AstExprId,
+        name: &str,
+        args: &[AstExprId],
+        call: AstExprId,
+    ) -> Option<u32> {
+        if args.len() != 1 {
+            return None;
+        }
+        let fmt = self.info.ty(receiver).obj_internal()?.to_string();
+        if !self.is_string_format(&fmt) {
+            return None;
+        }
+        match name {
+            "encodeToString" => {
+                let c = self.serializable_internal(self.info.ty(args[0]))?;
+                let recv = self.expr(receiver)?;
+                let ser = self.serializer_crossfile(&c);
+                let val = self.expr(args[0])?;
+                Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: fmt,
+                        name: "encodeToString".to_string(),
+                        descriptor:
+                            "(Lkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)Ljava/lang/String;"
+                                .to_string(),
+                        interface: false,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![ser, val],
+                }))
+            }
+            "decodeFromString" => {
+                // The decoded type is the explicit type argument `<C>`.
+                let targ = self
+                    .afile
+                    .call_type_args
+                    .get(&call.0)
+                    .and_then(|ts| ts.first())
+                    .and_then(|tr| self.ty_ref(tr))?;
+                let c = self.serializable_internal(targ)?;
+                let recv = self.expr(receiver)?;
+                let ser = self.serializer_crossfile(&c);
+                let s = self.expr(args[0])?;
+                let decoded = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: fmt,
+                        name: "decodeFromString".to_string(),
+                        descriptor:
+                            "(Lkotlinx/serialization/DeserializationStrategy;Ljava/lang/String;)Ljava/lang/Object;"
+                                .to_string(),
+                        interface: false,
+                    },
+                    dispatch_receiver: Some(recv),
+                    args: vec![ser, s],
+                });
+                // The 2-arg member returns erased `Object`; checkcast to `C`.
+                Some(self.coerce_erased(decoded, Ty::obj(&c), Ty::obj("kotlin/Any")))
+            }
+            _ => None,
+        }
+    }
+
     /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
     /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
     /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
@@ -12077,6 +12198,12 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(this),
                             args: a,
                         }));
+                    }
+                    // Reified kotlinx.serialization round-trip: `fmt.encodeToString(x)` /
+                    // `fmt.decodeFromString<C>(s)` are `reified inline` (uncallable directly) — desugar to
+                    // the 2-arg member with a synthesized `C.serializer()`.
+                    if let Some(call) = self.try_reified_serial(receiver, &name, &args, e) {
+                        return Some(call);
                     }
                     // An arithmetic operator member called by name on a primitive numeric receiver
                     // (`a.plus(b)` ≡ `a + b`) → the same `PrimitiveBinOp` lowering as the operator form.

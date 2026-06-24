@@ -180,6 +180,32 @@ fun box(): String {
 }
 
 #[test]
+fn reified_serializer_round_trips_entirely_in_krusty() {
+    // The REIFIED form `Json.encodeToString(x)` / `Json.decodeFromString<C>(s)` (no explicit serializer
+    // argument) — a `reified inline` that can't be called directly. krusty desugars it to the 2-arg
+    // member with a synthesized `C.serializer()`, the way kotlinc's inliner would. Full round-trip.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val j = Json.encodeToString(Foo(1, "x"))
+    val back = Json.decodeFromString<Foo>(j)
+    return back.b + back.a.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerReified") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "x1",
+        "reified serializer round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty reified serializer round-trip OK");
+}
+
+#[test]
 fn serializable_class_encodes_to_json_entirely_in_krusty() {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping: no kotlin-stdlib jar located");

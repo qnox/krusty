@@ -430,6 +430,14 @@ names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lowe
 element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
 value-class serializers or reflection.
 
+**Reified serializer form landed** (krusty-only e2e green): `Json.encodeToString(x)` /
+`Json.decodeFromString<C>(s)` (no explicit serializer) are `reified inline` — uncallable directly
+(`UnsupportedOperationException`). `ir_lower::try_reified_serial` desugars them to the 2-arg member with
+a synthesized `C.serializer()` (the way kotlinc's inliner would); `resolve::reified_type_arg` types the
+decode result from the explicit `<C>`. This is the form ~20 corpus files use — but each ALSO needs a
+second feature (Map/sealed/value-class/reflection/`buildJsonObject`), so no NEW corpus file greens from
+reified alone; the capability is proven by `serialization_krusty_only_e2e::reified_serializer_round_trips`.
+
 First-blocker histogram for the 38 that DON'T compile (top entries): `unresolved 'Encoder'`/`'Decoder'`
 (7 — custom `KSerializer` objects, also need interface-body abstract members), `elementDescriptors`/
 `getElementName` SerialDescriptor introspection (4), reflection (`typeOf`, `parameters`, class-literal
