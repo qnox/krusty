@@ -119,12 +119,13 @@ test *ARGS:
         if "$b" $extra >"$1/$name.log" 2>&1; then :; else echo "$b" >>"$1/FAILED"; fi
     }
     export -f run_one
-    # The conformance gate binary is internally rayon-parallel (saturates every core on its own), so
-    # run it FIRST/alone — bundling it into the parallel batch only contends. Then run the remaining
-    # (JVM/kotlinc-bound) binaries in parallel, each with its own per-binary persistent JVM runner.
-    gate="$(printf '%s\n' "${bins[@]}" | grep conformance || true)"
+    # The box conformance gate binary is internally rayon-parallel (saturates every core on its own),
+    # so run it FIRST/alone — bundling it into the parallel batch only contends. Match it by its exact
+    # name: other binaries (e.g. serialization_conformance) also contain "conformance" but are ordinary
+    # parallel-batch tests, so a loose `grep conformance` would garble the gate path and drop them.
+    gate="$(printf '%s\n' "${bins[@]}" | grep kotlin_box_ir_jvm_conformance || true)"
     [ -n "$gate" ] && run_one "$logdir" "$gate"
-    printf '%s\n' "${bins[@]}" | grep -v conformance \
+    printf '%s\n' "${bins[@]}" | grep -v kotlin_box_ir_jvm_conformance \
         | xargs -P "$(nproc)" -I{} bash -c 'run_one "$0" "$1::--test-threads=2"' "$logdir" {}
     if [ -f "$logdir/FAILED" ]; then
         echo "=== FAILED TEST BINARIES ==="
