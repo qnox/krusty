@@ -143,9 +143,9 @@ fn ty_descriptor(ty: &IrType) -> String {
     }
 }
 
-/// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` if it
-/// isn't a directly-decodable single-JVM-slot primitive/String (Long/Double need 2-slot handling;
-/// richer types need `decodeSerializableElement`).
+/// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
+/// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
+/// String; Long/Double are 2-slot and their field locals are sized via `slot_width`.
 fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
     let fq = match ty {
         IrType::Class { fq_name, .. } => fq_name.as_str(),
@@ -156,6 +156,10 @@ fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
             "decodeIntElement",
             "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)I",
         ),
+        "kotlin/Long" => (
+            "decodeLongElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)J",
+        ),
         "kotlin/Boolean" => (
             "decodeBooleanElement",
             "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
@@ -164,20 +168,36 @@ fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
             "decodeFloatElement",
             "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)F",
         ),
+        "kotlin/Double" => (
+            "decodeDoubleElement",
+            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)D",
+        ),
         "kotlin/String" => (
             "decodeStringElement",
             "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Ljava/lang/String;",
         ),
-        _ => return None, // Long/Double (2-slot) + reference types: future work
+        _ => return None, // reference/richer types: decodeSerializableElement (future work)
     })
+}
+
+/// JVM local-slot width of a field type (Long/Double take two slots).
+fn slot_width(ty: &IrType) -> u32 {
+    match ty {
+        IrType::Class { fq_name, .. } if fq_name == "kotlin/Long" || fq_name == "kotlin/Double" => {
+            2
+        }
+        _ => 1,
+    }
 }
 
 /// The default value for a field's local before the decode loop fills it.
 fn default_const(ty: &IrType) -> IrConst {
     match ty {
         IrType::Class { fq_name, .. } if fq_name == "kotlin/Int" => IrConst::Int(0),
+        IrType::Class { fq_name, .. } if fq_name == "kotlin/Long" => IrConst::Long(0),
         IrType::Class { fq_name, .. } if fq_name == "kotlin/Boolean" => IrConst::Boolean(false),
         IrType::Class { fq_name, .. } if fq_name == "kotlin/Float" => IrConst::Float(0.0),
+        IrType::Class { fq_name, .. } if fq_name == "kotlin/Double" => IrConst::Double(0.0),
         IrType::Class { fq_name, .. } if fq_name == "kotlin/String" => {
             IrConst::String(String::new())
         }
@@ -605,12 +625,20 @@ impl IrPlugin for SerializationPlugin {
                         //       when (i) { -1 -> break@loop; 0 -> f0 = c.decode<T>Element(d,0); ... }
                         //   }
                         //   c.endStructure(descriptor); return Foo(f0, f1)
-                        // Supported only when every field is a single-slot decodable type; otherwise
-                        // fall back to a default-construct stub (no wrong decode emitted).
+                        // Supported only when every field is a decodable type; otherwise fall back to
+                        // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
                         let decodable = fields
                             .iter()
                             .all(|(_, t)| decode_element_method(t).is_some());
+                        // Field-local slot for each property — `this`=0, decoder=1, c=2, i=3, then the
+                        // field locals from slot 4, advancing by each type's JVM width (Long/Double=2).
+                        let mut slots: Vec<u32> = Vec::with_capacity(fields.len());
+                        let mut next = 4u32;
+                        for (_, ty) in &fields {
+                            slots.push(next);
+                            next += slot_width(ty);
+                        }
                         let this_desc = |ir: &mut IrFile| -> ExprId {
                             let r = ir.add_expr(IrExpr::GetValue(0));
                             ir.add_expr(IrExpr::GetField {
@@ -650,7 +678,7 @@ impl IrPlugin for SerializationPlugin {
                             for (k, (_, ty)) in fields.iter().enumerate() {
                                 let init = ir.add_expr(IrExpr::Const(default_const(ty)));
                                 stmts.push(ir.add_expr(IrExpr::Variable {
-                                    index: 4 + k as u32,
+                                    index: slots[k],
                                     ty: ty.clone(),
                                     init: Some(init),
                                 }));
@@ -710,7 +738,7 @@ impl IrPlugin for SerializationPlugin {
                                     args: vec![dk, idxc],
                                 });
                                 let setk = ir.add_expr(IrExpr::SetValue {
-                                    var: 4 + k as u32,
+                                    var: slots[k],
                                     value: decoded,
                                 });
                                 let setk_blk = ir.add_expr(IrExpr::Block {
@@ -748,7 +776,7 @@ impl IrPlugin for SerializationPlugin {
                             }));
                             // return Foo(f0, f1, ...)
                             let args: Vec<ExprId> = (0..fields.len())
-                                .map(|k| ir.add_expr(IrExpr::GetValue(4 + k as u32)))
+                                .map(|k| ir.add_expr(IrExpr::GetValue(slots[k])))
                                 .collect();
                             let new = ir.add_expr(IrExpr::New {
                                 class: foo_id,
