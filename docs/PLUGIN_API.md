@@ -430,6 +430,13 @@ names) on constructor properties (`Param`/`PropParam.annotation_args`), `ir_lowe
 element name / JSON key. The other 8 compile-OK files fail at runtime needing custom/polymorphic/sealed/
 value-class serializers or reflection.
 
+**Value-class serializer landed** (krusty-only e2e green; a `@JvmInline value class`'s `$serializer`
+uses `InlinePrimitiveDescriptor(name, <Underlying>Serializer.INSTANCE)` so `descriptor.isInline==true`,
+and serialize/deserialize go through `encodeInline()/decodeInline()` — `Foo(42)` round-trips as bare
+`42`). Gated to a directly-supported primitive/String underlying. The corpus `inlineClasses` file
+additionally nests a value class as a FIELD of a normal class, which fails on krusty's value-class
+field-representation ambiguity (boxed-vs-unboxed) — a core-compiler issue independent of the serializer.
+
 **`@Serializable(with = X::class)` landed** (greens `contextualByDefault` + `polymorphic`, box()=OK):
 `serializer()` returns an instance of the explicit serializer `X` — `new X(getOrCreateKotlinClass(C.class))`
 (`ContextualSerializer`/`PolymorphicSerializer` take the class's `KClass`; their descriptors carry the

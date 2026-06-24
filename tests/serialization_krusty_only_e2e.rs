@@ -241,6 +241,37 @@ fun box(): String {
 }
 
 #[test]
+fn value_class_inline_serializer_entirely_in_krusty() {
+    // A `@JvmInline value class`'s generated serializer uses an `InlinePrimitiveDescriptor`
+    // (`descriptor.isInline == true`) and serializes/deserializes inline (encodeInline().encodeInt(),
+    // decodeInline().decodeInt()) — so `Foo(42)` round-trips as the bare JSON `42`. (The kotlinx
+    // `inlineClasses` corpus case additionally nests a value class in another class, which needs
+    // value-class field-representation work beyond the serializer.)
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+@JvmInline
+value class Foo(val i: Int)
+fun box(): String {
+    if (!Foo.serializer().descriptor.isInline) return "not inline"
+    val s = Json.encodeToString(Foo.serializer(), Foo(42))
+    if (s != "42") return "enc: $s"
+    val d = Json.decodeFromString(Foo.serializer(), s)
+    return if (d.i == 42) "OK" else "dec: ${d.i}"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerValueClass") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "value-class inline serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty value-class inline serializer OK");
+}
+
+#[test]
 fn serializable_class_encodes_to_json_entirely_in_krusty() {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skipping: no kotlin-stdlib jar located");
