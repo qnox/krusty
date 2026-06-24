@@ -3178,15 +3178,31 @@ impl<'a> Lower<'a> {
             return None;
         }
         let elem = ty_of(self.afile, &decl.params[0].ty);
-        if !elem.is_reference() {
-            return None; // primitive-array spread uses different `copyOf` overloads — not yet handled
+        // A genuine JVM primitive element (`vararg xs: Int` → `IntArray`/`[I`) uses the matching
+        // `Arrays.copyOf(int[], int): int[]` overload and needs NO checkcast (the result is already the
+        // exact array type). Unsigned `UInt`/`ULong` varargs are a value-class array (`UIntArray`) with a
+        // different copy path — leave those (skip) rather than miscompile.
+        let prim = matches!(
+            elem,
+            Ty::Int
+                | Ty::Long
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Char
+                | Ty::Boolean
+                | Ty::Float
+                | Ty::Double
+        );
+        if !elem.is_reference() && !prim {
+            return None;
         }
         let array_ty = Ty::array(elem);
         let key: String = array_ty.descriptor();
         let fid = *self.fun_ids.get(&(fname.clone(), key))?;
         let array_ir = ty_to_ir(array_ty);
 
-        // `Arrays.copyOf(a, a.size)` → a fresh `Object[]`, then `checkcast` to the element array type.
+        // `Arrays.copyOf(a, a.size)` — the primitive overload returns the exact array type (no cast); the
+        // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
         let a0 = self.lower_arg(spread, &array_ir)?;
         let a1 = self.lower_arg(spread, &array_ir)?;
         let size = self.ir.add_expr(IrExpr::Call {
@@ -3194,26 +3210,36 @@ impl<'a> Lower<'a> {
             dispatch_receiver: Some(a1),
             args: vec![],
         });
+        let copyof_desc = if prim {
+            let p = elem.descriptor();
+            format!("([{p}I)[{p}")
+        } else {
+            "([Ljava/lang/Object;I)[Ljava/lang/Object;".to_string()
+        };
         let copy = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: "java/util/Arrays".to_string(),
                 name: "copyOf".to_string(),
-                descriptor: "([Ljava/lang/Object;I)[Ljava/lang/Object;".to_string(),
+                descriptor: copyof_desc,
                 inline: false,
                 must_inline: false,
             },
             dispatch_receiver: None,
             args: vec![a0, size],
         });
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: copy,
-            type_operand: array_ir,
-        });
+        let arg = if prim {
+            copy // primitive `copyOf` already returns `[<prim>` — no cast
+        } else {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: copy,
+                type_operand: array_ir,
+            })
+        };
         Some(self.ir.add_expr(IrExpr::Call {
             callee: Callee::Local(fid),
             dispatch_receiver: None,
-            args: vec![cast],
+            args: vec![arg],
         }))
     }
 

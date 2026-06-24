@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1734 OK / 0 FAIL** (scanned 7351, Phase 444).
+  repo's `compiler/testData/codegen/box`). Current gate: **1734 OK / 0 FAIL** (scanned 7351, Phase 445).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P68 — single-spread of a PRIMITIVE array into a `vararg` function (gate 1734 → 1734, +0
+  corpus, byte-equal, FAIL=0).** `f(*intArrayOf(1,2,3))` / `f(*xs)` (forwarding a vararg param) bailed
+  ("this construct is not yet supported") — `lower_single_spread_call` only handled REFERENCE-array
+  spreads (`Object[]` `copyOf` + checkcast). A genuine JVM-primitive element now uses the matching
+  `Arrays.copyOf([<prim>I)[<prim>` overload with NO checkcast (the result is already the exact array
+  type). Verified BYTE-IDENTICAL to kotlinc (same `aload;ldc;checkNotNull;aload;aload;arraylength;
+  copyOf([II)[I;invokestatic f;ireturn`). Unsigned `UInt`/`ULong` varargs (a `UIntArray` value-class
+  array with a different copy path) still skip (sound). +0 on the box corpus (no file gates on exactly
+  this shape) but a real byte-faithful capability common in practice. TDD: tests/primitive_spread_e2e.rs
+  (Int literal spread, vararg-param forward, Long spread).
 
 - **Phase P67 — properties in an enum entry body (gate 1733 → 1734, +1, FAIL=0).** `enum class E { A { val y = …; override fun f() = y }; abstract fun f(): String }` was rejected by the parser ("only method overrides are supported in an enum entry body") — only method overrides in an entry body were modeled. Now a `val`/`var` in an entry body becomes a private backing field + getter on the synthesized `E$Entry` subclass, initialized in its constructor after `super(name, ordinal[, args])`, and the override resolves the property as `this.<field>`. Pieces: parser collects entry-body props into a new parallel `ClassDecl.enum_entry_props`; the checker types each initializer and makes the entry's props visible to that entry's override bodies; ir_lower gives the entry subclass the fields + a getter per prop + an `init_body` that stores each, REGISTERS the subclass in the lowering's class map, and lowers the override bodies with `cur_class = E$Entry` (so a prop reads as a subclass field — a property-less entry keeps the enum scope, unchanged); the entry-subclass emitter now emits the fields and runs `init_body` in the ctor. Only a plainly-initialized prop is modeled (a getter/setter/delegate/`lateinit` entry prop cleanly skips). Byte-faithful (private field + `getX` on `E$Entry`). TDD: tests/enum_entry_property_e2e.rs (read-by-override, mixed prop/method entries, Int prop).
 
