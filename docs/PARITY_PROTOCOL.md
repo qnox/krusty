@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1730 OK / 0 FAIL** (scanned 7351, Phase 440).
+  repo's `compiler/testData/codegen/box`). Current gate: **1729 OK / 0 FAIL** (scanned 7351, Phase 441).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,26 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P64 — faithful `// WITH_COROUTINES` helper injection (gate 1730 → 1729, −1, FAIL=0).** The
+  conformance harness was treating `WITH_COROUTINES` as "add the kotlinx-coroutines-core jar" — wrong:
+  kotlinc's `TestFiles.java` injects a generated `helpers` SOURCE file (`CoroutineUtil.kt`, text from
+  `TestHelperGenerator.createTextForCoroutineHelpers(checkStateMachine, checkTailCallOptimization)`),
+  compiled in the same module. Verified: of 502 `WITH_COROUTINES` box files, **0** import
+  `kotlinx.coroutines` and **0** use `CHECK_STATE_MACHINE`/`CHECK_TAIL_CALL_OPTIMIZATION`. So krusty now
+  injects the `false,false` helper variant (`EmptyContinuation`, `runBlocking`,
+  `handleResultContinuation`, `handleExceptionContinuation`, `ResultContinuation`) as an extra source
+  block — for both `// FILE:` and single-file coroutine tests. **Net −1**: one `// FILE:`+coroutine test
+  previously compiled a helper-free subset and "passed"; under kotlinc the helper is always present, and
+  krusty cannot yet compile it, so the honest result is now a SKIP (a corrected false positive). This
+  un-masks the real blocker for all 502 coroutine tests: krusty can't compile the helper. The suspend
+  STATE MACHINE exists (`jvm/suspend.rs build_state_machine`), but five frontend gaps gate the helper:
+  (1) the `kotlin.coroutines.Continuation(ctx) {…}` factory function isn't resolved; (2) `startCoroutine`
+  (extension on a `suspend () -> T`, seen as `Function`) isn't resolved; (3) a generic type param `T` is
+  out of scope inside an anonymous `object : Continuation<T>`; (4) `override val context = …` property
+  type can't be inferred; (5) a function-typed param (`x: (T)->Unit`) invoked by name `x(...)` isn't
+  resolved inside the anon object. NEXT for coroutines = land those five, then the helper compiles and
+  the genuinely-supported suspend tests flip to OK.
 
 - **Phase P63 — top-level `const val` visibility + cross-file const reads (gate 1726 → 1730, +4,
   FAIL=0).** Two bugs. (1) The parser dispatched top-level `val`/`var` through `parse_top_property`
