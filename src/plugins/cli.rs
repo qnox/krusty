@@ -1,7 +1,8 @@
-//! Drop-in extension activation — krusty consumes the **same switches kotlinc does**, so an existing
-//! Gradle/Maven build that wires the serialization or KSP compiler plugin works unchanged. There is
-//! no krusty-specific plugin registry: plugins are activated by `-Xplugin=<jar>` and configured by
-//! `-P plugin:<id>:<key>=<value>`, exactly as `kotlinc` documents.
+//! Per-compilation extension **activation** — krusty consumes the **same switches kotlinc does**, so
+//! an existing Gradle/Maven build that wires the serialization or KSP compiler plugin works unchanged.
+//! Plugins are activated by `-Xplugin=<jar>` and configured by `-P plugin:<id>:<key>=<value>`, exactly
+//! as `kotlinc` documents. This is layer 2 of two; layer 1 is the general extension registry
+//! (`super::registry`), which `resolve` joins with this per-unit config.
 //!
 //!   -Xplugin=/path/kotlinx-serialization-compiler-plugin.jar
 //!   -Xplugin=/path/symbol-processing.jar
@@ -81,7 +82,7 @@ impl PluginConfig {
     fn jar_present(&self, needle: &str) -> bool {
         self.plugin_jars
             .iter()
-            .any(|j| j.rsplit('/').next().unwrap_or(j).contains(needle))
+            .any(|j| j.rsplit(['/', '\\']).next().unwrap_or(j).contains(needle))
     }
 
     /// Generic per-compilation activation test for a registered extension: its jar is on `-Xplugin`,

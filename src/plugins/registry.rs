@@ -59,8 +59,9 @@ pub enum PluginDiagnostic {
     },
     /// krusty will host the real plugin via the sidecar.
     Hosted { plugin_id: String },
-    /// An `-Xplugin` jar krusty can neither reimplement nor host — hard error.
-    Unsupported { jar: String },
+    /// A plugin krusty can neither reimplement nor host — hard error. `plugin` is the offending
+    /// `-Xplugin` jar path, or `plugin id '<id>'` when activated only via `-P` with no jar.
+    Unsupported { plugin: String },
 }
 
 impl PluginDiagnostic {
@@ -79,9 +80,9 @@ impl PluginDiagnostic {
             PluginDiagnostic::Hosted { plugin_id } => {
                 format!("krusty: hosting '{plugin_id}' via the KSP sidecar (the real plugin runs unmodified).")
             }
-            PluginDiagnostic::Unsupported { jar } => format!(
-                "krusty: unsupported compiler plugin '{jar}': krusty has no native implementation for \
-                 it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). \
+            PluginDiagnostic::Unsupported { plugin } => format!(
+                "krusty: unsupported compiler plugin '{plugin}': krusty has no native implementation \
+                 for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). \
                  Ignoring it would silently produce wrong output, so this is an error — remove the \
                  plugin or compile this module with kotlinc."
             ),
@@ -176,7 +177,22 @@ impl PluginRegistry {
         for jar in &act.config.plugin_jars {
             let name = basename(jar);
             if !self.extensions.iter().any(|e| name.contains(e.jar_marker)) {
-                diagnostics.push(PluginDiagnostic::Unsupported { jar: jar.clone() });
+                diagnostics.push(PluginDiagnostic::Unsupported {
+                    plugin: jar.clone(),
+                });
+            }
+        }
+
+        // ...and a plugin activated purely via `-P plugin:<id>:…` (no jar) for an UNregistered id is
+        // equally unsupported — Compose wired only by id must not slip through silently.
+        let mut flagged_ids: Vec<&str> = Vec::new();
+        for opt in &act.config.options {
+            let known = self.extensions.iter().any(|e| e.plugin_id == opt.id);
+            if !known && !flagged_ids.contains(&opt.id.as_str()) {
+                flagged_ids.push(&opt.id);
+                diagnostics.push(PluginDiagnostic::Unsupported {
+                    plugin: format!("plugin id '{}'", opt.id),
+                });
             }
         }
 
@@ -189,7 +205,7 @@ impl PluginRegistry {
 }
 
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 fn jar_matching(config: &PluginConfig, marker: &str) -> Option<String> {
@@ -273,6 +289,36 @@ mod tests {
         let msg = resolved.diagnostics[0].message();
         assert!(msg.contains("compose-compiler-plugin.jar"));
         assert!(msg.contains("unsupported"));
+    }
+
+    #[test]
+    fn unsupported_plugin_via_p_only_also_errors() {
+        // Compose wired by id with NO -Xplugin jar must still fail — not slip through silently.
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:suppressKotlinVersionCompatibilityCheck=true",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(
+            resolved.has_errors(),
+            "unknown -P plugin id must fail the compile"
+        );
+        assert!(matches!(
+            resolved.diagnostics.as_slice(),
+            [PluginDiagnostic::Unsupported { plugin }] if plugin.contains("androidx.compose")
+        ));
+    }
+
+    #[test]
+    fn known_plugin_via_p_only_activates_without_jar() {
+        // KSP configured by -P with no -Xplugin jar still activates (and is NOT flagged unsupported).
+        let c = cfg(&[
+            "-P",
+            "plugin:com.google.devtools.ksp.symbol-processing:apclasspath=/p/proc.jar",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(resolved.ksp_active);
+        assert!(!resolved.has_errors());
     }
 
     #[test]
