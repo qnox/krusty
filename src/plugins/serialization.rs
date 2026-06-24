@@ -996,12 +996,37 @@ impl IrPlugin for SerializationPlugin {
                         ir.functions[fid as usize].body = Some(body);
                     }
                     "childSerializers" => {
-                        // Valid stub: `return null`. childSerializers feeds the framework's *auto*
-                        // serialize/deserialize; our generated `serialize` drives the encoder directly,
-                        // so it is never consulted on the encode path. Wiring real element serializers
-                        // (builtin serializer singletons) is future work, tracked for the decode path.
-                        let n = ir.add_expr(IrExpr::Const(IrConst::Null));
-                        let ret = ir.add_expr(IrExpr::Return(Some(n)));
+                        // Return the per-field element-serializer array (arity == field count): one
+                        // `KSerializer` singleton per property. A nested `@Serializable` field uses the
+                        // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
+                        // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
+                        // (placeholder) so the array arity still matches the descriptor's element count.
+                        let elements: Vec<ExprId> = field_types
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ty)| {
+                                if let Some(nsid) = nested[i] {
+                                    ir.add_expr(IrExpr::StaticInstance {
+                                        owner: nsid,
+                                        ty: nsid,
+                                        field: "INSTANCE",
+                                    })
+                                } else if let Some(ser) = builtin_element_serializer(ty) {
+                                    ir.add_expr(IrExpr::ExternalStaticInstance {
+                                        owner: ser.to_string(),
+                                        ty: ser.to_string(),
+                                        field: "INSTANCE".to_string(),
+                                    })
+                                } else {
+                                    ir.add_expr(IrExpr::Const(IrConst::Null))
+                                }
+                            })
+                            .collect();
+                        let arr = ir.add_expr(IrExpr::Vararg {
+                            element_type: class_ty(KSERIALIZER_FQ),
+                            elements,
+                        });
+                        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
                         let body = ir.add_expr(IrExpr::Block {
                             stmts: vec![ret],
                             value: None,

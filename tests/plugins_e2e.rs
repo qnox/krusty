@@ -89,8 +89,13 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
         .unwrap();
     assert_eq!(fields_before, 2, "Foo lowered with 2 fields");
     let body = child.body.expect("childSerializers has a body");
-    let krusty::ir::IrExpr::Block { value: Some(v), .. } = ir.expr(body) else {
+    // The body is `{ return <array> }` — a block whose single statement returns the element-serializer
+    // array (a non-Unit method needs an explicit `Return`; a block tail-value would never `areturn`).
+    let krusty::ir::IrExpr::Block { stmts, .. } = ir.expr(body) else {
         panic!("childSerializers body not a block");
+    };
+    let krusty::ir::IrExpr::Return(Some(v)) = ir.expr(stmts[stmts.len() - 1]) else {
+        panic!("childSerializers does not return");
     };
     let krusty::ir::IrExpr::Vararg { elements, .. } = ir.expr(*v) else {
         panic!("childSerializers does not return an array");
