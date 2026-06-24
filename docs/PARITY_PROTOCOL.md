@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1530 OK / 0 FAIL** (scanned 7351).
+  repo's `compiler/testData/codegen/box`). Current gate: **1537 OK / 0 FAIL** (scanned 7351).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -71,6 +71,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P25 — range-typed property inference (gate 1530 → 1537, +7, FAIL=0).** A range value used to
+  initialize a property (`val r = 1..10`, `'a'..'c'`, `0 until n`, `4 downTo 1`) now infers its stdlib
+  range type at signature-collection time — `infer_lit_ty` gained an `Expr::RangeTo` arm mirroring the
+  checker's `RangeTo` typing (`IntRange`/`LongRange`/`CharRange`/`UIntRange`/`ULongRange` by operand
+  type). Previously such a property was `Error` ("cannot infer the type of property 'range0'") — the
+  single biggest blocker (25×) in `ranges/contains/`. The stored range then iterates/uses through the
+  existing range support. New `range_property_e2e`. (Stored-range `x in r` `contains` and stepped/reversed/
+  unsigned progressions remain separate items.)
 - **Phase P24 — unsigned literal/`toString`/`ULong`-promotion correctness (gate 1528 → 1530, +2, FAIL=0).**
   Three drop-in fidelity fixes for unsigned types (`UInt`/`ULong`, erased to int/long): (1) top-level &
   member property inference now types an unsigned-literal initializer (`val ua = 1234U` → `UInt`) — was

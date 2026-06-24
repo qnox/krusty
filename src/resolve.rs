@@ -2071,6 +2071,23 @@ fn infer_lit_ty_p(
             }
             Ty::Error
         }
+        // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
+        // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
+        Expr::RangeTo { lo, hi, .. } => {
+            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props);
+            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props);
+            let small_int = |t: &Ty| matches!(t, Ty::Byte | Ty::Short | Ty::Int);
+            match (lt, rt) {
+                (Ty::Char, Ty::Char) => Ty::obj("kotlin/ranges/CharRange"),
+                (Ty::UInt, Ty::UInt) => Ty::obj("kotlin/ranges/UIntRange"),
+                (Ty::ULong, Ty::ULong) => Ty::obj("kotlin/ranges/ULongRange"),
+                _ if small_int(&lt) && small_int(&rt) => Ty::obj("kotlin/ranges/IntRange"),
+                _ if (small_int(&lt) || lt == Ty::Long) && (small_int(&rt) || rt == Ty::Long) => {
+                    Ty::obj("kotlin/ranges/LongRange")
+                }
+                _ => Ty::Error,
+            }
+        }
         _ => Ty::Error,
     }
 }
