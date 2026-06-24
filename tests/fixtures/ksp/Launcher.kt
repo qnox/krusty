@@ -32,6 +32,7 @@ fun main(args: Array<String>) {
         jvmTarget = "17"
         languageVersion = "2.0"
         apiVersion = "2.0"
+        processorOptions = mapOf("greeting" to "hi-from-krusty")
     }.build()
     // Load the processor provider FROM THE JAR via ServiceLoader (genuine from-jar discovery).
     val cl = URLClassLoader(arrayOf(procJar.toURI().toURL()), KSPJvmConfig::class.java.classLoader)
