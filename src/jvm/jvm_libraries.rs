@@ -28,6 +28,90 @@ impl JvmLibraries {
         JvmLibraries { cp }
     }
 
+    /// The erased JVM descriptor of a classpath value class's underlying (`kotlin/UInt` → `"I"`,
+    /// `kotlin/Result` → `"Ljava/lang/Object;"`), or `None` if `internal` is not a value class. Its
+    /// mangled extensions are indexed under this descriptor.
+    fn value_class_underlying_desc(&self, internal: &str) -> Option<String> {
+        let ic = self
+            .cp
+            .find(internal)
+            .and_then(|ci| crate::jvm::metadata::class_inline(&ci))?;
+        Some(match ic.underlying_class.as_deref() {
+            Some("kotlin/Boolean") => "Z".into(),
+            Some("kotlin/Byte") => "B".into(),
+            Some("kotlin/Short") => "S".into(),
+            Some("kotlin/Int") => "I".into(),
+            Some("kotlin/Long") => "J".into(),
+            Some("kotlin/Char") => "C".into(),
+            Some("kotlin/Float") => "F".into(),
+            Some("kotlin/Double") => "D".into(),
+            Some(other) => format!("L{other};"),
+            None => "Ljava/lang/Object;".into(),
+        })
+    }
+
+    /// The logical Kotlin return type of a value-class extension identified by its MANGLED JVM method name
+    /// (`coerceAtMost-J1ME1BU` → `UInt`), from `@Metadata` (facade parts merged). The descriptor return is
+    /// the erased underlying; this recovers the unsigned/value-class type. `None` if not found.
+    fn metadata_ext_return_ty(&self, owner: &str, jvm_name: &str) -> Option<Ty> {
+        let owner_ci = self.cp.find(owner)?;
+        let mut fns = crate::jvm::metadata::package_functions(&owner_ci);
+        if fns.is_empty() {
+            for part in &owner_ci.kotlin_d1 {
+                if let Some(pci) = self.cp.find(part) {
+                    fns.extend(crate::jvm::metadata::package_functions(&pci));
+                }
+            }
+        }
+        let rc = fns
+            .into_iter()
+            .find(|m| m.jvm_name == jvm_name)?
+            .ret_class?;
+        Some(match rc.as_str() {
+            "kotlin/Boolean" => Ty::Boolean,
+            "kotlin/Byte" => Ty::Byte,
+            "kotlin/Short" => Ty::Short,
+            "kotlin/Int" => Ty::Int,
+            "kotlin/Long" => Ty::Long,
+            "kotlin/Char" => Ty::Char,
+            "kotlin/Float" => Ty::Float,
+            "kotlin/Double" => Ty::Double,
+            "kotlin/UInt" => Ty::UInt,
+            "kotlin/ULong" => Ty::ULong,
+            other => Ty::obj(other),
+        })
+    }
+
+    /// Whether a value-class argument `a` (`3u: UInt`) fits a parameter `p` that is the value class's
+    /// ERASED underlying (`Int`) — a mangled value-class extension carries erased params in its descriptor.
+    fn value_class_arg_fits(&self, p: &Ty, a: &Ty) -> bool {
+        let under_ty = match a {
+            Ty::UInt => Ty::Int,
+            Ty::ULong => Ty::Long,
+            Ty::Obj(internal, _) => {
+                let under = self
+                    .cp
+                    .find(internal)
+                    .and_then(|ci| crate::jvm::metadata::class_inline(&ci))
+                    .and_then(|ic| ic.underlying_class);
+                match under.as_deref() {
+                    Some("kotlin/Boolean") => Ty::Boolean,
+                    Some("kotlin/Byte") => Ty::Byte,
+                    Some("kotlin/Short") => Ty::Short,
+                    Some("kotlin/Int") => Ty::Int,
+                    Some("kotlin/Long") => Ty::Long,
+                    Some("kotlin/Char") => Ty::Char,
+                    Some("kotlin/Float") => Ty::Float,
+                    Some("kotlin/Double") => Ty::Double,
+                    Some(other) => Ty::obj(other),
+                    None => return false,
+                }
+            }
+            _ => return false,
+        };
+        *p == under_ty
+    }
+
     /// Resolve an extension `receiver.name(args)` to a `LibraryCallable` (exact-arity match, generic
     /// return recovered from the signature). `allow_non_public` includes `@InlineOnly` package-private
     /// candidates — used ONLY by the inline route (which splices, emitting no call); normal resolution
@@ -108,12 +192,12 @@ impl JvmLibraries {
                 }
                 // Subtype-aware fit so a `List` argument matches an `Iterable` parameter (`list + list`
                 // selects the `Iterable` concat overload); the most-specific pick below then disambiguates
-                // against the erased-`Object` element overload.
-                if !params[1..]
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
-                {
+                // against the erased-`Object` element overload. A value-class argument (`3u: UInt`) also fits
+                // a parameter of its ERASED underlying (`Int`), since a mangled value-class extension's
+                // descriptor carries the erased params (`coerceAtMost-<hash>(II)`).
+                if !params[1..].iter().zip(args).all(|(p, a)| {
+                    arg_fits_subtype(&self.cp, p, a) || self.value_class_arg_fits(p, a)
+                }) {
                     continue;
                 }
                 // Disambiguate by the receiver's type arguments: reject an overload whose declared
@@ -188,6 +272,19 @@ impl JvmLibraries {
                 } else {
                     ret_ty
                 };
+            // A mangled value-class extension's descriptor return is the ERASED underlying (`coerceAtMost-
+            // <hash>(II)I`); recover the LOGICAL value-class return from `@Metadata` (by the mangled JVM
+            // name, part-merged) so `b: UInt`, not `Int`. Only override TO a value-class type (leaves an
+            // ordinary extension untouched).
+            let ret_ty = match self.metadata_ext_return_ty(&c.owner, &c.name) {
+                Some(mt)
+                    if matches!(mt, Ty::UInt | Ty::ULong)
+                        || matches!(&mt, Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some()) =>
+                {
+                    mt
+                }
+                _ => ret_ty,
+            };
             return Some(LibraryCallable {
                 owner: c.owner.clone(),
                 name: c.name.clone(),
@@ -851,6 +948,29 @@ impl SymbolSource for JvmLibraries {
                 .enumerate()
             {
                 for c in self.cp.find_extensions(&recv_desc, name) {
+                    // A value-class receiver erases to a primitive descriptor (`UInt`→`"I"`), so a SIGNED
+                    // primitive extension (`Int.coerceAtMost`) matches at the erased rung. Reject a
+                    // candidate whose `@Metadata` receivers are concrete and EXCLUDE this value class (it is
+                    // not one of them, nor a subtype) — only a `UInt`-declared (or generic, no recorded
+                    // receiver) extension applies to a `UInt`. Mirrors the collection applicability check.
+                    let recv_vc = match &receiver {
+                        Ty::UInt => Some("kotlin/UInt".to_string()),
+                        Ty::ULong => Some("kotlin/ULong".to_string()),
+                        Ty::Obj(i, _) if self.value_class_underlying_desc(i).is_some() => {
+                            Some(i.to_string())
+                        }
+                        _ => None,
+                    };
+                    if let Some(vc) = &recv_vc {
+                        let recvs = self.cp.metadata_receiver_types(&c.owner, &c.name);
+                        if !recvs.is_empty()
+                            && !recvs
+                                .iter()
+                                .any(|r| r == vc || self.cp.kotlin_subtype(vc, r))
+                        {
+                            continue;
+                        }
+                    }
                     let (params, pret) = parse_method_desc(&c.descriptor);
                     let inline = self.cp.is_inline_method(&c.owner, &c.name);
                     let ret_nullable = self.cp.metadata_return_nullable(&c.owner, &c.name);
@@ -934,6 +1054,90 @@ impl SymbolSource for JvmLibraries {
                             origin: crate::libraries::Origin::Library,
                         },
                     });
+                }
+            }
+            // Metadata-mangled extensions on a value-class receiver. An extension on a value class
+            // (`UInt.coerceAtMost`) has a `@JvmName`-MANGLED bytecode name (`coerceAtMost-5PvTz6A`) indexed
+            // under the receiver's ERASED underlying descriptor, so the literal-name `find_extensions` above
+            // misses it. kotlinc resolves it from `@Metadata`: the Kotlin name + extension receiver class.
+            // For a value-class receiver only (bounding the blast radius), map `name` → the mangled method
+            // via `package_functions`, then load the real candidate by that JVM name.
+            // The receiver's value-class internal name — a dedicated `Ty::UInt`/`ULong` or an `Obj`.
+            let recv_value_internal: Option<String> = match &receiver {
+                Ty::UInt => Some("kotlin/UInt".to_string()),
+                Ty::ULong => Some("kotlin/ULong".to_string()),
+                Ty::Obj(i, _) => Some(i.to_string()),
+                _ => None,
+            };
+            if let Some(recv_internal) = recv_value_internal {
+                if let Some(recv_desc) = self.value_class_underlying_desc(&recv_internal) {
+                    {
+                        for owner in self.cp.find_extension_owners(&recv_desc) {
+                            let Some(owner_ci) = self.cp.find(&owner) else {
+                                continue;
+                            };
+                            // A multifile FACADE has no function metadata of its own — its functions live in
+                            // the PART classes named in its `@Metadata` `d1` (`URangesKt` →
+                            // `URangesKt___URangesKt`). Merge them, mirroring `metadata_fn_type`.
+                            let mut metafns = crate::jvm::metadata::package_functions(&owner_ci);
+                            if metafns.is_empty() {
+                                for part in &owner_ci.kotlin_d1 {
+                                    if let Some(pci) = self.cp.find(part) {
+                                        metafns
+                                            .extend(crate::jvm::metadata::package_functions(&pci));
+                                    }
+                                }
+                            }
+                            for mf in metafns {
+                                // Only a metadata-mangled (jvm_name != kotlin name) public extension whose
+                                // `@Metadata` receiver IS this value class.
+                                if mf.kotlin_name != name
+                                    || mf.jvm_name == name
+                                    || !mf.is_public
+                                    || mf.receiver_class.as_deref() != Some(recv_internal.as_str())
+                                {
+                                    continue;
+                                }
+                                for c in self.cp.find_extensions(&recv_desc, &mf.jvm_name) {
+                                    let (params, pret) = parse_method_desc(&c.descriptor);
+                                    let ret = self
+                                        .cp
+                                        .metadata_return_ty(&c.owner, &c.name)
+                                        .unwrap_or(pret);
+                                    overloads.push(FunctionInfo {
+                                        kind: FnKind::Extension,
+                                        receiver: Some(receiver),
+                                        ret_nullable: self
+                                            .cp
+                                            .metadata_return_nullable(&c.owner, &c.name),
+                                        public: true,
+                                        // The value class is the most-specific receiver rung.
+                                        receiver_rank: 0,
+                                        call_sig: crate::libraries::CallSig::default(),
+                                        flags: FnFlags {
+                                            inline: mf.is_inline,
+                                            inline_only: mf.is_inline && !c.public,
+                                            suspend: mf.is_suspend,
+                                        },
+                                        callable: LibraryCallable {
+                                            name: c.name.clone(),
+                                            owner: c.owner.clone(),
+                                            params,
+                                            ret,
+                                            physical_ret: pret,
+                                            descriptor: c.descriptor.clone(),
+                                            is_inline: mf.is_inline,
+                                            default_call: false,
+                                            vararg_elem: None,
+                                            must_inline: mf.is_inline && !c.public,
+                                            signature: c.signature.clone(),
+                                            origin: crate::libraries::Origin::Library,
+                                        },
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Member functions of the receiver's type (own + inherited) — "functions inside types". A member

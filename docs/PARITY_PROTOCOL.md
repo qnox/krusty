@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1616 OK / 0 FAIL** (scanned 7351, Phase 433).
+  repo's `compiler/testData/codegen/box`). Current gate: **1690 OK / 0 FAIL** (scanned 7351, Phase 434).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P57 — unsigned (`UInt`/`ULong`) value-class extension resolution via `@Metadata` (gate 1616 → 1690,
+  +74, FAIL=0).** A value-class extension (`UInt.coerceAtMost`/`coerceIn`/…) has a `@JvmName`-MANGLED bytecode
+  name (`coerceAtMost-J1ME1BU`) in a multifile PART class, indexed under the ERASED underlying descriptor —
+  the literal-name lookup misses it, and `UInt`'s erased descriptor `"I"` makes the SIGNED `Int` extension
+  shadow it. Four pieces, all reusing the Result machinery: (1) `functions()` resolves the mangled extension
+  for a value-class receiver via `package_functions` (facade PARTS merged from the facade's `@Metadata` `d1`),
+  matching the Kotlin name + `@Metadata` extension receiver, then loads the real candidate by the mangled JVM
+  name; (2) the plain-extension loop now REJECTS a candidate whose `@Metadata` receivers are concrete and
+  exclude this value class (not it, nor a supertype via `kotlin_subtype`) — so signed `Int.coerceAtMost` no
+  longer binds a `UInt`; (3) the arg-matcher accepts a value-class argument (`3u`) for its erased-underlying
+  param (`coerceAtMost-<hash>(II)`); (4) the logical return is recovered from `@Metadata` by the mangled JVM
+  name (`MetaFn.ret_class`, new) so `b: UInt`, not `Int` (the by-Kotlin-name lookup is ambiguous across the
+  4 unsigned overloads). e2e `unsigned_ext_e2e` (`coerceAtMost`, `coerceIn`). +74 unsigned-cluster box files,
+  all run correctly under `-Xverify:all`.
 - **Phase P56 — full `kotlin.Result` end-to-end: construction + extension + erasure, byte-equal (gate 1612 →
   1616, +4, FAIL=0).** `Result.success(42)` then `getOrThrow()` now compiles, runs under `-Xverify:all`, and
   is byte-equal to kotlinc. Pieces: (1) the checker resolves a value-class COMPANION call (`Result.success`)
