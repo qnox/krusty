@@ -418,6 +418,72 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
     m
 }
 
+/// Collect every simple type NAME referenced in a `TypeRef` (recursively through generic arguments,
+/// function-type params/return, and the array/return `arg`) into `out`.
+fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String>) {
+    if !r.name.is_empty() && r.name != "<fun>" {
+        out.insert(r.name.clone());
+    }
+    if let Some(a) = &r.arg {
+        collect_typeref_names(a, out);
+    }
+    for t in &r.targs {
+        collect_typeref_names(t, out);
+    }
+    for p in &r.fun_params {
+        collect_typeref_names(p, out);
+    }
+}
+
+/// Collect every simple type NAME referenced in TYPE positions across a file's declarations (function
+/// params/returns/receivers + type-param bounds, property types, class members) — so the signature phase
+/// can import-resolve names absent from the global seed (ambiguity-pruned), matching the Checker.
+fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<String>) {
+    fn fun_names(f: &FunDecl, file: &File, out: &mut std::collections::HashSet<String>) {
+        let _ = file;
+        if let Some(r) = &f.receiver {
+            collect_typeref_names(r, out);
+        }
+        for p in &f.params {
+            collect_typeref_names(&p.ty, out);
+        }
+        if let Some(r) = &f.ret {
+            collect_typeref_names(r, out);
+        }
+        for (_, b) in &f.type_param_bounds {
+            collect_typeref_names(b, out);
+        }
+    }
+    fn prop_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
+        if let Some(r) = &p.receiver {
+            collect_typeref_names(r, out);
+        }
+        if let Some(r) = &p.ty {
+            collect_typeref_names(r, out);
+        }
+    }
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => fun_names(f, file, out),
+            Decl::Property(p) => prop_names(p, out),
+            Decl::Class(c) => {
+                for (_, b) in &c.type_param_bounds {
+                    collect_typeref_names(b, out);
+                }
+                for pp in &c.props {
+                    collect_typeref_names(&pp.ty, out);
+                }
+                for p in c.body_props.iter().chain(&c.companion_props) {
+                    prop_names(p, out);
+                }
+                for m in c.methods.iter().chain(&c.companion_methods) {
+                    fun_names(m, file, out);
+                }
+            }
+        }
+    }
+}
+
 /// The packages Kotlin imports by DEFAULT into every file, as internal names — kotlinc's fixed list for
 /// the JVM target. A bare type name resolves against these (plus the file's own imports + same package),
 /// NOT against every class on the classpath. (`kotlin.coroutines` is NOT here — it needs an explicit
@@ -602,21 +668,38 @@ pub fn collect_signatures_with_cp(
     {
         let mut from_import: HashMap<String, Option<String>> = HashMap::new();
         for file in files {
-            for (simple, full) in import_map(file) {
-                if class_names.contains_key(simple.as_str()) || user_defined.contains(&simple) {
+            let imap = import_map(file);
+            let wilds = import_wildcards(file); // explicit `a.b.*` packages + Kotlin's default imports
+                                                // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
+                                                // it) plus the explicit-import names themselves.
+            let mut names = std::collections::HashSet::new();
+            collect_file_type_names(file, &mut names);
+            names.extend(imap.keys().cloned());
+            for name in names {
+                if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
                     continue;
                 }
-                if libraries.resolve_type(&full).is_none() {
-                    continue;
-                }
-                match from_import.get(&simple) {
-                    None => {
-                        from_import.insert(simple, Some(full));
+                // An explicit import wins; else a wildcard package that actually provides the type.
+                let full = imap
+                    .get(&name)
+                    .filter(|f| libraries.resolve_type(f).is_some())
+                    .cloned()
+                    .or_else(|| {
+                        wilds
+                            .iter()
+                            .map(|p| format!("{p}/{name}"))
+                            .find(|cand| libraries.resolve_type(cand).is_some())
+                    });
+                if let Some(full) = full {
+                    match from_import.get(&name) {
+                        None => {
+                            from_import.insert(name, Some(full));
+                        }
+                        Some(Some(prev)) if *prev != full => {
+                            from_import.insert(name, None); // conflicting resolutions → leave unresolved
+                        }
+                        _ => {}
                     }
-                    Some(Some(prev)) if *prev != full => {
-                        from_import.insert(simple, None); // conflicting imports → leave unresolved
-                    }
-                    _ => {}
                 }
             }
         }

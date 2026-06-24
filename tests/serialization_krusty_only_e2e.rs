@@ -266,17 +266,28 @@ fn ambiguous_import_resolves_in_signature_phase() {
         eprintln!("skipping: no JDK lib/modules (needed to reproduce the ambiguity)");
         return;
     }
-    let src = "import kotlinx.serialization.encoding.Encoder\n\
+    // Both explicit AND wildcard imports must resolve the ambiguity-pruned name in the signature phase.
+    let explicit = "import kotlinx.serialization.encoding.Encoder\n\
                import kotlinx.serialization.encoding.Decoder\n\
                fun f(e: Encoder, d: Decoder) {}\n\
                fun box(): String = \"OK\"\n";
-    let classes = common::compile_in_process(src, "AmbigImp", &[stdlib, core], Some(&modules));
-    assert!(
-        classes.is_some(),
-        "explicit import of an ambiguously-named class (Encoder) must resolve in the signature phase \
-         even with the JDK on the classpath"
-    );
-    eprintln!("ambiguous explicit import resolves in signature phase OK");
+    let wildcard = "import kotlinx.serialization.encoding.*\n\
+               fun f(e: Encoder, d: Decoder) {}\n\
+               fun box(): String = \"OK\"\n";
+    for (kind, src) in [("explicit", explicit), ("wildcard", wildcard)] {
+        let classes = common::compile_in_process(
+            src,
+            "AmbigImp",
+            &[stdlib.clone(), core.clone()],
+            Some(&modules),
+        );
+        assert!(
+            classes.is_some(),
+            "{kind} import of an ambiguously-named class (Encoder) must resolve in the signature phase \
+             even with the JDK on the classpath"
+        );
+    }
+    eprintln!("ambiguous explicit+wildcard imports resolve in signature phase OK");
 }
 
 #[test]
