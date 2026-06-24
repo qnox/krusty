@@ -583,6 +583,24 @@ mod tests {
             SerializationAbi::from_classpath(&["/x/kotlin-stdlib.jar".to_string()]),
             None
         );
+
+        // -core, not -json/-protobuf, drives the ABI even when several serialization jars co-exist.
+        let many = vec![
+            "/x/kotlinx-serialization-json-jvm-1.5.0.jar".to_string(),
+            "/x/kotlinx-serialization-protobuf-jvm-1.5.0.jar".to_string(),
+            "/x/kotlinx-serialization-core-jvm-1.8.1.jar".to_string(),
+        ];
+        assert_eq!(
+            SerializationAbi::from_classpath(&many),
+            Some(SerializationAbi::V1_6Plus)
+        );
+
+        // A snapshot version still parses by its leading numeric components.
+        let snap = vec!["/x/kotlinx-serialization-core-jvm-1.8.1-SNAPSHOT.jar".to_string()];
+        assert_eq!(
+            SerializationAbi::from_classpath(&snap),
+            Some(SerializationAbi::V1_6Plus)
+        );
     }
 
     #[test]
