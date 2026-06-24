@@ -249,11 +249,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .map(|(_, t, _)| *t)
                     })
                     .unwrap_or(Ty::Error);
-                if gv.ret != prop_ty {
+                // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
+                // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
+                // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
+                // return isn't, so bail on that.
+                if gv.ret != prop_ty && !gv.ret.is_reference() {
                     return None;
                 }
                 if prop_ty.obj_internal().is_some_and(is_value_cls) {
                     return None;
+                }
+                // A `var`'s `setValue` value param erased to a reference (`<T> setValue(…, i: T)`) while the
+                // property is a PRIMITIVE needs the value boxed before the call — not yet modeled, so bail
+                // (the getter coercion above is the read-only half). A reference property passes through.
+                if p.is_var {
+                    if let Some(sv) = syms.method_of(di, "setValue") {
+                        if sv
+                            .params
+                            .last()
+                            .is_some_and(|vp| vp.is_reference() && prop_ty.is_primitive())
+                        {
+                            return None;
+                        }
+                    }
                 }
             }
             // Synthetic `x$delegate` instance fields for delegated member properties — one per delegated
@@ -1398,7 +1416,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         dispatch_receiver: Some(dele),
                         args: vec![this_arg, pref],
                     });
-                    let ret = lo.ir.add_expr(IrExpr::Return(Some(call)));
+                    // A generic delegate's `getValue` returns the erased `Object`; coerce to the property
+                    // type (`checkcast`/unbox), exactly as kotlinc does.
+                    let coerced = lo.coerce_erased(call, prop_ty, gv.ret);
+                    let ret = lo.ir.add_expr(IrExpr::Return(Some(coerced)));
                     let body = lo.ir.add_expr(IrExpr::Block {
                         stmts: vec![ret],
                         value: None,
