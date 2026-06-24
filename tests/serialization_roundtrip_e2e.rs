@@ -118,7 +118,8 @@ fn serializable_class_encode_round_trips() {
                    @Serializable class Wide(val big: Long, val d: Double, val tag: String)\n\
                    @Serializable class Inner(val v: Int)\n\
                    @Serializable class Outer(val inner: Inner, val label: String)\n\
-                   @Serializable class Nul(val a: Int, val b: String?)";
+                   @Serializable class Nul(val a: Int, val b: String?)\n\
+                   @Serializable class NulP(val a: Int?, val b: Long?, val c: Boolean?)";
         let mut d = DiagSink::new();
         let toks = lex(src, &mut d);
         let files = vec![parse(src, &toks, &mut d)];
@@ -188,6 +189,16 @@ fun box(): String {
     if (nj2 != "{\"a\":2,\"b\":null}") return "NUL NULL ENC FAIL: $nj2"
     val nb2 = Json.decodeFromString(ns, nj2)
     if (nb2.a != 2 || nb2.b != null) return "NUL NULL DEC FAIL: ${nb2.a},${nb2.b}"
+    // Nullable PRIMITIVES (Int?/Long?/Boolean?, boxed): present and null via the builtin serializers.
+    val ps = NulP.serializer() as KSerializer<NulP>
+    val pj = Json.encodeToString(ps, NulP(7, 9000000000L, true))
+    if (pj != "{\"a\":7,\"b\":9000000000,\"c\":true}") return "NULP ENC FAIL: $pj"
+    val pb = Json.decodeFromString(ps, pj)
+    if (pb.a != 7 || pb.b != 9000000000L || pb.c != true) return "NULP DEC FAIL: ${pb.a},${pb.b},${pb.c}"
+    val pj2 = Json.encodeToString(ps, NulP(null, null, null))
+    if (pj2 != "{\"a\":null,\"b\":null,\"c\":null}") return "NULP NULL ENC FAIL: $pj2"
+    val pb2 = Json.decodeFromString(ps, pj2)
+    if (pb2.a != null || pb2.b != null || pb2.c != null) return "NULP NULL DEC FAIL: ${pb2.a},${pb2.b},${pb2.c}"
     return "OK"
 }
 fun main() { println(box()) }
