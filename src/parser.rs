@@ -72,7 +72,9 @@ fn fixup_parenless_base_classes(file: &mut File) {
         .decl_arena
         .iter()
         .filter_map(|d| match d {
-            Decl::Class(c) if !c.is_interface && !c.is_object && !c.is_enum => Some(c.name.clone()),
+            Decl::Class(c) if c.kind == ClassKind::Class || c.is_annotation() => {
+                Some(c.name.clone())
+            }
             _ => None,
         })
         .collect();
@@ -287,7 +289,7 @@ impl<'a> Parser<'a> {
                 {
                     self.bump(); // 'annotation'
                     let mut d = self.parse_class();
-                    d.is_annotation = true;
+                    d.kind = ClassKind::Annotation;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -971,13 +973,10 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: true,
+            kind: ClassKind::Enum,
             enum_entries: entries,
             enum_entry_args: entry_args,
             enum_entry_bodies: entry_bodies,
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1531,13 +1530,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Class,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1735,13 +1731,10 @@ impl<'a> Parser<'a> {
             init_order: Vec::new(),
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Interface,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: true,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1861,13 +1854,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: false,
-            is_enum: false,
+            kind: ClassKind::Class,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,
@@ -1989,13 +1979,10 @@ impl<'a> Parser<'a> {
             init_order,
             is_data: false,
             is_value: false,
-            is_annotation: false,
-            is_object: true,
-            is_enum: false,
+            kind: ClassKind::Object,
             enum_entries: Vec::new(),
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
-            is_interface: false,
             is_fun_interface: false,
             is_open: false,
             is_abstract: false,

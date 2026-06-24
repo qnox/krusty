@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 426).
+  repo's `compiler/testData/codegen/box`). Current gate: **1611 OK / 0 FAIL** (scanned 7351, Phase 427).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -74,6 +74,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
 
+- **Phase P50 — classpath `object` referenced as a value + kind-flag enums (gate 1611 → 1611, +0, FAIL=0).**
+  Coroutine-chain layer 1b: a bare reference to a CLASSPATH Kotlin `object` (e.g. `EmptyCoroutineContext`)
+  was an "unresolved reference". Now the checker's bare-`Name` fallback resolves the name through the generic
+  import machinery (`imported_type_internal` — explicit imports + Kotlin default-import packages), and if the
+  resolved library type is an `object` (`LibraryType::is_object()` — detected via a `public static final
+  INSTANCE` field of the type's own descriptor), it types the reference as that object and records it; lowering
+  emits a new `IrExpr::ExternalStaticField { owner, name: "INSTANCE", descriptor }` → `getstatic
+  <owner>.INSTANCE`. e2e `classpath_object_value_e2e` round-trips `EmptyCoroutineContext.toString()` under
+  `-Xverify:all`. Plus a design cleanup the maintainer flagged on review: the parallel kind booleans
+  (`is_interface`/`is_object`/`is_enum`/`is_annotation`) on `ClassDecl` and (`is_interface`/`is_annotation`/
+  `is_object`) on `LibraryType` are now a single `kind:` field — `ast::ClassKind` and `libraries::TypeKind`
+  enums — read through `is_*()` accessor methods. `TypeKind::is_interface()` returns `true` for `Annotation`
+  too (JVM annotations carry `ACC_INTERFACE`); the AST `ClassKind` keeps `Annotation` distinct from
+  `Interface` (matching the parser, which never set `is_interface` on annotation classes). No behavior change
+  — pure single-source-of-truth refactor; full suite + gate green.
 - **Phase P49 — coroutine stdlib type resolution: `kotlin.*` wins ambiguous simple names + default-import
   packages in the generic import machinery (gate 1610 → 1611, +1, FAIL=0).** `kotlin.coroutines.Continuation`
   and `kotlin.Result` (and `CoroutineContext`) didn't resolve as types — even fully-qualified — because the

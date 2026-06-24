@@ -2797,6 +2797,19 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
                 code.getstatic(f, 1);
             }
+            IrExpr::ExternalStaticField {
+                owner,
+                name,
+                descriptor,
+            } => {
+                let f = self.cw.fieldref(owner, name, descriptor);
+                let words = if descriptor == "J" || descriptor == "D" {
+                    2
+                } else {
+                    1
+                };
+                code.getstatic(f, words);
+            }
             IrExpr::EnumValues { class } => {
                 let fq = self.ir.classes[*class as usize].fq_name.clone();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
@@ -4435,6 +4448,21 @@ impl<'a> Emitter<'a> {
                 Ty::obj(&self.ir.classes[*class as usize].fq_name)
             }
             IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name),
+            IrExpr::ExternalStaticField { descriptor, .. } => {
+                // The static field's JVM type, from its descriptor (an object `L…;` for an `object`'s
+                // INSTANCE; primitives for the rare const-field case).
+                match descriptor.as_str() {
+                    "J" => Ty::Long,
+                    "D" => Ty::Double,
+                    "I" => Ty::Int,
+                    "Z" => Ty::Boolean,
+                    d => d
+                        .strip_prefix('L')
+                        .and_then(|s| s.strip_suffix(';'))
+                        .map(Ty::obj)
+                        .unwrap_or(Ty::obj("java/lang/Object")),
+                }
+            }
             IrExpr::RefNew { elem, .. } => Ty::obj(ref_class(elem).0),
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,

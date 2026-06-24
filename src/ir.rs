@@ -264,6 +264,15 @@ pub enum IrExpr {
         ty: ClassId,
         field: &'static str,
     },
+    /// Read a static field of a CLASSPATH class by name — `getstatic owner.name:descriptor`. Used for a
+    /// classpath `object` referenced as a value (`EmptyCoroutineContext` → `getstatic kotlin/coroutines/
+    /// EmptyCoroutineContext.INSTANCE:Lkotlin/coroutines/EmptyCoroutineContext;`). Unlike `StaticInstance`
+    /// (a user `ClassId`) and `GetStatic` (a facade statics index), this names an external owner directly.
+    ExternalStaticField {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues {
         class: ClassId,
@@ -843,6 +852,7 @@ pub fn for_each_child(ir: &IrFile, e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
         | IrExpr::EnumEntry { .. }
+        | IrExpr::ExternalStaticField { .. }
         | IrExpr::StaticInstance { .. }
         | IrExpr::EnumValues { .. }
         | IrExpr::UnitInstance => {}
