@@ -151,7 +151,12 @@ import kotlinx.serialization.KSerializer
 fun box(): String {
     val s = Foo.serializer() as KSerializer<Foo>
     val j = Json.encodeToString(s, Foo(1, "x"))
-    return if (j == "{\"a\":1,\"b\":\"x\"}") "OK" else "FAIL: $j"
+    if (j != "{\"a\":1,\"b\":\"x\"}") return "ENC FAIL: $j"
+    val back = Json.decodeFromString(s, j)
+    if (back.a != 1 || back.b != "x") return "DEC FAIL: ${back.a},${back.b}"
+    // A non-default payload, to prove decode actually reads the values (not defaults).
+    val back2 = Json.decodeFromString(s, "{\"a\":42,\"b\":\"hi\"}")
+    return if (back2.a == 42 && back2.b == "hi") "OK" else "DEC2 FAIL: ${back2.a},${back2.b}"
 }
 fun main() { println(box()) }
 "#,
