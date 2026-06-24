@@ -64,3 +64,21 @@ fn local_class_inheritance_with_modifiers() {
     let out = run(SRC).expect("local class inheritance should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn named_local_object() {
+    // A NAMED local object (`object Counter { … }`) is a singleton declaration — distinct from an
+    // anonymous-object expression (`object { … }` / `object : T { … }`), which stays on the expr path.
+    const SRC: &str = "fun box(): String {\n\
+    object Registry {\n\
+        val tag = \"reg\"\n\
+        fun describe() = \"id=\" + tag\n\
+    }\n\
+    if (Registry.describe() != \"id=reg\") return \"fail object\"\n\
+    val anon = object { val n = 7 }\n\
+    if (anon.n != 7) return \"fail anon\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC).expect("named local object should compile + run");
+    assert_eq!(out, "OK");
+}
