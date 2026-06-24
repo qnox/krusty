@@ -137,3 +137,34 @@ fn serialization_activates_from_source_annotation() {
         "$serializer synthesized purely from the source annotation"
     );
 }
+
+#[test]
+fn top_level_function_registers_parameter_defaults_for_plugins() {
+    // A plugin/transform that rewrites a default-valued call (e.g. Compose's `$default` mask) needs the
+    // LOWERED default exprs. Member methods and data-class `copy` already register them; a plain
+    // top-level function must too, with the static value layout (params at values 0..n, no `this`).
+    let Some((_file, ir)) =
+        lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"")
+    else {
+        eprintln!("skipping: no stdlib jar / outside IR subset");
+        return;
+    };
+    let fid = ir
+        .functions
+        .iter()
+        .position(|f| f.name == "bar")
+        .expect("bar lowered") as u32;
+    let defaults = ir
+        .fn_param_defaults
+        .get(&fid)
+        .expect("top-level fn with defaults must register fn_param_defaults");
+    assert_eq!(
+        defaults.len(),
+        3,
+        "one entry per parameter; got {defaults:?}"
+    );
+    assert!(
+        defaults[0].is_none() && defaults[1].is_some() && defaults[2].is_some(),
+        "required param has no default, the two defaulted params do; got {defaults:?}"
+    );
+}
