@@ -2688,10 +2688,12 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
 /// properties, concrete (bodied, non-extension) methods, no inheritance/interfaces/companion.
 fn is_simple_object(c: &ast::ClassDecl) -> bool {
     c.is_object()
-        // INTERFACE supertypes are allowed (`object X : KSerializer<C>`) — the general class lowering
-        // resolves them (and bails the file if any isn't actually a classpath interface). A base CLASS
-        // supertype (`object : Base()`) stays unsupported (no super-ctor handling for objects yet).
-        && c.base_class.is_none()
+        // INTERFACE supertypes are allowed (`object X : KSerializer<C>`); a base CLASS supertype
+        // (`object A : Sealed()`) too — the general class lowering computes the `superclass` + emits the
+        // `super(args)` call, and bails the file if the base isn't a simple file class. But a base class
+        // AND interfaces together (`object O : A(), T`) invites a qualified `super<A>`/`super<T>` call
+        // krusty doesn't dispatch — skip that combination.
+        && (c.base_class.is_none() || c.supertypes.is_empty())
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.is_empty()
         && c.body_props.iter().all(is_plain_body_prop)
