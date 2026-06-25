@@ -401,6 +401,53 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// The provisioned Kotlin codegen/box corpus directory (`KRUSTY_KOTLIN_BOX_DIR`), if present — the
+/// SAME corpus the differential conformance gate runs over. Lets an e2e pin a SPECIFIC real corpus
+/// case as a named regression test (instead of a hand-written snippet that may hit a lowering edge the
+/// corpus case doesn't). `None` when the corpus isn't provisioned, so the test skips rather than fails.
+#[allow(dead_code)]
+pub fn box_corpus_dir() -> Option<PathBuf> {
+    let d = std::env::var("KRUSTY_KOTLIN_BOX_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let p = PathBuf::from(d);
+    p.is_dir().then_some(p)
+}
+
+/// Whether both the JVM toolchain AND the box corpus are provisioned (an e2e that runs a corpus case
+/// needs both). `false` ⇒ the test should skip.
+#[allow(dead_code)]
+pub fn corpus_ready() -> bool {
+    java_home().is_some() && stdlib_jar().is_some() && box_corpus_dir().is_some()
+}
+
+/// Compile + run a SINGLE box-corpus case by its path relative to the corpus root (e.g.
+/// `"boxing/boxing10.kt"`), reusing the EXACT classpath the conformance gate compiles with —
+/// `classpath_jars_for` (the canonical, directive-aware set: stdlib/test/annotations unconditional,
+/// +reflect/coroutines per directive), so the e2e and the gate can't drift. That set always carries
+/// the stdlib, so emitted `Intrinsics` null-checks resolve at runtime too (it serves as both the
+/// compile and the runtime classpath); the JDK `lib/modules` jimage is the compile bootclasspath.
+///
+/// Returns `Some(box_result)` when the case actually RAN ("OK" when correct), or `None` when it was
+/// SKIPPED — corpus/toolchain absent, a multi-file `// FILE:`/`// MODULE:` case (this single-source
+/// helper doesn't split them; the full gate does), or a case krusty declines to compile. Callers must
+/// treat `None` as a skip (matching the gate's skip accounting), NOT a failure.
+#[allow(dead_code)]
+pub fn run_box_corpus_case(rel: &str) -> Option<String> {
+    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?;
+    // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
+    // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
+    if src.contains("// FILE:") || src.contains("// MODULE:") {
+        return None;
+    }
+    let jh = java_home()?;
+    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
+    let cp = classpath_jars_for(&src);
+    let classes = compile_in_process(&src, "P", &cp, Some(&jdk))?;
+    let box_class = find_box_class(&classes)?;
+    run_box(&classes, &box_class, &cp)
+}
+
 // --- Persistent kotlinc compiler server -----------------------------------
 //
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler
