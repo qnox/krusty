@@ -244,10 +244,14 @@ fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
 }
 
 fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
-    if ir.statics.is_empty() {
+    // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
+    // facade — see `emit_owned_consts`.
+    let facade_statics: Vec<&crate::ir::IrStatic> =
+        ir.statics.iter().filter(|s| s.owner.is_none()).collect();
+    if facade_statics.is_empty() {
         return;
     }
-    for s in &ir.statics {
+    for s in &facade_statics {
         // kotlinc: `const val` → `public static final`; a plain `val` → `private static final`; a `var`
         // → `private static` (mutated through the synthesized setter). The private field is read/written
         // directly only from within the facade; other classes go through the get/set accessors.
@@ -272,7 +276,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
     // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
     // `const val` is `public static final` with no accessor (kotlinc inlines const reads).
-    for s in &ir.statics {
+    for s in &facade_statics {
         if s.is_const {
             continue;
         }
@@ -327,7 +331,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
     };
     let mut code = CodeBuilder::new(0);
     let mut any_init = false;
-    for s in &ir.statics {
+    for s in &facade_statics {
         // A `const val` folded into a `ConstantValue` attribute (literal init) is initialized by the JVM
         // — kotlinc emits no `<clinit>` store for it, so skip it here too (byte-identical).
         if s.is_const && const_value_idx_peek(ir, s.init) {
@@ -426,6 +430,20 @@ fn emit_class(
             &ir_ty_to_jvm(ty).descriptor(),
             field_sig.as_deref(),
         );
+    }
+    // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
+    // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
+    for s in ir
+        .statics
+        .iter()
+        .filter(|s| s.owner.as_deref() == Some(c.fq_name.as_str()))
+    {
+        let desc = ir_ty_to_jvm(&s.ty).descriptor();
+        if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
+            cw.add_field_const(0x0019, &s.name, &desc, cv); // PUBLIC | STATIC | FINAL
+        } else {
+            cw.add_field(0x0019, &s.name, &desc);
+        }
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body

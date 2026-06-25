@@ -698,6 +698,10 @@ pub struct IrStatic {
     /// `const val` ⇒ kotlinc keeps the field `public static final` (inlined at use) with no accessor;
     /// a plain top-level `val`/`var` is `private static [final]` + a `public static` getter/setter.
     pub is_const: bool,
+    /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
+    /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
+    /// `public static final` + `ConstantValue` there), not the facade.
+    pub owner: Option<String>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
