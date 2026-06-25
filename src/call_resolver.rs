@@ -215,22 +215,34 @@ impl<'a> CallResolver<'a> {
     /// Resolve a single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the
     /// overload on `receiver` whose return type equals the lambda's return type. The candidate set (with
     /// its per-overload disambiguation) comes entirely from the one `functions` query.
+    /// Resolve `receiver.name(lambda)` where the return type binds from the lambda's return. Returns the
+    /// callable plus `is_member` — `true` ⇒ an instance member (lower as `invokevirtual` with the
+    /// receiver as the dispatch receiver), `false` ⇒ an extension (lower as a static call with the
+    /// receiver as the first argument).
     pub fn resolve_lambda_return_overload(
         &self,
         receiver: Ty,
         name: &str,
         lambda_ret: Ty,
         arg_tys: &[Ty],
-    ) -> Option<LibraryCallable> {
+    ) -> Option<(LibraryCallable, bool)> {
         if arg_tys.len() != 1 {
             return None;
         }
+        // The matched overload's KIND decides how the caller lowers it: an EXTENSION's receiver is the
+        // first argument of a static method (`Callee::Static`, receiver as `args[0]`), but an instance
+        // MEMBER's receiver is the dispatch receiver (`Callee::Virtual`, `invokevirtual`). Conflating
+        // them — emitting a member static with the receiver as an argument — leaves the receiver on the
+        // operand stack (`VerifyError: Inconsistent stackmap frames`), which is exactly what a classpath
+        // instance member taking a trailing lambda hit. Return the kind so the caller branches.
         self.lib
             .functions(name, Some(receiver))
             .overloads
             .into_iter()
-            .find(|o| o.callable.ret == lambda_ret)
-            .map(|o| o.callable)
+            .find(|o| {
+                matches!(o.kind, FnKind::Extension | FnKind::Member) && o.callable.ret == lambda_ret
+            })
+            .map(|o| (o.callable, o.kind == FnKind::Member))
     }
 }
 

@@ -7035,7 +7035,7 @@ impl<'a> Checker<'a> {
                         None
                     }
                 }) {
-                    if let Some(c) = self
+                    if let Some((c, _)) = self
                         .resolver()
                         .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                     {
