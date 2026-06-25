@@ -1749,6 +1749,7 @@ fn build_continuation_class(
         ctor_param_count: 0,
         ctor_args,
         init_body,
+        explicit_param_stores: false,
         methods: vec![inv_fid],
         is_interface: false,
         is_sealed: false,
