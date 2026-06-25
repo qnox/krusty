@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1740 OK / 0 FAIL** (scanned 7351, Phase 447).
+  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 448).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P71 — `var` extension properties (gate 1740 → 1750, +10, FAIL=0).** Builds on P70: a `var Recv.name:
+  T get() = … set(v) { … }` now lowers BOTH accessors as statics — `getName(Recv): T` and `setName(Recv,
+  T): Unit` — with the getter/setter bodies lowered with `this` = the receiver (param 0) and the setter's
+  value as param 1. A read `x.name` → `getName(x)`, a write `x.name = v` → `setName(x, v)` (routed in the
+  `AssignMember` lowering). A `var` extension property requires an explicit `set(v) { … }` body (no
+  backing field to default to); without it the file skips cleanly. TDD: tests/var_extension_property_e2e.rs
+  (Int get/set, String get/set).
 
 - **Phase P70 — `val` extension properties (gate 1736 → 1740, +4, FAIL=0).** `val Recv.name: T get() = …`
   bailed at lowering: the checker already handled extension properties (`ext_props`, getter as a static

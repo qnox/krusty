@@ -41,6 +41,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
+        ext_prop_set_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
         scope: Vec::new(),
@@ -1020,12 +1021,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 );
                 continue;
             }
-            // A `val` extension property (`val Recv.name: T get() = …`) → a static `getName(Recv): T`,
-            // exactly like an extension function's lowering. No backing field; only a `get()`-bodied
-            // property is modeled. A `var` extension property (custom setter) is not modeled yet — skip
-            // the file rather than emit a getter-only accessor that drops writes.
+            // An extension property (`val/var Recv.name: T get() = … [set(v) = …]`) → a static
+            // `getName(Recv): T` (and, for a `var`, `setName(Recv, T)`), exactly like an extension
+            // function's lowering. No backing field; only a `get()`-bodied property is modeled. A `var`
+            // needs an explicit `set(v) { … }` body (no backing field to default to).
             if let Some(recv_ref) = &p.receiver {
-                if p.is_var || p.getter.is_none() || p.delegate.is_some() {
+                if p.getter.is_none() || p.delegate.is_some() {
+                    return None;
+                }
+                let has_set_body = p
+                    .setter
+                    .as_ref()
+                    .is_some_and(|s| s.body.is_some() && s.param.is_some());
+                if p.is_var && !has_set_body {
                     return None;
                 }
                 let recv_ty = ty_of(file, recv_ref);
@@ -1041,7 +1049,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     param_checks: vec![],
                 });
                 lo.ext_prop_get_ids
-                    .insert((recv_desc, p.name.clone()), gfid);
+                    .insert((recv_desc.clone(), p.name.clone()), gfid);
+                if p.is_var {
+                    let sfid = lo.ir.add_fun(IrFunction {
+                        name: setter_name(&p.name),
+                        params: vec![ty_to_ir(recv_ty), ty_to_ir(pty)],
+                        ret: ty_to_ir(Ty::Unit),
+                        body: None,
+                        is_static: true,
+                        dispatch_receiver: None,
+                        param_checks: vec![],
+                    });
+                    lo.ext_prop_set_ids
+                        .insert((recv_desc, p.name.clone()), sfid);
+                }
                 continue;
             }
             let ty = body_prop_ty(file, info, p);
@@ -2169,13 +2190,31 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let recv_ty = ty_of(file, recv_ref);
                     let recv_desc = recv_ty.descriptor();
                     let pty = body_prop_ty(file, info, p);
-                    let gfid = *lo.ext_prop_get_ids.get(&(recv_desc, p.name.clone()))?;
+                    let gfid = *lo
+                        .ext_prop_get_ids
+                        .get(&(recv_desc.clone(), p.name.clone()))?;
                     lo.cur_fn_name = getter_name(&p.name);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ty_to_ir(pty), gfid)?;
+                    // `var` extension property setter: `set(v) { … }` with `this` = receiver (param 0),
+                    // the value parameter `v` (param 1).
+                    if p.is_var {
+                        let sfid = *lo.ext_prop_set_ids.get(&(recv_desc, p.name.clone()))?;
+                        let setter = p.setter.as_ref().unwrap();
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_fn_name = setter_name(&p.name);
+                        lo.lambda_seq = 0;
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, recv_ty));
+                        let v_v = lo.fresh_value();
+                        lo.scope.push((setter.param.clone().unwrap(), v_v, pty));
+                        let sbody = setter.body.clone().unwrap();
+                        lo.lower_body(&sbody, &ty_to_ir(Ty::Unit), sfid)?;
+                    }
                 } else if p.delegate.is_some() {
                     lo.lower_delegated_top_level(p)?;
                 } else if let Some(&(fid, ty)) = lo.computed_props.get(&p.name) {
@@ -2613,9 +2652,11 @@ pub(crate) struct Lower<'a> {
     /// Top-level extension functions, keyed by `(receiver type descriptor, name)` — separate from
     /// `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by receiver.
     ext_fun_ids: HashMap<(String, String), u32>,
-    /// Top-level `val` extension PROPERTIES (`val Recv.name: T get() = …`), keyed by `(receiver
-    /// descriptor, name)` → the synthesized static getter (`getName(Recv): T`) FunId.
+    /// Top-level extension PROPERTIES (`val/var Recv.name: T get() = … [set(v) = …]`), keyed by
+    /// `(receiver descriptor, name)` → the synthesized static getter (`getName(Recv): T`) / setter
+    /// (`setName(Recv, T)`) FunId.
     ext_prop_get_ids: HashMap<(String, String), u32>,
+    ext_prop_set_ids: HashMap<(String, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
     statics: HashMap<String, (u32, Ty)>,
@@ -8069,6 +8110,21 @@ impl<'a> Lower<'a> {
                 value,
             } => {
                 let rt = self.info.ty(receiver);
+                // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
+                if let Some(&sfid) = self.ext_prop_set_ids.get(&(rt.descriptor(), name.clone())) {
+                    let pty = self.ir.functions[sfid as usize]
+                        .params
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
+                    let r = self.expr(receiver)?;
+                    let v = self.lower_arg(value, &pty)?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Local(sfid),
+                        dispatch_receiver: None,
+                        args: vec![r, v],
+                    }));
+                }
                 // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
                 // (the backing field is private). A cross-file `val` write bails.
                 if self.class_of(rt).is_none() {
