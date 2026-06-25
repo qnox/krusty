@@ -4035,12 +4035,22 @@ impl<'a> Checker<'a> {
             .map(|r| self.resolve_ty(r))
             .unwrap_or_else(|| {
                 // For a method without an explicit return type (e.g. `override fun foo() = "Z"`),
-                // use the return type that collect_signatures already inferred from the method body.
+                // use the return type that collect_signatures already inferred from the method body, or —
+                // for an `override` of an inherited member (a base class OR an implemented interface, e.g.
+                // an enum entry overriding an interface method) — that member's declared return type.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
                     if let Some(sig) = self
                         .syms
                         .class_by_internal(internal)
                         .and_then(|c| c.methods.get(&f.name))
+                    {
+                        return sig.ret;
+                    }
+                    if let Some((_, sig)) = self
+                        .syms
+                        .supertype_methods(internal)
+                        .into_iter()
+                        .find(|(n, _)| n == &f.name)
                     {
                         return sig.ret;
                     }
