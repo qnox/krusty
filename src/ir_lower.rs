@@ -70,6 +70,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         scope: Vec::new(),
         next_value: 0,
         cur_class: None,
+        cur_field: None,
+        field_accessor_props: std::collections::HashSet::new(),
         cur_fn_name: String::new(),
         cur_fn_suspend: false,
         cur_tparams: Vec::new(),
@@ -270,6 +272,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     (p.name.clone(), ty)
                 })
                 .collect();
+            // A custom-accessor property is read/written ONLY via `getX`/`setX` — record it so an
+            // in-class access by name routes through the accessor, not a direct field read/write.
+            for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
+                lo.field_accessor_props
+                    .insert((internal.clone(), p.name.clone()));
+            }
             // Guard each delegated member property: only the simple shape is modeled — a concrete
             // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
             // property type exactly (generic erasure / value-class unboxing would need a cast the inline
@@ -1553,6 +1561,62 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
                 }
+                // Field-backed custom accessors (`val x = init get() = field…`): overwrite the default
+                // `getX`/`setX` body (built in pass 1) with the lowered custom accessor, binding the
+                // `field` keyword to the property's backing field via `cur_field`.
+                for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
+                    let class_id = lo.classes[&internal].id;
+                    let fidx = lo.ir.classes[class_id as usize]
+                        .fields
+                        .iter()
+                        .position(|(n, _)| n == &p.name)? as u32;
+                    let fty_ir = lo.ir.classes[class_id as usize].fields[fidx as usize]
+                        .1
+                        .clone();
+                    if let Some(getter) = p.getter.clone() {
+                        let gname = getter_name(&p.name);
+                        let (_, fid, _) = lo.classes[&internal].methods[&gname];
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(internal.clone());
+                        lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
+                        lo.cur_fn_name = gname;
+                        lo.lambda_seq = 0;
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                        let ret_ty = lo.ir.functions[fid as usize].ret.clone();
+                        lo.lower_body(&getter, &ret_ty, fid)?;
+                        lo.cur_field = None;
+                    }
+                    if p.is_var {
+                        if let Some(setter) =
+                            p.setter.as_ref().filter(|s| s.body.is_some()).cloned()
+                        {
+                            let sname = setter_name(&p.name);
+                            let (_, fid, _) = lo.classes[&internal].methods[&sname];
+                            let pty = body_prop_ty(file, info, p);
+                            lo.scope.clear();
+                            lo.next_value = 0;
+                            lo.cur_class = Some(internal.clone());
+                            lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
+                            lo.cur_fn_name = sname;
+                            lo.lambda_seq = 0;
+                            let this_v = lo.fresh_value();
+                            lo.scope
+                                .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                            let v_v = lo.fresh_value();
+                            lo.scope.push((
+                                setter.param.clone().unwrap_or_else(|| "value".to_string()),
+                                v_v,
+                                pty,
+                            ));
+                            let sbody = setter.body.clone().unwrap();
+                            lo.lower_body(&sbody, &IrType::Unit, fid)?;
+                            lo.cur_field = None;
+                        }
+                    }
+                }
                 // Delegated body-property accessors → `getX()`/`setX()` calling the delegate's
                 // getValue/setValue, with the `KProperty` passed inline as a `PropertyReference1Impl`.
                 for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
@@ -2645,7 +2709,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
         // Methods are non-extension; an abstract method (no body) is allowed on an abstract class
         // (the checker only permits that), and emitted as an `ACC_ABSTRACT` declaration.
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -2849,6 +2913,16 @@ fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
     !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
 }
 
+/// A backing-field property whose accessor is CUSTOM and reads/writes `field` (`val x = init get() =
+/// field…`, `var x = init set(v) { field = … }`). The backing field is emitted as usual; the
+/// synthesized `getX`/`setX` run the custom body (with `field` bound to that field) instead of the
+/// default field read/write.
+fn is_field_accessor_prop(p: &ast::PropDecl) -> bool {
+    is_backing_field_prop(p)
+        && p.init.is_some()
+        && (p.getter.is_some() || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
+}
+
 /// The JVM accessor name for a property: `x` → `getX`; an `is`-prefixed boolean keeps its name
 /// (`isEmpty` → `isEmpty`), matching kotlinc.
 fn getter_name(prop: &str) -> String {
@@ -2929,6 +3003,15 @@ pub(crate) struct Lower<'a> {
     scope: Vec<(String, u32, Ty)>,
     next_value: u32,
     cur_class: Option<String>,
+    /// When lowering a property's custom accessor body (`get()`/`set()`), the property's backing field
+    /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
+    /// outside an accessor body.
+    cur_field: Option<(u32, u32, IrType)>,
+    /// `(class internal, property name)` for every property with a CUSTOM accessor over a backing
+    /// field. Such a property is read/written ONLY through `getX`/`setX` (even in-class) — never as a
+    /// direct field — so `resolve_field` declines it (the `field` keyword reaches the field via
+    /// `cur_field` instead).
+    field_accessor_props: std::collections::HashSet<(String, String)>,
     /// Name of the enclosing function/method being lowered — used to name synthesized lambda impl
     /// methods `<enclosing>$lambda$<n>` (matching kotlinc).
     cur_fn_name: String,
@@ -5697,6 +5780,15 @@ impl<'a> Lower<'a> {
         while let Some(ci_name) = cur {
             let ci = self.classes.get(&ci_name)?;
             if let Some(idx) = ci.fields.iter().position(|(fn_, _)| fn_ == name) {
+                // A custom-accessor property is never a direct field read: decline it so the caller
+                // routes the access through `getX`/`setX` (the accessor's own `field` reaches the
+                // field via `cur_field`, not this resolver).
+                if self
+                    .field_accessor_props
+                    .contains(&(ci_name.clone(), name.to_string()))
+                {
+                    return None;
+                }
                 return Some((ci.id, idx as u32, ci.fields[idx].1));
             }
             cur = ci.super_internal.clone();
@@ -8194,6 +8286,19 @@ impl<'a> Lower<'a> {
                 }))
             }
             Stmt::Assign { name, value } => {
+                // `field = …` inside a custom setter body writes the property's backing field.
+                if name == "field" {
+                    if let Some((class_id, fidx, fty)) = self.cur_field.clone() {
+                        let val = self.lower_arg(value, &fty)?;
+                        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+                        return Some(self.ir.add_expr(IrExpr::SetField {
+                            receiver: this_e,
+                            class: class_id,
+                            index: fidx,
+                            value: val,
+                        }));
+                    }
+                }
                 // A local delegated `var`: write through the delegate's `setValue(null, propref, value)`.
                 if let Some(ld) = self.local_delegated.get(&name).cloned() {
                     let setvalue_desc = ld.setvalue_desc.clone()?;
@@ -8230,15 +8335,21 @@ impl<'a> Lower<'a> {
                 // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
                 let own_field = self.lookup("this").and_then(|(this_v, _)| {
-                    self.cur_class
-                        .as_ref()
-                        .and_then(|c| self.classes.get(c))
-                        .and_then(|ci| {
+                    self.cur_class.as_ref().and_then(|c| {
+                        // A custom-accessor property writes through `setX`, never the raw field.
+                        if self
+                            .field_accessor_props
+                            .contains(&(c.clone(), name.clone()))
+                        {
+                            return None;
+                        }
+                        self.classes.get(c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
                                 .map(|i| (this_v, ci.id, i as u32, ty_to_ir(ci.fields[i].1)))
                         })
+                    })
                 });
                 if let Some((v, sty)) = self.lookup(&name) {
                     // Coerce to the slot's declared type — a generic-erased `Object` value assigned to a
@@ -8365,17 +8476,21 @@ impl<'a> Lower<'a> {
                     };
                     let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     // A field of *this* class is read/written directly; an inherited one (or an external
-                    // `this`) goes through its getter/setter accessors.
-                    let own = self
-                        .cur_class
-                        .as_ref()
-                        .and_then(|c| self.classes.get(c))
-                        .and_then(|ci| {
+                    // `this`), or a CUSTOM-accessor property, goes through its getter/setter accessors.
+                    let own = self.cur_class.as_ref().and_then(|c| {
+                        if self
+                            .field_accessor_props
+                            .contains(&(c.clone(), name.clone()))
+                        {
+                            return None;
+                        }
+                        self.classes.get(c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
                                 .map(|i| (ci.id, i as u32))
-                        });
+                        })
+                    });
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
                     let cur_val = if let Some((class, idx)) = own {
                         self.ir.add_expr(IrExpr::GetField {
@@ -10509,6 +10624,17 @@ impl<'a> Lower<'a> {
                 ));
             }
             Expr::Name(n) => {
+                // The `field` keyword inside a custom accessor body reads the property's backing field.
+                if n == "field" {
+                    if let Some((class_id, fidx, _)) = self.cur_field {
+                        let this_e = self.ir.add_expr(IrExpr::GetValue(0));
+                        return Some(self.ir.add_expr(IrExpr::GetField {
+                            receiver: this_e,
+                            class: class_id,
+                            index: fidx,
+                        }));
+                    }
+                }
                 // A CLASSPATH `object` referenced as a value (`EmptyCoroutineContext`) — the checker
                 // recorded it; read `getstatic <internal>.INSTANCE`.
                 if let Some(internal) = self.info.obj_value_refs.get(&e) {
@@ -10676,7 +10802,12 @@ impl<'a> Lower<'a> {
                             .classes
                             .get(&cur)
                             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
-                        let field = if cur_is_iface {
+                        let field = if cur_is_iface
+                            || self
+                                .field_accessor_props
+                                .contains(&(cur.clone(), n.clone()))
+                        {
+                            // A custom-accessor property reads through `getX`, never the raw field.
                             None
                         } else {
                             self.classes.get(&cur).and_then(|ci| {

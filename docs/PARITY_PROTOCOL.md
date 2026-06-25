@@ -968,3 +968,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   VerifyError/CCE); (2) an *impossible* cast (`1 as String`) is rejected, not boxed (the wrapper must
   be assignable to the target via `obj_is_subtype`) — boxing `Integer` into a `String` slot would be a
   load-time VerifyError. Gate 1763/0. `tests/primitive_box_cast_e2e.rs`.
+- **Property with a backing field + custom accessor (`val x = init get() = field…`).** A property with
+  BOTH a stored field and a custom getter/setter referencing `field` now lowers (was a `gate:class`
+  skip). The field is emitted; the synthesized `getX`/`setX` run the custom accessor body with `field`
+  bound to the backing field. The hard part, surfaced by TWO review rounds: EVERY access to such a
+  property — even in-class `x` / `x = …` / `x += …` / `x++` — must route through `getX`/`setX`, never
+  the raw field (krusty's direct-field optimization is correct only for default accessors). `resolve_field`
+  plus the unqualified read/write/incdec sites all decline a custom-accessor property (tracked in
+  `field_accessor_props`); only the `field` keyword reaches the field. Two miscompiles (internal
+  read/write, then `x++`) were caught by review and fixed before landing. Gate 1767/0.
+  `tests/backing_field_accessor_e2e.rs`.

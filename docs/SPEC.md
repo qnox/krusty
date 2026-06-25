@@ -767,6 +767,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxed, and the value-class pass would unbox a `null` (NPE) — so it skips rather than miscompile. Test:
   `tests/nullable_cast_e2e.rs`.
 
+- **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
+  + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
+  AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
+  which has default accessors). The backing field is emitted with its initializer; the synthesized
+  `getX`/`setX` run the custom accessor body, with `field` bound to that backing field (read →
+  `GetField`, write → `SetField`). Crucially, EVERY access to the property — even in-class, including
+  `x`, `x = …`, `x += …`, `x++` — routes through `getX`/`setX`, never the raw field (`resolve_field`
+  and the direct unqualified read/write/incdec sites all decline a custom-accessor property); only the
+  `field` keyword inside the accessor reaches the field. Tests: `tests/backing_field_accessor_e2e.rs`.
+
 - **Cast of a primitive operand to a reference type (`42 as Any`, `'a' as Char?`, `b as Byte?`).** A
   boxing operation — the primitive is boxed to its wrapper (`Integer`/`Character`/`Byte`, an
   `ImplicitCoercion` → `valueOf`), which is-a the target. Allowed ONLY when the wrapper is assignable
