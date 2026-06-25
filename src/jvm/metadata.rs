@@ -456,10 +456,9 @@ fn parse_type_nullable(body: &[u8]) -> bool {
 /// return type (`mutableListOf` → `kotlin/collections/MutableList`), recovered from `@Metadata` (the JVM
 /// descriptor/`Signature` erase this to `java/util/List`). Only entries whose return type is a class are
 /// included. The `d2` string is the qualified name with `/` separators already.
-pub fn package_function_return_types(ci: &ClassInfo) -> std::collections::HashMap<String, String> {
-    package_functions(ci)
-        .into_iter()
-        .filter_map(|f| Some((f.kotlin_name, f.ret_class?)))
+pub fn return_types(fns: &[MetaFn]) -> std::collections::HashMap<String, String> {
+    fns.iter()
+        .filter_map(|f| Some((f.kotlin_name.clone(), f.ret_class.clone()?)))
         .collect()
 }
 
@@ -468,15 +467,13 @@ pub fn package_function_return_types(ci: &ClassInfo) -> std::collections::HashMa
 /// is overloaded across receivers (`plus` applies to `Collection`, `Map`, `Set`, `String`), so the value
 /// is a list — a receiver applies if it is a subtype of ANY entry. The JVM descriptor erases the receiver
 /// to its first parameter (`java/util/Collection`); only `@Metadata` keeps the read-only/mutable identity.
-pub fn package_function_receivers(
-    ci: &ClassInfo,
-) -> std::collections::HashMap<String, Vec<String>> {
+pub fn receivers(fns: &[MetaFn]) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for f in package_functions(ci) {
-        if let Some(cn) = f.receiver_class {
-            let v = out.entry(f.kotlin_name).or_default();
-            if !v.contains(&cn) {
-                v.push(cn);
+    for f in fns {
+        if let Some(cn) = &f.receiver_class {
+            let v = out.entry(f.kotlin_name.clone()).or_default();
+            if !v.contains(cn) {
+                v.push(cn.clone());
             }
         }
     }
@@ -767,10 +764,10 @@ pub fn package_lambda_return_overloads(
 /// (`takeIf`/`takeUnless` → `T?` → `true`). The JVM descriptor/`Signature` erase nullability; only
 /// `@Metadata` keeps it. A name is `true` if ANY overload's return is nullable (the scope fns are not
 /// overloaded, so this is exact for them).
-pub fn package_function_return_nullable(ci: &ClassInfo) -> std::collections::HashMap<String, bool> {
+pub fn return_nullable(fns: &[MetaFn]) -> std::collections::HashMap<String, bool> {
     let mut out = std::collections::HashMap::new();
-    for f in package_functions(ci) {
-        let e = out.entry(f.kotlin_name).or_insert(false);
+    for f in fns {
+        let e = out.entry(f.kotlin_name.clone()).or_insert(false);
         *e = *e || f.ret_nullable;
     }
     out
