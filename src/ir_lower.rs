@@ -79,6 +79,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
         cur_ret_ty: Ty::Unit,
+        cur_method_returns_unit_ref: false,
         try_finally_stack: Vec::new(),
         companions: HashMap::new(),
         computed_props: HashMap::new(),
@@ -3052,6 +3053,12 @@ pub(crate) struct Lower<'a> {
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
     cur_ret_ty: Ty,
+    /// True while lowering a method whose JVM return is the `kotlin/Unit` SINGLETON (a reference) rather
+    /// than `void` — i.e. a `() -> Unit` lambda's closure method (its `invoke` returns `Object`). A
+    /// valueless `return`/`return@lambda` there must push `Unit.INSTANCE` (`areturn`), not `return`
+    /// (`void`), or the verifier rejects it ("method expects a return value"). A plain `Unit` function
+    /// (`fun f(): Unit`) is a `void` method, so this stays false for it.
+    cur_method_returns_unit_ref: bool,
     /// `finally` blocks of the enclosing `try`s (outermost first) whose protected region covers the
     /// statement being lowered. A `return` inside them must run each `finally` (innermost first) before
     /// transferring control — so the lowerer inlines them at the `return`. Pushed while a try-body/catch
@@ -4026,7 +4033,16 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *pty));
         }
+        // The closure method returns the `kotlin/Unit` SINGLETON (a reference) when the lambda is
+        // `() -> Unit` and not a `void` SAM (`Runnable`) nor a diverging body — so a `return@lambda`
+        // inside it (a LOCAL return from the closure method) must `areturn Unit.INSTANCE`, not `return`.
+        let sam_void_pre = matches!(&sam, Some((_, _, true)));
+        let returns_unit_ref =
+            sig.ret == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
+        let saved_unit_ref =
+            std::mem::replace(&mut self.cur_method_returns_unit_ref, returns_unit_ref);
         let ve = self.expr(body);
+        self.cur_method_returns_unit_ref = saved_unit_ref;
         self.scope = saved_scope;
         self.next_value = saved_next;
         let ve = ve?;
@@ -7580,6 +7596,9 @@ impl<'a> Lower<'a> {
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
         self.cur_ret_ty = ret_ty.clone();
+        // A named/local function returning `Unit` is a `void` JVM method (only a `() -> Unit` lambda's
+        // closure method returns the `Unit` reference) — reset so a nested fun doesn't inherit it.
+        self.cur_method_returns_unit_ref = false;
         // Defensive: the stack is push/pop-balanced within a body, but a bail mid-lowering of a previous
         // body must not leak an enclosing `finally` into this one.
         self.try_finally_stack.clear();
@@ -7664,6 +7683,7 @@ impl<'a> Lower<'a> {
         param_tys: Vec<Ty>,
     ) -> Option<()> {
         self.cur_ret_ty = ret_ty.clone();
+        self.cur_method_returns_unit_ref = false;
         self.try_finally_stack.clear();
         self.local_delegated.clear();
         let label = "$tailrec".to_string();
@@ -8097,6 +8117,11 @@ impl<'a> Lower<'a> {
                         Some(self.lower_arg(e, &rt)?)
                     }
                     Some(e) => Some(self.expr(e)?),
+                    // A valueless `return@lambda` in a `() -> Unit` closure method must `areturn` the
+                    // `kotlin/Unit` singleton (the method's JVM return is a reference, not `void`).
+                    None if self.cur_method_returns_unit_ref => {
+                        Some(self.ir.add_expr(IrExpr::UnitInstance))
+                    }
                     None => None,
                 };
                 // Inside one or more `try { … } finally { … }`, a `return` must run each enclosing

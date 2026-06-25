@@ -45,6 +45,26 @@ fun box(): String {
 }
 "#,
     ),
+    // A valueless `return@lambda` in a `() -> Unit` lambda: the closure method's JVM `invoke` returns
+    // the `kotlin/Unit` SINGLETON (a reference, since the generic `R` erases to `Object`), so the local
+    // return must `areturn Unit.INSTANCE`, not a `void` `return` (which the verifier rejects). The
+    // conditional keeps the continuation reachable (`seen = c` runs only when the guard is false).
+    (
+        "LabeledUnitReturnInLambda",
+        r#"
+fun <R> myRun(block: () -> R): R = block()
+fun test(c: Int): Int {
+    var seen = 0
+    myRun { if (c > 0) { return@myRun }; seen = c }
+    return seen
+}
+fun box(): String {
+    if (test(5) != 0) return "f1: ${test(5)}"
+    if (test(-3) != -3) return "f2: ${test(-3)}"
+    return "OK"
+}
+"#,
+    ),
     // A trivial elvis kotlinc folds: a non-null (primitive) lhs makes `x ?: d` == `x` (rhs is dead),
     // and a statically-`null` lhs makes `null ?: d` == `d`. krusty must emit the folded side, keeping
     // the live operand's side effects.
