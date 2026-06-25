@@ -738,10 +738,13 @@ impl SymbolSource for JvmLibraries {
         // every file compiled against this classpath, so build it ONCE per (thread, classpath) and hand
         // back a shared `Rc`. Cloning this ~40k-entry map per file was the dominant `sigs` cost.
         thread_local! {
-            static CACHE: std::cell::RefCell<std::collections::HashMap<usize, crate::symbol_source::SharedSeed>> =
+            static CACHE: std::cell::RefCell<std::collections::HashMap<u64, crate::symbol_source::SharedSeed>> =
                 std::cell::RefCell::new(std::collections::HashMap::new());
         }
-        let key = std::rc::Rc::as_ptr(&self.cp) as *const () as usize;
+        // Key on the classpath's STABLE process-unique id — NOT the `Rc` pointer address, which a
+        // freed-then-reallocated `Classpath` can reuse, serving a stale seed for a different classpath
+        // (manifested as a cross-module class going unresolved after a prior compile in the same process).
+        let key = self.cp.id();
         if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
             return hit;
         }

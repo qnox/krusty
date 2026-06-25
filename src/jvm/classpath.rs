@@ -264,10 +264,18 @@ pub struct Classpath {
     /// supertypes + members. Built once per file on first use — the single source for BOTH the collection
     /// read-only/mutable hierarchy AND every builtin type's API. Empty if no stdlib is on the classpath.
     builtins: RefCell<HashMap<String, std::rc::Rc<HashMap<String, super::metadata::BuiltinClass>>>>,
+    /// Process-unique identity for this `Classpath`, assigned at construction. Caches keyed by a
+    /// `Classpath` (e.g. the per-classpath library seed) MUST key on this — NOT on the `Rc<Classpath>`
+    /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
+    /// that serves a DIFFERENT classpath's data (e.g. a cross-module class going unresolved).
+    id: u64,
 }
 
 impl Classpath {
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let entries: Vec<Entry> = paths
             .into_iter()
             .map(|p| {
@@ -302,7 +310,14 @@ impl Classpath {
             meta_fns: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
+            id,
         }
+    }
+
+    /// Process-unique identity assigned at construction — a stable cache key for per-classpath caches
+    /// (see the `id` field). Unlike an `Rc<Classpath>` pointer, this never aliases a freed classpath.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The Kotlin return-type internal name of function `fn_name` declared in class `internal`, decoded
@@ -1508,5 +1523,22 @@ mod fq_tests {
             idx.class_names.get("c.d.Widget").map(String::as_str),
             Some("c/d/Widget")
         );
+    }
+
+    // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been
+    // dropped (and its heap address could be reused). Per-classpath caches (the library seed) key on this
+    // id, so a freed-then-reallocated `Classpath` cannot collide with a stale entry — the regression that
+    // made a cross-module class go unresolved on the *second* compile in a process (the first compile's
+    // seed, missing that module, was served via a reused `Rc<Classpath>` pointer address).
+    #[test]
+    fn classpath_ids_are_unique_across_realloc() {
+        let id_a = {
+            let a = Classpath::new(vec![PathBuf::from("/nonexistent/a")]);
+            a.id()
+        }; // `a` dropped here — its address is now free to be reused by `b`.
+        let b = Classpath::new(vec![PathBuf::from("/nonexistent/b")]);
+        assert_ne!(id_a, b.id(), "a reallocated Classpath must not reuse an id");
+        let c = Classpath::new(vec![PathBuf::from("/nonexistent/c")]);
+        assert_ne!(b.id(), c.id(), "distinct live Classpaths have distinct ids");
     }
 }
