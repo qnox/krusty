@@ -16,7 +16,7 @@
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
-use crate::ir::{Callee, ExprId, IrCatch, IrExpr, IrFile};
+use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::ir_ty_to_jvm;
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
@@ -2430,103 +2430,5 @@ fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) 
     if !out.insert(root) {
         return;
     }
-    let push = |id: ExprId, out: &mut HashSet<ExprId>| collect_reachable(exprs, id, out);
-    match &exprs[root as usize] {
-        IrExpr::SetValue { value, .. }
-        | IrExpr::TypeOp { arg: value, .. }
-        | IrExpr::GetField {
-            receiver: value, ..
-        }
-        | IrExpr::SetStatic { value, .. }
-        | IrExpr::EnumValueOf { arg: value, .. }
-        | IrExpr::NotNullAssert { operand: value }
-        | IrExpr::RefNew { init: value, .. }
-        | IrExpr::RefGet { holder: value, .. }
-        | IrExpr::Throw { operand: value }
-        | IrExpr::NewArray { size: value, .. } => push(*value, out),
-        IrExpr::Return(Some(v)) | IrExpr::Variable { init: Some(v), .. } => push(*v, out),
-        IrExpr::Call {
-            dispatch_receiver,
-            args,
-            ..
-        } => {
-            if let Some(r) = dispatch_receiver {
-                push(*r, out);
-            }
-            args.iter().for_each(|a| push(*a, out));
-        }
-        IrExpr::Block { stmts, value } => {
-            stmts.iter().for_each(|s| push(*s, out));
-            if let Some(v) = value {
-                push(*v, out);
-            }
-        }
-        IrExpr::When { branches } => branches.iter().for_each(|(c, r)| {
-            if let Some(c) = c {
-                push(*c, out);
-            }
-            push(*r, out);
-        }),
-        IrExpr::While {
-            cond, body, update, ..
-        } => {
-            push(*cond, out);
-            push(*body, out);
-            if let Some(u) = update {
-                push(*u, out);
-            }
-        }
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
-            push(*lhs, out);
-            push(*rhs, out);
-        }
-        IrExpr::SetField {
-            receiver, value, ..
-        }
-        | IrExpr::RefSet {
-            holder: receiver,
-            value,
-            ..
-        } => {
-            push(*receiver, out);
-            push(*value, out);
-        }
-        IrExpr::New { args, .. }
-        | IrExpr::NewExternal { args, .. }
-        | IrExpr::NewCrossFile { args, .. } => args.iter().for_each(|a| push(*a, out)),
-        IrExpr::MethodCall { receiver, args, .. } => {
-            push(*receiver, out);
-            args.iter().flatten().for_each(|a| push(*a, out));
-        }
-        IrExpr::EnumEntry { .. } => {}
-        IrExpr::Lambda {
-            captures,
-            inline_body,
-            ..
-        } => {
-            captures.iter().for_each(|c| push(*c, out));
-            if let Some(b) = inline_body {
-                push(*b, out);
-            }
-        }
-        IrExpr::InvokeFunction { func, args, .. } => {
-            push(*func, out);
-            args.iter().for_each(|a| push(*a, out));
-        }
-        IrExpr::Vararg { elements, .. } => elements.iter().for_each(|e| push(*e, out)),
-        IrExpr::StringConcat(parts) => parts.iter().for_each(|p| push(*p, out)),
-        IrExpr::Try {
-            body,
-            catches,
-            finally,
-            ..
-        } => {
-            push(*body, out);
-            catches.iter().for_each(|c: &IrCatch| push(c.body, out));
-            if let Some(f) = finally {
-                push(*f, out);
-            }
-        }
-        _ => {}
-    }
+    crate::ir::for_each_child(exprs, root, &mut |c| collect_reachable(exprs, c, out));
 }

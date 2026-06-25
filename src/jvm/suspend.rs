@@ -27,7 +27,8 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp,
+    for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction,
+    IrTypeOp,
 };
 use crate::types::Ty;
 use std::collections::HashSet;
@@ -454,7 +455,7 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
         return true;
     }
     let mut found = false;
-    for_each_child(ir, e, &mut |c| {
+    for_each_child(&ir.exprs, e, &mut |c| {
         if expr_calls_suspend(ir, c, suspend_set) {
             found = true;
         }
@@ -1402,7 +1403,7 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
     if let IrExpr::GetValue(i) = ir.exprs[e as usize] {
         out.push(i);
     }
-    for_each_child(ir, e, &mut |c| collect_reads(ir, c, out));
+    for_each_child(&ir.exprs, e, &mut |c| collect_reads(ir, c, out));
 }
 
 /// The declared type of local `idx`, from its `Variable` declaration somewhere in `b`'s subtree.
@@ -1413,7 +1414,7 @@ fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<Ty> {
         }
     }
     let mut found = None;
-    for_each_child(ir, b, &mut |c| {
+    for_each_child(&ir.exprs, b, &mut |c| {
         if found.is_none() {
             found = find_local_ty(ir, c, idx);
         }
@@ -1867,7 +1868,7 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
         _ => {}
     }
     let mut kids = Vec::new();
-    for_each_child(ir, e, &mut |c| kids.push(c));
+    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
     for c in kids {
         shift_locals(ir, c, threshold);
     }
@@ -1886,58 +1887,4 @@ fn max_value_index(ir: &IrFile) -> u32 {
         }
     }
     m
-}
-
-/// Invoke `f` on each direct child expression of `e` (for the suspend-call scan).
-fn for_each_child(ir: &IrFile, e: ExprId, f: &mut impl FnMut(ExprId)) {
-    match &ir.exprs[e as usize] {
-        IrExpr::Block { stmts, value } => {
-            stmts.iter().for_each(|&s| f(s));
-            value.iter().for_each(|&v| f(v));
-        }
-        IrExpr::When { branches } => branches.iter().for_each(|(c, b)| {
-            c.iter().for_each(|&c| f(c));
-            f(*b);
-        }),
-        IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
-        IrExpr::TypeOp { arg, .. } | IrExpr::NotNullAssert { operand: arg } => f(*arg),
-        IrExpr::Throw { operand } => f(*operand),
-        IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
-            f(*lhs);
-            f(*rhs);
-        }
-        IrExpr::SetValue { value, .. } => f(*value),
-        IrExpr::SetField {
-            receiver, value, ..
-        } => {
-            f(*receiver);
-            f(*value);
-        }
-        IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
-        IrExpr::GetField { receiver, .. } => f(*receiver),
-        IrExpr::Call {
-            args,
-            dispatch_receiver,
-            ..
-        } => {
-            dispatch_receiver.iter().for_each(|&r| f(r));
-            args.iter().for_each(|&a| f(a));
-        }
-        IrExpr::MethodCall { receiver, args, .. } => {
-            f(*receiver);
-            args.iter().flatten().for_each(|&a| f(a));
-        }
-        IrExpr::New { args, .. } | IrExpr::NewExternal { args, .. } => {
-            args.iter().for_each(|&a| f(a))
-        }
-        IrExpr::While {
-            cond, body, update, ..
-        } => {
-            f(*cond);
-            f(*body);
-            update.iter().for_each(|&u| f(u));
-        }
-        _ => {}
-    }
 }
