@@ -359,6 +359,33 @@ fun box(): String {
 }
 
 #[test]
+fn nested_generic_field_serializer_in_krusty() {
+    // A class with a NESTED generic field (`Holder(val b: Box<Int>)`): the containing serializer must
+    // build `Box.serializer(IntSerializer.INSTANCE)` for that element (caller-side type-argument
+    // derivation), recovering the `<Int>` from the field's source type → `{"b":{"boxed":7}}`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable class Box<T>(val boxed: T)
+@Serializable class Holder(val b: Box<Int>)
+
+fun box(): String {
+    val s = Json.encodeToString(Holder.serializer(), Holder(Box(7)))
+    return if (s == "{\"b\":{\"boxed\":7}}") "OK" else "enc=$s"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerNestedGeneric") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "nested generic field serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty nested generic field serializer OK");
+}
+
+#[test]
 fn sealed_class_polymorphic_serializer_in_krusty() {
     // A `@Serializable sealed class` base: `Base.serializer()` returns a runtime `SealedClassSerializer`
     // over its `@Serializable` subclasses, so `Json.encodeToString(Base.serializer(), A(1))` emits the

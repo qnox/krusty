@@ -339,6 +339,101 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
     })
 }
 
+/// The element-serializer expression for a property of (`@Serializable`/builtin) type `ty`, used by a
+/// CONTAINING class's `childSerializers`/`serialize`/`deserialize`:
+/// - a GENERIC `@Serializable` class `Foo<A…>` → `Foo.serializer(<serializer for A>…)` (invokestatic the
+///   generated generic accessor, recursively building each type-argument's serializer);
+/// - a non-generic nested `@Serializable` class → its `Foo$serializer.INSTANCE` singleton;
+/// - a directly-supported builtin (`String`/primitive/…) → its `…Serializer.INSTANCE`.
+///
+/// Returns `None` for a type with no derivable serializer (the caller bails to a clean no-op).
+fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
+    let IrType::Class {
+        fq_name, type_args, ..
+    } = ty
+    else {
+        return None;
+    };
+    let ser_fq = serializer_fq(fq_name);
+    if let Some(sid) = ir.classes.iter().position(|c| c.fq_name == ser_fq) {
+        // The declared type-parameter count comes from the BASE class (the `$serializer` is erased).
+        let n_tp = ir
+            .classes
+            .iter()
+            .find(|c| &c.fq_name == fq_name)
+            .map(|c| c.type_params.len())
+            .unwrap_or(0);
+        if n_tp == 0 {
+            return Some(ir.add_expr(IrExpr::StaticInstance {
+                owner: sid as u32,
+                ty: sid as u32,
+                field: "INSTANCE",
+            }));
+        }
+        // Generic: `Foo.serializer(<arg serializer>…)`, each type argument's serializer derived
+        // recursively; if any can't be derived, the whole element can't be.
+        let mut arg_sers = Vec::with_capacity(n_tp);
+        for a in type_args.iter().take(n_tp) {
+            arg_sers.push(element_serializer_expr(ir, a)?);
+        }
+        if arg_sers.len() != n_tp {
+            return None;
+        }
+        let kser = kserializer_of(class_ty("kotlin/Any"));
+        return Some(ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFile {
+                facade: fq_name.clone(),
+                name: "serializer".to_string(),
+                params: vec![kser; n_tp],
+                ret: kserializer_of(class_ty(fq_name)),
+            },
+            dispatch_receiver: None,
+            args: arg_sers,
+        }));
+    }
+    if let Some(ser) = builtin_element_serializer(ty) {
+        return Some(ir.add_expr(IrExpr::ExternalStaticInstance {
+            owner: ser.to_string(),
+            ty: ser.to_string(),
+            field: "INSTANCE".to_string(),
+        }));
+    }
+    None
+}
+
+/// Non-mutating mirror of [`element_serializer_expr`]: whether a property of type `ty` HAS a derivable
+/// element serializer (nested @Serializable generic/non-generic, or a builtin). `deserialize` gates on
+/// this so it stubs cleanly instead of emitting a `null` element serializer for an un-derivable type.
+fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
+    let IrType::Class {
+        fq_name, type_args, ..
+    } = ty
+    else {
+        return false;
+    };
+    if ir
+        .classes
+        .iter()
+        .any(|c| c.fq_name == serializer_fq(fq_name))
+    {
+        let n_tp = ir
+            .classes
+            .iter()
+            .find(|c| &c.fq_name == fq_name)
+            .map(|c| c.type_params.len())
+            .unwrap_or(0);
+        if n_tp == 0 {
+            return true;
+        }
+        return type_args.len() >= n_tp
+            && type_args
+                .iter()
+                .take(n_tp)
+                .all(|a| can_derive_element_serializer(ir, a));
+    }
+    builtin_element_serializer(ty).is_some()
+}
+
 /// The internal name of the kotlinx builtin `KSerializer` singleton (`…INSTANCE`) for a directly
 /// serializable element type — used as the element serializer for a NULLABLE property, which goes
 /// through `encode/decodeNullableSerializableElement` (there is no `encodeNullable<Prim>Element`).
@@ -1185,16 +1280,15 @@ impl IrPlugin for SerializationPlugin {
                                     dispatch_receiver: Some(c),
                                     args: vec![d, idx, inst, v],
                                 }));
-                            } else if let Some(nsid) = nested[i] {
+                            } else if nested[i].is_some() {
                                 // Nested @Serializable: encode[Nullable]SerializableElement(desc, i,
-                                // <T>$serializer.INSTANCE, value.getX()). The nullable variant has the
-                                // SAME descriptor — it just writes JSON null when the value is null — so
-                                // it's a method-name swap for an `Inner?` field.
-                                let inst = ir.add_expr(IrExpr::StaticInstance {
-                                    owner: nsid,
-                                    ty: nsid,
-                                    field: "INSTANCE",
-                                });
+                                // <element serializer>, value.getX()) — the nested `$serializer.INSTANCE`
+                                // (non-generic) or `Foo.serializer(A_ser)` (generic). The nullable variant
+                                // shares the SAME descriptor (writes JSON null) — a method-name swap.
+                                let Some(inst) = element_serializer_expr(ir, ty) else {
+                                    bail = true;
+                                    break;
+                                };
                                 let method = if is_nullable(ty) {
                                     "encodeNullableSerializableElement"
                                 } else {
@@ -1334,8 +1428,14 @@ impl IrPlugin for SerializationPlugin {
                         // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
                         let decodable = fields.iter().enumerate().all(|(i, (_, t))| {
-                            if nested[i].is_some() || tp_field[i].is_some() {
+                            if tp_field[i].is_some() {
                                 return true;
+                            }
+                            // A nested @Serializable element is decodable only if its serializer is
+                            // actually derivable (a generic field with an un-derivable type arg is not) —
+                            // else deserialize stubs cleanly rather than emit a `null` element serializer.
+                            if nested[i].is_some() {
+                                return can_derive_element_serializer(ir, t);
                             }
                             if is_nullable(t) {
                                 return builtin_element_serializer(t).is_some();
@@ -1472,15 +1572,15 @@ impl IrPlugin for SerializationPlugin {
                                         arg: raw,
                                         type_operand: ty.clone(),
                                     })
-                                } else if let Some(nsid) = nested[k] {
+                                } else if nested[k].is_some() {
                                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
-                                    // T$serializer.INSTANCE, null). Same descriptor; the nullable
-                                    // variant yields null for a JSON-null `Inner?` element.
-                                    let inst = ir.add_expr(IrExpr::StaticInstance {
-                                        owner: nsid,
-                                        ty: nsid,
-                                        field: "INSTANCE",
-                                    });
+                                    // <element serializer>, null) — the nested `$serializer.INSTANCE`
+                                    // (non-generic) or `Foo.serializer(A_ser)` (generic). Same descriptor;
+                                    // the nullable variant yields null for a JSON-null `Inner?` element.
+                                    let inst =
+                                        element_serializer_expr(ir, ty).unwrap_or_else(|| {
+                                            ir.add_expr(IrExpr::Const(IrConst::Null))
+                                        });
                                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
                                     let method = if is_nullable(ty) {
                                         "decodeNullableSerializableElement"
@@ -1622,7 +1722,7 @@ impl IrPlugin for SerializationPlugin {
                         let elements: Vec<ExprId> = field_types
                             .iter()
                             .enumerate()
-                            .map(|(i, ty)| {
+                            .map(|(i, _ty)| {
                                 if let Some(fidx) = tp_field[i] {
                                     // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
                                     let this = ir.add_expr(IrExpr::GetValue(0));
@@ -1640,18 +1740,11 @@ impl IrPlugin for SerializationPlugin {
                                     } else {
                                         base
                                     }
-                                } else if let Some(nsid) = nested[i] {
-                                    ir.add_expr(IrExpr::StaticInstance {
-                                        owner: nsid,
-                                        ty: nsid,
-                                        field: "INSTANCE",
-                                    })
-                                } else if let Some(ser) = builtin_element_serializer(ty) {
-                                    ir.add_expr(IrExpr::ExternalStaticInstance {
-                                        owner: ser.to_string(),
-                                        ty: ser.to_string(),
-                                        field: "INSTANCE".to_string(),
-                                    })
+                                } else if let Some(e) = element_serializer_expr(ir, &field_types[i])
+                                {
+                                    // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
+                                    // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
+                                    e
                                 } else {
                                     ir.add_expr(IrExpr::Const(IrConst::Null))
                                 }
