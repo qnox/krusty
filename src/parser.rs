@@ -2550,8 +2550,18 @@ impl<'a> Parser<'a> {
                     fun_has_receiver: false,
                     fun_suspend,
                 }
+            } else if fun_params.len() == 1 && !fun_suspend {
+                // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
+                // a function type nullable: `(() -> Unit)?` ≡ `Function0<Unit>?`. The parens wrap a single
+                // type; an optional trailing `?` applies to it. (Kotlin permits redundant parens around any
+                // type — `(Int)`, `(String)?`.)
+                let mut inner = fun_params.into_iter().next().unwrap();
+                if self.eat_type_nullable() {
+                    inner.nullable = true;
+                }
+                inner
             } else {
-                // Parenthesized type (rare) — just return error; krusty doesn't support tuple types.
+                // Parenthesized multi-element type (a tuple) — krusty doesn't support tuple types.
                 self.diags.error(span, "expected '->' for function type");
                 TypeRef {
                     name: "<error>".to_string(),
