@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1762 OK / 0 FAIL** (scanned 7351, Phase 455).
+  repo's `compiler/testData/codegen/box`). Current gate: **1766 OK / 0 FAIL** (scanned 7351, Phase 456).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 456 — `object O : Base(args)` extends a class (gate 1762 → 1766, +4, FAIL=0).** `parse_object`
+  previously discarded an object's base class and super-args; it now captures them (`base_class`,
+  `base_args`) like an ordinary class, so the general class lowering computes the `superclass` and emits
+  the `super(args)` call. This also registers a sealed hierarchy of objects (`sealed class S; object A : S();
+  object B : S()`) as subclasses of the sealed base, making a `when (s) { is A -> …; is B -> … }`
+  exhaustive. `is_simple_object` no longer requires `base_class.is_none()`, but skips an object with BOTH
+  a base class AND interfaces (`object O : A(), T`): that shape invites a qualified `super<A>`/`super<T>`
+  call krusty doesn't yet dispatch — gated as unsupported rather than miscompiled. TDD:
+  tests/object_extends_class_e2e.rs (object extends class with arg; sealed-object `when (is)`; override
+  through the base type).
 
 - **Phase P78 — `as? T ?: e` parse fix (gate 1761 → 1762, +1, FAIL=0).** An unparenthesized safe cast
   followed by elvis (`x as? String ?: "no"`) failed to parse: `parse_type` greedily ate the `?` of the
