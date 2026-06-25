@@ -331,6 +331,38 @@ fun box(): String {
 }
 
 #[test]
+fn classpath_typed_field_serializer_in_krusty() {
+    // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
+    // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
+    // resolution (`field_ty`: the field decl, ctor param and getter all agree on `Uuid`, not erased `Any`)
+    // + the non-null `encodeSerializableElement` path for a builtin-ref element. Mirrors corpus
+    // `uuidSerializer`.
+    let src = r#"// OPT_IN: kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.*
+import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable
+class Holder(val u: Uuid)
+
+fun box(): String {
+    val h = Holder(Uuid.parse("bc501c76-d806-4578-b45e-97a264e280f1"))
+    val s = Json.encodeToString(h)
+    return if (s == "{\"u\":\"bc501c76-d806-4578-b45e-97a264e280f1\"}") "OK" else s
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerClasspathField") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "classpath-typed field serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty classpath-typed field serializer OK");
+}
+
+#[test]
 fn default_value_descriptor_is_optional_in_krusty() {
     // A primary-constructor property with a CONSTANT default (`b: Int = 5`, `t: String? = null`) is an
     // OPTIONAL descriptor element — `descriptor.isElementOptional(i) == true` (matches kotlinc's ABI);

@@ -189,11 +189,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
+            // A field's type is resolved with `ty_of` (file-local classes + built-ins); when that erases a
+            // CLASSPATH reference type to `Any` (`ty_of` doesn't consult imports), recover the concrete type
+            // from the lowerer's classpath-aware `ty_ref` so the field decl, constructor parameter and getter
+            // all agree on the real type (e.g. `kotlin.uuid.Uuid`, `java.net.URL`).
             let mut ctor_fields: Vec<(String, Ty)> = c
                 .props
                 .iter()
                 .filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), ty_of(file, &p.ty)))
+                .map(|p| (p.name.clone(), lo.field_ty(file, &p.ty)))
                 .collect();
             if let Some(outer) = &inner_outer {
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
@@ -473,7 +477,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .chain(c.props.iter().map(|p| {
                         // Carry a declared `?` into the ctor-param IrType (like the field), so a nullable
                         // value-class parameter erases to the boxed `X` consistently with its getter/field.
-                        let t = ty_to_ir(ty_of(file, &p.ty));
+                        // Use `field_ty` so a classpath-typed param matches the field/getter (not erased `Any`).
+                        let t = ty_to_ir(lo.field_ty(file, &p.ty));
                         let t = if p.ty.nullable { mark_nullable(t) } else { t };
                         (t, p.is_property)
                     }))
@@ -7293,6 +7298,27 @@ impl<'a> Lower<'a> {
 
     /// Resolve an `is`/`as` target `TypeRef` to a known **reference** `Ty` (`String` or a class in
     /// this IR); returns `None` to bail for primitives, nullables, or unknown types.
+    /// A field's declared type: `ty_of` (file-local classes + built-ins), falling back to the
+    /// classpath-aware [`ty_ref`] when `ty_of` erases a CLASSPATH reference type to `Any` (it doesn't
+    /// consult imports). Keeps the field decl, constructor parameter and getter agreeing on the real type.
+    fn field_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
+        let base = ty_of(file, r);
+        if base == Ty::obj("kotlin/Any") {
+            // Resolve the NON-nullable form (`ty_ref` bails on a nullable type); the caller re-applies
+            // the field's nullability to the IrType, so `Uuid` and `Uuid?` recover the same base type.
+            let nn = ast::TypeRef {
+                nullable: false,
+                ..r.clone()
+            };
+            if let Some(rt) = self.ty_ref(&nn) {
+                if rt != Ty::obj("kotlin/Any") {
+                    return rt;
+                }
+            }
+        }
+        base
+    }
+
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
         // A reified type parameter (inside an expanded `<reified T>` inline body) resolves to the type
         // bound at the call site — `Array<T>`, `val x: T`, a return `T`, etc. all specialize. The bound

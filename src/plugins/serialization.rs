@@ -461,6 +461,9 @@ fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
         "kotlin/Char" | "java/lang/Character" => "kotlinx/serialization/internal/CharSerializer",
         "kotlin/Byte" | "java/lang/Byte" => "kotlinx/serialization/internal/ByteSerializer",
         "kotlin/Short" | "java/lang/Short" => "kotlinx/serialization/internal/ShortSerializer",
+        // A stdlib reference type with a kotlinx BUILTIN `KSerializer` singleton (no `encode<T>Element`
+        // shortcut — goes through `encode/decodeSerializableElement` like a nested @Serializable).
+        "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
         _ => return None,
     })
 }
@@ -1347,6 +1350,18 @@ impl IrPlugin for SerializationPlugin {
                                     ),
                                     dispatch_receiver: Some(c),
                                     args: vec![d, idx, v],
+                                }));
+                            } else if let Some(inst) = element_serializer_expr(ir, ty) {
+                                // A non-null reference element with a builtin/derivable serializer (e.g.
+                                // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        "encodeSerializableElement",
+                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, inst, v],
                                 }));
                             } else {
                                 bail = true;
