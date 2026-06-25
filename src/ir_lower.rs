@@ -12688,6 +12688,25 @@ impl<'a> Lower<'a> {
                             ret,
                         }));
                     }
+                    // `x(args)` where `x` is a TOP-LEVEL property of function type (`val x = ::foo; x()`):
+                    // read the property (the facade getter / cross-file read), then invoke it through
+                    // `FunctionN.invoke`. Locals are handled above; this is the not-a-local case.
+                    if self.lookup(&fname).is_none() {
+                        if let Some(Ty::Fun(sig)) = self.syms.props.get(&fname).map(|p| p.0) {
+                            if sig.params.len() == args.len() {
+                                let func = self.expr(callee)?;
+                                let mut a = Vec::new();
+                                for arg in &args {
+                                    a.push(self.expr(*arg)?);
+                                }
+                                return Some(self.ir.add_expr(IrExpr::InvokeFunction {
+                                    func,
+                                    args: a,
+                                    ret: ty_to_ir(sig.ret),
+                                }));
+                            }
+                        }
+                    }
                     // The array creators (`arrayOf`/`intArrayOf`/…/`IntArray(n)`/`Array(n){}`) are
                     // compiler synthetics — the synthetic registry (priority over the classpath)
                     // supplies their IR body directly. Honor user shadowing first: a user-defined `fun

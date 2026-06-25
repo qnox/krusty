@@ -7292,6 +7292,16 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Calling a TOP-LEVEL property of function type: `val x: () -> Int = ...; x()` (e.g. a
+                // property bound to a function reference, `val x = ::foo`). Not a local (those are handled
+                // above) — read the property and `invoke` it; the backend reads the facade getter then
+                // calls `FunctionN.invoke`.
+                if self.lookup(&fname).is_none() {
+                    if let Some(&(Ty::Fun(s), _, _)) = self.syms.props.get(&fname) {
+                        let _: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                        return s.ret;
+                    }
+                }
                 // Local function call — resolved before top-level funs and constructors.
                 if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
                     let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
