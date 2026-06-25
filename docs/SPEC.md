@@ -354,6 +354,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
   (krusty has no visibility model beyond `private`, and skips extension functions and constructors for
   now — minor byte-parity gaps, not correctness ones.)
+- **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
+  boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
+  (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
+  lives only in `Ty::descriptor()` — the backend boundary. `Ty::nullable` is idempotent (no `T??`) and
+  collapses degenerate inputs (`Null?` = `Null`, `Error?` = `Error`); `Nothing?` is kept (it is the type
+  of the `null` literal). Tests: `types::tests` (representation + descriptor boxing). The legacy
+  wrapper-masquerade tables (`resolve::nullable_prim_wrapper`/`prim_of_wrapper`) are being retired onto
+  this representation (consumer migration in progress).
 - Boolean short-circuit evaluation (`&&`/`||`) side-effect order.
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.

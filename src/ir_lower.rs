@@ -7351,7 +7351,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // A nullable-primitive receiver (`Int?` = `java/lang/Integer`, from a chained `…?.let { … }`) binds
         // the scope param as the UNBOXED primitive — matching the checker, so `it + 1` is primitive math.
-        let (rty, recv_val) = match rty.obj_internal().and_then(crate::resolve::prim_of_wrapper) {
+        let (rty, recv_val) = match rty.nullable_primitive() {
             Some(prim) => {
                 let unboxed = self.ir.add_expr(IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
@@ -8106,19 +8106,15 @@ impl<'a> Lower<'a> {
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
                         ty_of(self.afile, r)
                     }
-                    // A nullable primitive (`Char?`) is its boxed wrapper, not the primitive — keep the
-                    // slot a reference (consistent with the checker), else a boxed value is stored raw.
+                    // A nullable primitive (`Char?`) is `Nullable(prim)`, a reference slot (consistent
+                    // with the checker), else a boxed value is stored raw.
                     Some(r)
-                        if Ty::from_name(&r.name).map_or(false, |t| {
-                            r.nullable
-                                && !t.is_reference()
-                                && crate::resolve::nullable_prim_wrapper(t).is_some()
-                        }) =>
+                        if r.nullable
+                            && Ty::from_name(&r.name)
+                                .and_then(Ty::nullable_boxed)
+                                .is_some() =>
                     {
-                        Ty::obj(
-                            crate::resolve::nullable_prim_wrapper(Ty::from_name(&r.name).unwrap())
-                                .unwrap(),
-                        )
+                        Ty::from_name(&r.name).unwrap().nullable_boxed().unwrap()
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r)
@@ -10314,11 +10310,7 @@ impl<'a> Lower<'a> {
                 };
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
                 // both `when` branches are the wrapper reference (the other branch is `null`).
-                let member = if result_ty
-                    .obj_internal()
-                    .and_then(crate::resolve::prim_of_wrapper)
-                    .is_some()
-                {
+                let member = if result_ty.nullable_primitive().is_some() {
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: member,
@@ -10417,7 +10409,7 @@ impl<'a> Lower<'a> {
                     // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                     // unboxing `Integer` straight to `Double` would be an invalid checkcast.
-                    if let Some(lp) = lty.obj_internal().and_then(crate::resolve::prim_of_wrapper) {
+                    if let Some(lp) = lty.nullable_primitive() {
                         get2 = self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: get2,
@@ -11505,8 +11497,8 @@ impl<'a> Lower<'a> {
                         // short-circuit — when the wrapper is null the result is fixed (`!=`→true,
                         // `==`→false) WITHOUT evaluating the primitive side (which may have side effects).
                         // `{ val t = wrapper; if (t == null) <fixed> else t.unbox <op> prim }`.
-                        let l_wp = lt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
-                        let r_wp = rt.obj_internal().and_then(crate::resolve::prim_of_wrapper);
+                        let l_wp = lt.nullable_primitive();
+                        let r_wp = rt.nullable_primitive();
                         if let Some(wp) = l_wp.or(r_wp) {
                             let (w_e, w_ty, p_e) = if l_wp.is_some() {
                                 (lhs, lt, rhs)
@@ -14734,11 +14726,11 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
         };
     }
     if let Some(t) = Ty::from_name(&r.name) {
-        // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`), consistent with the
-        // checker — otherwise a boxed value would be stored in a primitive field and unboxed wrong.
+        // A nullable primitive is `Nullable(prim)`, a reference slot consistent with the checker —
+        // otherwise a boxed value would be stored in a primitive field and unboxed wrong.
         if r.nullable && !t.is_reference() {
-            if let Some(w) = crate::resolve::nullable_prim_wrapper(t) {
-                return Ty::obj(w);
+            if let Some(nb) = t.nullable_boxed() {
+                return nb;
             }
         }
         return t;

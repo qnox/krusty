@@ -1778,7 +1778,7 @@ fn jvm_bound_descriptor(bound: &crate::ir::IrType) -> Option<String> {
         return Some("Ljava/lang/Object;".to_string());
     }
     if ty.is_primitive() {
-        return crate::resolve::nullable_prim_wrapper(ty).map(|w| format!("L{w};"));
+        return ty.nullable_boxed().map(|nb| nb.descriptor());
     }
     None
 }

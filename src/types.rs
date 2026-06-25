@@ -111,6 +111,11 @@ pub enum Ty {
     /// by the JVM backend, but the front end keeps the real parameter/return types (interned `FnSig`)
     /// so a call through a `Fun` value recovers its return type instead of erasing to `Object`.
     Fun(&'static FnSig),
+    /// A nullable type `T?`. Wraps the interned non-null type. Kotlin has no `T??`, so the inner type
+    /// is never itself `Nullable` (the [`Ty::nullable`] constructor enforces this). Nullability is a
+    /// Kotlin-level fact: a nullable primitive (`Int?`) is a JVM *reference* (boxed `java/lang/Integer`)
+    /// — that representation choice lives in the JVM backend / [`Ty::descriptor`], not in the checker.
+    Nullable(&'static Ty),
 }
 
 impl Ty {
@@ -146,6 +151,45 @@ impl Ty {
             Ty::Obj("kotlin/Array", args) => args.first().copied(),
             _ => None,
         }
+    }
+
+    /// The nullable form `T?` of a type. Idempotent (Kotlin has no `T??`), and degenerate inputs
+    /// collapse: `Null?` = `Null`, `Error?` = `Error`. `Nothing?` is kept — it's the real type of the
+    /// `null` literal.
+    pub fn nullable(inner: Ty) -> Ty {
+        match inner {
+            Ty::Nullable(_) | Ty::Null | Ty::Error => inner,
+            _ => Ty::Nullable(intern_ty(inner)),
+        }
+    }
+
+    /// Whether this type is nullable (`T?`).
+    pub fn is_nullable(self) -> bool {
+        matches!(self, Ty::Nullable(_))
+    }
+
+    /// The non-null form: strips a `?` if present, else returns `self`.
+    pub fn non_null(self) -> Ty {
+        match self {
+            Ty::Nullable(inner) => *inner,
+            _ => self,
+        }
+    }
+
+    /// The unboxed primitive of a nullable primitive (`Int?` → `Int`), else `None`. Replaces the old
+    /// "is this a boxed-wrapper `Obj`?" probe (`t.obj_internal().and_then(prim_of_wrapper)`).
+    pub fn nullable_primitive(self) -> Option<Ty> {
+        match self {
+            Ty::Nullable(inner) if inner.is_primitive() => Some(*inner),
+            _ => None,
+        }
+    }
+
+    /// The nullable form `T?` of a primitive that krusty can box (`Int` → `Int?`). `None` for a
+    /// non-primitive (already a reference) or the unsigned/value primitives, whose nullable boxing
+    /// isn't supported yet (those stay rejected — never miscompiled).
+    pub fn nullable_boxed(self) -> Option<Ty> {
+        (self.is_primitive() && !self.is_unsigned()).then(|| Ty::nullable(self))
     }
 
     /// A function type `(params) -> ret`.
@@ -285,6 +329,7 @@ impl Ty {
             Ty::Array(_) => "Array",
             Ty::Error => "<error>",
             Ty::Fun(_) => "Function",
+            Ty::Nullable(inner) => inner.name(),
         }
     }
 
@@ -296,11 +341,12 @@ impl Ty {
         }
     }
 
-    /// True for JVM reference types (where `null` is a valid value).
+    /// True for JVM reference types (where `null` is a valid value). Any nullable type is a
+    /// reference: a nullable primitive (`Int?`) boxes to its wrapper.
     pub fn is_reference(self) -> bool {
         matches!(
             self,
-            Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_)
+            Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_) | Ty::Nullable(_)
         )
     }
 
@@ -384,6 +430,14 @@ impl Ty {
                 "Lkotlin/jvm/functions/Function{};",
                 s.params.len() + usize::from(s.suspend)
             ),
+            // `T?` is a reference: a nullable primitive boxes to its wrapper (`Int?` →
+            // `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`); a nullable reference keeps the same
+            // descriptor.
+            Ty::Nullable(inner) => match *inner {
+                Ty::UInt => obj_desc("kotlin/UInt"),
+                Ty::ULong => obj_desc("kotlin/ULong"),
+                other => other.boxed_ref().unwrap_or(other).descriptor(),
+            },
         }
     }
 
@@ -417,5 +471,96 @@ impl Ty {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nullable_wraps_inner_and_reports_nullable() {
+        let t = Ty::nullable(Ty::Int);
+        assert!(t.is_nullable());
+        assert_eq!(t.non_null(), Ty::Int);
+    }
+
+    #[test]
+    fn non_null_type_is_not_nullable() {
+        assert!(!Ty::Int.is_nullable());
+        assert_eq!(Ty::Int.non_null(), Ty::Int);
+    }
+
+    #[test]
+    fn nullable_is_idempotent_no_double_wrap() {
+        // Kotlin has no `T??`: wrapping an already-nullable type is a no-op.
+        let once = Ty::nullable(Ty::obj("demo/Point"));
+        assert_eq!(Ty::nullable(once), once);
+    }
+
+    #[test]
+    fn nullable_primitive_is_a_reference_so_null_is_valid() {
+        // `Int?` boxes — it accepts `null`, unlike the unboxed `Int`.
+        assert!(!Ty::Int.is_reference());
+        assert!(Ty::nullable(Ty::Int).is_reference());
+    }
+
+    #[test]
+    fn nullable_signed_primitive_descriptor_boxes_to_jvm_wrapper() {
+        assert_eq!(Ty::nullable(Ty::Int).descriptor(), "Ljava/lang/Integer;");
+        assert_eq!(Ty::nullable(Ty::Boolean).descriptor(), "Ljava/lang/Boolean;");
+    }
+
+    #[test]
+    fn nullable_unsigned_primitive_descriptor_boxes_to_inline_class() {
+        // `UInt?`/`ULong?` box to their Kotlin inline-class type, NOT the unboxed `I`/`J`.
+        assert_eq!(Ty::nullable(Ty::UInt).descriptor(), "Lkotlin/UInt;");
+        assert_eq!(Ty::nullable(Ty::ULong).descriptor(), "Lkotlin/ULong;");
+    }
+
+    #[test]
+    fn nullable_reference_descriptor_matches_non_null() {
+        assert_eq!(Ty::nullable(Ty::String).descriptor(), Ty::String.descriptor());
+        let p = Ty::obj("demo/Point");
+        assert_eq!(Ty::nullable(p).descriptor(), p.descriptor());
+    }
+
+    #[test]
+    fn nullable_idempotent_over_a_primitive() {
+        let once = Ty::nullable(Ty::Int);
+        assert_eq!(Ty::nullable(once), once);
+    }
+
+    #[test]
+    fn nullable_of_null_or_error_collapses() {
+        // `Null?`/`Error?` are degenerate — wrapping them is meaningless.
+        assert_eq!(Ty::nullable(Ty::Null), Ty::Null);
+        assert_eq!(Ty::nullable(Ty::Error), Ty::Error);
+    }
+
+    #[test]
+    fn nullable_of_nothing_is_a_real_distinct_type() {
+        // Kotlin's `Nothing?` is the type of the `null` literal — a real nullable type, kept.
+        assert!(Ty::nullable(Ty::Nothing).is_nullable());
+        assert_eq!(Ty::nullable(Ty::Nothing).non_null(), Ty::Nothing);
+    }
+
+    #[test]
+    fn nullable_primitive_recovers_the_unboxed_primitive() {
+        assert_eq!(Ty::nullable(Ty::Int).nullable_primitive(), Some(Ty::Int));
+        // Not a nullable primitive → None.
+        assert_eq!(Ty::Int.nullable_primitive(), None);
+        assert_eq!(Ty::nullable(Ty::String).nullable_primitive(), None);
+        assert_eq!(Ty::obj("demo/Point").nullable_primitive(), None);
+    }
+
+    #[test]
+    fn nullable_boxed_is_the_supported_nullable_form_of_a_primitive() {
+        assert_eq!(Ty::Int.nullable_boxed(), Some(Ty::nullable(Ty::Int)));
+        assert_eq!(Ty::Char.nullable_boxed(), Some(Ty::nullable(Ty::Char)));
+        // Unsigned/value primitives: nullable boxing not supported yet.
+        assert_eq!(Ty::UInt.nullable_boxed(), None);
+        // Already a reference → not a primitive to box.
+        assert_eq!(Ty::String.nullable_boxed(), None);
     }
 }
