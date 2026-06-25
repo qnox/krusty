@@ -1370,16 +1370,21 @@ pub fn collect_signatures_with_cp(
                         .iter()
                         .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
                     {
+                        // A generic `@Serializable class C<T…>` takes one `KSerializer` argument per type
+                        // parameter (`C.serializer(KSerializer<T0>, …)`), matching the plugin's generic
+                        // `$serializer` constructor; a non-generic class takes none.
+                        let n_tp = c.type_params.len();
+                        let sparams = vec![Ty::obj("kotlinx/serialization/KSerializer"); n_tp];
                         static_methods.insert(
                             "serializer".to_string(),
                             Signature {
-                                params: vec![],
+                                params: sparams,
                                 ret: Ty::obj_args(
                                     "kotlinx/serialization/KSerializer",
                                     &[Ty::obj(&internal)],
                                 ),
                                 vararg: false,
-                                required: 0,
+                                required: n_tp,
                                 param_defaults: vec![],
                                 param_names: vec![],
                                 lambda_param_types: vec![],

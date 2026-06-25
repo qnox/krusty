@@ -407,6 +407,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         (n.clone(), if tr.nullable { mark_nullable(bt) } else { bt })
                     })
                     .collect(),
+                type_params: c.type_params.clone(),
                 field_type_params,
                 supertypes: vec![],
                 fields: fields
@@ -774,6 +775,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
+                    type_params: Vec::new(),
                     field_type_params: vec![],
                     supertypes: vec![],
                     fields: vec![],
@@ -2045,6 +2047,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
+                            type_params: Vec::new(),
                             field_type_params: vec![],
                             supertypes: vec![],
                             fields: prop_fields
@@ -3782,6 +3785,7 @@ impl<'a> Lower<'a> {
             field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
+            type_params: Vec::new(),
             field_type_params: vec![None; n_fields],
             supertypes: vec![],
             fields,
@@ -5434,6 +5438,7 @@ impl<'a> Lower<'a> {
             field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
+            type_params: Vec::new(),
             field_type_params: vec![],
             supertypes: vec![],
             fields: vec![],
@@ -5702,6 +5707,7 @@ impl<'a> Lower<'a> {
             field_serializers: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
+            type_params: Vec::new(),
             field_type_params: vec![],
             supertypes: vec![],
             fields: vec![],
@@ -12897,7 +12903,7 @@ impl<'a> Lower<'a> {
                                     .iter()
                                     .any(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
                             });
-                            if is_serializable && args.is_empty() && self.lookup(&cls).is_none() {
+                            if is_serializable && self.lookup(&cls).is_none() {
                                 if let Some(internal) = self
                                     .classes
                                     .get(&class_internal(self.afile, &cls))
@@ -12907,15 +12913,24 @@ impl<'a> Lower<'a> {
                                         "kotlinx/serialization/KSerializer",
                                         &[Ty::obj(&internal)],
                                     ));
+                                    // A generic `C<T…>` takes one `KSerializer` argument per type
+                                    // parameter (`C.serializer(KSerializer<T0>, …)`); a non-generic class
+                                    // takes none. Each argument lowers to an erased `KSerializer`.
+                                    let kser =
+                                        ty_to_ir(Ty::obj("kotlinx/serialization/KSerializer"));
+                                    let mut a = Vec::new();
+                                    for arg in &args {
+                                        a.push(self.lower_arg(*arg, &kser)?);
+                                    }
                                     return Some(self.ir.add_expr(IrExpr::Call {
                                         callee: Callee::CrossFile {
                                             facade: internal,
                                             name: "serializer".to_string(),
-                                            params: vec![],
+                                            params: vec![kser; args.len()],
                                             ret,
                                         },
                                         dispatch_receiver: None,
-                                        args: vec![],
+                                        args: a,
                                     }));
                                 }
                             }

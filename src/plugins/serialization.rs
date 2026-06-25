@@ -164,6 +164,8 @@ fn ty_descriptor(ty: &IrType) -> String {
         "kotlin/Double" => "D".to_string(),
         "kotlin/Float" => "F".to_string(),
         "kotlin/String" => "Ljava/lang/String;".to_string(),
+        // A type-parameter-typed property erases to `Object` — its getter is `()Ljava/lang/Object;`.
+        "kotlin/Any" => "Ljava/lang/Object;".to_string(),
         other => format!("L{other};"),
     }
 }
@@ -702,6 +704,13 @@ impl IrPlugin for SerializationPlugin {
             );
 
             let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            // Generic `@Serializable class C<T…>`: the `$serializer` is a CLASS (not a singleton object)
+            // with one `KSerializer` constructor parameter per type parameter (`typeSerialK`, stored at
+            // fields `1..=N`, after the `descriptor` field 0), used as the element serializer for any
+            // type-parameter-typed property. A non-generic class keeps the singleton-object form.
+            let type_params: Vec<String> = ir.classes[class_id as usize].type_params.clone();
+            let n_tp = type_params.len();
+            let is_generic = n_tp > 0;
             // `@SerialName("x")` overrides a property's descriptor element name (and thus its JSON key).
             let serial_names: Vec<(String, String)> =
                 ir.classes[class_id as usize].serial_names.clone();
@@ -714,20 +723,31 @@ impl IrPlugin for SerializationPlugin {
             };
 
             let mut ser = synthetic_class(&ser_fq);
-            ser.is_object = true; // `$serializer` is a singleton object (INSTANCE)
-                                  // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
-                                  // (we generate it) and a DEFAULT `typeParametersSerializers()`, and it lets the descriptor
-                                  // (built with `this` below) derive element descriptors for `getElementDescriptor`/introspection.
+            ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
+                                         // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
+                                         // (we generate it) and a DEFAULT `typeParametersSerializers()`, and it lets the descriptor
+                                         // (built with `this` below) derive element descriptors for `getElementDescriptor`/introspection.
             ser.interfaces = vec![GENERATED_SERIALIZER_FQ.to_string()];
             ser.supertypes = vec![kserializer_of(class_ty(&class_fq))];
-            // A `descriptor` field (a `PluginGeneratedSerialDescriptor`), built in the object's <init>.
+            // Field 0 is the `descriptor` (a `PluginGeneratedSerialDescriptor`), built in <init>. A generic
+            // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
+            // set from the constructor parameters.
             ser.fields = vec![(
                 "descriptor".to_string(),
                 class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
             )];
-            ser.field_final = vec![true];
-            ser.field_private = vec![true];
-            ser.ctor_param_count = 0;
+            for k in 0..n_tp {
+                ser.fields.push((
+                    format!("typeSerial{k}"),
+                    kserializer_of(class_ty("kotlin/Any")),
+                ));
+            }
+            ser.field_final = vec![true; 1 + n_tp];
+            ser.field_private = vec![true; 1 + n_tp];
+            ser.ctor_param_count = n_tp as u32;
+            // The N constructor params ARE the type-param serializers (`is_field=false`: stored manually in
+            // <init> to fields `1..=N`, NOT auto-stored — field 0 is the descriptor, built in <init>).
+            ser.ctor_args = vec![(kserializer_of(class_ty("kotlin/Any")), false); n_tp];
             ser.methods = vec![descriptor, serialize, deserialize, child];
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
@@ -778,6 +798,9 @@ impl IrPlugin for SerializationPlugin {
                     .and_then(|(_, t)| inline_prim_methods(t))
                     .is_some();
             let pgsd_internal = "kotlinx/serialization/internal/PluginGeneratedSerialDescriptor";
+            // The `descriptor` local index: `this` is 0 and the `N` constructor params (type-param
+            // serializers) are `1..=N`, so the descriptor temporary lives at `N+1` (just `1` when N==0).
+            let desc_local = n_tp as u32 + 1;
             let mut init_stmts;
             if is_value {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
@@ -807,7 +830,7 @@ impl IrPlugin for SerializationPlugin {
                     args: vec![name, ser_inst],
                 });
                 init_stmts = vec![ir.add_expr(IrExpr::Variable {
-                    index: 1,
+                    index: desc_local,
                     ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                     init: Some(d),
                 })];
@@ -826,13 +849,13 @@ impl IrPlugin for SerializationPlugin {
                     args: vec![pgsd_name, pgsd_self, pgsd_n],
                 });
                 let dvar = ir.add_expr(IrExpr::Variable {
-                    index: 1,
+                    index: desc_local,
                     ty: class_ty(pgsd_internal),
                     init: Some(pgsd),
                 });
                 init_stmts = vec![dvar];
                 for (pname, _) in &foo_fields {
-                    let d = ir.add_expr(IrExpr::GetValue(1));
+                    let d = ir.add_expr(IrExpr::GetValue(desc_local));
                     let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name(pname))));
                     let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
                     init_stmts.push(ir.add_expr(IrExpr::Call {
@@ -848,13 +871,24 @@ impl IrPlugin for SerializationPlugin {
                 }
             }
             let this0 = ir.add_expr(IrExpr::GetValue(0));
-            let dval = ir.add_expr(IrExpr::GetValue(1));
+            let dval = ir.add_expr(IrExpr::GetValue(desc_local));
             init_stmts.push(ir.add_expr(IrExpr::SetField {
                 receiver: this0,
                 class: ser_id,
                 index: 0,
                 value: dval,
             }));
+            // Store each constructor type-param serializer (`GetValue(1..=N)`) to its field (`1..=N`).
+            for k in 0..n_tp {
+                let this_k = ir.add_expr(IrExpr::GetValue(0));
+                let pv = ir.add_expr(IrExpr::GetValue(k as u32 + 1));
+                init_stmts.push(ir.add_expr(IrExpr::SetField {
+                    receiver: this_k,
+                    class: ser_id,
+                    index: k as u32 + 1,
+                    value: pv,
+                }));
+            }
             let init = ir.add_expr(IrExpr::Block {
                 stmts: init_stmts,
                 value: None,
@@ -862,23 +896,47 @@ impl IrPlugin for SerializationPlugin {
             let ser_idx = ser_id as usize;
             ir.classes[ser_idx].init_body = Some(init);
 
-            // `serializer()` accessor — body reads the `$serializer` singleton (`Foo$serializer.INSTANCE`).
-            // kotlinc emits it on `Foo.Companion`; the PoC attaches it to the class as a static member.
-            let inst = ir.add_expr(IrExpr::StaticInstance {
-                owner: ser_id,
-                ty: ser_id,
-                field: "INSTANCE",
-            });
-            let inst_ret = ir.add_expr(IrExpr::Return(Some(inst)));
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![inst_ret],
-                value: None,
-            });
+            // `serializer()` accessor. Non-generic: returns the `$serializer` singleton
+            // (`Foo$serializer.INSTANCE`). Generic: `serializer(KSerializer typeSerial0…)` → a fresh
+            // `new C$serializer(typeSerial0…)`. kotlinc emits it on `Foo.Companion`; the PoC attaches it
+            // to the class as a static member.
+            let (acc_params, acc_body) = if is_generic {
+                let args: Vec<ExprId> = (0..n_tp)
+                    .map(|k| ir.add_expr(IrExpr::GetValue(k as u32)))
+                    .collect();
+                let new_ser = ir.add_expr(IrExpr::New {
+                    class: ser_id,
+                    args,
+                    ctor_params: Some(vec![kserializer_of(class_ty("kotlin/Any")); n_tp]),
+                });
+                let ret = ir.add_expr(IrExpr::Return(Some(new_ser)));
+                (
+                    vec![kserializer_of(class_ty("kotlin/Any")); n_tp],
+                    ir.add_expr(IrExpr::Block {
+                        stmts: vec![ret],
+                        value: None,
+                    }),
+                )
+            } else {
+                let inst = ir.add_expr(IrExpr::StaticInstance {
+                    owner: ser_id,
+                    ty: ser_id,
+                    field: "INSTANCE",
+                });
+                let inst_ret = ir.add_expr(IrExpr::Return(Some(inst)));
+                (
+                    vec![],
+                    ir.add_expr(IrExpr::Block {
+                        stmts: vec![inst_ret],
+                        value: None,
+                    }),
+                )
+            };
             let accessor = ir.add_fun(IrFunction {
                 name: "serializer".to_string(),
-                params: vec![],
+                params: acc_params,
                 ret: kserializer_of(class_ty(&class_fq)),
-                body: Some(body),
+                body: Some(acc_body),
                 is_static: true,
                 dispatch_receiver: None,
                 param_checks: Vec::new(),
@@ -965,6 +1023,23 @@ impl IrPlugin for SerializationPlugin {
                             .map(|i| i as u32)
                     }
                     _ => None,
+                })
+                .collect();
+            // For each field: the `$serializer` field index (`1..=N`) holding its element serializer when
+            // the property's declared type IS a class type parameter (`val boxed: T` on a generic class).
+            // `None` for a concrete-typed field. Lets serialize/deserialize/childSerializers route a
+            // type-param element through the ctor-supplied `this.typeSerialK` instead of a fixed serializer.
+            let class_type_params: Vec<String> = ir.classes[class_id as usize].type_params.clone();
+            let field_tps: Vec<Option<String>> =
+                ir.classes[class_id as usize].field_type_params.clone();
+            let tp_field: Vec<Option<u32>> = (0..fields.len())
+                .map(|i| {
+                    field_tps.get(i).and_then(|o| o.as_ref()).and_then(|tp| {
+                        class_type_params
+                            .iter()
+                            .position(|t| t == tp)
+                            .map(|k| 1 + k as u32)
+                    })
                 })
                 .collect();
             for fid in ir.classes[ser_idx].methods.clone() {
@@ -1087,7 +1162,30 @@ impl IrPlugin for SerializationPlugin {
                                 args: vec![],
                             });
                             let c = ir.add_expr(IrExpr::GetValue(3));
-                            if let Some(nsid) = nested[i] {
+                            if let Some(fidx) = tp_field[i] {
+                                // Type-parameter element: encode[Nullable]SerializableElement(desc, i,
+                                // this.typeSerialK, value.getX()) — the serializer is the ctor-supplied one.
+                                let this_s = ir.add_expr(IrExpr::GetValue(0));
+                                let inst = ir.add_expr(IrExpr::GetField {
+                                    receiver: this_s,
+                                    class: ser_idx as u32,
+                                    index: fidx,
+                                });
+                                let method = if is_nullable(ty) {
+                                    "encodeNullableSerializableElement"
+                                } else {
+                                    "encodeSerializableElement"
+                                };
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        method,
+                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, inst, v],
+                                }));
+                            } else if let Some(nsid) = nested[i] {
                                 // Nested @Serializable: encode[Nullable]SerializableElement(desc, i,
                                 // <T>$serializer.INSTANCE, value.getX()). The nullable variant has the
                                 // SAME descriptor — it just writes JSON null when the value is null — so
@@ -1236,7 +1334,7 @@ impl IrPlugin for SerializationPlugin {
                         // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
                         let decodable = fields.iter().enumerate().all(|(i, (_, t))| {
-                            if nested[i].is_some() {
+                            if nested[i].is_some() || tp_field[i].is_some() {
                                 return true;
                             }
                             if is_nullable(t) {
@@ -1345,7 +1443,36 @@ impl IrPlugin for SerializationPlugin {
                                 let dk = this_desc(ir);
                                 let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                                 let cdk = ir.add_expr(IrExpr::GetValue(2));
-                                let decoded = if let Some(nsid) = nested[k] {
+                                let decoded = if let Some(fidx) = tp_field[k] {
+                                    // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
+                                    // this.typeSerialK, null) — the ctor-supplied type-param serializer.
+                                    let this_s = ir.add_expr(IrExpr::GetValue(0));
+                                    let inst = ir.add_expr(IrExpr::GetField {
+                                        receiver: this_s,
+                                        class: ser_cid,
+                                        index: fidx,
+                                    });
+                                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let method = if is_nullable(ty) {
+                                        "decodeNullableSerializableElement"
+                                    } else {
+                                        "decodeSerializableElement"
+                                    };
+                                    let raw = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            method,
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc, inst, prev],
+                                    });
+                                    ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::Cast,
+                                        arg: raw,
+                                        type_operand: ty.clone(),
+                                    })
+                                } else if let Some(nsid) = nested[k] {
                                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
                                     // T$serializer.INSTANCE, null). Same descriptor; the nullable
                                     // variant yields null for a JSON-null `Inner?` element.
@@ -1496,7 +1623,15 @@ impl IrPlugin for SerializationPlugin {
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| {
-                                if let Some(internal) = field_sers.get(&fields[i].0) {
+                                if let Some(fidx) = tp_field[i] {
+                                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
+                                    let this = ir.add_expr(IrExpr::GetValue(0));
+                                    ir.add_expr(IrExpr::GetField {
+                                        receiver: this,
+                                        class: ser_idx as u32,
+                                        index: fidx,
+                                    })
+                                } else if let Some(internal) = field_sers.get(&fields[i].0) {
                                     // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
                                     // wrapped `.nullable` for a nullable property.
                                     let base = build_field_serializer_instance(ir, internal);

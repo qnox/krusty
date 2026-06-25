@@ -469,6 +469,11 @@ pub struct IrClass {
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
     pub type_param_bounds: Vec<(String, IrType)>,
+    /// ALL declared generic type-parameter names in order (`class C<A, B>` → `["A","B"]`), including
+    /// those with only the implicit `Any` bound (unlike [`type_param_bounds`], which lists only non-`Any`
+    /// bounds). The serialization extension uses the count/order to shape a generic `$serializer`
+    /// (one `KSerializer` constructor arg per type parameter). Empty for a non-generic class.
+    pub type_params: Vec<String>,
     /// Parallel to `fields`: the source type-parameter NAME a field was declared with (`val x: T` →
     /// `Some("T")`), else `None` for a concrete type. Platform-neutral; lets the value-class pass pick the
     /// CORRECT bound for a generic underlying (vs guessing), independent of erasure dropping the name.

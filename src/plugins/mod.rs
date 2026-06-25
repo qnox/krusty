@@ -200,6 +200,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         field_serializers: Vec::new(),
         is_value: false,
         type_param_bounds: Vec::new(),
+        type_params: Vec::new(),
         field_type_params: Vec::new(),
         supertypes: Vec::new(),
         fields: Vec::new(),

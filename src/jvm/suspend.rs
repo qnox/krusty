@@ -1755,6 +1755,7 @@ fn build_continuation_class(
         field_serializers: Vec::new(),
         is_value: false,
         type_param_bounds: vec![],
+        type_params: Vec::new(),
         field_type_params,
         supertypes: vec![],
         fields,
