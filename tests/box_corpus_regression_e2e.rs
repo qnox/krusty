@@ -24,18 +24,33 @@ const REGRESSED_CASES: &[&str] = &[
     "inline/requireNotNull.kt",
 ];
 
+/// A broader cross-subsystem net of real corpus cases krusty box-OKs — touching the areas the Ty/IR
+/// consolidation reworked (a data-class multi-declaration / IrField, a smart-cast, a generic-constant
+/// `as`, a `when`, control flow). Curated to box-OK today (the conformance gate proves the full set);
+/// pinned here for fast, attributable feedback on a regression.
+const SUBSYSTEM_CASES: &[&str] = &[
+    "dataClasses/multiDeclarationFor.kt",
+    "smartCasts/smartCastInsideIf.kt",
+    "casts/asForConstants.kt",
+    "when/noElseExhaustiveStatement.kt",
+    "controlStructures/kt769.kt",
+];
+
 #[test]
-fn nullable_boxing_corpus_cases_box_ok() {
+fn subsystem_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(SUBSYSTEM_CASES);
+}
+
+/// Run each corpus case; a case that RAN must be `box()=OK` (any other value is a real miscompile),
+/// while `None` (skipped: declined / multi-file) is tolerated exactly as the conformance gate counts
+/// it — so this e2e is never stricter than the gate. Guards against the whole set silently all-skipping.
+fn assert_corpus_cases_box_ok(cases: &[&str]) {
     if !common::corpus_ready() {
         return;
     }
-    // `None` = the case was SKIPPED (declined/multi-file) — the conformance gate counts those as skips
-    // too, so we don't fail on them (avoids the e2e being stricter than the gate it mirrors). A case
-    // that actually RAN must return "OK"; any other value is a real miscompile (the regression class
-    // these pins exist for — the 57 were VerifyErrors / wrong box() values, not skips).
     let mut failures = Vec::new();
     let mut ran = 0;
-    for &rel in REGRESSED_CASES {
+    for &rel in cases {
         if let Some(out) = common::run_box_corpus_case(rel) {
             ran += 1;
             if out != "OK" {
@@ -45,14 +60,17 @@ fn nullable_boxing_corpus_cases_box_ok() {
     }
     assert!(
         failures.is_empty(),
-        "{} corpus regression case(s) miscompiled (not box()=OK):\n{}",
+        "{} corpus case(s) miscompiled (not box()=OK):\n{}",
         failures.len(),
         failures.join("\n")
     );
-    // With the corpus provisioned, the set must not silently all-skip (a broken classpath/provisioning
-    // would make every case decline to compile and the assert above pass vacuously).
     assert!(
         ran > 0,
-        "no corpus regression case ran with the corpus provisioned — classpath/provisioning broken?"
+        "no corpus case ran with the corpus provisioned — classpath/provisioning broken?"
     );
+}
+
+#[test]
+fn nullable_boxing_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(REGRESSED_CASES);
 }
