@@ -109,7 +109,9 @@ test *ARGS:
         exit $?
     fi
     cargo test --profile gate --no-run
-    mapfile -t bins < <(cargo test --profile gate --no-run 2>&1 \
+    # Portable array read (macOS ships bash 3.2 — no `mapfile`).
+    bins=()
+    while IFS= read -r line; do bins+=("$line"); done < <(cargo test --profile gate --no-run 2>&1 \
         | sed -nE 's/.*[Ee]xecutable [^(]*\(([^)]+)\)/\1/p' | sort -u)
     logdir="$(mktemp -d)"
     run_one() { # $1=logdir $2=binary[:extra-args]
@@ -126,7 +128,7 @@ test *ARGS:
     gate="$(printf '%s\n' "${bins[@]}" | grep kotlin_box_ir_jvm_conformance || true)"
     [ -n "$gate" ] && run_one "$logdir" "$gate"
     printf '%s\n' "${bins[@]}" | grep -v kotlin_box_ir_jvm_conformance \
-        | xargs -P "$(nproc)" -I{} bash -c 'run_one "$0" "$1::--test-threads=2"' "$logdir" {}
+        | xargs -P "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" -I{} bash -c 'run_one "$0" "$1::--test-threads=2"' "$logdir" {}
     if [ -f "$logdir/FAILED" ]; then
         echo "=== FAILED TEST BINARIES ==="
         while read -r b; do echo "----- $b -----"; cat "$logdir/$(basename "$b").log"; done <"$logdir/FAILED"
