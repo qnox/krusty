@@ -27,8 +27,7 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction,
-    IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp,
 };
 use crate::types::Ty;
 use std::collections::HashSet;

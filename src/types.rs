@@ -587,7 +587,10 @@ mod tests {
     #[test]
     fn nullable_signed_primitive_descriptor_boxes_to_jvm_wrapper() {
         assert_eq!(Ty::nullable(Ty::Int).descriptor(), "Ljava/lang/Integer;");
-        assert_eq!(Ty::nullable(Ty::Boolean).descriptor(), "Ljava/lang/Boolean;");
+        assert_eq!(
+            Ty::nullable(Ty::Boolean).descriptor(),
+            "Ljava/lang/Boolean;"
+        );
     }
 
     #[test]
@@ -599,7 +602,10 @@ mod tests {
 
     #[test]
     fn nullable_reference_descriptor_matches_non_null() {
-        assert_eq!(Ty::nullable(Ty::String).descriptor(), Ty::String.descriptor());
+        assert_eq!(
+            Ty::nullable(Ty::String).descriptor(),
+            Ty::String.descriptor()
+        );
         let p = Ty::obj("demo/Point");
         assert_eq!(Ty::nullable(p).descriptor(), p.descriptor());
     }

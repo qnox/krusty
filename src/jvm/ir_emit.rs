@@ -122,9 +122,7 @@ fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
 fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &Ty) -> bool {
         match t.non_null() {
-            Ty::Fun(s) => {
-                s.params.len() <= 22 && s.params.iter().all(ty_ok) && ty_ok(&s.ret)
-            }
+            Ty::Fun(s) => s.params.len() <= 22 && s.params.iter().all(ty_ok) && ty_ok(&s.ret),
             Ty::Obj(_, type_args) => type_args.iter().all(ty_ok),
             _ => true,
         }
@@ -414,12 +412,7 @@ fn emit_class(
         // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
         // `result`/`label`).
         let private = field.is_private;
-        let acc = (if private { 0x0002 } else { 0x0001 })
-            | if field.is_final {
-                0x0010
-            } else {
-                0
-            };
+        let acc = (if private { 0x0002 } else { 0x0001 }) | if field.is_final { 0x0010 } else { 0 };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`), like kotlinc.
         let field_sig = ir
             .field_signatures
@@ -826,12 +819,7 @@ fn emit_enum_entry_subclass(
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
     for field in c.fields.iter() {
-        let acc = 0x0002
-            | if field.is_final {
-                0x0010
-            } else {
-                0
-            };
+        let acc = 0x0002 | if field.is_final { 0x0010 } else { 0 };
         cw.add_field(acc, &field.name, &ir_ty_to_jvm(&field.ty).descriptor());
     }
 

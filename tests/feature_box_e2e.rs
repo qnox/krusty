@@ -14,6 +14,22 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // Kotlin BUILTIN members read as plain VALUES (not only fused/safe-call forms): `String.length`
+    // (a property over `java.lang.String.length()`) and `List.size`/indexing (`java.util.List`). These
+    // resolve generically from the builtins metadata + the kotlin↔JVM class map — no per-member hardcode.
+    (
+        "BuiltinMemberValues",
+        r#"// WITH_STDLIB
+fun box(): String {
+    val n = "hello".length
+    val l = listOf("a", "b", "c")
+    if (n != 5) return "len=$n"
+    if (l.size != 3) return "size=${l.size}"
+    if (l[1] != "b") return "idx=${l[1]}"
+    return "OK"
+}
+"#,
+    ),
     // A `Unit`-valued local: `val u = f()` where `f(): Unit`. kotlinc runs the initializer for effect
     // then binds the `kotlin.Unit` singleton — `u` is a `kotlin/Unit` reference, so `u.toString()` and
     // string interpolation yield "kotlin.Unit".

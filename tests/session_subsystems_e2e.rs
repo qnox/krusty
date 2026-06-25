@@ -40,7 +40,10 @@ fun box(): String {\n\
     if (id(\"a\") != \"a\") return \"fail id\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("generic var field should compile + run"), "OK");
+    assert_eq!(
+        run(SRC).expect("generic var field should compile + run"),
+        "OK"
+    );
 }
 
 /// `@JvmInline value class` arithmetic — the unboxed underlying representation.
@@ -56,7 +59,10 @@ fun box(): String {\n\
     val r = add(Meters(2), Meters(3))\n\
     return if (r.v == 5) \"OK\" else \"fail\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("value class arith should compile + run"), "OK");
+    assert_eq!(
+        run(SRC).expect("value class arith should compile + run"),
+        "OK"
+    );
 }
 
 /// Multi-field data class mixing `val`/`var` with `copy` — pins per-field finality/visibility/order
@@ -80,7 +86,10 @@ fun box(): String {\n\
     if (s.b != 9) return \"fail shared\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("multi-field data class copy should compile + run"), "OK");
+    assert_eq!(
+        run(SRC).expect("multi-field data class copy should compile + run"),
+        "OK"
+    );
 }
 
 /// Enum — `IrClass` enum-entry fields + `values()`/`valueOf`/`ordinal`/`name`.

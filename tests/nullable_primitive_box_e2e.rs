@@ -34,7 +34,10 @@ fun box(): String {\n\
     if (c != null) return \"fail null\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("boxed Int? equality should compile + run"), "OK");
+    assert_eq!(
+        run(SRC).expect("boxed Int? equality should compile + run"),
+        "OK"
+    );
 }
 
 #[test]
@@ -79,7 +82,10 @@ fun box(): String {\n\
     if (f(false) != null) return \"fail false\"\n\
     return \"OK\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("a `: Int?` return should compile + run"), "OK");
+    assert_eq!(
+        run(SRC).expect("a `: Int?` return should compile + run"),
+        "OK"
+    );
 }
 
 #[test]

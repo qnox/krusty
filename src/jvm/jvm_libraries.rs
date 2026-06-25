@@ -288,15 +288,13 @@ impl JvmLibraries {
                     gsig_to_ty(&rsig, &binds)
                 })
                 .unwrap_or(ret);
-            // A nullable Kotlin return (`takeIf`/`takeUnless`: `T?`) over a PRIMITIVE receiver erases to
-            // the boxed wrapper — type the result as that reference wrapper so a `?:`/null-check on it is
-            // preserved (a primitive `Ty` is treated as never-null and would fold the elvis away, then
-            // unbox a possibly-null value → NPE). The JVM signature drops nullability; `@Metadata` keeps it.
+            // A nullable Kotlin return (`takeIf`/`takeUnless`: `T?`) over a PRIMITIVE receiver is the
+            // first-class `Ty::Nullable(prim)` (the JVM signature drops nullability; `@Metadata` keeps it).
+            // Keeping it nullable preserves a `?:`/null-check on it (a bare primitive `Ty` is never-null and
+            // would fold the elvis away, then unbox a possibly-null value → NPE); the emit boxes it.
             let ret_ty =
                 if ret_ty.is_primitive() && self.cp.metadata_return_nullable(&c.owner, &c.name) {
-                    super::jvm_class_map::wrapper_internal(ret_ty)
-                        .map(crate::types::Ty::obj)
-                        .unwrap_or(ret_ty)
+                    crate::types::Ty::nullable(ret_ty)
                 } else {
                     ret_ty
                 };
@@ -1078,12 +1076,11 @@ impl SymbolSource for JvmLibraries {
                             gsig_to_ty(&rsig, &binds)
                         })
                         .unwrap_or(pret);
-                    // A nullable Kotlin return over a PRIMITIVE receiver erases to the boxed wrapper, so a
-                    // `?:`/null-check on the result is preserved (see `extension_callable`).
+                    // A nullable Kotlin return over a PRIMITIVE receiver is the first-class
+                    // `Ty::Nullable(prim)`, so a `?:`/null-check on the result is preserved (see
+                    // `extension_callable`); the emit boxes it.
                     let ret = if ret.is_primitive() && ret_nullable {
-                        super::jvm_class_map::wrapper_internal(ret)
-                            .map(crate::types::Ty::obj)
-                            .unwrap_or(ret)
+                        crate::types::Ty::nullable(ret)
                     } else {
                         ret
                     };
@@ -1533,6 +1530,15 @@ impl LibrarySet for JvmLibraries {
 
     fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
         self.cp.builtin_member_ret(internal, name, args)
+    }
+
+    fn builtin_member_call(
+        &self,
+        internal: &str,
+        name: &str,
+        n_args: usize,
+    ) -> Option<(String, String, Ty, bool)> {
+        self.cp.builtin_member_call(internal, name, n_args)
     }
 
     fn can_inline_lambda(&self, owner: &str, name: &str, descriptor: &str) -> bool {
