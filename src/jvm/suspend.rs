@@ -1753,6 +1753,7 @@ fn build_continuation_class(
         methods: vec![inv_fid],
         is_interface: false,
         is_sealed: false,
+        is_abstract: false,
         superclass: CONTINUATION_IMPL.to_string(),
         super_args: vec![super_arg],
         enum_entries: vec![],

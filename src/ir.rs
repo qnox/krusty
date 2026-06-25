@@ -531,6 +531,10 @@ pub struct IrClass {
     /// `@Serializable` base's `serializer()` to a runtime `SealedClassSerializer` over its `@Serializable`
     /// subclasses (polymorphic), instead of generating an empty `$serializer`. Ignored by the core backend.
     pub is_sealed: bool,
+    /// `true` for an `abstract class` (not `sealed`). The serialization extension serializes a property
+    /// of an abstract `@Serializable` type via a runtime `PolymorphicSerializer(<type>::class)` (open
+    /// polymorphism), since an abstract base has no closed subclass set. Ignored by the core backend.
+    pub is_abstract: bool,
     /// JVM superclass internal name (`java/lang/Object` normally, `java/lang/Enum` for an enum, or a
     /// user base class for `class B : A(args)`).
     pub superclass: String,
