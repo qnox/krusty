@@ -652,6 +652,17 @@ box corpus now get correct field/ctor/getter types (net win, no regression). Tes
 constValInSerialName, contextualByDefault, customFixedNonSerializableArguments, externalSerialierJava,
 inlineClasses, polymorphic, serializerFactory, uuidSerializer.
 
+#### Update (2026-06-25) — star-projection → PolymorphicSerializer → corpus 9/69
+
+A `Box<*>` field (the `*` parses to an erased `Any` type argument) on a generic `@Serializable Box<T : E>`
+now derives `Box.serializer(PolymorphicSerializer(E::class))` for its element — the `*` argument's descriptor
+`serialName` is `kotlinx.serialization.Polymorphic<E>`. In `element_serializer_expr`, the generic-arg loop
+builds `PolymorphicSerializer(<base class's type-param bound>::class)` (`build_polymorphic_serializer`) for an
+erased-`Any` argument, GATED on a non-`Any` bound so an unbounded explicit `Box<Any>` (indistinguishable from
+`*` after `ty_of` erases reference nullability) isn't wrongly captured. `can_derive_element_serializer`
+mirrors the gate. **Corpus starProjections greens → 9/69; main box gate 1760 → 1761 (+1, 0 FAIL).** Test:
+`star_projection_polymorphic_serializer_in_krusty`. GREEN (9): + starProjections.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
