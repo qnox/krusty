@@ -6342,7 +6342,7 @@ impl<'a> Checker<'a> {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
                     // queried through the module source.
                     let rt = self.expr(*receiver);
-                    matches!(rt, Ty::Obj(_, _))
+                    let module_member = matches!(rt, Ty::Obj(_, _))
                         && crate::module_symbols::ModuleSymbols::new(self.syms)
                             .functions(name, Some(rt))
                             .overloads
@@ -6351,7 +6351,21 @@ impl<'a> Checker<'a> {
                             .map_or(false, |fi| {
                                 fi.call_sig.required < fi.callable.params.len()
                                     && !fi.call_sig.param_names.is_empty()
-                            })
+                            });
+                    // A CLASSPATH instance member whose `@Metadata` records parameter names
+                    // (`g.greet(b = …, a = …)` against a method from a jar/dependency module).
+                    module_member
+                        || (matches!(rt, Ty::Obj(_, _))
+                            && self
+                                .syms
+                                .libraries
+                                .functions(name, Some(rt))
+                                .overloads
+                                .iter()
+                                .any(|o| {
+                                    o.kind == crate::libraries::FnKind::Member
+                                        && !o.call_sig.param_names.is_empty()
+                                }))
                 }
                 _ => false,
             };
@@ -6956,6 +6970,49 @@ impl<'a> Checker<'a> {
                             }
                         }
                         return fi.callable.ret;
+                    }
+                    // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
+                    // parameter positions via the member's `@Metadata` names, then check each against its
+                    // parameter (overload resolution by source-order types would otherwise fail to pair).
+                    if let Some(names) = arg_names
+                        .as_ref()
+                        .filter(|ns| ns.iter().any(Option::is_some))
+                    {
+                        if let Some(fi) = self
+                            .syms
+                            .libraries
+                            .functions(&name, Some(rt))
+                            .overloads
+                            .into_iter()
+                            .find(|o| {
+                                o.kind == crate::libraries::FnKind::Member
+                                    && !o.call_sig.param_names.is_empty()
+                            })
+                        {
+                            let params = fi.callable.params.clone();
+                            let pn = &fi.call_sig.param_names;
+                            match map_call_args(args, Some(names), pn, pn.len(), &[]) {
+                                Ok(slots) => {
+                                    for (i, slot) in slots.iter().enumerate() {
+                                        if let Some(a) = slot {
+                                            if matches!(self.file.expr(*a), Expr::Lambda { .. }) {
+                                                continue;
+                                            }
+                                            self.expect_assignable(
+                                                params[i],
+                                                self.expr_types[a.0 as usize],
+                                                self.span(*a),
+                                                "argument",
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(msg) => {
+                                    self.diags.error(span, format!("call to '{name}': {msg}"))
+                                }
+                            }
+                            return fi.callable.ret;
+                        }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
                     if let Some(m) = crate::call_resolver::resolve_instance(
