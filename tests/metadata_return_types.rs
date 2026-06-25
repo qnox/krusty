@@ -3,7 +3,7 @@
 //! `java/util/List`. This is the foundation for distinguishing read-only vs mutable collections.
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::metadata::{builtins_supertypes, package_function_return_types};
+use krusty::jvm::metadata::{builtins_supertypes, package_functions, return_types};
 use std::path::PathBuf;
 
 fn stdlib() -> Option<PathBuf> {
@@ -28,7 +28,7 @@ fn collection_factory_return_types_distinguish_mutable() {
     let ci = cp
         .find("kotlin/collections/CollectionsKt__CollectionsKt")
         .expect("CollectionsKt part on classpath");
-    let rets = package_function_return_types(&ci);
+    let rets = return_types(&package_functions(&ci));
     assert_eq!(
         rets.get("listOf").map(String::as_str),
         Some("kotlin/collections/List"),

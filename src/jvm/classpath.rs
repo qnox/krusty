@@ -197,22 +197,27 @@ pub struct TypeIndex {
     pub type_aliases: HashMap<String, String>,
 }
 
-/// Per-class `@Metadata` cache shape: class internal name → (function name → its single decoded Kotlin
-/// type, e.g. the return type). Shared by [`Classpath::metadata_return_type`].
-type MetaTypeCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, String>>>>;
-/// Per-class `@Metadata` cache for an overloaded property: class internal name → (function name → ALL its
-/// Kotlin extension-receiver names). Used by [`Classpath::metadata_receiver_types`].
-type MetaReceiverCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, Vec<String>>>>>;
-/// Per-class `@Metadata` cache for SOURCE value-parameter types: class internal name → every function's
-/// `(JVM name, has-extension-receiver, source value-param `Ty`s)`. One entry per OVERLOAD (a name
-/// repeats), in declaration order. The `Vec<Ty>` length is the source arity (excludes the synthetic
-/// params the descriptor appends). The receiver flag comes from the SAME `MetaFn` (not a separate query
-/// that could disagree), so an extension's descriptor-leading receiver param is accounted for. Used by
-/// [`Classpath::metadata_kept_params`] to align an overload to a bytecode candidate by its descriptor.
-type MetaParamCache = RefCell<HashMap<String, std::rc::Rc<Vec<(String, bool, Vec<Ty>)>>>>;
-/// Per-class `@Metadata` cache for return-type nullability: class internal name → (function name →
-/// whether its Kotlin return type is nullable `T?`). Used by [`Classpath::metadata_return_nullable`].
-type MetaNullableCache = RefCell<HashMap<String, std::rc::Rc<HashMap<String, bool>>>>;
+/// Per-class `@Metadata` cache: class internal name → every function decoded from its `Package` metadata
+/// (with the multifile-facade part classes merged in). This is the SINGLE decode of a class's `d1` for the
+/// function lookups below — `metadata_return_type`/`metadata_receiver_types`/`metadata_return_nullable`/
+/// `metadata_kept_params` all PROJECT over it instead of each re-decoding and re-merging.
+type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
+
+/// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
+/// (facade parts merged). Computed once per class in [`Classpath::class_meta`]; the public
+/// `metadata_*` methods just index these maps.
+struct ClassMeta {
+    /// function name → Kotlin return-type internal name (`mutableListOf` → `MutableList`).
+    return_types: HashMap<String, String>,
+    /// function name → all its Kotlin extension-RECEIVER internal names (a name is overloaded across
+    /// receivers, so the value is a list — `plusAssign` → `[MutableCollection, MutableMap]`).
+    receivers: HashMap<String, Vec<String>>,
+    /// function name → whether its Kotlin return type is nullable (`takeIf`/`takeUnless` → `T?`).
+    return_nullable: HashMap<String, bool>,
+    /// per OVERLOAD (a name repeats), in declaration order: `(JVM name, has-extension-receiver, source
+    /// value-param `Ty`s)` — the `Vec<Ty>` length is the source arity (synthetic trailing params excluded).
+    overload_params: Vec<(String, bool, Vec<Ty>)>,
+}
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
 /// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
 /// `@OverloadResolutionByLambdaReturnType` selects (`sumOf` → `sumOfInt`/`sumOfLong`/…).
@@ -249,18 +254,9 @@ pub struct Classpath {
     /// Cache of the `suspend` function names declared by a class (from its `@Metadata` `IS_SUSPEND`
     /// flag), so suspension-point recognition at a call site doesn't re-decode the metadata per call.
     suspend_names: RefCell<HashMap<String, std::rc::Rc<std::collections::HashSet<String>>>>,
-    /// Cache of each class's `@Metadata` function name → Kotlin return-type internal name (decodes the
-    /// read-only/mutable distinction the JVM signature erases — `mutableListOf` → `MutableList`).
-    meta_returns: MetaTypeCache,
-    /// Cache of each class's `@Metadata` function name → SOURCE value-parameter types (drops the
-    /// synthetic params the descriptor appends — a `suspend` Continuation, a `@Composable` Composer/int).
-    meta_param_tys: MetaParamCache,
-    /// Cache of each class's `@Metadata` function name → all Kotlin extension-RECEIVER internal names (the
-    /// read-only/mutable identity the JVM signature erases — `plusAssign` → `[MutableCollection, MutableMap]`).
-    meta_receivers: MetaReceiverCache,
-    /// Cache of each class's `@Metadata` function name → whether its Kotlin return type is nullable
-    /// (`takeIf`/`takeUnless` → `T?`). The JVM signature erases this; only `@Metadata` keeps it.
-    meta_ret_nullable: MetaNullableCache,
+    /// Cache of each class's decoded `@Metadata` functions (facade parts merged) — the single decode the
+    /// return-type / receiver / nullability / kept-param lookups all project over (see [`MetaFnsCache`]).
+    meta_fns: MetaFnsCache,
     /// Cache of each class's `@Metadata` Kotlin-name → `@JvmName` overloads (see [`MetaOverloadCache`]).
     meta_overloads: MetaOverloadCache,
     /// Parsed `.kotlin_builtins` fragments, keyed by resource path (e.g. `kotlin/kotlin.kotlin_builtins`,
@@ -303,10 +299,7 @@ impl Classpath {
             bodies: RefCell::new(HashMap::new()),
             inline_names: RefCell::new(HashMap::new()),
             suspend_names: RefCell::new(HashMap::new()),
-            meta_returns: RefCell::new(HashMap::new()),
-            meta_param_tys: RefCell::new(HashMap::new()),
-            meta_receivers: RefCell::new(HashMap::new()),
-            meta_ret_nullable: RefCell::new(HashMap::new()),
+            meta_fns: RefCell::new(HashMap::new()),
             meta_overloads: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
         }
@@ -318,12 +311,53 @@ impl Classpath {
     /// A multifile FACADE (`CollectionsKt`) has no function metadata of its own — its `@Metadata` `d1`
     /// lists the PART class names, which hold the functions; merge the parts.
     pub fn metadata_return_type(&self, internal: &str, fn_name: &str) -> Option<String> {
-        self.metadata_fn_type(
-            &self.meta_returns,
-            internal,
-            fn_name,
-            super::metadata::package_function_return_types,
-        )
+        self.class_meta(internal).return_types.get(fn_name).cloned()
+    }
+
+    /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
+    /// cached. The single `d1` decode that `metadata_return_type`/`metadata_receiver_types`/
+    /// `metadata_return_nullable`/`metadata_kept_params` all project over.
+    fn class_meta(&self, internal: &str) -> std::rc::Rc<ClassMeta> {
+        if let Some(m) = self.meta_fns.borrow().get(internal) {
+            return m.clone();
+        }
+        let ci = self.find(internal);
+        let mut fns = ci
+            .as_ref()
+            .map(super::metadata::package_functions)
+            .unwrap_or_default();
+        // A multifile FACADE has no function metadata of its own — its `d1` lists the PART class names,
+        // which hold the functions; merge them in (the parts' `d1` is decoded once here, not per lookup).
+        if fns.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        fns.extend(super::metadata::package_functions(&pci));
+                    }
+                }
+            }
+        }
+        let overload_params = fns
+            .iter()
+            .map(|f| {
+                let tys = f
+                    .value_param_types
+                    .iter()
+                    .map(|o| meta_param_ty(o.as_deref()))
+                    .collect();
+                (f.jvm_name.clone(), f.receiver_class.is_some(), tys)
+            })
+            .collect();
+        let meta = std::rc::Rc::new(ClassMeta {
+            return_types: super::metadata::return_types(&fns),
+            receivers: super::metadata::receivers(&fns),
+            return_nullable: super::metadata::return_nullable(&fns),
+            overload_params,
+        });
+        self.meta_fns
+            .borrow_mut()
+            .insert(internal.to_string(), meta.clone());
+        meta
     }
 
     /// The LOGICAL Kotlin return type of `internal.fn_name` as a `Ty`, from `@Metadata`. Used for a
@@ -363,7 +397,7 @@ impl Classpath {
         fn_name: &str,
         desc_params: &[Ty],
     ) -> Option<usize> {
-        let all = self.metadata_overload_params(internal);
+        let all = &self.class_meta(internal).overload_params;
         // For each same-named overload, the descriptor's REAL leading params are its extension receiver
         // (one slot, if any) followed by its source value params; any params beyond that are synthetic
         // trailing ones the descriptor appends (a `@Composable` Composer/int). Align the overload by
@@ -384,119 +418,28 @@ impl Classpath {
             .max()
     }
 
-    /// The cached per-overload `(JVM name, has-extension-receiver, source value-param `Ty`s)` of every
-    /// function in `internal` (with the multifile-facade part merge), in declaration order.
-    fn metadata_overload_params(
-        &self,
-        internal: &str,
-    ) -> std::rc::Rc<Vec<(String, bool, Vec<Ty>)>> {
-        if let Some(m) = self.meta_param_tys.borrow().get(internal) {
-            return m.clone();
-        }
-        let ci = self.find(internal);
-        let mut fns = ci
-            .as_ref()
-            .map(super::metadata::package_functions)
-            .unwrap_or_default();
-        if fns.is_empty() {
-            if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
-                    if let Some(pci) = self.find(part) {
-                        fns.extend(super::metadata::package_functions(&pci));
-                    }
-                }
-            }
-        }
-        let v: Vec<(String, bool, Vec<Ty>)> = fns
-            .into_iter()
-            .map(|f| {
-                let tys = f
-                    .value_param_types
-                    .iter()
-                    .map(|o| meta_param_ty(o.as_deref()))
-                    .collect();
-                (f.jvm_name, f.receiver_class.is_some(), tys)
-            })
-            .collect();
-        let rc = std::rc::Rc::new(v);
-        self.meta_param_tys
-            .borrow_mut()
-            .insert(internal.to_string(), rc.clone());
-        rc
-    }
-
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
     /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
     /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases
     /// the receiver to its first parameter; only `@Metadata` keeps the read-only/mutable identity. Empty
     /// for a non-extension function.
     pub fn metadata_receiver_types(&self, internal: &str, fn_name: &str) -> Vec<String> {
-        if let Some(m) = self.meta_receivers.borrow().get(internal) {
-            return m.get(fn_name).cloned().unwrap_or_default();
-        }
-        let ci = self.find(internal);
-        let mut map = ci
-            .as_ref()
-            .map(super::metadata::package_function_receivers)
-            .unwrap_or_default();
-        if map.is_empty() {
-            if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
-                    if let Some(pci) = self.find(part) {
-                        // UNION across parts: a name (`forEach`) is overloaded across receivers
-                        // (`Iterable` in one part, `Iterator`/`CharSequence`/… in others), so the
-                        // receiver lists must concatenate — first-wins would drop the supertype that
-                        // actually applies and wrongly reject the call.
-                        for (k, v) in super::metadata::package_function_receivers(&pci) {
-                            let e = map.entry(k).or_default();
-                            for x in v {
-                                if !e.contains(&x) {
-                                    e.push(x);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let rc = std::rc::Rc::new(map);
-        let hit = rc.get(fn_name).cloned().unwrap_or_default();
-        self.meta_receivers
-            .borrow_mut()
-            .insert(internal.to_string(), rc);
-        hit
+        self.class_meta(internal)
+            .receivers
+            .get(fn_name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Whether function `fn_name` in class `internal` has a NULLABLE Kotlin return type (`takeIf`/
     /// `takeUnless` → `T?`), from `@Metadata`. The JVM descriptor/`Signature` erase nullability; only
     /// `@Metadata` carries it. A multifile FACADE has no function metadata of its own — merge its parts.
     pub fn metadata_return_nullable(&self, internal: &str, fn_name: &str) -> bool {
-        if let Some(m) = self.meta_ret_nullable.borrow().get(internal) {
-            return m.get(fn_name).copied().unwrap_or(false);
-        }
-        let ci = self.find(internal);
-        let mut map = ci
-            .as_ref()
-            .map(super::metadata::package_function_return_nullable)
-            .unwrap_or_default();
-        if map.is_empty() {
-            if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
-                    if let Some(pci) = self.find(part) {
-                        for (k, v) in super::metadata::package_function_return_nullable(&pci) {
-                            let e = map.entry(k).or_insert(false);
-                            *e = *e || v;
-                        }
-                    }
-                }
-            }
-        }
-        let rc = std::rc::Rc::new(map);
-        let hit = rc.get(fn_name).copied().unwrap_or(false);
-        self.meta_ret_nullable
-            .borrow_mut()
-            .insert(internal.to_string(), rc);
-        hit
+        self.class_meta(internal)
+            .return_nullable
+            .get(fn_name)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// A facade class's `@Metadata` Kotlin-name → `@JvmName` overloads, cached (part-merged for a multifile
@@ -546,38 +489,6 @@ impl Classpath {
             }
         }
         owners
-    }
-
-    /// Shared cache+decode for the per-function `@Metadata` type lookups: decode the class's `Package`
-    /// metadata with `decode` (return type / receiver type), and — for a multifile FACADE that has no
-    /// function metadata of its own — merge the part classes named in its `d1`.
-    fn metadata_fn_type(
-        &self,
-        cache: &MetaTypeCache,
-        internal: &str,
-        fn_name: &str,
-        decode: impl Fn(&ClassInfo) -> HashMap<String, String>,
-    ) -> Option<String> {
-        if let Some(m) = cache.borrow().get(internal) {
-            return m.get(fn_name).cloned();
-        }
-        let ci = self.find(internal);
-        let mut map = ci.as_ref().map(&decode).unwrap_or_default();
-        if map.is_empty() {
-            if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
-                    if let Some(pci) = self.find(part) {
-                        for (k, v) in decode(&pci) {
-                            map.entry(k).or_insert(v);
-                        }
-                    }
-                }
-            }
-        }
-        let rc = std::rc::Rc::new(map);
-        let hit = rc.get(fn_name).cloned();
-        cache.borrow_mut().insert(internal.to_string(), rc);
-        hit
     }
 
     /// A parsed `.kotlin_builtins` fragment by resource path (class internal name → supertypes+members),
