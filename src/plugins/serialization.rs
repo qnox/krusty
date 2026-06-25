@@ -436,6 +436,52 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     None
 }
 
+/// The element serializer for property `name` of type `ty` IF it is contextual (`name` ∈ `contextual`):
+/// `ContextualSerializer(<ty>::class)`, wrapped `.nullable` for a nullable property. `None` when the
+/// property isn't contextual or its type has no class internal (a primitive can't be contextual).
+fn contextual_serializer_for(
+    ir: &mut IrFile,
+    contextual: &std::collections::HashSet<String>,
+    name: &str,
+    ty: &Ty,
+) -> Option<ExprId> {
+    if !contextual.contains(name) {
+        return None;
+    }
+    let internal = ty.non_null().obj_internal()?.to_string();
+    let base = build_contextual_serializer(ir, &internal);
+    Some(if is_nullable(ty) {
+        wrap_nullable_serializer(ir, base)
+    } else {
+        base
+    })
+}
+
+/// `new ContextualSerializer(<type>::class)` — the element serializer for a `@Contextual` property (or one
+/// whose type is named in `@file:UseContextualSerialization`). Its descriptor `kind` is CONTEXTUAL; the
+/// actual serializer is resolved from the `SerializersModule` at run time.
+fn build_contextual_serializer(ir: &mut IrFile, type_internal: &str) -> ExprId {
+    let classlit = ir.add_expr(IrExpr::ClassConst {
+        internal: type_internal.to_string(),
+    });
+    let kclass = ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: "kotlin/jvm/internal/Reflection".to_string(),
+            name: "getOrCreateKotlinClass".to_string(),
+            descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+            inline: false,
+            must_inline: false,
+        },
+        dispatch_receiver: None,
+        args: vec![classlit],
+    });
+    ir.add_expr(IrExpr::NewExternal {
+        internal: "kotlinx/serialization/ContextualSerializer".to_string(),
+        ctor_desc: "(Lkotlin/reflect/KClass;)V".to_string(),
+        args: vec![kclass],
+    })
+}
+
 /// `new PolymorphicSerializer(<base>::class)` — the element serializer for a star-projection / erased
 /// `Any` type argument (`Box<*>` with `Box<T : E>` → `PolymorphicSerializer(E::class)`); its descriptor
 /// `serialName` is `kotlinx.serialization.Polymorphic<E>`.
@@ -1204,6 +1250,13 @@ impl IrPlugin for SerializationPlugin {
                 .iter()
                 .cloned()
                 .collect();
+            // Property names whose element serializer is CONTEXTUAL (`@Contextual` / file-level
+            // `@UseContextualSerialization`) — emit `ContextualSerializer(<field type>::class)`.
+            let contextual: std::collections::HashSet<String> = ir.classes[class_id as usize]
+                .contextual_fields
+                .iter()
+                .cloned()
+                .collect();
             let class_internal = ir.classes[class_id as usize].fq_name.clone();
             let ser_fq = serializer_fq(&ir.classes[class_id as usize].fq_name);
             let Some(ser_idx) = ir.classes.iter().position(|c| c.fq_name == ser_fq) else {
@@ -1367,7 +1420,26 @@ impl IrPlugin for SerializationPlugin {
                                 args: vec![],
                             });
                             let c = ir.add_expr(IrExpr::GetValue(3));
-                            if let Some(fidx) = tp_field[i] {
+                            if let Some(inst) =
+                                contextual_serializer_for(ir, &contextual, pname, ty)
+                            {
+                                // Contextual element: encode[Nullable]SerializableElement(desc, i,
+                                // ContextualSerializer(<type>::class), value.getX()).
+                                let method = if is_nullable(ty) {
+                                    "encodeNullableSerializableElement"
+                                } else {
+                                    "encodeSerializableElement"
+                                };
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        method,
+                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, inst, v],
+                                }));
+                            } else if let Some(fidx) = tp_field[i] {
                                 // Type-parameter element: encode[Nullable]SerializableElement(desc, i,
                                 // this.typeSerialK, value.getX()) — the serializer is the ctor-supplied one.
                                 let this_s = ir.add_expr(IrExpr::GetValue(0));
@@ -1599,8 +1671,8 @@ impl IrPlugin for SerializationPlugin {
                         // Supported only when every field is a decodable type; otherwise fall back to
                         // a default-construct stub (no wrong decode emitted).
                         let ser_cid = ser_idx as u32;
-                        let decodable = fields.iter().enumerate().all(|(i, (_, t))| {
-                            if tp_field[i].is_some() {
+                        let decodable = fields.iter().enumerate().all(|(i, (pname, t))| {
+                            if tp_field[i].is_some() || contextual.contains(pname) {
                                 return true;
                             }
                             // A nested @Serializable element is decodable only if its serializer is
@@ -1722,7 +1794,32 @@ impl IrPlugin for SerializationPlugin {
                                 let dk = this_desc(ir);
                                 let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                                 let cdk = ir.add_expr(IrExpr::GetValue(2));
-                                let decoded = if let Some(fidx) = tp_field[k] {
+                                let decoded = if let Some(inst) =
+                                    contextual_serializer_for(ir, &contextual, &fields[k].0, ty)
+                                {
+                                    // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
+                                    // desc, k, ContextualSerializer(<type>::class), null).
+                                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let method = if is_nullable(ty) {
+                                        "decodeNullableSerializableElement"
+                                    } else {
+                                        "decodeSerializableElement"
+                                    };
+                                    let raw = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            method,
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc, inst, prev],
+                                    });
+                                    ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::Cast,
+                                        arg: raw,
+                                        type_operand: *ty,
+                                    })
+                                } else if let Some(fidx) = tp_field[k] {
                                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
                                     // this.typeSerialK, null) — the ctor-supplied type-param serializer.
                                     let this_s = ir.add_expr(IrExpr::GetValue(0));
@@ -1902,7 +1999,15 @@ impl IrPlugin for SerializationPlugin {
                             .iter()
                             .enumerate()
                             .map(|(i, _ty)| {
-                                if let Some(fidx) = tp_field[i] {
+                                if let Some(inst) = contextual_serializer_for(
+                                    ir,
+                                    &contextual,
+                                    &fields[i].0,
+                                    &field_types[i],
+                                ) {
+                                    // `@Contextual` / file-level `@UseContextualSerialization` property.
+                                    inst
+                                } else if let Some(fidx) = tp_field[i] {
                                     // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
                                     let this = ir.add_expr(IrExpr::GetValue(0));
                                     ir.add_expr(IrExpr::GetField {

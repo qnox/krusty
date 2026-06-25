@@ -645,6 +645,9 @@ pub struct File {
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
+    /// File-level annotations (`@file:Foo(args…)`) as `(simple_name, arg ExprIds)`. Lets a plugin read
+    /// e.g. `@file:UseContextualSerialization(MyDate::class)` to mark matching property types contextual.
+    pub file_annotations: Vec<(String, Vec<ExprId>)>,
     /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.

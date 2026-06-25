@@ -501,6 +501,11 @@ pub struct IrClass {
     /// The serialization extension routes that property's `childSerializers`/descriptor element through
     /// an instance of `X` instead of a default builtin/nested serializer. Ignored by the core backend.
     pub field_serializers: Vec<(String, String)>,
+    /// Property names whose element serializer is CONTEXTUAL (`@Contextual` on the property, or the file
+    /// carries `@file:UseContextualSerialization(<the property's type>::class)`). The serialization
+    /// extension emits `ContextualSerializer(<type>::class)` (descriptor kind CONTEXTUAL) for these
+    /// instead of a derived builtin/nested serializer. Empty for a class with no contextual property.
+    pub contextual_fields: Vec<String>,
     /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
     /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
     /// matching kotlinc, which inserts the check at each access site (not only the property getter).

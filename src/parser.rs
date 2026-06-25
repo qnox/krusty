@@ -864,12 +864,14 @@ impl<'a> Parser<'a> {
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
         let mut use_site = false;
+        let mut target = String::new();
         if self.at(TokenKind::Ident)
             && self
                 .t
                 .get(self.i + 1)
                 .map_or(false, |t| t.kind == TokenKind::Colon)
         {
+            target = self.text().to_string();
             self.bump();
             self.bump(); // ':'
             use_site = true;
@@ -877,6 +879,12 @@ impl<'a> Parser<'a> {
         let qname = self.parse_qualified_name();
         self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
         let args = self.parse_annotation_args();
+        // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
+        // plugins (e.g. `@file:UseContextualSerialization(MyDate::class)`) rather than dropping it.
+        if target == "file" && !qname.is_empty() {
+            let simple = qname.rsplit('.').next().unwrap_or(&qname).to_string();
+            self.file.file_annotations.push((simple, args.clone()));
+        }
         if use_site || qname.is_empty() {
             (None, args)
         } else {
