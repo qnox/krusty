@@ -1227,6 +1227,15 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::RParen, "')'");
         }
+        // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
+        // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
+        // extend a class, so only the interface supertypes are kept.)
+        let enum_supertypes = if self.at(TokenKind::Colon) {
+            let (supertypes, _base, _args, _del) = self.parse_supertypes();
+            supertypes
+        } else {
+            Vec::new()
+        };
         let mut entries = Vec::new();
         let mut entry_args: Vec<Vec<ExprId>> = Vec::new();
         let mut entry_bodies: Vec<Vec<FunDecl>> = Vec::new();
@@ -1393,7 +1402,7 @@ impl<'a> Parser<'a> {
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
-            supertypes: Vec::new(),
+            supertypes: enum_supertypes,
             delegations: Vec::new(),
             base_class: None,
             base_args: Vec::new(),

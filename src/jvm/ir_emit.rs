@@ -1417,6 +1417,11 @@ fn emit_enum_class(
         access |= 0x0010;
     } // FINAL
     cw.set_access(access);
+    // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
+    // interface-typed call with `IncompatibleClassChangeError`.
+    for itf in &c.interfaces {
+        cw.add_interface(itf);
+    }
 
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
     let n_params = c.ctor_param_count as usize;

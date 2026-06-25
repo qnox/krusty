@@ -2064,6 +2064,51 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // Enum entries: lower each entry's constructor arguments (constant expressions
                 // evaluated in `<clinit>`), coerced to the matching ctor-parameter field type.
                 if c.is_enum() {
+                    // Soundness gate for `enum class E : I`: every ABSTRACT interface member must be
+                    // satisfied — by a concrete enum method of that name, or by an override in EVERY
+                    // entry body. Otherwise the JVM throws `AbstractMethodError`/`IncompatibleClassChange`
+                    // at an interface-typed call (e.g. an interface `val ordinal` mapped to `getOrdinal`
+                    // that the enum doesn't provide). A classpath-interface supertype (abstractness not
+                    // checked here) bails conservatively.
+                    for st in &c.supertypes {
+                        let Some(ic) = file.decls.iter().find_map(|&d| match file.decl(d) {
+                            Decl::Class(ic) if ic.name == *st && ic.is_interface() => Some(ic),
+                            _ => None,
+                        }) else {
+                            return None; // non-file / non-interface supertype on an enum — skip
+                        };
+                        // A GENERIC interface (`A<T>`) whose method an entry overrides needs a synthetic
+                        // erased bridge (`foo(Object)` → `foo(String)`) krusty doesn't emit — skip rather
+                        // than miscompile an interface-typed call.
+                        if !ic.type_params.is_empty() {
+                            return None;
+                        }
+                        let mut abstract_members: Vec<String> = ic
+                            .methods
+                            .iter()
+                            .filter(|m| matches!(m.body, FunBody::None))
+                            .map(|m| m.name.clone())
+                            .collect();
+                        for p in &ic.body_props {
+                            abstract_members.push(getter_name(&p.name));
+                            if p.is_var {
+                                abstract_members.push(setter_name(&p.name));
+                            }
+                        }
+                        for m in abstract_members {
+                            let enum_has = c
+                                .methods
+                                .iter()
+                                .any(|em| em.name == m && !matches!(em.body, FunBody::None));
+                            let all_entries_override = !c.enum_entries.is_empty()
+                                && c.enum_entry_bodies
+                                    .iter()
+                                    .all(|b| b.iter().any(|bm| bm.name == m));
+                            if !enum_has && !all_entries_override {
+                                return None; // unsatisfied abstract interface member — skip
+                            }
+                        }
+                    }
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
                     let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields
@@ -2210,8 +2255,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let mut mfids = Vec::new();
                         for bm in body {
                             // The override conforms to the abstract member it overrides — use that
-                            // signature for the emitted descriptor (kotlinc's erased override shape).
-                            let sig = syms.classes.get(&c.name)?.methods.get(&bm.name)?.clone();
+                            // signature for the emitted descriptor (kotlinc's erased override shape). The
+                            // member is declared on the enum itself, OR on an implemented interface
+                            // (`enum class E : I { A { override fun … } }`).
+                            let sig = match syms
+                                .classes
+                                .get(&c.name)
+                                .and_then(|cs| cs.methods.get(&bm.name))
+                            {
+                                Some(s) => s.clone(),
+                                None => syms
+                                    .supertype_methods(&internal)
+                                    .into_iter()
+                                    .find(|(n, _)| n == &bm.name)
+                                    .map(|(_, s)| s)?,
+                            };
                             let params: Vec<IrType> =
                                 sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                             let fid = lo.ir.add_fun(IrFunction {
@@ -2561,7 +2619,9 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         .collect();
     c.is_enum()
         && c.companion_methods.is_empty() && c.companion_props.is_empty()
-        && c.secondary_ctors.is_empty() && c.supertypes.is_empty()
+        && c.secondary_ctors.is_empty()
+        // An enum may implement interfaces (`enum class E : I`) — supertypes are interfaces only (an enum
+        // can't extend a class); the lowering resolves them as interfaces or bails.
         && c.props.iter().all(|p| p.is_property)
         // A body property must be a plain backing field — an `abstract val` (entry-overridden property)
         // isn't modeled yet.

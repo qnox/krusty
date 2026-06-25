@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 452).
+  repo's `compiler/testData/codegen/box`). Current gate: **1752 OK / 0 FAIL** (scanned 7351, Phase 453).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P76 — enum implementing an interface (`enum class E : I`) (gate 1750 → 1752, +2, FAIL=0).**
+  The enum header parser didn't accept a supertype list, so `enum class E : I { … }` failed to parse
+  entirely. Now: the parser reads the optional `: I1, I2` supertype list into `ClassDecl.supertypes`; the
+  checker resolves a return-type-less entry/enum `override` against the implemented interface (via
+  `supertype_methods`); ir_lower's enum path looks up the override sig on the interface and the
+  `is_simple_enum` gate admits interface supertypes; and `emit_enum_class` now emits the `implements`
+  clause (without it an interface-typed call threw `IncompatibleClassChangeError`). The abstract interface
+  member is satisfied by an enum-level method, a per-entry override, OR a default. SOUND skips (caught as
+  gate FAILs mid-development, then gated): a GENERIC interface (`A<T>` — needs an erased `foo(Object)`
+  bridge krusty doesn't emit), a classpath-interface supertype, and any unsatisfied abstract member
+  (e.g. an interface `val ordinal` → `getOrdinal` the enum doesn't provide) all skip the file. TDD:
+  tests/enum_implements_interface_e2e.rs (enum-level override, per-entry override, default method — all
+  called via the INTERFACE type).
 
 - **Phase P75 — same-file `const val` read inlining (gate 1750 → 1750, +0 corpus, byte-equality FIX,
   FAIL=0).** Completes the const byte-parity started in P73: a same-file top-level `const val` read now
