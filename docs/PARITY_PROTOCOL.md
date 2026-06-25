@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 448).
+  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 449).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P72 — member/extension resolution on Kotlin MAPPED collection types (gate 1750 → 1750, +0
+  corpus, byte-equal, FAIL=0).** `kotlin.collections.List`/`Set`/`Map`/`Iterable`/… have no own JVM
+  `.class` — their *actual* platform declaration IS a JVM interface (`java/util/List`), the `expect`/
+  `actual` + `JavaToKotlinClassMap` device kotlinc uses. `JvmLibraries::resolve_type` returned `None` for
+  these (the `.class` reader `cp.find` has no entry), so NO member/extension on a `List`/`Set`/… resolved
+  (`for (x in list)`, `list[i]`, `list.size`, `list.iterator()`, `forEach`/`contains`/`indexOf` all
+  failed). Fix (generic, no per-type hack): when `cp.find(internal)` is `None`, fall back to the mapped
+  (actual) type via the SAME generic `to_jvm_internal` device the emitter uses for the call owner — so
+  resolution and codegen stay byte-consistent. Verified BYTE-IDENTICAL to kotlinc for the iterator
+  protocol (`invokeinterface java/util/List.iterator()Ljava/util/Iterator;`, `Iterator.hasNext()Z`,
+  `Iterator.next()Ljava/lang/Object;`). +0 on the box corpus only because the collection-heavy tests are
+  ALSO gated by other features (`forInIndices` parser syntax, primitive-upper-bound type params,
+  coroutines, `assertEquals`) — the collection resolution itself is now functional end-to-end and is a
+  foundation those tests build on. TDD: tests/collection_members_e2e.rs (for-over-List, size+index,
+  isEmpty/contains/indexOf).
 
 - **Phase P71 — `var` extension properties (gate 1740 → 1750, +10, FAIL=0).** Builds on P70: a `var Recv.name:
   T get() = … set(v) { … }` now lowers BOTH accessors as statics — `getName(Recv): T` and `setName(Recv,
