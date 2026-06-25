@@ -15028,6 +15028,10 @@ pub(crate) fn ty_to_ir(t: Ty) -> Ty {
                 None => ty_to_ir(*inner),
             };
         }
+        // A type parameter `T` erases to its declared bound in the IR (JVM erasure). When generic
+        // substitution lands this will instead carry the `TyParam` so the backend erases at emit; for
+        // now erasing here keeps codegen identical to the pre-`TyParam` representation.
+        Ty::TyParam(_, bound) => return ty_to_ir(*bound),
         _ => return Ty::Error,
     };
     Ty::obj(fq)

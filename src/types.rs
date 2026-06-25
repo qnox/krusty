@@ -139,6 +139,7 @@ impl Ty {
     pub fn type_args(self) -> &'static [Ty] {
         match self {
             Ty::Obj(_, args) => args,
+            Ty::TyParam(_, b) => b.type_args(),
             _ => &[],
         }
     }
@@ -155,6 +156,7 @@ impl Ty {
         match self {
             Ty::Array(e) => Some(*e),
             Ty::Obj("kotlin/Array", args) => args.first().copied(),
+            Ty::TyParam(_, b) => b.array_elem(),
             _ => None,
         }
     }
@@ -370,6 +372,8 @@ impl Ty {
     pub fn obj_internal(self) -> Option<&'static str> {
         match self {
             Ty::Obj(n, _) => Some(n),
+            // A type parameter erases to its bound — report the bound's class (JVM erasure).
+            Ty::TyParam(_, b) => b.obj_internal(),
             _ => None,
         }
     }
