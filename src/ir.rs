@@ -450,6 +450,10 @@ pub struct IrField {
     /// field read/written cross-class (a coroutine continuation's `result`/`label`). Each backend maps
     /// this to its own access representation (the JVM emitter → `ACC_PRIVATE`/`ACC_PUBLIC`).
     pub is_private: bool,
+    /// Backs a `lateinit var`. EVERY read of such a field (a backend `GetField`) null-checks it and
+    /// throws `UninitializedPropertyAccessException` when still unset — matching kotlinc, which inserts
+    /// the check at each access site (not only the property getter).
+    pub is_lateinit: bool,
 }
 
 impl IrField {
@@ -463,6 +467,7 @@ impl IrField {
             default: None,
             is_final: false,
             is_private: true,
+            is_lateinit: false,
         }
     }
 }
@@ -506,10 +511,6 @@ pub struct IrClass {
     /// extension emits `ContextualSerializer(<type>::class)` (descriptor kind CONTEXTUAL) for these
     /// instead of a derived builtin/nested serializer. Empty for a class with no contextual property.
     pub contextual_fields: Vec<String>,
-    /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
-    /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
-    /// matching kotlinc, which inserts the check at each access site (not only the property getter).
-    pub lateinit_fields: Vec<u32>,
     /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.

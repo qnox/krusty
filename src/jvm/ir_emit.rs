@@ -2572,7 +2572,7 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[*index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
-                let is_lateinit = c.lateinit_fields.contains(index);
+                let is_lateinit = c.fields[*index as usize].is_lateinit;
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
                 code.getfield(fref, slot_words(jt) as i32);

@@ -1746,7 +1746,6 @@ fn build_continuation_class(
         type_params: Vec::new(),
         supertypes: vec![],
         fields,
-        lateinit_fields: Vec::new(),
         ctor_param_count: 0,
         ctor_args,
         init_body,

@@ -360,19 +360,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .chain(iface_delegate_fields.iter().cloned())
                 .chain(expr_delegate_fields.iter().cloned())
                 .collect();
-            // Field indices backing a `lateinit var` (matched by name in the final `fields`, so any
-            // `this$0` offset is handled). The backend null-checks every read of these fields.
+            // The names backing a `lateinit var` — `IrField::is_lateinit` is set by name below (matched
+            // in the final `fields`, so any `this$0` offset is handled). The backend null-checks every
+            // read of such a field.
             let lateinit_names: std::collections::HashSet<&str> = c
                 .body_props
                 .iter()
                 .filter(|p| p.is_lateinit)
                 .map(|p| p.name.as_str())
-                .collect();
-            let lateinit_fields: Vec<u32> = fields
-                .iter()
-                .enumerate()
-                .filter(|(_, (n, _))| lateinit_names.contains(n.as_str()))
-                .map(|(i, _)| i as u32)
                 .collect();
             // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
             // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
@@ -517,6 +512,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // non-final, matching the prior `field_final.get(i).unwrap_or(false)`.
                         is_final: field_finals.get(i).copied().unwrap_or(false),
                         is_private: true, // user backing fields are all private (default)
+                        is_lateinit: lateinit_names.contains(n.as_str()),
                     }
                 })
                 .collect();
@@ -576,7 +572,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
-                lateinit_fields,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
             });
@@ -925,7 +920,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     ctor_param_checks: vec![],
                     is_companion: true,
                     companion_class: None,
-                    lateinit_fields: Vec::new(),
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
                 });
@@ -2347,7 +2341,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ctor_param_checks: vec![],
                             is_companion: false,
                             companion_class: None,
-                            lateinit_fields: Vec::new(),
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
                         });
@@ -4274,7 +4267,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         };
@@ -6029,7 +6021,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
@@ -6303,7 +6294,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
         });
