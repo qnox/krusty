@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1761 OK / 0 FAIL** (scanned 7351, Phase 454).
+  repo's `compiler/testData/codegen/box`). Current gate: **1762 OK / 0 FAIL** (scanned 7351, Phase 455).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P78 — `as? T ?: e` parse fix (gate 1761 → 1762, +1, FAIL=0).** An unparenthesized safe cast
+  followed by elvis (`x as? String ?: "no"`) failed to parse: `parse_type` greedily ate the `?` of the
+  `?:` as a nullable `String?`, leaving a dangling `:` ("expected an expression"). New `eat_type_nullable`
+  helper eats a `?` nullable-type marker UNLESS it's immediately before `:` (a nullable type is never
+  validly followed by `:`, so `?:` there is elvis) — applied at all type-nullable parse sites.
+  `(x as? T) ?: e`, `as?` alone, and ordinary nullable types are unaffected. TDD:
+  tests/safe_cast_elvis_e2e.rs (success path, failure path, nullable-type regression guard).
 
 - **Phase P77 — enum implementing a GENERIC interface, with erased bridge (gate 1752 → 1761, +9,
   FAIL=0).** P76 gated ALL generic-interface enums (`enum class Z : A<String>`); this lands them. The
