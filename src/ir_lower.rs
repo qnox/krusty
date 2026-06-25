@@ -415,6 +415,29 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .iter()
                     .map(|(n, t)| {
                         let ir = ty_to_ir(*t);
+                        // Re-attach a generic field's TYPE ARGUMENTS from the property's source `TypeRef`
+                        // (`ty_of`/`ty_to_ir` erase them for a general `Obj`). Read straight from the AST so
+                        // `Box<Int>` keeps `<Int>` — the serialization extension needs it to build a nested
+                        // generic element serializer (`Box.serializer(IntSerializer)`); descriptors still
+                        // erase, so this is additive metadata on the field type only.
+                        let ir = match (c.props.iter().find(|p| p.name == *n), ir) {
+                            (
+                                Some(p),
+                                IrType::Class {
+                                    fq_name, nullable, ..
+                                },
+                            ) if !p.ty.targs.is_empty() => IrType::Class {
+                                fq_name,
+                                type_args: p
+                                    .ty
+                                    .targs
+                                    .iter()
+                                    .map(|a| ty_to_ir(ty_of(file, a)))
+                                    .collect(),
+                                nullable,
+                            },
+                            (_, ir) => ir,
+                        };
                         // A field carries its declared nullability into the IrType (`Ty` drops it). The
                         // JVM value-class pass keys boxing + null-check elision on a value class's
                         // underlying `?` (`X(val v: Int?)` → nullable `Integer`).

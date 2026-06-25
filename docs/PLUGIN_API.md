@@ -575,6 +575,23 @@ serializer derivation for a NESTED generic field (`Box<*>`/`Box<Int>` as a prope
 `PolymorphicSerializer`, and decode-side generic-return inference (`decodeFromString(C.serializer(t), s)`
 currently types the result `Any`). The generic-serializer foundation itself is proven by the e2e test.
 
+#### Update (2026-06-25) — nested generic field serializers → main gate 1748 → 1750
+
+A class with a NESTED generic field (`Holder(val b: Box<Int>)`) now derives the element serializer
+`Box.serializer(IntSerializer.INSTANCE)` (caller-side type-argument derivation). Two pieces: (1) a generic
+field's type arguments are re-attached to its `IrType::Class.type_args` at the IR field-build site by reading
+the property's source `TypeRef.targs` straight from the AST (`ty_of`/`ty_to_ir` erase generic args for a
+general `Obj`; descriptors still erase, so this is additive field-only metadata); (2) `element_serializer_expr`
+recursively builds a property's element serializer — generic `Foo<A…>` → `Foo.serializer(<A ser>…)`
+(invokestatic the generic accessor), non-generic nested → `Foo$serializer.INSTANCE`, builtin →
+`…Serializer.INSTANCE` — wired into childSerializers/serialize/deserialize (deserialize gates on a
+non-mutating `can_derive_element_serializer` so it stubs cleanly rather than emit a `null` element
+serializer). Verified: `Holder(val b: Box<Int>)` → `{"b":{"boxed":7}}`. **Main box gate 1748 → 1750 (+2),
+0 FAIL** (the field-type-args metadata lets a few generic-field box tests recover their element type). Test:
+`serialization_krusty_only_e2e::nested_generic_field_serializer_in_krusty`. The generic *corpus* files
+(generics, genericBaseClass\*) still additionally need default values, sealed-parametrized interfaces, and
+decode-side member access — so no NEW ser-corpus green from this alone; corpus stays 7/69.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
