@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1752 OK / 0 FAIL** (scanned 7351, Phase 453).
+  repo's `compiler/testData/codegen/box`). Current gate: **1761 OK / 0 FAIL** (scanned 7351, Phase 454).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P77 — enum implementing a GENERIC interface, with erased bridge (gate 1752 → 1761, +9,
+  FAIL=0).** P76 gated ALL generic-interface enums (`enum class Z : A<String>`); this lands them. The
+  general `Decl::Class` lowering already computes the interface bridge for an enum (it runs the
+  `!is_interface` bridge pass), and `emit_enum_class` now emits `c.bridges` — so an enum-level override
+  of a generic interface method (`override fun foo(t: String)`) gets the erased
+  `foo(Object)`→`foo(String)` ACC_BRIDGE the JVM needs for an interface-typed call (without it,
+  `(Z.Z1 as A<String>).foo("")` ran the interface default → wrong result). The P76 gate now allows a
+  generic interface IFF its abstract method is overridden at the ENUM level (bridge belongs on the enum
+  class); a generic method satisfied only by PER-ENTRY overrides still skips (the bridge would belong on
+  each entry subclass — not modeled). +9 (a generic-interface-enum cluster, e.g. `bridges/simpleEnum.kt`).
+  TDD: tests/enum_generic_interface_e2e.rs (default-overridden + abstract, called via the interface).
 
 - **Phase P76 — enum implementing an interface (`enum class E : I`) (gate 1750 → 1752, +2, FAIL=0).**
   The enum header parser didn't accept a supertype list, so `enum class E : I { … }` failed to parse

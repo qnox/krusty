@@ -1424,6 +1424,7 @@ fn emit_enum_class(
     }
 
     let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+    // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     // User (primary-constructor) fields — public so the IR's direct cross-class reads work.
@@ -1598,6 +1599,9 @@ fn emit_enum_class(
             );
         }
     }
+    // Erased bridges for a generic-interface method overridden at the enum level
+    // (`enum E : A<String> { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`).
+    emit_bridges(c, &mut cw);
     cw.finish()
 }
 

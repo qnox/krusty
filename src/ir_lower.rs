@@ -2080,12 +2080,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         }) else {
                             return None; // non-file / non-interface supertype on an enum — skip
                         };
-                        // A GENERIC interface (`A<T>`) whose method an entry overrides needs a synthetic
-                        // erased bridge (`foo(Object)` → `foo(String)`) krusty doesn't emit — skip rather
-                        // than miscompile an interface-typed call.
-                        if !ic.type_params.is_empty() {
-                            return None;
-                        }
+                        let generic = !ic.type_params.is_empty();
                         let mut abstract_members: Vec<String> = ic
                             .methods
                             .iter()
@@ -2109,6 +2104,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     .all(|b| b.iter().any(|bm| bm.name == m));
                             if !enum_has && !all_entries_override {
                                 return None; // unsatisfied abstract interface member — skip
+                            }
+                            // A GENERIC interface needs an erased bridge (`foo(Object)`→`foo(String)`).
+                            // The bridge is computed for the ENUM class (an enum-level override) — so a
+                            // generic method satisfied only by PER-ENTRY overrides (bridge would belong on
+                            // each entry subclass, not modeled) skips rather than miscompiles.
+                            if generic && !enum_has {
+                                return None;
                             }
                         }
                     }
