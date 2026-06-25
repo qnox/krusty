@@ -11015,6 +11015,22 @@ impl<'a> Lower<'a> {
                         descriptor: format!("L{internal};"),
                     }));
                 }
+                // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): read its
+                // companion singleton `getstatic C.Companion:LC$Companion;`. Only classes whose companion
+                // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
+                // the same name shadows it.
+                if self.lookup(&n).is_none() {
+                    if let Some(cls) = self.syms.classes.get(&n) {
+                        let comp_internal = format!("{}$Companion", cls.internal);
+                        if self.syms.class_by_internal(&comp_internal).is_some() {
+                            return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
+                                owner: cls.internal.clone(),
+                                name: "Companion".to_string(),
+                                descriptor: format!("L{comp_internal};"),
+                            }));
+                        }
+                    }
+                }
                 // A local delegated property: read through the delegate's `getValue(null, propref)`.
                 if let Some(ld) = self.local_delegated.get(&n).cloned() {
                     // Resolve the `$delegate` slot via the CURRENT scope (so a capture-remapped value

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 461).
+  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 462).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 462 — class name used as a value resolves to its `companion object` (gate 1777, box-OK flat,
+  FAIL=0).** A class `C` whose companion declares interface supertypes and has methods (so the backend
+  emits the `C$Companion` class + `Companion` field) used as a VALUE (`val i: I = C`) is now its companion
+  instance: collect registers `C$Companion` as a typed object (interfaces from the companion's supertypes;
+  `super_internal = None` to match the emitted `Any` superclass — a base class is still ignored, not
+  claimed), the checker types `C` as `C$Companion` (assignable to its interfaces), and lowering reads
+  `getstatic C.Companion`. Gated to exactly what is emitted (companion has interfaces AND methods), so a
+  method-less / base-only companion (`companion object : Factory(1)`) isn't treated as a value — it skips,
+  never `NoSuchFieldError`. This is the keystone for the coroutine `EmptyContinuation` completion once
+  companion-extends-class lands. TDD: tests/companion_supertype_e2e.rs (companion used AS its interface
+  value runs `"OK"` on the JVM).
 
 - **Phase 461 — `companion object` with a declared supertype implements its interfaces (gate 1773 → 1777,
   +4, FAIL=0).** The parser DISCARDED a companion's supertype list (parser.rs "tolerate and ignore") and

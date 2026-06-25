@@ -1287,7 +1287,15 @@ pub fn collect_signatures_with_cp(
                     };
                     let interfaces: Vec<String> =
                         c.supertypes.iter().map(&mut resolve_super).collect();
-                    let super_internal = c.base_class.as_ref().map(|b| resolve_super(b));
+                    let super_internal = c.base_class.as_ref().map(&mut resolve_super);
+                    // A `companion object`'s OWN supertypes, resolved like the class's — so the synthesized
+                    // `C$Companion` can be registered as a typed object (`C` used as a value is its
+                    // companion, assignable to the companion's supertypes).
+                    let companion_interfaces: Vec<String> = c
+                        .companion_supertypes
+                        .iter()
+                        .map(&mut resolve_super)
+                        .collect();
                     // `companion object` members → static methods/props on this class.
                     let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -1468,6 +1476,11 @@ pub fn collect_signatures_with_cp(
                     } else {
                         None
                     };
+                    // The companion's methods + internal name (for the `C$Companion` typed-object
+                    // registration below), captured before `static_methods`/`internal` are moved into the
+                    // main class's `ClassSig`.
+                    let companion_methods_sigs = static_methods.clone();
+                    let comp_internal = format!("{internal}$Companion");
                     table.classes.insert(
                         c.name.clone(),
                         ClassSig {
@@ -1491,6 +1504,38 @@ pub fn collect_signatures_with_cp(
                             value_field,
                         },
                     );
+                    // Register the synthesized `C$Companion` as a typed object so `C` used as a value (its
+                    // companion instance) is assignable to its INTERFACE supertypes and their members
+                    // resolve. Gated to exactly what the backend emits: the companion class + `Companion`
+                    // field only exist when the companion has methods (`ir_lower` synthesizes it then), and
+                    // only INTERFACE supertypes are emitted on it (a base CLASS is ignored — left `Any` —
+                    // so `super_internal` is `None`, never claiming a base it isn't). A method-less or
+                    // interface-less companion isn't a first-class value yet (its use as a value skips).
+                    if !companion_interfaces.is_empty() && !c.companion_methods.is_empty() {
+                        table.classes.insert(
+                            comp_internal.clone(),
+                            ClassSig {
+                                internal: comp_internal,
+                                props: Vec::new(),
+                                ctor_params: Vec::new(),
+                                methods: companion_methods_sigs,
+                                is_interface: false,
+                                is_sealed: false,
+                                inner_of: None,
+                                static_methods: HashMap::new(),
+                                static_props: HashMap::new(),
+                                lateinit_props: Default::default(),
+                                interfaces: companion_interfaces,
+                                super_internal: None,
+                                is_annotation: false,
+                                ctor_defaults: Vec::new(),
+                                secondary_ctors: Vec::new(),
+                                tparam_names: Vec::new(),
+                                generic_props: HashMap::new(),
+                                value_field: None,
+                            },
+                        );
+                    }
                 }
                 Decl::Property(p) => {
                     // Extension property `val Recv.name: T get() = …`: register by (receiver
@@ -4976,6 +5021,19 @@ impl<'a> Checker<'a> {
                         // by lowering. Resolved here so an object can refer to itself in its own body.
                         if let Some(cls) = self.syms.classes.get(&n) {
                             return self.set(e, Ty::obj(&cls.internal));
+                        }
+                    }
+                    // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): its
+                    // value is the companion instance (`C.Companion`), typed as `C$Companion` — which the
+                    // collect pass registered with the companion's supertypes, so it is assignable to them.
+                    // Lowering reads `getstatic C.Companion`. (Only classes whose companion declares a
+                    // supertype get a `C$Companion` ClassSig; a plain companion isn't a first-class value.)
+                    if !self.syms.objects.contains(&n) {
+                        if let Some(cls) = self.syms.classes.get(&n) {
+                            let comp_internal = format!("{}$Companion", cls.internal);
+                            if self.syms.class_by_internal(&comp_internal).is_some() {
+                                return self.set(e, Ty::obj(&comp_internal));
+                            }
                         }
                     }
                     if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
