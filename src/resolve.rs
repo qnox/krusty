@@ -6237,6 +6237,21 @@ impl<'a> Checker<'a> {
         Some(t)
     }
 
+    /// Primary-constructor parameter names of a same-file class, in declaration order (parallel to
+    /// `ClassSig::ctor_params`/`ctor_defaults`) — for mapping named constructor arguments. `None` if
+    /// `class_name` isn't a same-file class with a primary constructor.
+    fn primary_ctor_param_names(&self, class_name: &str) -> Option<Vec<String>> {
+        self.file
+            .decls
+            .iter()
+            .find_map(|&d| match self.file.decl(d) {
+                Decl::Class(c) if c.name == class_name && c.has_primary_ctor => {
+                    Some(c.props.iter().map(|p| p.name.clone()).collect())
+                }
+                _ => None,
+            })
+    }
+
     fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
         // Named arguments map onto parameter positions for a top-level function or a method whose
         // signature records parameter names (e.g. a data-class `copy`). Elsewhere the labels would be
@@ -6245,7 +6260,11 @@ impl<'a> Checker<'a> {
         if arg_names.is_some() {
             let callee_expr = self.file.expr(callee).clone();
             let supports_named = match &callee_expr {
-                Expr::Name(n) => self.module_declares(n),
+                // A top-level function, or a same-file class CONSTRUCTOR (`C(b = 9)`) — the primary
+                // ctor's parameter names map the labels onto positions, just like a function's.
+                Expr::Name(n) => {
+                    self.module_declares(n) || self.syms.classes.contains_key(n.as_str())
+                }
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
                     // queried through the module source.
@@ -7489,6 +7508,43 @@ impl<'a> Checker<'a> {
                 if self.lookup(&fname).is_none() {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
+                        // Named-argument constructor call (`C(b = 9)`): map names → positions using the
+                        // primary ctor's parameter names + per-parameter defaults, the same path a
+                        // top-level function uses. An omitted parameter falls back to its default (the
+                        // lowering fills a simple-literal default, or skips the file — never miscompiles).
+                        if arg_names.is_some() {
+                            if let Some(param_names) = self.primary_ctor_param_names(&fname) {
+                                let param_defaults: Vec<bool> =
+                                    cls.ctor_defaults.iter().map(|d| d.is_some()).collect();
+                                let required = param_defaults.iter().filter(|d| !**d).count();
+                                match map_call_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_names,
+                                    required,
+                                    &param_defaults,
+                                ) {
+                                    Ok(slots) => {
+                                        for (i, slot) in slots.iter().enumerate() {
+                                            if let (Some(a), Some(pt)) = (slot, ctor_params.get(i))
+                                            {
+                                                self.expect_assignable(
+                                                    *pt,
+                                                    self.expr_types[a.0 as usize],
+                                                    self.span(*a),
+                                                    "argument",
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(msg) => {
+                                        self.diags
+                                            .error(span, format!("constructor '{fname}': {msg}"));
+                                    }
+                                }
+                                return self.ctor_result(call, &cls.internal);
+                            }
+                        }
                         // Omitted trailing arguments are allowed when those parameters have a default
                         // that is a *simple literal of the parameter's exact type* — the call site can
                         // emit it directly. Adapting defaults (`Long = 0`) or complex defaults

@@ -914,3 +914,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `dup`-per-element; kotlinc stores to a temp + `aload`-per-element); primitive-array `iterator()` loops
   (krusty ~24 bytes larger); more loop forms (ranges/downTo/step/indices) to audit for kotlinc's
   counted-loop optimizations.
+- **Casts to type parameters + nullable references.** `x as T` (type-param unchecked cast) and `x as
+  Foo?` (nullable reference cast) now lower instead of skipping the whole file. `T` is kept with its
+  bound in the IR (`IrType::TypeParameter`) and erased ONLY at JVM emit (the "no erasure in the checker"
+  rule); a non-null bound null-checks, an unbounded `T` emits no `checkcast`. A nullable reference cast
+  is a `null`-passing `checkcast` (its non-null form names the class); a nullable value-class target
+  skips (would unbox `null`). Unmodeled coercions (`<Unit>`/`<Nothing>` results, erased generic calls
+  inside `inline`, the `genericSafeCasts` flag) skip, never miscompile. Gate +8 box()=OK across the two,
+  0 miscompiles. `tests/typeparam_cast_e2e.rs`, `tests/nullable_cast_e2e.rs`.
+- **Named constructor arguments (`C(b = 9)`).** The checker now maps named ctor args to the primary
+  ctor's parameter names (read from the same-file `ClassDecl`, reusing the function path's
+  `map_call_args`); the lowering was already capable. A regression caught by review + fixed before
+  landing: a named call must target the PRIMARY ctor only — the secondary-constructor selection in
+  lowering is now gated on the call being positional, else `C(b = 9)` against a same-arity
+  `constructor(x: Int) : this(x, x)` set `a` from the secondary (wrong fields). `tests/named_ctor_args_e2e.rs`.
+- **Survey roadmap diagnostic.** `lower_file` records WHY it last skipped a file
+  (`ir_lower::lower_bail_reason`: phase tags `gate:class`/`deep:fun` plus the innermost `expr
+  Lambda`/`call Foo`), surfaced by the `survey` binary so the "lower bailed" bucket is an actionable
+  roadmap rather than one opaque category. Read only by `survey`; zero compiler behaviour. `just survey
+  [CATEGORY]` runs it against the version-matched cached corpus.

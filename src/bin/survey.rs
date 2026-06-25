@@ -37,7 +37,7 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let facade = file_class_name(stem, files[0].package.as_deref());
     let mut ir = match lower_file(&files[0], &info, &syms) {
         Some(ir) => ir,
-        None => return Some("lower: lower_file bailed (unsupported IR construct)".into()),
+        None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
     };
     if !lower_value_classes(&mut ir) {
         return Some("lower: value-class shape not lowered".into());
