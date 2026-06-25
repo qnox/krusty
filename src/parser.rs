@@ -682,7 +682,9 @@ impl<'a> Parser<'a> {
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
-                // `interface Name { … }` (soft keyword `interface` + a name).
+                // `interface Name { … }` (soft keyword `interface` + a name). A `sealed interface` carries
+                // `is_sealed` so it serializes as a `SealedClassSerializer` (closed polymorphism), like a
+                // `sealed class` — not the open `PolymorphicSerializer` a plain interface gets.
                 TokenKind::Ident
                     if self.text() == "interface"
                         && self
@@ -690,7 +692,8 @@ impl<'a> Parser<'a> {
                             .get(self.i + 1)
                             .map_or(false, |t| t.kind == TokenKind::Ident) =>
                 {
-                    let d = self.parse_interface();
+                    let mut d = self.parse_interface();
+                    d.is_sealed = is_sealed;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }

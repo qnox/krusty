@@ -14214,23 +14214,51 @@ impl<'a> Lower<'a> {
                         let recv =
                             self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
                         let mut a = vec![recv];
-                        for (i, &arg) in args.iter().enumerate() {
-                            match c.params.get(i + 1) {
-                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                None => a.push(self.expr(arg)?),
-                            }
-                        }
-                        // A `name$default` call appends a placeholder per omitted trailing parameter, an
-                        // `int` bit-mask (a bit per omitted parameter), and a `null` marker.
-                        if c.default_call {
+                        // A `$default` call with a TRAILING LAMBDA: the lambda fills the LAST real parameter
+                        // (`transform`), the leading args a prefix, the MIDDLE parameters default. Place the
+                        // lambda in the last slot, zero-placeholders for the defaulted middle, and a mask
+                        // with a bit set for each defaulted middle parameter (not the prefix, not the lambda).
+                        let trailing_lambda = c.default_call
+                            && args
+                                .last()
+                                .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
+                        if trailing_lambda {
                             let real_count = c.params.len() - 1; // exclude the receiver
-                            for j in args.len()..real_count {
-                                let ph = self.zero_placeholder(c.params[j + 1]);
-                                a.push(ph);
+                            let prefix_len = args.len() - 1;
+                            let last = real_count - 1;
+                            for j in 0..real_count {
+                                let pj = ty_to_ir(c.params[j + 1]);
+                                if j < prefix_len {
+                                    a.push(self.lower_arg(args[j], &pj)?);
+                                } else if j == last {
+                                    a.push(self.lower_arg(args[prefix_len], &pj)?);
+                                // the trailing lambda
+                                } else {
+                                    a.push(self.zero_placeholder(c.params[j + 1]));
+                                }
                             }
-                            let mask: i32 = (args.len()..real_count).map(|j| 1i32 << j).sum();
+                            let mask: i32 = (prefix_len..last).map(|j| 1i32 << j).sum();
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
                             a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                        } else {
+                            for (i, &arg) in args.iter().enumerate() {
+                                match c.params.get(i + 1) {
+                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                    None => a.push(self.expr(arg)?),
+                                }
+                            }
+                            // A `name$default` call appends a placeholder per omitted trailing parameter,
+                            // an `int` bit-mask (a bit per omitted parameter), and a `null` marker.
+                            if c.default_call {
+                                let real_count = c.params.len() - 1; // exclude the receiver
+                                for j in args.len()..real_count {
+                                    let ph = self.zero_placeholder(c.params[j + 1]);
+                                    a.push(ph);
+                                }
+                                let mask: i32 = (args.len()..real_count).map(|j| 1i32 << j).sum();
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                            }
                         }
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
