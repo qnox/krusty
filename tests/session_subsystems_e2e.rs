@@ -92,6 +92,25 @@ fun box(): String {\n\
     );
 }
 
+/// `lateinit var` — the backing field carries `IrField::is_lateinit`; a read after init returns the
+/// value (the per-access null-check passes). Pins the field-flag fold.
+#[test]
+fn lateinit_var_set_then_get() {
+    if !toolchain_ready() {
+        return;
+    }
+    const SRC: &str = "// WITH_STDLIB\n\
+class Holder {\n\
+    lateinit var name: String\n\
+}\n\
+fun box(): String {\n\
+    val h = Holder()\n\
+    h.name = \"hi\"\n\
+    return if (h.name == \"hi\") \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("lateinit var should compile + run"), "OK");
+}
+
 /// Enum — `IrClass` enum-entry fields + `values()`/`valueOf`/`ordinal`/`name`.
 #[test]
 fn enum_entries_and_values() {
