@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 451).
+  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 452).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P75 — same-file `const val` read inlining (gate 1750 → 1750, +0 corpus, byte-equality FIX,
+  FAIL=0).** Completes the const byte-parity started in P73: a same-file top-level `const val` read now
+  inlines its literal as `ldc` (kotlinc's behavior) instead of `getstatic`. ir_lower records each
+  top-level `const val`'s compile-time literal (`const_lits`, via `ast_literal_const` narrowing to the
+  declared type — `Byte`/`Short`/`Char`/etc.) in pass 1c, and the bare-name read emits `IrExpr::Const`.
+  With P73's `ConstantValue` field + omitted `<clinit>`, a pure const read is now BYTE-IDENTICAL to
+  kotlinc (verified: normalized `javap` diff empty for `const val X = "OK"; fun box() = X`). Remaining
+  const-fold gap (separate): kotlinc folds a const-in-condition (`if (N == 42)`) to a constant branch;
+  krusty still emits the runtime compare. Same-file only (cross-file/companion const reads inline as a
+  follow-up — they need the classpath `ConstantValue`). +0 corpus (const was runtime-correct); pure
+  byte-parity. TDD: tests/const_read_inline_e2e.rs.
 
 - **Phase P74 — companion-object `const val` (gate 1750 → 1750, +0 corpus, FAIL=0).** A `companion
   object` with ANY property previously bailed the whole file. Now a `const val` (compile-time literal) in
