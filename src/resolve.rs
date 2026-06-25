@@ -4620,7 +4620,28 @@ impl<'a> Checker<'a> {
                 // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
                 // `x as Int` on a reference operand is an unbox (`checkcast Integer; intValue()`).
                 let prim_unbox = ot.is_reference() && tt.is_primitive() && !tt.is_unsigned();
-                if !(tt.is_reference() || prim_unbox) || (!ot.is_reference() && ot != Ty::Error) {
+                // A PRIMITIVE operand cast to a CONCRETE reference type (`42 as Any`, `'a' as Char?`,
+                // `b as Byte?`) is a BOX — but only when the operand's wrapper is actually assignable
+                // to the target (`Any`/`Object`, the wrapper itself, or a supertype like `Number`).
+                // An impossible cast (`1 as String`) is NOT boxed — boxing an `Integer` into a `String`
+                // slot is a VerifyError; reject it (skip), as kotlinc rejects it at compile time. A
+                // type-parameter target (`56 as T`) is excluded too — the boxed value would flow into
+                // an erased/bridged generic slot krusty doesn't reconcile.
+                let prim_box = ot.is_primitive()
+                    && !ot.is_unsigned()
+                    && tt.is_reference()
+                    && !self.tparams.contains(&ty.name)
+                    && nullable_prim_wrapper(ot).is_some_and(|bw| {
+                        tt.obj_internal().is_some_and(|t| {
+                            t == "kotlin/Any"
+                                || t == "java/lang/Object"
+                                || t == bw
+                                || self.obj_is_subtype(bw, t)
+                        })
+                    });
+                if !(tt.is_reference() || prim_unbox)
+                    || (!ot.is_reference() && !prim_box && ot != Ty::Error)
+                {
                     self.diags.error(
                         self.span(e),
                         "krusty: 'as' with this type is not supported".to_string(),

@@ -11948,6 +11948,22 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 let arg = self.expr(operand)?;
+                // A PRIMITIVE operand cast to a reference type (`42 as Any`, `'a' as Char?`, `b as
+                // Byte?`) is a BOX: the primitive is boxed to its wrapper (which is-a the target), an
+                // `ImplicitCoercion` the JVM backend emits as `valueOf`. Handle it before the
+                // reference-target paths below (which assume a reference operand + `checkcast`).
+                let operand_ty = self.info.ty(operand);
+                let target_is_tparam = self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
+                if operand_ty.is_primitive() && !operand_ty.is_unsigned() && !target_is_tparam {
+                    let target = self.info.ty(e);
+                    if target.is_reference() {
+                        return Some(self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            type_operand: ty_to_ir(target),
+                        }));
+                    }
+                }
                 // `x as T` — a cast to a type parameter in scope. The IR keeps `T` (with its bound) as
                 // the cast target; the JVM backend erases it (checkcast to the bound, `Object` for an
                 // unbounded `T`). A non-null `T` (`<T : Any>`, `<T : Foo>`) null-checks like kotlinc

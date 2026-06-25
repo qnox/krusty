@@ -767,6 +767,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxed, and the value-class pass would unbox a `null` (NPE) — so it skips rather than miscompile. Test:
   `tests/nullable_cast_e2e.rs`.
 
+- **Cast of a primitive operand to a reference type (`42 as Any`, `'a' as Char?`, `b as Byte?`).** A
+  boxing operation — the primitive is boxed to its wrapper (`Integer`/`Character`/`Byte`, an
+  `ImplicitCoercion` → `valueOf`), which is-a the target. Allowed ONLY when the wrapper is assignable
+  to the target (`Any`/`Object`, the wrapper itself, or a supertype like `Number`/`Comparable`); an
+  impossible cast (`1 as String`) is rejected, not boxed — boxing an `Integer` into a `String` slot is
+  a load-time VerifyError, and kotlinc rejects it at compile time anyway. A type-parameter target
+  (`56 as T`) is excluded: the boxed value would flow into an erased/bridged generic slot krusty does
+  not reconcile (it skips). Unsigned operands (`1u as Any`) are excluded too. Test:
+  `tests/primitive_box_cast_e2e.rs`.
+
 - **Named arguments on a constructor call (`C(b = 9)`).** The primary constructor's parameter names map
   the labels onto positions, exactly as for a top-level function — including a call that skips a leading
   parameter whose default is a simple literal (the checker maps via `map_call_args`, the lowering fills

@@ -941,3 +941,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   Lambda`/`call Foo`), surfaced by the `survey` binary so the "lower bailed" bucket is an actionable
   roadmap rather than one opaque category. Read only by `survey`; zero compiler behaviour. `just survey
   [CATEGORY]` runs it against the version-matched cached corpus.
+- **Primitive→reference box cast (`42 as Any`, `'a' as Char?`, `b as Byte?`).** A primitive operand
+  cast to a reference type now boxes (its wrapper is-a the target) instead of the checker rejecting it.
+  Two guards keep it sound (review-driven): (1) a type-parameter target (`56 as T`) is excluded — an
+  initial version without it caused 5 miscompiles (boxing into an erased/bridged generic slot →
+  VerifyError/CCE); (2) an *impossible* cast (`1 as String`) is rejected, not boxed (the wrapper must
+  be assignable to the target via `obj_is_subtype`) — boxing `Integer` into a `String` slot would be a
+  load-time VerifyError. Gate 1763/0. `tests/primitive_box_cast_e2e.rs`.
