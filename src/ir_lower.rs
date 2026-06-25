@@ -400,6 +400,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 serial_names: serial_names_of(file, c),
                 custom_serializer: lo.custom_serializer_of(c),
                 field_serializers: lo.field_serializers_of(c),
+                field_defaults: fields
+                    .iter()
+                    .map(|(n, _)| {
+                        c.props
+                            .iter()
+                            .find(|p| p.name == *n)
+                            .and_then(|p| p.default)
+                            .and_then(|d| const_default_of(file, d))
+                    })
+                    .collect(),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -822,6 +832,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     serial_names: Vec::new(),
                     custom_serializer: None,
                     field_serializers: Vec::new(),
+                    field_defaults: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -2101,6 +2112,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             serial_names: Vec::new(),
                             custom_serializer: None,
                             field_serializers: Vec::new(),
+                            field_defaults: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -3890,6 +3902,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -5543,6 +5556,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -5812,6 +5826,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -13934,6 +13949,25 @@ fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
 /// (const-folded). Empty when none — the serialization extension reads this to name descriptor elements.
+/// Const-fold a primary-constructor default-value expression to an [`IrConst`] for the serialization
+/// extension's `isOptional` element handling. Only obvious compile-time literals (the common
+/// `= null`/`= 5`/`= "x"`/`= true` defaults); `None` for any non-literal default (the field is then
+/// treated as non-optional — never miscompiled).
+fn const_default_of(file: &ast::File, e: AstExprId) -> Option<crate::ir::IrConst> {
+    use crate::ir::IrConst;
+    Some(match file.expr(e) {
+        Expr::NullLit => IrConst::Null,
+        Expr::IntLit(v) => IrConst::Int(*v as i32),
+        Expr::LongLit(v) => IrConst::Long(*v),
+        Expr::BoolLit(v) => IrConst::Boolean(*v),
+        Expr::DoubleLit(v) => IrConst::Double(*v),
+        Expr::FloatLit(v) => IrConst::Float(*v),
+        Expr::CharLit(v) => IrConst::Char(*v),
+        Expr::StringLit(s) => IrConst::String(s.clone()),
+        _ => return None,
+    })
+}
+
 fn serial_names_of(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, String)> {
     c.props
         .iter()

@@ -496,6 +496,12 @@ pub struct IrClass {
     /// The serialization extension routes that property's `childSerializers`/descriptor element through
     /// an instance of `X` instead of a default builtin/nested serializer. Ignored by the core backend.
     pub field_serializers: Vec<(String, String)>,
+    /// Per-property CONSTANT default values from a primary-constructor default (`val b: Int = 5` →
+    /// `Some(Int(5))`, `val t: T? = null` → `Some(Null)`), parallel to `fields`. `None` for a property
+    /// with no default OR a non-constant default. The serialization extension marks an element with a
+    /// default `isOptional` and omits it on encode when it still equals the default. Ignored by the core
+    /// backend (constructor defaults are realized separately via the `$default` synthetic).
+    pub field_defaults: Vec<Option<IrConst>>,
     /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
     /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
     /// matching kotlinc, which inserts the check at each access site (not only the property getter).
