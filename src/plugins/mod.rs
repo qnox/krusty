@@ -198,6 +198,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         serial_names: Vec::new(),
         custom_serializer: None,
         field_serializers: Vec::new(),
+        contextual_fields: Vec::new(),
         is_value: false,
         type_param_bounds: Vec::new(),
         type_params: Vec::new(),

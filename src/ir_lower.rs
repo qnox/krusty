@@ -525,6 +525,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 serial_names: serial_names_of(file, c),
                 custom_serializer: lo.custom_serializer_of(c),
                 field_serializers: lo.field_serializers_of(c),
+                contextual_fields: lo.contextual_fields_of(c),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -895,6 +896,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     serial_names: Vec::new(),
                     custom_serializer: None,
                     field_serializers: Vec::new(),
+                    contextual_fields: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
@@ -2308,6 +2310,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             serial_names: Vec::new(),
                             custom_serializer: None,
                             field_serializers: Vec::new(),
+                            contextual_fields: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
@@ -4241,6 +4244,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -5521,6 +5525,62 @@ impl<'a> Lower<'a> {
             .collect()
     }
 
+    /// Property names whose element serializer is CONTEXTUAL: a property carrying `@Contextual`, or one
+    /// whose type is named in a file-level `@file:UseContextualSerialization(<type>::class)`. Matching is
+    /// by type NAME (typealias-expanded on both sides), so `@file:UseContextualSerialization(MyDate::class)`
+    /// (where `typealias MyDate = java.time.LocalDate`) covers both a `MyDate` and a `java.time.LocalDate`
+    /// property. The plugin emits `ContextualSerializer(<type>::class)` for these (descriptor kind CONTEXTUAL).
+    fn contextual_fields_of(&self, c: &ast::ClassDecl) -> Vec<String> {
+        // Canonical (typealias-expanded) type names named by the file's `@UseContextualSerialization`.
+        // Matching is on the FULL canonical name (never a bare simple name), so a same-simple-name class
+        // in a different package is NOT mis-marked contextual.
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (ann, args) in &self.afile.file_annotations {
+            if ann != "UseContextualSerialization" {
+                continue;
+            }
+            for &arg in args {
+                if let Expr::CallableRef {
+                    receiver: Some(r),
+                    name,
+                } = self.afile.expr(arg)
+                {
+                    if name == "class" {
+                        if let Expr::Name(x) = self.afile.expr(*r) {
+                            names.insert(self.canonical_type_name(x));
+                        }
+                    }
+                }
+            }
+        }
+        c.props
+            .iter()
+            .filter_map(|p| {
+                let has_contextual = p
+                    .annotations
+                    .iter()
+                    .any(|a| a.rsplit(['/', '.']).next() == Some("Contextual"));
+                if has_contextual || names.contains(&self.canonical_type_name(&p.ty.name)) {
+                    Some(p.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// A type name's `typealias` target (`MyDate` → `java.time.LocalDate`) or the name unchanged. Lets a
+    /// contextual-type reference match a property declared via either the alias or the underlying type,
+    /// while comparing FULL names only (so `java.time.LocalDate` never matches `other.pkg.LocalDate`).
+    fn canonical_type_name(&self, name: &str) -> String {
+        self.afile
+            .type_aliases
+            .iter()
+            .find(|(a, _)| a == name)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| name.to_string())
+    }
+
     fn class_decl(&self, name: &str) -> Option<&ast::ClassDecl> {
         self.afile
             .decls
@@ -5932,6 +5992,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
@@ -6198,6 +6259,7 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),

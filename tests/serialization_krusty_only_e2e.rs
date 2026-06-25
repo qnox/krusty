@@ -300,6 +300,41 @@ fun box(): String {
 }
 
 #[test]
+fn contextual_serialization_descriptor_kind_in_krusty() {
+    // A `@Contextual` property makes its element serializer CONTEXTUAL: krusty emits
+    // `ContextualSerializer(<type>::class)`, whose descriptor `kind` is CONTEXTUAL. Uses a plain (non
+    // `@Serializable`) user type `Plain` so no JDK type is needed on the harness classpath. The
+    // file-level `@file:UseContextualSerialization` + typealias path is covered by the
+    // `typealiasesInContextualTest` boxIr corpus case.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+
+class Plain(val x: Int)
+
+@Serializable
+data class MyClass(@Contextual val p: Plain, @Contextual val q: Plain?)
+
+fun box(): String {
+    val d = MyClass.serializer().descriptor
+    val k0 = d.getElementDescriptor(0).kind
+    val k1 = d.getElementDescriptor(1).kind
+    if (k0 != SerialKind.CONTEXTUAL) return "k0=$k0"
+    if (k1 != SerialKind.CONTEXTUAL) return "k1=$k1"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerContextual") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "contextual element kinds wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty contextual serialization (descriptor kind CONTEXTUAL) OK");
+}
+
+#[test]
 fn reified_serializer_free_function_and_data_object_in_krusty() {
     // `serializer<T>()` (the reified free function `kotlinx.serialization.serializer`) can't be called
     // directly (throws at runtime) — krusty desugars it to `T.serializer()`. Also exercises a
