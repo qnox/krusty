@@ -2691,11 +2691,11 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
         diags.error(r.span, format!("unresolved reference '{}'.", r.name));
         Ty::Error
     };
-    // A nullable primitive is its boxed wrapper (`Int?` = `java/lang/Integer`); a non-wrappable
-    // primitive (unsigned/value) is still rejected (skip, never miscompiled).
+    // A nullable primitive is `Nullable(prim)` (it boxes to its wrapper at the backend boundary); a
+    // non-boxable primitive (unsigned/value) is still rejected (skip, never miscompiled).
     if r.nullable && !base.is_reference() && base != Ty::Error {
-        if let Some(w) = nullable_prim_wrapper(base) {
-            return Ty::obj(w);
+        if let Some(nb) = base.nullable_boxed() {
+            return nb;
         }
         diags.error(
             r.span,
@@ -2706,8 +2706,10 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
     base
 }
 
-/// The JVM wrapper internal name for a nullable primitive (`Int?` → `java/lang/Integer`). `None` for a
-/// non-wrappable primitive (unsigned/value types) — those stay unsupported.
+/// The JVM wrapper internal name of a primitive (`Int` → `java/lang/Integer`). `None` for a
+/// non-wrappable primitive (unsigned/value types). The sole remaining caller is the `as`-cast box
+/// check, which needs the wrapper's *JVM name* to test assignability to a supertype target
+/// (`42 as Number`); the nullable *type* itself is now `Ty::Nullable`, built via [`Ty::nullable_boxed`].
 pub(crate) fn nullable_prim_wrapper(t: Ty) -> Option<&'static str> {
     Some(match t {
         Ty::Int => "java/lang/Integer",
@@ -2718,23 +2720,6 @@ pub(crate) fn nullable_prim_wrapper(t: Ty) -> Option<&'static str> {
         Ty::Char => "java/lang/Character",
         Ty::Byte => "java/lang/Byte",
         Ty::Short => "java/lang/Short",
-        _ => return None,
-    })
-}
-
-/// The unboxed primitive `Ty` of a JVM wrapper internal name (`java/lang/Integer` → `Int`); inverse of
-/// [`nullable_prim_wrapper`]. Used to narrow a nullable primitive (`Int?`) to its primitive after `!!`
-/// or a null smart-cast.
-pub(crate) fn prim_of_wrapper(internal: &str) -> Option<Ty> {
-    Some(match internal {
-        "java/lang/Integer" => Ty::Int,
-        "java/lang/Long" => Ty::Long,
-        "java/lang/Double" => Ty::Double,
-        "java/lang/Float" => Ty::Float,
-        "java/lang/Boolean" => Ty::Boolean,
-        "java/lang/Character" => Ty::Char,
-        "java/lang/Byte" => Ty::Byte,
-        "java/lang/Short" => Ty::Short,
         _ => return None,
     })
 }
@@ -3566,8 +3551,8 @@ impl<'a> Checker<'a> {
             Ty::Error
         };
         if r.nullable && !base.is_reference() && base != Ty::Error {
-            if let Some(w) = nullable_prim_wrapper(base) {
-                return Ty::obj(w);
+            if let Some(nb) = base.nullable_boxed() {
+                return nb;
             }
             self.diags.error(
                 r.span,
@@ -3898,7 +3883,7 @@ impl<'a> Checker<'a> {
                     if let Some(n) = name {
                         if let Some(l) = self.lookup(&n) {
                             if !l.is_var {
-                                if let Some(p) = l.ty.obj_internal().and_then(prim_of_wrapper) {
+                                if let Some(p) = l.ty.nullable_primitive() {
                                     return Some((n, p));
                                 }
                             }
@@ -4315,11 +4300,9 @@ impl<'a> Checker<'a> {
             return;
         }
         // A primitive is assignable to its boxed wrapper — i.e. to the matching nullable primitive
-        // (`Int` → `Int?` = `java/lang/Integer`). The box (`Integer.valueOf`) is the emit site's job.
-        if let Ty::Obj(ew, _) = expected {
-            if prim_of_wrapper(ew) == Some(actual) {
-                return;
-            }
+        // (`Int` → `Int?`). The box (`Integer.valueOf`) is the emit site's job.
+        if expected.nullable_primitive() == Some(actual) {
+            return;
         }
         // In Kotlin every type is a subtype of `Any`/`Object`, and the top type narrows back to a
         // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
@@ -4429,7 +4412,7 @@ impl<'a> Checker<'a> {
             Expr::NotNull { operand } => {
                 // The value with its non-null type; `Int?!!` narrows to the unboxed primitive `Int`.
                 let t = self.expr(operand);
-                t.obj_internal().and_then(prim_of_wrapper).unwrap_or(t)
+                t.nullable_primitive().unwrap_or(t)
             }
             Expr::Throw { operand } => {
                 self.expr(operand); // any reference (a Throwable) — krusty doesn't model the hierarchy
@@ -4677,14 +4660,17 @@ impl<'a> Checker<'a> {
                     && !ot.is_unsigned()
                     && tt.is_reference()
                     && !self.tparams.contains(&ty.name)
-                    && nullable_prim_wrapper(ot).is_some_and(|bw| {
-                        tt.obj_internal().is_some_and(|t| {
-                            t == "kotlin/Any"
-                                || t == "java/lang/Object"
-                                || t == bw
-                                || self.obj_is_subtype(bw, t)
-                        })
-                    });
+                    // `'a' as Char?` / `42 as Int?` — box to the operand's own nullable form …
+                    && (tt.nullable_primitive() == Some(ot)
+                        // … or `42 as Any` / `42 as Number` — box to a supertype of the JVM wrapper.
+                        || nullable_prim_wrapper(ot).is_some_and(|bw| {
+                            tt.obj_internal().is_some_and(|t| {
+                                t == "kotlin/Any"
+                                    || t == "java/lang/Object"
+                                    || t == bw
+                                    || self.obj_is_subtype(bw, t)
+                            })
+                        }));
                 if !(tt.is_reference() || prim_unbox)
                     || (!ot.is_reference() && !prim_box && ot != Ty::Error)
                 {
@@ -4801,7 +4787,7 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(rhs);
                 // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
                 // unboxed primitive, so `intNullable ?: 0` is `Int`.
-                let lt = lt0.obj_internal().and_then(prim_of_wrapper).unwrap_or(lt0);
+                let lt = lt0.nullable_primitive().unwrap_or(lt0);
                 // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
                 // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
                 if rt == Ty::Unit {
@@ -4914,12 +4900,12 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                // The safe-call result is nullable: a primitive member result becomes its boxed wrapper
-                // (`s?.length` → `Int?` = `java/lang/Integer`); the member value is boxed (or `null`) in
-                // lowering. A non-wrappable primitive (unsigned/value) stays unsupported.
+                // The safe-call result is nullable: a primitive member result becomes `Int?`
+                // (`s?.length`); the member value is boxed (or `null`) in lowering. A non-boxable
+                // primitive (unsigned/value) stays unsupported.
                 if !result.is_reference() && result != Ty::Error {
-                    if let Some(w) = nullable_prim_wrapper(result) {
-                        return self.set(e, Ty::obj(w));
+                    if let Some(nb) = result.nullable_boxed() {
+                        return self.set(e, nb);
                     }
                     self.diags.error(
                         self.span(e),
@@ -5647,8 +5633,7 @@ impl<'a> Checker<'a> {
                 // Float/Double — their `0.0 == -0.0` IEEE-754 semantics differ between primitive `==` and
                 // boxed `equals`, which needs a dedicated comparison krusty doesn't emit yet.
                 let wrapper_vs_prim = |w: Ty, p: Ty| {
-                    w.obj_internal()
-                        .and_then(prim_of_wrapper)
+                    w.nullable_primitive()
                         .map_or(false, |pw| pw == p && !matches!(pw, Ty::Float | Ty::Double))
                 };
                 if lt == rt
@@ -5671,7 +5656,7 @@ impl<'a> Checker<'a> {
                 // literal, so `A.b === B.b`); krusty emits such a const as a runtime concatenation (a
                 // fresh object), so it can't reproduce String identity yet — skip rather than miscompile.
                 // Object and boxed-primitive identity is unaffected.
-                let is_prim_wrapper = |t: Ty| t.obj_internal().and_then(prim_of_wrapper).is_some();
+                let is_prim_wrapper = |t: Ty| t.nullable_primitive().is_some();
                 if lt == Ty::String || rt == Ty::String {
                     self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
                     Ty::Error
@@ -5860,7 +5845,7 @@ impl<'a> Checker<'a> {
         // Inside the lambda the receiver is NON-null: a nullable-primitive receiver (`Int?` =
         // `java/lang/Integer`, e.g. from a chained `s?.let { … }?.let { it + 1 }`) binds `it`/`this` as
         // the UNBOXED primitive (`Int`), so `it + 1` is primitive arithmetic, not `Integer + Int`.
-        let rt = rt.obj_internal().and_then(prim_of_wrapper).unwrap_or(rt);
+        let rt = rt.nullable_primitive().unwrap_or(rt);
         match name {
             "run" | "apply" if params.is_empty() => {
                 let bt = self.check_with_receiver(rt, body, self.span(a[0]));
@@ -6095,7 +6080,7 @@ impl<'a> Checker<'a> {
         let arg = targs.get(idx)?;
         let t = self.resolve_ty_no_diag(arg);
         let t = if !t.is_reference() {
-            Ty::obj(nullable_prim_wrapper(t)?)
+            t.nullable_boxed()?
         } else {
             t
         };
@@ -7976,16 +7961,16 @@ impl<'a> Checker<'a> {
         if matches!((a, b), (Ty::Int | Ty::Long, Ty::Int | Ty::Long)) {
             return Ty::Long;
         }
-        // A primitive joins with `null` as its boxed (nullable) wrapper — `if (c) true else null` is a
-        // `Boolean?` (`java/lang/Boolean`), the primitive branch boxed at the merge.
+        // A primitive joins with `null` as its boxed (nullable) form — `if (c) true else null` is a
+        // `Boolean?`, the primitive branch boxed at the merge.
         if a == Ty::Null {
-            if let Some(w) = nullable_prim_wrapper(b) {
-                return Ty::obj(w);
+            if let Some(nb) = b.nullable_boxed() {
+                return nb;
             }
         }
         if b == Ty::Null {
-            if let Some(w) = nullable_prim_wrapper(a) {
-                return Ty::obj(w);
+            if let Some(nb) = a.nullable_boxed() {
+                return nb;
             }
         }
         // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
