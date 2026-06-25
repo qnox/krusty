@@ -5783,6 +5783,77 @@ impl<'a> Lower<'a> {
         Some(a)
     }
 
+    /// Reorder a NAMED-argument call to a CLASSPATH top-level function (`foo(b = …, a = …)`) into
+    /// declared-parameter order, so the positional lowering below sees the arguments positionally. The
+    /// parameter names come from the callee's `@Metadata` (a classpath function isn't in `fun_ids`/
+    /// `fn_facades`, so the same-file/module named-arg paths don't apply). Returns the reordered AST
+    /// argument ids, or `None` when this isn't a uniquely-resolvable classpath named call (then the caller
+    /// leaves the args untouched). Conservative: requires a SINGLE top-level overload carrying names, an
+    /// exact-arity call (no omitted defaults), every label to be a known parameter, and — when reordering
+    /// changes evaluation order — every argument to be side-effect-free (a const/name), matching
+    /// `lower_args_defaulted`.
+    fn reorder_classpath_named_args(
+        &self,
+        call: AstExprId,
+        fname: &str,
+        args: &[AstExprId],
+    ) -> Option<Vec<AstExprId>> {
+        let names = self.afile.call_arg_names.get(&call.0)?;
+        // The single classpath top-level overload with recorded parameter names (federated library set —
+        // a classpath function is not a module function, so `ModuleSymbols` wouldn't surface it).
+        let sets: Vec<Vec<String>> = self
+            .syms
+            .libraries
+            .functions(fname, None)
+            .overloads
+            .into_iter()
+            .filter(|o| {
+                o.kind == crate::libraries::FnKind::TopLevel && !o.call_sig.param_names.is_empty()
+            })
+            .map(|o| o.call_sig.param_names)
+            .collect();
+        let [param_names] = sets.as_slice() else {
+            return None;
+        };
+        let n = param_names.len();
+        if args.len() != n {
+            return None;
+        }
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut pos = 0usize;
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        for (i, &arg) in args.iter().enumerate() {
+            match names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if pos >= n || slot[pos].is_some() {
+                        return None;
+                    }
+                    slot[pos] = Some(arg);
+                    arg_slot.push(pos);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    let idx = param_names.iter().position(|p| p == nm)?;
+                    if slot[idx].is_some() {
+                        return None;
+                    }
+                    slot[idx] = Some(arg);
+                    arg_slot.push(idx);
+                }
+            }
+        }
+        // Reordering changes evaluation order; only proceed when each argument is side-effect-free.
+        let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
+        if reordered
+            && args.iter().any(|&a| {
+                !is_const_literal(self.afile, a) && !matches!(self.afile.expr(a), Expr::Name(_))
+            })
+        {
+            return None;
+        }
+        slot.into_iter().collect()
+    }
+
     /// The receiver's class type for member access. The checker types a bare `object` name as
     /// `Error` (it's only a qualifier), so map an object-name receiver to its object type; otherwise
     /// use the checker's inferred type.
@@ -12584,6 +12655,20 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    // NAMED-ARGUMENT call to a CLASSPATH top-level function (`foo(b = …, a = …)`): reorder
+                    // the arguments into parameter order (from the callee's `@Metadata` names) so the
+                    // positional lowering below sees them positionally. Same-file/module functions have
+                    // their own named-arg handling and are skipped here (this fires only for a name that is
+                    // neither a local nor module-declared). `None` → leave the args untouched.
+                    let args = if self.afile.call_arg_names.contains_key(&e.0)
+                        && self.lookup(&fname).is_none()
+                        && !self.module_declares(&fname)
+                    {
+                        self.reorder_classpath_named_args(e, &fname, &args)
+                            .unwrap_or(args)
+                    } else {
+                        args
+                    };
                     // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
                     // `reified inline` that can't be called directly (throws at runtime) — desugar to
                     // `T.serializer()` for a `@Serializable` T, the way kotlinc's inliner does.

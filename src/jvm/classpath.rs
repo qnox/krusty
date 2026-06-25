@@ -215,8 +215,9 @@ struct ClassMeta {
     /// function name → whether its Kotlin return type is nullable (`takeIf`/`takeUnless` → `T?`).
     return_nullable: HashMap<String, bool>,
     /// per OVERLOAD (a name repeats), in declaration order: `(JVM name, has-extension-receiver, source
-    /// value-param `Ty`s)` — the `Vec<Ty>` length is the source arity (synthetic trailing params excluded).
-    overload_params: Vec<(String, bool, Vec<Ty>)>,
+    /// value-param `Ty`s, source value-param NAMES)` — the `Vec<Ty>`/`Vec<String>` length is the source
+    /// arity (synthetic trailing params excluded). Names drive classpath named-argument resolution.
+    overload_params: Vec<(String, bool, Vec<Ty>, Vec<String>)>,
 }
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
 /// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
@@ -360,7 +361,12 @@ impl Classpath {
                     .iter()
                     .map(|o| meta_param_ty(o.as_deref()))
                     .collect();
-                (f.jvm_name.clone(), f.receiver_class.is_some(), tys)
+                (
+                    f.jvm_name.clone(),
+                    f.receiver_class.is_some(),
+                    tys,
+                    f.value_param_names.clone(),
+                )
             })
             .collect();
         let meta = std::rc::Rc::new(ClassMeta {
@@ -421,7 +427,7 @@ impl Classpath {
         // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
         // skipped — a normal function whose arity already equals the descriptor's).
         all.iter()
-            .filter_map(|(n, has_recv, vp)| {
+            .filter_map(|(n, has_recv, vp, _)| {
                 if n != fn_name {
                     return None;
                 }
@@ -431,6 +437,33 @@ impl Classpath {
                     .then_some(end)
             })
             .max()
+    }
+
+    /// The SOURCE value-parameter NAMES of the `internal.fn_name` overload whose source value params
+    /// prefix-match `desc_params` after its extension-receiver slot — i.e. the names parallel to the
+    /// LOGICAL params of the overload the descriptor denotes. Drives named-argument resolution of a
+    /// classpath call (`foo(b = …, a = …)`). Picks the LONGEST-aligning overload (most specific), matching
+    /// [`metadata_kept_params`]. `None` if no overload aligns or its names are unrecorded/empty.
+    pub fn metadata_param_names(
+        &self,
+        internal: &str,
+        fn_name: &str,
+        desc_params: &[Ty],
+    ) -> Option<Vec<String>> {
+        let meta = self.class_meta(internal);
+        meta.overload_params
+            .iter()
+            .filter_map(|(n, has_recv, vp, names)| {
+                if n != fn_name || names.is_empty() || names.iter().any(String::is_empty) {
+                    return None;
+                }
+                let off = *has_recv as usize;
+                let end = off + vp.len();
+                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
+                    .then_some((end, names.clone()))
+            })
+            .max_by_key(|(end, _)| *end)
+            .map(|(_, names)| names)
     }
 
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →

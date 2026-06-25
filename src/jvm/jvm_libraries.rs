@@ -1285,13 +1285,25 @@ impl SymbolSource for JvmLibraries {
                     physical_ret
                 };
                 let inline = self.cp.is_inline_method(&c.owner, &c.name);
+                // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution. A
+                // top-level function has no receiver, so the logical params equal the (truncated) source
+                // params — only wire names when the count aligns. Defaults aren't recovered here, so a
+                // named call must still supply every argument (just reorderable).
+                let call_sig = match self.cp.metadata_param_names(&c.owner, &c.name, &params) {
+                    Some(names) if names.len() == params.len() => crate::libraries::CallSig {
+                        required: params.len(),
+                        param_names: names,
+                        ..Default::default()
+                    },
+                    _ => crate::libraries::CallSig::default(),
+                };
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
                     receiver: None,
                     ret_nullable: false,
                     public: c.public,
                     receiver_rank: 0,
-                    call_sig: crate::libraries::CallSig::default(),
+                    call_sig,
                     flags: FnFlags {
                         inline,
                         inline_only: inline && !c.public,

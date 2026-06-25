@@ -128,3 +128,29 @@ fn result_get_or_throw_resolves_as_inline_extension() {
         "getOrThrow must not bind a non-Result receiver"
     );
 }
+
+#[test]
+fn metadata_decodes_value_parameter_names() {
+    let Some(cp) = cp() else {
+        eprintln!("no stdlib jar; skipping");
+        return;
+    };
+    // `@Metadata` carries each SOURCE value parameter's NAME (proto `ValueParameter.name`), which
+    // named-argument resolution of a classpath call needs. `kotlin.Pair.copy(first, second)` is a stable
+    // public, non-inline target.
+    let pair = cp.find("kotlin/Pair").expect("kotlin/Pair on classpath");
+    let fns = class_functions(&pair);
+    let copy = fns
+        .iter()
+        .find(|f| f.kotlin_name == "copy")
+        .expect("Pair.copy in metadata");
+    assert_eq!(
+        copy.value_param_names,
+        vec!["first".to_string(), "second".to_string()],
+        "copy's value-parameter names decode from @Metadata"
+    );
+    // Names are parallel to types (same length = source arity).
+    assert_eq!(copy.value_param_names.len(), copy.value_param_types.len());
+    let equals = fns.iter().find(|f| f.kotlin_name == "equals").unwrap();
+    assert_eq!(equals.value_param_names, vec!["other".to_string()]);
+}

@@ -6303,7 +6303,22 @@ impl<'a> Checker<'a> {
                 // A top-level function, or a same-file class CONSTRUCTOR (`C(b = 9)`) — the primary
                 // ctor's parameter names map the labels onto positions, just like a function's.
                 Expr::Name(n) => {
-                    self.module_declares(n) || self.syms.classes.contains_key(n.as_str())
+                    self.module_declares(n)
+                        || self.syms.classes.contains_key(n.as_str())
+                        // A CLASSPATH top-level function whose `@Metadata` records parameter names
+                        // (`foo(b = …, a = …)` against a function from a jar/dependency module). Module
+                        // top-level functions are covered by `module_declares`; this queries the federated
+                        // library set for a classpath overload carrying names.
+                        || self
+                            .syms
+                            .libraries
+                            .functions(n, None)
+                            .overloads
+                            .iter()
+                            .any(|o| {
+                                o.kind == crate::libraries::FnKind::TopLevel
+                                    && !o.call_sig.param_names.is_empty()
+                            })
                 }
                 Expr::Member { receiver, name } => {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
@@ -7860,6 +7875,45 @@ impl<'a> Checker<'a> {
                         .cloned()
                         .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                         .unwrap_or_default();
+                    // NAMED arguments to a classpath function (`describe(count = 3, name = "hi")`):
+                    // reorder the arguments into PARAMETER order using the callee's `@Metadata` names, so
+                    // overload resolution and per-argument checking pair against the right parameters. Falls
+                    // back to source order when there are no labels or the callee has no usable single
+                    // overload with names (`supports_named` already rejected truly unsupported callees).
+                    let (sel_args, arg_tys): (Vec<ExprId>, Vec<Ty>) = match arg_names
+                        .as_ref()
+                        .filter(|ns| ns.iter().any(Option::is_some))
+                    {
+                        Some(names) => {
+                            let pnames: Vec<Vec<String>> = self
+                                .syms
+                                .libraries
+                                .functions(&fname, None)
+                                .overloads
+                                .into_iter()
+                                .filter(|o| {
+                                    o.kind == crate::libraries::FnKind::TopLevel
+                                        && !o.call_sig.param_names.is_empty()
+                                })
+                                .map(|o| o.call_sig.param_names)
+                                .collect();
+                            match pnames.as_slice() {
+                                [pn] => match map_call_args(args, Some(names), pn, pn.len(), &[]) {
+                                    Ok(slots) if slots.iter().all(Option::is_some) => {
+                                        let sa: Vec<ExprId> = slots.into_iter().flatten().collect();
+                                        let at = sa
+                                            .iter()
+                                            .map(|a| self.expr_types[a.0 as usize])
+                                            .collect();
+                                        (sa, at)
+                                    }
+                                    _ => (args.to_vec(), arg_tys.clone()),
+                                },
+                                _ => (args.to_vec(), arg_tys.clone()),
+                            }
+                        }
+                        None => (args.to_vec(), arg_tys.clone()),
+                    };
                     if let Some(c) =
                         self.syms
                             .libraries
@@ -7876,7 +7930,7 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(
                                     c.params[i],
                                     arg_tys[i],
-                                    self.span(args[i]),
+                                    self.span(sel_args[i]),
                                     "argument",
                                 );
                             }
@@ -7884,19 +7938,19 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(
                                     elem,
                                     arg_tys[i],
-                                    self.span(args[i]),
+                                    self.span(sel_args[i]),
                                     "vararg argument",
                                 );
                             }
                         } else {
                             for (i, a) in arg_tys.iter().enumerate() {
-                                if matches!(self.file.expr(args[i]), Expr::Lambda { .. }) {
+                                if matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. }) {
                                     continue;
                                 }
                                 self.expect_assignable(
                                     c.params[i],
                                     *a,
-                                    self.span(args[i]),
+                                    self.span(sel_args[i]),
                                     "argument",
                                 );
                             }
