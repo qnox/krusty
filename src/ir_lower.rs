@@ -13933,27 +13933,60 @@ impl<'a> Lower<'a> {
                                     .resolve_lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                             })
                     } {
-                        let recv =
-                            self.lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
-                        let mut a = vec![recv];
-                        for (i, &arg) in args.iter().enumerate() {
-                            match c.params.get(i + 1) {
-                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                None => a.push(self.expr(arg)?),
+                        let (c, is_member) = c;
+                        let phys = c.physical_ret;
+                        let call = if is_member {
+                            // Instance MEMBER (`recv.foo { … }`): the receiver is the DISPATCH receiver
+                            // (`invokevirtual`/`invokeinterface`), NOT an argument. `c.params` are the
+                            // value parameters only (no receiver). Emitting it static would leave the
+                            // receiver on the operand stack → `VerifyError`.
+                            let interface = self
+                                .syms
+                                .libraries
+                                .resolve_type(&c.owner)
+                                .is_some_and(|t| t.is_interface());
+                            let recv = self.expr(receiver)?;
+                            let mut a = Vec::new();
+                            for (i, &arg) in args.iter().enumerate() {
+                                match c.params.get(i) {
+                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                    None => a.push(self.expr(arg)?),
+                                }
                             }
-                        }
-                        let call = self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner: c.owner,
-                                name: c.name,
-                                descriptor: c.descriptor,
-                                inline: true,
-                                must_inline: c.must_inline,
-                            },
-                            dispatch_receiver: None,
-                            args: a,
-                        });
-                        self.coerce_generic_read(call, e, c.physical_ret)
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Virtual {
+                                    owner: c.owner,
+                                    name: c.name,
+                                    descriptor: c.descriptor,
+                                    interface,
+                                },
+                                dispatch_receiver: Some(recv),
+                                args: a,
+                            })
+                        } else {
+                            // Extension: a static method whose receiver is the FIRST argument.
+                            let recv = self
+                                .lower_arg(receiver, &ty_to_ir(*c.params.first().unwrap_or(&rt)))?;
+                            let mut a = vec![recv];
+                            for (i, &arg) in args.iter().enumerate() {
+                                match c.params.get(i + 1) {
+                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                    None => a.push(self.expr(arg)?),
+                                }
+                            }
+                            self.ir.add_expr(IrExpr::Call {
+                                callee: Callee::Static {
+                                    owner: c.owner,
+                                    name: c.name,
+                                    descriptor: c.descriptor,
+                                    inline: true,
+                                    must_inline: c.must_inline,
+                                },
+                                dispatch_receiver: None,
+                                args: a,
+                            })
+                        };
+                        self.coerce_generic_read(call, e, phys)
                     } else if let Some(c) = {
                         // A private `@InlineOnly` extension (`String.uppercase()` → inlines
                         // `toUpperCase(Locale.ROOT)`): resolve via the inline-only path and emit an inline
