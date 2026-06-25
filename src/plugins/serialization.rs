@@ -370,11 +370,44 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
                 field: "INSTANCE",
             }));
         }
+        // Per-type-parameter upper bound (internal name) of the BASE class — used to build a
+        // `PolymorphicSerializer` for a star-projection / erased `Any` argument (`Box<*>` with
+        // `Box<T : E>` → `PolymorphicSerializer(E::class)`). `kotlin/Any` for an unbounded parameter.
+        let bounds: Vec<String> = {
+            let base = ir.classes.iter().find(|c| &c.fq_name == fq_name);
+            (0..n_tp)
+                .map(|i| {
+                    base.and_then(|c| {
+                        let name = c.type_params.get(i)?;
+                        c.type_param_bounds
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .and_then(|(_, bt)| match bt {
+                                IrType::Class { fq_name, .. } => Some(fq_name.clone()),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or_else(|| "kotlin/Any".to_string())
+                })
+                .collect()
+        };
         // Generic: `Foo.serializer(<arg serializer>…)`, each type argument's serializer derived
-        // recursively; if any can't be derived, the whole element can't be.
+        // recursively; a star-projection / erased `Any` argument becomes a `PolymorphicSerializer` over
+        // the parameter's bound; if any other argument can't be derived, the whole element can't be.
         let mut arg_sers = Vec::with_capacity(n_tp);
-        for a in type_args.iter().take(n_tp) {
-            arg_sers.push(element_serializer_expr(ir, a)?);
+        for (i, a) in type_args.iter().take(n_tp).enumerate() {
+            if let Some(e) = element_serializer_expr(ir, a) {
+                arg_sers.push(e);
+            } else if matches!(a, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+                && bounds[i] != "kotlin/Any"
+            {
+                // A star projection on a BOUNDED type parameter (`Box<*>` with `Box<T : E>`, the arg
+                // erased to `Any`) → `PolymorphicSerializer(E::class)`. Gated on a non-`Any` bound so an
+                // explicit unbounded `Box<Any>` (indistinguishable from `*` after erasure) isn't captured.
+                arg_sers.push(build_polymorphic_serializer(ir, &bounds[i]));
+            } else {
+                return None;
+            }
         }
         if arg_sers.len() != n_tp {
             return None;
@@ -401,6 +434,31 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
     None
 }
 
+/// `new PolymorphicSerializer(<base>::class)` — the element serializer for a star-projection / erased
+/// `Any` type argument (`Box<*>` with `Box<T : E>` → `PolymorphicSerializer(E::class)`); its descriptor
+/// `serialName` is `kotlinx.serialization.Polymorphic<E>`.
+fn build_polymorphic_serializer(ir: &mut IrFile, base_internal: &str) -> ExprId {
+    let classlit = ir.add_expr(IrExpr::ClassConst {
+        internal: base_internal.to_string(),
+    });
+    let kclass = ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: "kotlin/jvm/internal/Reflection".to_string(),
+            name: "getOrCreateKotlinClass".to_string(),
+            descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+            inline: false,
+            must_inline: false,
+        },
+        dispatch_receiver: None,
+        args: vec![classlit],
+    });
+    ir.add_expr(IrExpr::NewExternal {
+        internal: "kotlinx/serialization/PolymorphicSerializer".to_string(),
+        ctor_desc: "(Lkotlin/reflect/KClass;)V".to_string(),
+        args: vec![kclass],
+    })
+}
+
 /// Non-mutating mirror of [`element_serializer_expr`]: whether a property of type `ty` HAS a derivable
 /// element serializer (nested @Serializable generic/non-generic, or a builtin). `deserialize` gates on
 /// this so it stubs cleanly instead of emitting a `null` element serializer for an un-derivable type.
@@ -425,11 +483,24 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
         if n_tp == 0 {
             return true;
         }
+        let base = ir.classes.iter().find(|c| &c.fq_name == fq_name);
         return type_args.len() >= n_tp
-            && type_args
-                .iter()
-                .take(n_tp)
-                .all(|a| can_derive_element_serializer(ir, a));
+            && type_args.iter().take(n_tp).enumerate().all(|(i, a)| {
+                if can_derive_element_serializer(ir, a) {
+                    return true;
+                }
+                // An erased `Any` argument (star projection) on a BOUNDED type parameter becomes a
+                // `PolymorphicSerializer` (mirrors `element_serializer_expr`).
+                matches!(a, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+                    && base.is_some_and(|c| {
+                        c.type_params.get(i).is_some_and(|name| {
+                            c.type_param_bounds.iter().any(|(n, bt)| {
+                                n == name
+                                    && !matches!(bt, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+                            })
+                        })
+                    })
+            });
     }
     builtin_element_serializer(ty).is_some()
 }

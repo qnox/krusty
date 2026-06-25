@@ -331,6 +331,38 @@ fun box(): String {
 }
 
 #[test]
+fn star_projection_polymorphic_serializer_in_krusty() {
+    // A `Box<*>` field (star projection on `Box<T : E>`) derives `Box.serializer(PolymorphicSerializer(
+    // E::class))` for its element — the descriptor of the `*` argument is `kotlinx.serialization.
+    // Polymorphic<E>`. Mirrors corpus `starProjections`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+
+interface E
+
+@Serializable
+class Box<T: E>(val boxed: T)
+
+@Serializable
+class Wrapper(val boxed: Box<*>)
+
+fun box(): String {
+    val s = Wrapper.serializer().descriptor.elementDescriptors.joinToString()
+    return if (s == "Box(boxed: kotlinx.serialization.Polymorphic<E>)") "OK" else s
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerStarProj") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "star-projection polymorphic serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty star-projection polymorphic serializer OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
