@@ -637,6 +637,21 @@ it as `Long`/`Double`/`Float` to match the local's slot width — a reviewer-cau
 defaults (computed initializers, which DO need the `seen`-mask + mask ctor) and the default-value *corpus*
 files' OTHER needs (sealed-parametrized interfaces, decode-side erased-member access, `C()` ctor-default-args).
 
+#### Update (2026-06-25) — classpath-typed fields → corpus 8/69, main gate 1755 → 1760
+
+`ty_of` (ir_lower's `TypeRef`→`Ty`) resolves only file-local classes + built-ins, so a CLASSPATH-typed
+field (`kotlin.uuid.Uuid`, `java.net.URL`, resolved via an import) erased to `Any` — its field/ctor/getter
+became `Object`. New `Lowerer::field_ty` falls back to the classpath-aware `ty_ref` (resolving a non-nullable
+copy; the caller re-applies nullability) when `ty_of` yields `Any`; BOTH `ctor_fields` (field decl) and
+`ctor_args` (ctor param + putfield) use it, so decl/param/getter agree on the concrete type. The
+serialization plugin gains `Uuid`→`kotlinx/serialization/internal/UuidSerializer` as a builtin element
+serializer + a non-null `encodeSerializableElement` branch for a builtin-ref element. **Corpus uuidSerializer
+greens → 8/69; main box gate 1755 → 1760 (+5, 0 FAIL)** — classes with classpath-typed fields across the
+box corpus now get correct field/ctor/getter types (net win, no regression). Tests:
+`classpath_typed_field_serializer_in_krusty` (+ a nullable `Uuid?` variant verified). GREEN (8):
+constValInSerialName, contextualByDefault, customFixedNonSerializableArguments, externalSerialierJava,
+inlineClasses, polymorphic, serializerFactory, uuidSerializer.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
