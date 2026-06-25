@@ -589,7 +589,7 @@ fn value_class_underlying(ir: &IrFile, ty: &IrType) -> Option<IrType> {
         if !c.is_value {
             return None;
         }
-        let u = c.fields.first()?.1.clone();
+        let u = c.fields.first()?.ty.clone();
         // Unwrap a further value-class layer; else this layer's underlying IS the terminal type.
         Some(rec(ir, &u, depth + 1).unwrap_or(u))
     }
@@ -905,11 +905,18 @@ impl IrPlugin for SerializationPlugin {
                 None,
             );
 
-            let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty.clone()))
+                .collect();
             // Per-property constant default (`Some` ⇒ the element is `isOptional` — omitted on encode when
             // it still equals the default).
-            let foo_defaults: Vec<Option<IrConst>> =
-                ir.classes[class_id as usize].field_defaults.clone();
+            let foo_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .map(|f| f.default.clone())
+                .collect();
             // Generic `@Serializable class C<T…>`: the `$serializer` is a CLASS (not a singleton object)
             // with one `KSerializer` constructor parameter per type parameter (`typeSerialK`, stored at
             // fields `1..=N`, after the `descriptor` field 0), used as the element serializer for any
@@ -938,18 +945,23 @@ impl IrPlugin for SerializationPlugin {
             // Field 0 is the `descriptor` (a `PluginGeneratedSerialDescriptor`), built in <init>. A generic
             // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
             // set from the constructor parameters.
-            ser.fields = vec![(
-                "descriptor".to_string(),
-                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            )];
+            // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
+            ser.fields = vec![crate::ir::IrField {
+                is_final: true,
+                ..crate::ir::IrField::new(
+                    "descriptor".to_string(),
+                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                )
+            }];
             for k in 0..n_tp {
-                ser.fields.push((
-                    format!("typeSerial{k}"),
-                    kserializer_of(class_ty("kotlin/Any")),
-                ));
+                ser.fields.push(crate::ir::IrField {
+                    is_final: true,
+                    ..crate::ir::IrField::new(
+                        format!("typeSerial{k}"),
+                        kserializer_of(class_ty("kotlin/Any")),
+                    )
+                });
             }
-            ser.field_final = vec![true; 1 + n_tp];
-            ser.field_private = vec![true; 1 + n_tp];
             ser.ctor_param_count = n_tp as u32;
             // The N constructor params ARE the type-param serializers (`is_field=false`: stored manually in
             // <init> to fields `1..=N`, NOT auto-stored — field 0 is the descriptor, built in <init>).
@@ -1196,18 +1208,21 @@ impl IrPlugin for SerializationPlugin {
             let fields: Vec<(String, IrType)> = ir.classes[class_id as usize]
                 .fields
                 .iter()
-                .map(|(n, ty)| {
+                .map(|f| {
                     (
-                        n.clone(),
-                        value_class_underlying(ir, ty).unwrap_or(ty.clone()),
+                        f.name.clone(),
+                        value_class_underlying(ir, &f.ty).unwrap_or(f.ty.clone()),
                     )
                 })
                 .collect();
             let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
             // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
             // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
-            let field_defaults: Vec<Option<IrConst>> =
-                ir.classes[class_id as usize].field_defaults.clone();
+            let field_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .map(|f| f.default.clone())
+                .collect();
             // Per-property explicit serializers (`@Serializable(with = X::class)` on a field).
             let field_sers: std::collections::HashMap<String, String> = ir.classes
                 [class_id as usize]
@@ -1242,8 +1257,11 @@ impl IrPlugin for SerializationPlugin {
             // `None` for a concrete-typed field. Lets serialize/deserialize/childSerializers route a
             // type-param element through the ctor-supplied `this.typeSerialK` instead of a fixed serializer.
             let class_type_params: Vec<String> = ir.classes[class_id as usize].type_params.clone();
-            let field_tps: Vec<Option<String>> =
-                ir.classes[class_id as usize].field_type_params.clone();
+            let field_tps: Vec<Option<String>> = ir.classes[class_id as usize]
+                .fields
+                .iter()
+                .map(|f| f.type_param.clone())
+                .collect();
             let tp_field: Vec<Option<u32>> = (0..fields.len())
                 .map(|i| {
                     field_tps.get(i).and_then(|o| o.as_ref()).and_then(|tp| {
@@ -1967,7 +1985,7 @@ mod tests {
         c.fields = field_types
             .iter()
             .enumerate()
-            .map(|(i, ty)| (format!("f{i}"), class_ty(ty)))
+            .map(|(i, ty)| crate::ir::IrField::new(format!("f{i}"), class_ty(ty)))
             .collect();
         c.ctor_param_count = field_types.len() as u32;
         let id = ir.add_class(c);
@@ -2008,7 +2026,7 @@ mod tests {
         // encode/decodeNullableSerializableElement with the builtin StringSerializer singleton, not
         // the plain encode/decodeStringElement path (which can't represent null).
         let (mut ir, ctx, id) = serializable_class("N", &["kotlin/Int", "kotlin/String"]);
-        if let IrType::Class { nullable, .. } = &mut ir.classes[id as usize].fields[1].1 {
+        if let IrType::Class { nullable, .. } = &mut ir.classes[id as usize].fields[1].ty {
             *nullable = true;
         }
         run(&mut ir, &ctx);
@@ -2037,7 +2055,7 @@ mod tests {
         // nullable). The plugin must still route it through encodeNullableSerializableElement with the
         // builtin IntSerializer singleton — this guards the boxed-name mapping.
         let (mut ir, ctx, id) = serializable_class("P", &["kotlin/Int"]);
-        ir.classes[id as usize].fields[0].1 = IrType::Class {
+        ir.classes[id as usize].fields[0].ty = IrType::Class {
             fq_name: "java/lang/Integer".to_string(),
             type_args: vec![],
             nullable: true,
@@ -2061,12 +2079,12 @@ mod tests {
         // SerializableElement (not the plain serializable element, which can't represent null).
         let mut ir = IrFile::default();
         let mut inner = synthetic_class("Inner");
-        inner.fields = vec![("v".to_string(), class_ty("kotlin/Int"))];
+        inner.fields = vec![crate::ir::IrField::new("v".to_string(), class_ty("kotlin/Int"))];
         inner.ctor_param_count = 1;
         let inner_id = ir.add_class(inner);
         let mut outer = synthetic_class("Outer");
         outer.fields = vec![
-            (
+            crate::ir::IrField::new(
                 "inner".to_string(),
                 IrType::Class {
                     fq_name: "Inner".to_string(),
@@ -2074,7 +2092,7 @@ mod tests {
                     nullable: true,
                 },
             ),
-            ("label".to_string(), class_ty("kotlin/String")),
+            crate::ir::IrField::new("label".to_string(), class_ty("kotlin/String")),
         ];
         outer.ctor_param_count = 2;
         let outer_id = ir.add_class(outer);
@@ -2231,7 +2249,7 @@ mod tests {
         for (name, n) in [("demo/A", 1usize), ("demo/B", 2)] {
             let mut c = synthetic_class(name);
             c.fields = (0..n)
-                .map(|i| (format!("f{i}"), class_ty("kotlin/Int")))
+                .map(|i| crate::ir::IrField::new(format!("f{i}"), class_ty("kotlin/Int")))
                 .collect();
             let id = ir.add_class(c);
             ctx.class_annotations

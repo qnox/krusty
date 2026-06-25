@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrType,
     IrTypeOp,
 };
 use crate::resolve::{SymbolTable, TypeInfo};
@@ -450,24 +450,83 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     return None;
                 }
             }
+            // Per-field finality aligned to `fields`: `this$0` is final; a property field is final unless
+            // `var`; each synthetic `x$delegate` field is final.
+            let field_finals: Vec<bool> = inner_outer
+                .iter()
+                .map(|_| true)
+                .chain(c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var))
+                .chain(
+                    c.body_props
+                        .iter()
+                        .filter(|p| is_backing_field_prop(p))
+                        .map(|p| !p.is_var),
+                )
+                .chain(delegate_fields.iter().map(|_| true))
+                .collect();
+            let ir_fields: Vec<IrField> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, (n, t))| {
+                    let default = c
+                        .props
+                        .iter()
+                        .find(|p| p.name == *n)
+                        .and_then(|p| p.default)
+                        .and_then(|d| const_default_of(file, d))
+                        // Widen the literal to the field's type so its JVM slot width/kind matches the
+                        // field local (`val x: Long = 5` parses `5` as `Int` — store it as `Long`).
+                        .map(|cst| widen_const_to(cst, *t));
+                    let ir = ty_to_ir(*t);
+                    // Re-attach a generic field's TYPE ARGUMENTS from the property's source `TypeRef`
+                    // (`ty_of`/`ty_to_ir` erase them for a general `Obj`). Read straight from the AST so
+                    // `Box<Int>` keeps `<Int>` — the serialization extension needs it to build a nested
+                    // generic element serializer (`Box.serializer(IntSerializer)`); descriptors still
+                    // erase, so this is additive metadata on the field type only.
+                    let ir = match (c.props.iter().find(|p| p.name == *n), ir) {
+                        (
+                            Some(p),
+                            IrType::Class {
+                                fq_name, nullable, ..
+                            },
+                        ) if !p.ty.targs.is_empty() => IrType::Class {
+                            fq_name,
+                            type_args: p
+                                .ty
+                                .targs
+                                .iter()
+                                .map(|a| ty_to_ir(ty_of(file, a)))
+                                .collect(),
+                            nullable,
+                        },
+                        (_, ir) => ir,
+                    };
+                    // A field carries its declared nullability into the IrType (`Ty` drops it). The
+                    // JVM value-class pass keys boxing + null-check elision on a value class's
+                    // underlying `?` (`X(val v: Int?)` → nullable `Integer`).
+                    let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable) {
+                        mark_nullable(ir)
+                    } else {
+                        ir
+                    };
+                    IrField {
+                        name: n.clone(),
+                        ty: ir,
+                        type_param: field_type_params[i].clone(),
+                        default,
+                        // `field_finals` covers up to the `x$delegate` fields; the trailing
+                        // interface-delegation fields (`$$delegate_N`/`$$delegate_e<j>`) default to
+                        // non-final, matching the prior `field_final.get(i).unwrap_or(false)`.
+                        is_final: field_finals.get(i).copied().unwrap_or(false),
+                        is_private: true, // user backing fields are all private (default)
+                    }
+                })
+                .collect();
             let id = lo.ir.add_class(IrClass {
                 fq_name: internal.clone(),
                 serial_names: serial_names_of(file, c),
                 custom_serializer: lo.custom_serializer_of(c),
                 field_serializers: lo.field_serializers_of(c),
-                field_defaults: fields
-                    .iter()
-                    .map(|(n, t)| {
-                        c.props
-                            .iter()
-                            .find(|p| p.name == *n)
-                            .and_then(|p| p.default)
-                            .and_then(|d| const_default_of(file, d))
-                            // Widen the literal to the field's type so its JVM slot width/kind matches the
-                            // field local (`val x: Long = 5` parses `5` as `Int` — store it as `Long`).
-                            .map(|c| widen_const_to(c, *t))
-                    })
-                    .collect(),
                 is_value: c.is_value,
                 type_param_bounds: c
                     .type_param_bounds
@@ -478,46 +537,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     })
                     .collect(),
                 type_params: c.type_params.clone(),
-                field_type_params,
                 supertypes: vec![],
-                fields: fields
-                    .iter()
-                    .map(|(n, t)| {
-                        let ir = ty_to_ir(*t);
-                        // Re-attach a generic field's TYPE ARGUMENTS from the property's source `TypeRef`
-                        // (`ty_of`/`ty_to_ir` erase them for a general `Obj`). Read straight from the AST so
-                        // `Box<Int>` keeps `<Int>` — the serialization extension needs it to build a nested
-                        // generic element serializer (`Box.serializer(IntSerializer)`); descriptors still
-                        // erase, so this is additive metadata on the field type only.
-                        let ir = match (c.props.iter().find(|p| p.name == *n), ir) {
-                            (
-                                Some(p),
-                                IrType::Class {
-                                    fq_name, nullable, ..
-                                },
-                            ) if !p.ty.targs.is_empty() => IrType::Class {
-                                fq_name,
-                                type_args: p
-                                    .ty
-                                    .targs
-                                    .iter()
-                                    .map(|a| ty_to_ir(ty_of(file, a)))
-                                    .collect(),
-                                nullable,
-                            },
-                            (_, ir) => ir,
-                        };
-                        // A field carries its declared nullability into the IrType (`Ty` drops it). The
-                        // JVM value-class pass keys boxing + null-check elision on a value class's
-                        // underlying `?` (`X(val v: Int?)` → nullable `Integer`).
-                        let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable) {
-                            mark_nullable(ir)
-                        } else {
-                            ir
-                        };
-                        (n.clone(), ir)
-                    })
-                    .collect(),
+                fields: ir_fields,
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
                 // An inner class's synthetic `this$0` (the outer instance) is the first field param.
@@ -555,21 +576,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
-                field_final: inner_outer
-                    .iter()
-                    .map(|_| true) // `this$0` is final
-                    .chain(c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var))
-                    .chain(
-                        c.body_props
-                            .iter()
-                            .filter(|p| is_backing_field_prop(p))
-                            .map(|p| !p.is_var),
-                    )
-                    // Each `x$delegate` field is final (the delegate instance never changes; `var`
-                    // mutation goes through the delegate's `setValue`).
-                    .chain(delegate_fields.iter().map(|_| true))
-                    .collect(),
-                field_private: vec![], // user backing fields are all private (default)
                 lateinit_fields,
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
@@ -759,7 +765,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
                     // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
-                    let fty_ir = lo.ir.classes[id as usize].fields[fidx].1.clone();
+                    let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty.clone();
                     let gname = getter_name(pname);
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
@@ -891,12 +897,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     serial_names: Vec::new(),
                     custom_serializer: None,
                     field_serializers: Vec::new(),
-                    field_defaults: Vec::new(),
                     fq_name: comp_fq.clone(),
                     is_value: false,
                     type_param_bounds: vec![],
                     type_params: Vec::new(),
-                    field_type_params: vec![],
                     supertypes: vec![],
                     fields: vec![],
                     ctor_param_count: 0,
@@ -919,8 +923,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     ctor_param_checks: vec![],
                     is_companion: true,
                     companion_class: None,
-                    field_final: vec![],
-                    field_private: vec![],
                     lateinit_fields: Vec::new(),
                     secondary_ctors: vec![],
                     has_primary_ctor: true,
@@ -1579,9 +1581,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let fidx = lo.ir.classes[class_id as usize]
                         .fields
                         .iter()
-                        .position(|(n, _)| n == &p.name)? as u32;
+                        .position(|f| f.name == p.name)? as u32;
                     let fty_ir = lo.ir.classes[class_id as usize].fields[fidx as usize]
-                        .1
+                        .ty
                         .clone();
                     if let Some(getter) = p.getter.clone() {
                         let gname = getter_name(&p.name);
@@ -1637,7 +1639,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let field_idx = lo.ir.classes[class_id as usize]
                         .fields
                         .iter()
-                        .position(|(n, _)| *n == fname)
+                        .position(|f| f.name == fname)
                         .expect("delegate field") as u32;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
                     let gname = getter_name(&p.name);
@@ -1826,7 +1828,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let sup = &lo.ir.classes[sid as usize];
                             if sup.ctor_args.is_empty() {
                                 let n = sup.ctor_param_count as usize;
-                                sup.fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                                sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
                             } else {
                                 sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
                             }
@@ -1907,7 +1909,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let fidx = lo.ir.classes[class_id as usize]
                             .fields
                             .iter()
-                            .position(|(n, _)| n == &synth)?
+                            .position(|f| f.name == synth)?
                             as u32;
                         let (pv, _) = lo.lookup(dname)?;
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
@@ -1927,10 +1929,10 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let fidx = lo.ir.classes[class_id as usize]
                             .fields
                             .iter()
-                            .position(|(n, _)| n == &synth)?
+                            .position(|f| f.name == synth)?
                             as u32;
                         let fty = lo.ir.classes[class_id as usize].fields[fidx as usize]
-                            .1
+                            .ty
                             .clone();
                         let val_e = lo.lower_arg(*e, &fty)?;
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
@@ -1963,7 +1965,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let field_idx = ctor_count + body_offset as u32;
                                 let field_ty = lo.ir.classes[class_id as usize].fields
                                     [field_idx as usize]
-                                    .1
+                                    .ty
                                     .clone();
                                 let init_e = c.body_props[*i].init.unwrap();
                                 // A branchy body-property initializer (`val k = when { … }`) emits
@@ -2031,11 +2033,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let field_idx = lo.ir.classes[class_id as usize]
                             .fields
                             .iter()
-                            .position(|(n, _)| *n == fname)
+                            .position(|f| f.name == fname)
                             .expect("delegate field registered in pass 1")
                             as u32;
                         let field_ty = lo.ir.classes[class_id as usize].fields[field_idx as usize]
-                            .1
+                            .ty
                             .clone();
                         let val = lo.lower_arg(p.delegate.unwrap(), &field_ty)?;
                         let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
@@ -2062,7 +2064,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
                         lo.ir.classes[class_id as usize].fields[..n]
                             .iter()
-                            .map(|(_, t)| t.clone())
+                            .map(|f| f.ty.clone())
                             .collect()
                     };
                     // The IR param types of every secondary ctor (for resolving a sibling `this(…)`).
@@ -2255,7 +2257,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields
                         [..ctor_count]
                         .iter()
-                        .map(|(_, t)| t.clone())
+                        .map(|f| f.ty.clone())
                         .collect();
                     for (ei, args) in c.enum_entry_args.iter().enumerate() {
                         lo.scope.clear();
@@ -2309,16 +2311,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             serial_names: Vec::new(),
                             custom_serializer: None,
                             field_serializers: Vec::new(),
-                            field_defaults: Vec::new(),
                             fq_name: sub_fq.clone(),
                             is_value: false,
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
-                            field_type_params: vec![],
                             supertypes: vec![],
                             fields: prop_fields
                                 .iter()
-                                .map(|(n, t)| (n.clone(), ty_to_ir(*t)))
+                                .zip(eprops.iter())
+                                .map(|((n, t), p)| IrField {
+                                    is_final: !p.is_var,
+                                    ..IrField::new(n.clone(), ty_to_ir(*t))
+                                })
                                 .collect(),
                             ctor_param_count: 0,
                             ctor_args: vec![],
@@ -2340,8 +2344,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ctor_param_checks: vec![],
                             is_companion: false,
                             companion_class: None,
-                            field_final: eprops.iter().map(|p| !p.is_var).collect(),
-                            field_private: vec![],
                             lateinit_fields: Vec::new(),
                             secondary_ctors: vec![],
                             has_primary_ctor: true,
@@ -2598,8 +2600,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             note(&f.ret, &mut referenced);
         }
         for c in &lo.ir.classes {
-            for (_, t) in &c.fields {
-                note(t, &mut referenced);
+            for f in &c.fields {
+                note(&f.ty, &mut referenced);
             }
             for (t, _) in &c.ctor_args {
                 note(t, &mut referenced);
@@ -3142,7 +3144,7 @@ impl<'a> Lower<'a> {
                 let sup = &self.ir.classes[sid as usize];
                 if sup.ctor_args.is_empty() {
                     let n = sup.ctor_param_count as usize;
-                    sup.fields[..n].iter().map(|(_, t)| t.clone()).collect()
+                    sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
                 } else {
                     sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
                 }
@@ -3176,7 +3178,7 @@ impl<'a> Lower<'a> {
                         .count();
                     let field_idx = ctor_count + body_offset as u32;
                     let field_ty = self.ir.classes[class_id as usize].fields[field_idx as usize]
-                        .1
+                        .ty
                         .clone();
                     let init_e = c.body_props[*i].init.unwrap();
                     // kotlinc elides a field initializer that stores the field's JVM default value — a
@@ -4225,19 +4227,27 @@ impl<'a> Lower<'a> {
             .ir
             .add_expr(IrExpr::Const(IrConst::Int(jvm_arity as i32)));
         let completion_get = self.ir.add_expr(IrExpr::GetValue(1 + n_cap));
-        let n_fields = fields.len();
+        // Captures and own parameters are `final`; only the `label` state cursor is mutable. All fields
+        // are non-private (read/written by the coroutine state machine cross-class).
+        let ir_fields: Vec<IrField> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, ty))| IrField {
+                is_final: i < (n_cap + arity as u32) as usize,
+                is_private: false,
+                ..IrField::new(name, ty)
+            })
+            .collect();
         let class = IrClass {
             fq_name: internal.clone(),
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
-            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
-            field_type_params: vec![None; n_fields],
             supertypes: vec![],
-            fields,
+            fields: ir_fields,
             ctor_param_count: 0,
             ctor_args,
             init_body,
@@ -4258,11 +4268,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            // Captures and own parameters are `final`; only the `label` state cursor is mutable.
-            field_final: (0..n_fields)
-                .map(|i| i < (n_cap + arity as u32) as usize)
-                .collect(),
-            field_private: vec![false; n_fields],
             lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
@@ -4400,10 +4405,10 @@ impl<'a> Lower<'a> {
                 // The inline machine's `label` field is appended to the lambda class now.
                 {
                     let cls = &mut self.ir.classes[class_id as usize];
-                    cls.fields.push(("label".to_string(), ty_to_ir(Ty::Int)));
-                    cls.field_final.push(false);
-                    cls.field_private.push(false);
-                    cls.field_type_params.push(None);
+                    cls.fields.push(IrField {
+                        is_private: false,
+                        ..IrField::new("label".to_string(), ty_to_ir(Ty::Int))
+                    });
                 }
                 // Thread `this` (as Continuation) as the callee's trailing argument.
                 let this_for_cont = self.ir.add_expr(IrExpr::GetValue(0));
@@ -5018,7 +5023,7 @@ impl<'a> Lower<'a> {
     /// the `?`), so `hashCode` keeps it on the null-safe `Objects.hashCode` path.
     fn field_nullable(&self, class_id: ClassId, i: usize) -> bool {
         matches!(
-            self.ir.classes[class_id as usize].fields[i].1,
+            self.ir.classes[class_id as usize].fields[i].ty,
             IrType::Class { nullable: true, .. }
         )
     }
@@ -5191,7 +5196,7 @@ impl<'a> Lower<'a> {
                 // A data class renders an array property with `java.util.Arrays.toString(field)` (so
                 // `[true]`, not the default `[Z@hash`), matching kotlinc.
                 if let Some(param) =
-                    data_array_param(&self.ir.classes[class_id as usize].fields[i].1)
+                    data_array_param(&self.ir.classes[class_id as usize].fields[i].ty)
                 {
                     fv = self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Static {
@@ -5917,8 +5922,8 @@ impl<'a> Lower<'a> {
         let owner_id = self.classes.get(&owner)?.id;
         let prop_ty = {
             let cls = &self.ir.classes[owner_id as usize];
-            let idx = cls.fields.iter().position(|(n, _)| n == name)?;
-            cls.fields[idx].1.clone()
+            let idx = cls.fields.iter().position(|f| f.name == *name)?;
+            cls.fields[idx].ty.clone()
         };
         let synth_fq = class_internal(
             self.afile,
@@ -5935,11 +5940,9 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
-            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
-            field_type_params: vec![],
             supertypes: vec![],
             fields: vec![],
             ctor_param_count: 0,
@@ -5968,8 +5971,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            field_final: vec![],
-            field_private: vec![],
             lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
@@ -6205,11 +6206,9 @@ impl<'a> Lower<'a> {
             serial_names: Vec::new(),
             custom_serializer: None,
             field_serializers: Vec::new(),
-            field_defaults: Vec::new(),
             is_value: false,
             type_param_bounds: vec![],
             type_params: Vec::new(),
-            field_type_params: vec![],
             supertypes: vec![],
             fields: vec![],
             ctor_param_count: 0,
@@ -6244,8 +6243,6 @@ impl<'a> Lower<'a> {
             ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
-            field_final: vec![],
-            field_private: vec![],
             lateinit_fields: Vec::new(),
             secondary_ctors: vec![],
             has_primary_ctor: true,
@@ -6270,7 +6267,11 @@ impl<'a> Lower<'a> {
         let cur = self.cur_class.as_ref()?;
         let cur_id = self.classes.get(cur)?.id;
         let outer = match self.ir.classes[cur_id as usize].fields.first() {
-            Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => fq_name.clone(),
+            Some(IrField {
+                name: n0,
+                ty: IrType::Class { fq_name, .. },
+                ..
+            }) if n0 == "this$0" => fq_name.clone(),
             _ => return None,
         };
         let (c, i, f, _) = self.resolve_method(&outer, name)?;
@@ -10608,7 +10609,7 @@ impl<'a> Lower<'a> {
                     let field_tys: Vec<IrType> = if ctor_args.is_empty() {
                         self.ir.classes[class_id as usize].fields[..ctor_count]
                             .iter()
-                            .map(|(_, t)| t.clone())
+                            .map(|f| f.ty.clone())
                             .collect()
                     } else {
                         ctor_args.iter().map(|(t, _)| t.clone()).collect()
@@ -10902,9 +10903,11 @@ impl<'a> Lower<'a> {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
                             let cur_id = self.classes.get(&cur)?.id;
                             let outer = match self.ir.classes[cur_id as usize].fields.first() {
-                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => {
-                                    fq_name.clone()
-                                }
+                                Some(IrField {
+                                    name: n0,
+                                    ty: IrType::Class { fq_name, .. },
+                                    ..
+                                }) if n0 == "this$0" => fq_name.clone(),
                                 _ => return None,
                             };
                             let this0 = self.ir.add_expr(IrExpr::GetField {
@@ -13062,7 +13065,7 @@ impl<'a> Lower<'a> {
                         let field_tys: Vec<IrType> = if ctor_args.is_empty() {
                             self.ir.classes[class as usize].fields[..ctor_count]
                                 .iter()
-                                .map(|(_, t)| t.clone())
+                                .map(|f| f.ty.clone())
                                 .collect()
                         } else {
                             ctor_args.iter().map(|(t, _)| t.clone()).collect()
@@ -13332,9 +13335,11 @@ impl<'a> Lower<'a> {
                             // The inner's `this$0` field type must match the receiver's type (the outer
                             // instance) — guards against a same-named method returning an inner-typed value.
                             let this0_outer = match c.fields.first() {
-                                Some((n0, IrType::Class { fq_name, .. })) if n0 == "this$0" => {
-                                    Some(fq_name.as_str())
-                                }
+                                Some(IrField {
+                                    name: n0,
+                                    ty: IrType::Class { fq_name, .. },
+                                    ..
+                                }) if n0 == "this$0" => Some(fq_name.as_str()),
                                 _ => None,
                             };
                             c.fq_name.ends_with(&format!("${name}"))
@@ -13530,7 +13535,7 @@ impl<'a> Lower<'a> {
                                 let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields
                                     [..ctor_count]
                                     .iter()
-                                    .map(|(_, t)| t.clone())
+                                    .map(|f| f.ty.clone())
                                     .collect();
                                 let meta: Vec<(String, Option<AstExprId>)> = self
                                     .class_decl(&qname)

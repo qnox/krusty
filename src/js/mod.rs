@@ -20,7 +20,8 @@ pub fn emit_file(ir: &IrFile) -> String {
         let params: Vec<String> = (1..=n_params).map(|i| format!("v{i}")).collect();
         out.push_str(&format!("class {} {{\n", class_simple(&c.fq_name)));
         out.push_str(&format!("  constructor({}) {{\n", params.join(", ")));
-        for (i, (n, _)) in c.fields.iter().take(n_params).enumerate() {
+        for (i, f) in c.fields.iter().take(n_params).enumerate() {
+            let n = &f.name;
             out.push_str(&format!("    this.{n} = v{};\n", i + 1));
         }
         if let Some(init_body) = c.init_body {
@@ -124,7 +125,7 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             value,
         } => {
             indent(depth, out);
-            let name = &ir.classes[*class as usize].fields[*index as usize].0;
+            let name = &ir.classes[*class as usize].fields[*index as usize].name;
             out.push_str(&format!(
                 "{}.{} = {};\n",
                 emit_expr(ir, *receiver, inst),
@@ -233,7 +234,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             class,
             index,
         } => {
-            let name = &ir.classes[*class as usize].fields[*index as usize].0;
+            let name = &ir.classes[*class as usize].fields[*index as usize].name;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
         IrExpr::New { class, args, .. } => {

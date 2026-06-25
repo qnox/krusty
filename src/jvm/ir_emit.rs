@@ -406,14 +406,16 @@ fn emit_class(
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
     // (kotlinc does the same) — for both normal classes and objects.
-    for (i, (name, ty)) in c.fields.iter().enumerate() {
+    for field in c.fields.iter() {
+        let name = &field.name;
+        let ty = &field.ty;
         // Map the field's (platform-neutral) visibility to JVM access flags: a `private` field →
         // `ACC_PRIVATE` (the default — Kotlin backing fields are private, reached via accessors); a
         // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
-        // `result`/`label`). `field_private` empty ⇒ all private.
-        let private = c.field_private.get(i).copied().unwrap_or(true);
+        // `result`/`label`).
+        let private = field.is_private;
         let acc = (if private { 0x0002 } else { 0x0001 })
-            | if c.field_final.get(i).copied().unwrap_or(false) {
+            | if field.is_final {
                 0x0010
             } else {
                 0
@@ -448,7 +450,7 @@ fn emit_class(
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
     // (body-property initializers + `init {}` blocks). Fields past `ctor_param_count` are body
     // properties — not parameters — so the descriptor covers only the leading parameter fields.
-    let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+    let field_tys: Vec<Ty> = c.fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect();
     // The constructor takes ALL primary-ctor params (`ctor_args`), in declaration order — `val`/`var`
     // params back a field, plain params are arguments only. (Synthesized classes have empty `ctor_args`
     // and fall back to the leading `ctor_param_count` fields.)
@@ -471,7 +473,7 @@ fn emit_class(
         let mut field_i = 0usize;
         for (i, t) in param_tys.iter().enumerate() {
             if is_field.get(i).copied().unwrap_or(true) {
-                let fname = c.fields.get(field_i).map(|(n, _)| n.as_str()).unwrap_or("");
+                let fname = c.fields.get(field_i).map(|f| f.name.as_str()).unwrap_or("");
                 if let Some((_, tp)) = ftp.iter().find(|(f, _)| f == fname) {
                     sig.push_str(&format!("T{tp};"));
                     any = true;
@@ -504,7 +506,7 @@ fn emit_class(
                         if sc.ctor_args.is_empty() {
                             sc.fields[..sc.ctor_param_count as usize]
                                 .iter()
-                                .map(|(_, t)| ir_ty_to_jvm(t))
+                                .map(|f| ir_ty_to_jvm(&f.ty))
                                 .collect()
                         } else {
                             sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
@@ -593,7 +595,7 @@ fn emit_class(
             };
             for (i, t) in param_tys.iter().enumerate() {
                 if is_field.get(i).copied().unwrap_or(true) {
-                    let name = &c.fields[field_i].0;
+                    let name = &c.fields[field_i].name;
                     ctor.aload(0);
                     load(*t, slot, &mut ctor);
                     let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
@@ -692,7 +694,7 @@ fn emit_class(
                                 if sc.ctor_args.is_empty() {
                                     sc.fields[..sc.ctor_param_count as usize]
                                         .iter()
-                                        .map(|(_, t)| ir_ty_to_jvm(t))
+                                        .map(|f| ir_ty_to_jvm(&f.ty))
                                         .collect()
                                 } else {
                                     sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
@@ -823,14 +825,14 @@ fn emit_enum_entry_subclass(
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
-    for (i, (name, ty)) in c.fields.iter().enumerate() {
+    for field in c.fields.iter() {
         let acc = 0x0002
-            | if c.field_final.get(i).copied().unwrap_or(false) {
+            | if field.is_final {
                 0x0010
             } else {
                 0
             };
-        cw.add_field(acc, name, &ir_ty_to_jvm(ty).descriptor());
+        cw.add_field(acc, &field.name, &ir_ty_to_jvm(&field.ty).descriptor());
     }
 
     // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
@@ -1411,13 +1413,13 @@ fn emit_enum_class(
         cw.add_interface(itf);
     }
 
-    let field_tys: Vec<Ty> = c.fields.iter().map(|(_, t)| ir_ty_to_jvm(t)).collect();
+    let field_tys: Vec<Ty> = c.fields.iter().map(|f| ir_ty_to_jvm(&f.ty)).collect();
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     // User (primary-constructor) fields — public so the IR's direct cross-class reads work.
-    for ((name, _), t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.add_field(0x0001, name, &t.descriptor());
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.add_field(0x0001, &f.name, &t.descriptor());
     }
     // One static-final constant per entry, plus the private `$VALUES` array.
     for (entry, _) in &c.enum_entries {
@@ -1443,7 +1445,8 @@ fn emit_enum_class(
     let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(super_init, 2, 0);
     let mut slot = 3u16;
-    for ((name, _), t) in c.fields[..n_params].iter().zip(&user_tys) {
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        let name = &f.name;
         ctor.aload(0);
         load(*t, slot, &mut ctor);
         let fref = cw.fieldref(&fq, name, &t.descriptor());
@@ -2440,7 +2443,8 @@ impl<'a> Emitter<'a> {
                 value,
             } => {
                 let c = &self.ir.classes[class as usize];
-                let (name, fty) = c.fields[index as usize].clone();
+                let name = c.fields[index as usize].name.clone();
+                let fty = c.fields[index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
                 self.emit_value(receiver, code);
@@ -2576,7 +2580,8 @@ impl<'a> Emitter<'a> {
                 index,
             } => {
                 let c = &self.ir.classes[*class as usize];
-                let (name, fty) = c.fields[*index as usize].clone();
+                let name = c.fields[*index as usize].name.clone();
+                let fty = c.fields[*index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
                 let is_lateinit = c.lateinit_fields.contains(index);
@@ -2640,7 +2645,7 @@ impl<'a> Emitter<'a> {
                     }
                     None => c.fields[..c.ctor_param_count as usize]
                         .iter()
-                        .map(|(_, t)| ir_ty_to_jvm(t))
+                        .map(|f| ir_ty_to_jvm(&f.ty))
                         .collect(),
                 };
                 let args = args.clone();
@@ -4628,7 +4633,7 @@ impl<'a> Emitter<'a> {
                 .or_else(|| self.var_types.get(i).copied())
                 .unwrap_or(Ty::Error),
             IrExpr::GetField { class, index, .. } => {
-                ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].1)
+                ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
             IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name),

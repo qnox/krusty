@@ -805,10 +805,11 @@ fn build_lambda_state_machine(
     {
         let cls = &mut ir.classes[class_id as usize];
         let mut push = |name: &str, ty: IrType| {
-            cls.fields.push((name.to_string(), ty));
-            cls.field_final.push(false);
-            cls.field_private.push(false);
-            cls.field_type_params.push(None);
+            // State-machine fields are mutable and non-private (read/written cross-class).
+            cls.fields.push(crate::ir::IrField {
+                is_private: false,
+                ..crate::ir::IrField::new(name.to_string(), ty)
+            });
         };
         push("result", object_ty());
         push("label", int_ty());
@@ -982,7 +983,7 @@ fn build_lambda_state_machine(
     // runs at every entry (including a resume), so a value read across a suspension is always available.
     let mut prologue: Vec<ExprId> = Vec::new();
     for i in 0..field_base {
-        let cap_ty = ir.classes[class_id as usize].fields[i as usize].1.clone();
+        let cap_ty = ir.classes[class_id as usize].fields[i as usize].ty.clone();
         let this_c = k(ir, IrExpr::GetValue(0));
         let getf_c = k(
             ir,
@@ -1683,18 +1684,23 @@ fn build_continuation_class(
         param_checks: vec![None],
     });
 
+    // State-machine fields: `result`/`label`/`L$i` are mutable and non-private (read/written
+    // cross-class by the resume machinery).
     let mut fields = vec![
-        ("result".to_string(), object_ty()),
-        ("label".to_string(), int_ty()),
+        crate::ir::IrField {
+            is_private: false,
+            ..crate::ir::IrField::new("result".to_string(), object_ty())
+        },
+        crate::ir::IrField {
+            is_private: false,
+            ..crate::ir::IrField::new("label".to_string(), int_ty())
+        },
     ];
-    let mut field_final = vec![false, false];
-    let mut field_private = vec![false, false];
-    let mut field_type_params = vec![None, None];
     for (i, (_, ty)) in spilled.iter().enumerate() {
-        fields.push((format!("L${i}"), ty.clone()));
-        field_final.push(false);
-        field_private.push(false);
-        field_type_params.push(None);
+        fields.push(crate::ir::IrField {
+            is_private: false,
+            ..crate::ir::IrField::new(format!("L${i}"), ty.clone())
+        });
     }
 
     // Constructor value-indices: `this`=0, then (member) the receiver, then each captured value
@@ -1710,10 +1716,11 @@ fn build_continuation_class(
             type_args: vec![],
             nullable: false,
         };
-        fields.push(("this$0".to_string(), recv_ty.clone()));
-        field_final.push(true);
-        field_private.push(false);
-        field_type_params.push(None);
+        fields.push(crate::ir::IrField {
+            is_final: true,
+            is_private: false,
+            ..crate::ir::IrField::new("this$0".to_string(), recv_ty.clone())
+        });
         let this_c = ir.add_expr(IrExpr::GetValue(0));
         let recv_v = ir.add_expr(IrExpr::GetValue(arg_idx));
         ctor_stores.push(ir.add_expr(IrExpr::SetField {
@@ -1753,11 +1760,9 @@ fn build_continuation_class(
         serial_names: Vec::new(),
         custom_serializer: None,
         field_serializers: Vec::new(),
-        field_defaults: Vec::new(),
         is_value: false,
         type_param_bounds: vec![],
         type_params: Vec::new(),
-        field_type_params,
         supertypes: vec![],
         fields,
         lateinit_fields: Vec::new(),
@@ -1780,8 +1785,6 @@ fn build_continuation_class(
         ctor_param_checks: vec![],
         is_companion: false,
         companion_class: None,
-        field_final,
-        field_private,
         secondary_ctors: vec![],
         has_primary_ctor: true,
     };
