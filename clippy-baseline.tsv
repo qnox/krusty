@@ -101,11 +101,11 @@
 5	src/ast.rs	redundant closure: help: replace the closure with the function itself: `&mut fe`
 5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait
 5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
+5	src/jvm/jvm_libraries.rs	this `map_or` can be simplified
 5	src/plugins/serialization.rs	this `match` expression can be replaced with `?`: help: try instead: `ty.non_null().obj_internal()?`
 5	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 6	src/ast.rs	this `map_or` can be simplified
 6	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[fid as usize].ret`
-6	src/jvm/jvm_libraries.rs	this `map_or` can be simplified
 7	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
 8	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `object_ir`
 8	src/jvm/ir_emit.rs	this `map_or` can be simplified
