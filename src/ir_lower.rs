@@ -10944,6 +10944,25 @@ impl<'a> Lower<'a> {
                 ));
             }
             Expr::Name(n) => {
+                // `COROUTINE_SUSPENDED` (a `kotlin.coroutines` intrinsic, recognized via the registry) —
+                // read the sentinel through its accessor `IntrinsicsKt.getCOROUTINE_SUSPENDED()`. A local
+                // of the same name shadows it (resolved through the scope below).
+                if self.lookup(&n).is_none()
+                    && self.syms.libraries.coroutine_intrinsic(&n)
+                        == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
+                {
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: crate::ir::Callee::Static {
+                            owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
+                            name: "getCOROUTINE_SUSPENDED".to_string(),
+                            descriptor: "()Ljava/lang/Object;".to_string(),
+                            inline: false,
+                            must_inline: false,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![],
+                    }));
+                }
                 // The `field` keyword inside a custom accessor body reads the property's backing field.
                 if n == "field" {
                     if let Some((class_id, fidx, _)) = self.cur_field {
@@ -12700,6 +12719,28 @@ impl<'a> Lower<'a> {
             // (`getstatic <class>.<field>:L<companion>;`) as the receiver, then an inline-splice of the
             // companion's (instance) `inline` method — `success`'s `this` is the singleton, its param the
             // boxed argument. The splicer drops the unused `this` and inlines the arg, like kotlinc.
+            // `suspendCoroutineUninterceptedOrReturn { c -> block }` — a `kotlin.coroutines` inline
+            // intrinsic (recognized via the registry). The block runs with the enclosing suspend
+            // function's own `Continuation` bound as its parameter; kotlinc inlines the block and returns
+            // its `Any?` result. The leaf shape `{ COROUTINE_SUSPENDED }` (and any block that does NOT
+            // read its continuation parameter) inlines to just the block body. A block that DOES read the
+            // continuation needs the (post-CPS) continuation slot threaded in — not modeled here, so it
+            // bails (skip the file) rather than binding a wrong slot.
+            Expr::Call { callee, args }
+                if args.len() == 1
+                    && matches!(self.afile.expr(callee), ast::Expr::Name(n)
+                        if self.syms.libraries.coroutine_intrinsic(n)
+                            == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)) =>
+            {
+                let ast::Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() else {
+                    return None;
+                };
+                let cont_name = params.first().cloned().unwrap_or_else(|| "it".to_string());
+                if name_used_as_value(self.afile, body, &cont_name) {
+                    return None; // block reads its continuation — not modeled (skip, never miscompile)
+                }
+                self.expr(body)?
+            }
             Expr::Call { .. } if self.info.companion_calls.contains_key(&e) => {
                 let cf = self.info.companion_calls[&e].clone();
                 let args = match self.afile.expr(e).clone() {

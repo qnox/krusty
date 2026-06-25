@@ -1362,6 +1362,10 @@ impl SymbolSource for JvmLibraries {
 }
 
 impl LibrarySet for JvmLibraries {
+    fn coroutine_intrinsic(&self, name: &str) -> Option<crate::libraries::CoroutineIntrinsic> {
+        crate::jvm::coroutine_intrinsics::recognize_unqualified(name)
+    }
+
     fn value_companion_fn(
         &self,
         class_internal: &str,

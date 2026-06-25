@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1773 OK / 0 FAIL** (scanned 7351, Phase 459).
+  repo's `compiler/testData/codegen/box`). Current gate: **1773 OK / 0 FAIL** (scanned 7351, Phase 460).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 460 — coroutine-intrinsic registry: `COROUTINE_SUSPENDED` / `suspendCoroutineUninterceptedOrReturn`
+  / `startCoroutine` resolve + lower (foundation; gate 1773, box-OK flat, FAIL=0).** These are `@InlineOnly`
+  stdlib declarations whose stub bodies just `throw`; the reference compiler recognizes them by FQ name
+  (its intrinsics table) and emits dedicated codegen rather than calling/inlining. krusty's splice gate
+  (`can_inline_call`) correctly refuses the `throw` body, so they resolved to "unresolved". New
+  `jvm/coroutine_intrinsics.rs` FQ-name registry (the table only — signatures come from `@Metadata`, no
+  hardcoded sigs), reached from the resolver via a new `LibrarySet::coroutine_intrinsic` (platform-neutral
+  `CoroutineIntrinsic` enum; keeps `crate::jvm` out of the resolver). Checker: `COROUTINE_SUSPENDED`→`Any`,
+  `suspendCoroutineUninterceptedOrReturn{…}`→enclosing suspend fn's `T` (lambda param = `Continuation`),
+  `(suspend …→T).startCoroutine(completion)`→`Unit`. Lowering: `COROUTINE_SUSPENDED`→
+  `IntrinsicsKt.getCOROUTINE_SUSPENDED()`; `suspendCoroutineUninterceptedOrReturn{block}`→inline the block
+  (leaf shape — a block that READS its continuation bails, never miscompiles). Net box-OK is flat: a full
+  coroutine `box()` round-trip additionally needs the companion-object-as-value completion (the
+  `EmptyContinuation` test helper, ~123 files) — krusty's flattened-companion model doesn't yet emit a
+  companion singleton WITH a supertype usable as a value; that is the next phase. This lands the prereq
+  cleanly (FAIL=0, no regression). TDD: tests/coroutine_intrinsics_e2e.rs (compile-only: leaf intrinsics;
+  startCoroutine on a suspend-fn value). See memory [[coroutine-intrinsics-plan]].
 
 - **Phase 459 — generic base-member return resolved under the BASE's type params (gate 1763 → 1773, +10,
   FAIL=0).** Collecting a subclass's signatures walks the base class's methods to seed `local_rets` (so an
