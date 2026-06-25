@@ -360,6 +360,20 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             args: vec![],
         }));
     }
+    // An ABSTRACT (non-sealed) `@Serializable` class field serializes via open polymorphism — a property
+    // of type `Poly` / `Poly<*>` uses `PolymorphicSerializer(Poly::class)` (descriptor serialName
+    // `kotlinx.serialization.Polymorphic<Poly>`), not the generated `$serializer`. Requires the
+    // `serializer()` accessor (the class IS `@Serializable`).
+    if ir.classes.iter().any(|c| {
+        c.fq_name == fq_name
+            && c.is_abstract
+            && !c.is_sealed
+            && c.methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "serializer")
+    }) {
+        return Some(build_polymorphic_serializer(ir, fq_name));
+    }
     let ser_fq = serializer_fq(fq_name);
     if let Some(sid) = ir.classes.iter().position(|c| c.fq_name == ser_fq) {
         // The declared type-parameter count comes from the BASE class (the `$serializer` is erased).
@@ -521,6 +535,17 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     if ir.classes.iter().any(|c| {
         c.fq_name == fq_name
             && c.is_sealed
+            && c.methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "serializer")
+    }) {
+        return true;
+    }
+    // An abstract `@Serializable` class field → `PolymorphicSerializer` (mirrors `element_serializer_expr`).
+    if ir.classes.iter().any(|c| {
+        c.fq_name == fq_name
+            && c.is_abstract
+            && !c.is_sealed
             && c.methods
                 .iter()
                 .any(|&m| ir.functions[m as usize].name == "serializer")

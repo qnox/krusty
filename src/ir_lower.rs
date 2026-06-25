@@ -557,6 +557,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 methods: vec![],
                 is_interface: c.is_interface(),
                 is_sealed: c.is_sealed,
+                is_abstract: c.is_abstract,
                 superclass,
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
@@ -910,6 +911,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     is_interface: false,
 
                     is_sealed: false,
+                    is_abstract: false,
                     superclass: "kotlin/Any".to_string(),
                     super_args: vec![],
                     enum_entries: vec![],
@@ -2331,6 +2333,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             is_interface: false,
 
                             is_sealed: false,
+                            is_abstract: false,
                             superclass: internal.clone(),
                             super_args: vec![],
                             enum_entries: vec![],
@@ -4257,6 +4260,7 @@ impl<'a> Lower<'a> {
             is_interface: false,
 
             is_sealed: false,
+            is_abstract: false,
             superclass: "kotlin/coroutines/jvm/internal/SuspendLambda".to_string(),
             super_args: vec![arity_const, completion_get],
             enum_entries: vec![],
@@ -6005,6 +6009,7 @@ impl<'a> Lower<'a> {
             is_interface: false,
 
             is_sealed: false,
+            is_abstract: false,
             superclass: superclass.to_string(),
             super_args: vec![],
             enum_entries: vec![],
@@ -6272,6 +6277,7 @@ impl<'a> Lower<'a> {
             is_interface: false,
 
             is_sealed: false,
+            is_abstract: false,
             superclass: "kotlin/jvm/internal/FunctionReferenceImpl".to_string(),
             super_args: vec![],
             enum_entries: vec![],

@@ -425,6 +425,38 @@ fun box(): String {
 }
 
 #[test]
+fn abstract_class_field_polymorphic_serializer_in_krusty() {
+    // A property whose type is an ABSTRACT `@Serializable` class serializes via open polymorphism:
+    // `PolymorphicSerializer(Base::class)`, whose element descriptor `serialName` is
+    // `kotlinx.serialization.Polymorphic<Base>`. Covers both a non-null and a nullable such field.
+    // Mirrors the `Poly<*>` part of the `starProjectionsSealed` boxIr corpus case.
+    let src = r#"import kotlinx.serialization.*
+
+@Serializable
+abstract class Base { abstract val v: Int }
+
+@Serializable
+class Holder(val b: Base, val c: Base?)
+
+fun box(): String {
+    val d = Holder.serializer().descriptor
+    val s0 = d.getElementDescriptor(0).serialName
+    if (s0 != "kotlinx.serialization.Polymorphic<Base>") return "s0=$s0"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerAbstractPoly") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "abstract-class field polymorphic serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty abstract-class field polymorphic serializer OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
