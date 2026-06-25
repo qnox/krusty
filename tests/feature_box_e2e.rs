@@ -14,6 +14,23 @@ fn env(k: &str) -> Option<String> {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // `joinToString` with a TRAILING LAMBDA: the lambda fills the LAST parameter (`transform`), the five
+    // middle parameters defaulting (`separator`/`prefix`/… via the `$default` synthetic + bit-mask). The
+    // lambda's `it` binds to the receiver's element type. Covers both the lambda-only form and a leading
+    // explicit arg + trailing lambda.
+    (
+        "JoinToStringTrailingLambda",
+        r#"// WITH_STDLIB
+fun box(): String {
+    val xs: List<String> = listOf("a", "bb", "ccc")
+    val s1 = xs.joinToString { it.length.toString() }
+    if (s1 != "1, 2, 3") return "s1=$s1"
+    val s2 = xs.joinToString("-") { it.uppercase() }
+    if (s2 != "A-BB-CCC") return "s2=$s2"
+    return "OK"
+}
+"#,
+    ),
     // Kotlin BUILTIN members read as plain VALUES (not only fused/safe-call forms): `String.length`
     // (a property over `java.lang.String.length()`) and `List.size`/indexing (`java.util.List`). These
     // resolve generically from the builtins metadata + the kotlin↔JVM class map — no per-member hardcode.

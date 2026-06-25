@@ -1703,17 +1703,33 @@ impl LibrarySet for JvmLibraries {
                     let Some((_, psigs, _)) = parse_method_gsig(sig) else {
                         continue;
                     };
-                    if psigs.is_empty() || psigs.len() != arg_tys.len() + 1 {
+                    if psigs.is_empty() {
                         continue;
                     }
+                    let n_real = psigs.len() - 1; // value parameters (psigs[0] is the receiver)
+                    let k = arg_tys.len();
+                    // Map each ARGUMENT to a value parameter. Exact arity → positional. A TRAILING LAMBDA
+                    // with fewer args than params (`list.joinToString { it }` — the lambda fills the LAST
+                    // param `transform`, the middle defaulted) → the leading args fill a prefix and the
+                    // trailing lambda binds the LAST parameter (`(T) -> CharSequence`).
+                    let trailing_lambda = k >= 1 && arg_tys[k - 1].is_none();
+                    let mapped: Vec<&_> = if n_real == k {
+                        psigs[1..].iter().collect()
+                    } else if trailing_lambda && n_real > k && k >= 1 {
+                        let mut v: Vec<&_> = psigs[1..k].iter().collect();
+                        v.push(&psigs[n_real]); // last value parameter (the trailing-lambda slot)
+                        v
+                    } else {
+                        continue;
+                    };
                     let mut binds = std::collections::HashMap::new();
                     unify_gsig(&psigs[0], recv, &mut binds); // bind from the receiver parameter
-                    for (ps, at) in psigs[1..].iter().zip(arg_tys) {
+                    for (ps, at) in mapped.iter().zip(arg_tys) {
                         if let Some(t) = at {
                             unify_gsig(ps, *t, &mut binds); // bind from each typed non-lambda argument
                         }
                     }
-                    let out: Vec<Vec<Ty>> = psigs[1..]
+                    let out: Vec<Vec<Ty>> = mapped
                         .iter()
                         .map(|ps| function_input_types(ps, &binds))
                         .collect();
@@ -1988,12 +2004,10 @@ impl LibrarySet for JvmLibraries {
         // parameters (`list.joinToString(",")` → `joinToString$default(list, ",", …, mask, null)`).
         // Its descriptor is `(recv, real…, int mask, Object marker)ret`; the call fills a prefix of the
         // real parameters, the backend defaults the rest.
-        // A trailing lambda binds to the *last* function parameter (not a prefix), which interacts with
-        // defaulted middle parameters in a way the prefix-fill below doesn't model — leave those calls
-        // unresolved (the file skips) rather than risk a wrong argument placement.
-        if args.last().map_or(false, |a| matches!(a, Ty::Fun(_))) {
-            return None;
-        }
+        // A trailing lambda binds to the *last* value parameter (`transform`), with the middle parameters
+        // defaulted — `list.joinToString { it }` → `joinToString$default(list, …defaults…, transform,
+        // mask, null)`. The leading non-lambda args fill a prefix; the lambda fills the last real param.
+        let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         let default_name = format!("{name}$default");
         for recv_desc in supertype_descriptors(&self.cp, receiver) {
             for c in self.cp.find_extensions(&recv_desc, &default_name) {
@@ -2007,17 +2021,30 @@ impl LibrarySet for JvmLibraries {
                     continue; // need at least receiver + mask + marker
                 }
                 let real_count = params.len() - 3; // exclude receiver, int mask, Object marker
-                                                   // The provided arguments fill a prefix of the real parameters; each must fit its
-                                                   // parameter (subtype-aware) so a wrong overload (`contains(CharSequence)` for a `Char`
-                                                   // argument) is rejected rather than miscompiled.
-                if args.len() > real_count {
-                    continue;
-                }
-                if !params[1..1 + args.len()]
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
-                {
+                let param_is_fun = |t: &Ty| {
+                    matches!(t, Ty::Fun(_))
+                        || t.obj_internal()
+                            .is_some_and(|i| i.starts_with("kotlin/jvm/functions/Function"))
+                };
+                // Validate the fit. Non-lambda: the args fill a prefix of the real parameters (each fits,
+                // subtype-aware, so a wrong overload is rejected). Trailing lambda: the prefix (all but the
+                // lambda) fits, AND the LAST real parameter is a function type (the `transform` slot).
+                let fits = if trailing_lambda {
+                    let prefix_len = args.len() - 1;
+                    prefix_len < real_count
+                        && param_is_fun(&params[real_count])
+                        && params[1..1 + prefix_len]
+                            .iter()
+                            .zip(&args[..prefix_len])
+                            .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
+                } else {
+                    args.len() <= real_count
+                        && params[1..1 + args.len()]
+                            .iter()
+                            .zip(args)
+                            .all(|(p, a)| arg_fits_subtype(&self.cp, p, a))
+                };
+                if !fits {
                     continue;
                 }
                 // Keep the receiver + real parameters (drop the trailing mask + marker), like the

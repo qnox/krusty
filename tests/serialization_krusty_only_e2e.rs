@@ -488,6 +488,38 @@ fun box(): String {
 }
 
 #[test]
+fn sealed_interface_field_serializer_in_krusty() {
+    // A property whose type is a `sealed interface` serializes via closed polymorphism — a
+    // `SealedClassSerializer` (descriptor kind SEALED) like a `sealed class`, NOT the open
+    // `PolymorphicSerializer` (kind OPEN) a plain interface gets. Verifies `sealed interface` carries
+    // `is_sealed` through to the element-serializer choice. Mirrors a field of `multipleGenericsPolymorphic`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+
+@Serializable
+sealed interface Shape
+
+@Serializable
+class Holder(val s: Shape, val t: Shape?)
+
+fun box(): String {
+    val d = Holder.serializer().descriptor
+    if (d.getElementDescriptor(0).kind.toString() != "SEALED") return d.getElementDescriptor(0).kind.toString()
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerSealedIface") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "sealed-interface field serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty sealed-interface field serializer OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
