@@ -608,6 +608,20 @@ is step 1 of full default-value support; the remaining steps (each its own round
 constructor that fills omitted optionals from their defaults). Only both-directions-complete unlocks the
 default-value corpus files (generics.kt etc., which also need sealed-parametrized + decode member access).
 
+#### Update (2026-06-25) — default values, step 2: encode-omission
+
+serialize now OMITS an optional element (constant default) when it still equals the default, matching
+kotlinc's `encodeDefaults=false`: in the serialize per-field loop, the field's pushed encode call is wrapped
+in `IrExpr::When { [(cond, encode)] }` where `cond = c.shouldEncodeElementDefault(descriptor, i) ||
+value.getX() != default` (both `IrExpr::PrimitiveBinOp`; `Or` + `Ne`; the default is `Const(field_defaults[i])`).
+`Ne` covers all cases — a null default → JVM null-check, a primitive → `if_icmpne`, a reference → `areEqual`.
+The getter is re-read for the comparison (a `@Serializable` property has a side-effect-free auto accessor, and
+kotlinc's `write$Self` also reads the field twice). Verified: `C(val a:Int, val b:Int=5, val t:String?=null)` →
+`C(1)` encodes `{"a":1}`, `C(1,9,"hi")` encodes the full object. **Main box gate 1750/0** (no regression — the
+wrap only fires for a field with a constant default). Test:
+`serialization_krusty_only_e2e::default_value_encode_omission_in_krusty`. Remaining step 3 = DECODE (the
+`seen` bitmask + `SerializationConstructorMarker` mask constructor) before a default-value corpus file greens.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

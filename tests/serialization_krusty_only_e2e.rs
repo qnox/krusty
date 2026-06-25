@@ -357,6 +357,33 @@ fun box(): String {
 }
 
 #[test]
+fn default_value_encode_omission_in_krusty() {
+    // An OPTIONAL element (constant default) is OMITTED on encode when it still equals the default
+    // (`shouldEncodeElementDefault(desc,i) || value.x != default`), and emitted when it differs —
+    // matching kotlinc's default `encodeDefaults=false`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+@Serializable class C(val a: Int, val b: Int = 5, val t: String? = null)
+fun box(): String {
+    val s1 = Json.encodeToString(C.serializer(), C(1))
+    if (s1 != "{\"a\":1}") return "s1=$s1"
+    val s2 = Json.encodeToString(C.serializer(), C(1, 9, "hi"))
+    if (s2 != "{\"a\":1,\"b\":9,\"t\":\"hi\"}") return "s2=$s2"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerEncodeOmit") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "default-value encode-omission wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty default-value encode-omission OK");
+}
+
+#[test]
 fn generic_class_serializer_in_krusty() {
     // A generic `@Serializable class Box<T>(val boxed: T)`: its `$serializer` is a CLASS with one
     // `KSerializer` constructor argument per type parameter; `Box.serializer(Inner.serializer())` builds
