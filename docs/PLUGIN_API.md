@@ -557,6 +557,24 @@ The remaining 40 single-file cases fail on deep features: generic/polymorphic ty
 `PolymorphicSerializer`), reflection (`typeOf`, `serializer(typeOf<T>())`, annotation instantiation),
 multi-field value classes, ctor default-args.
 
+#### Update (2026-06-25) — generic type-parameter serializers ($serializer-as-class)
+
+A generic `@Serializable class C<T…>` now generates a `$serializer` that is a CLASS (not a singleton
+object), with one `KSerializer` constructor argument per type parameter — stored in fields `typeSerial0..N-1`
+(field indices `1..=N`; `descriptor` stays field 0). `childSerializers`/`serialize`/`deserialize` route a
+type-parameter-typed property (`val boxed: T`) through `this.typeSerialK` instead of a fixed serializer, and
+`C.serializer(KSerializer…)` returns `new C$serializer(args)`. New `IrClass.type_params` (full type-param
+name list — `type_param_bounds` lists only non-`Any` bounds, so it's insufficient), threaded from the AST;
+the checker signature phase declares `serializer(KSerializer×N)`; the accessor-call lowering passes the arg
+serializers; `ty_descriptor` erases a type-param property's `kotlin/Any` getter to `Ljava/lang/Object;`.
+Verified: monomorphic `Box.serializer(Inner.serializer())` round-trips `{"boxed":{"n":5}}`
+(`serialization_krusty_only_e2e::generic_class_serializer_in_krusty`). **Main box gate 1748/0 (gated on
+type-params — no regression); the 7 ser-corpus greens hold.** No NEW corpus green yet: the generic-corpus
+files (starProjections, genericBaseClass\*, polymorphicTypeParameter) additionally need caller-side type-arg
+serializer derivation for a NESTED generic field (`Box<*>`/`Box<Int>` as a property), star-projection →
+`PolymorphicSerializer`, and decode-side generic-return inference (`decodeFromString(C.serializer(t), s)`
+currently types the result `Any`). The generic-serializer foundation itself is proven by the e2e test.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

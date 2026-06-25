@@ -331,6 +331,34 @@ fun box(): String {
 }
 
 #[test]
+fn generic_class_serializer_in_krusty() {
+    // A generic `@Serializable class Box<T>(val boxed: T)`: its `$serializer` is a CLASS with one
+    // `KSerializer` constructor argument per type parameter; `Box.serializer(Inner.serializer())` builds
+    // `new Box$serializer(Inner$serializer.INSTANCE)`, and the `boxed: T` element serializes through that
+    // ctor-supplied serializer — `{"boxed":{"n":5}}`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable class Inner(val n: Int)
+@Serializable class Box<T>(val boxed: T)
+
+fun box(): String {
+    val s = Json.encodeToString(Box.serializer(Inner.serializer()), Box(Inner(5)))
+    return if (s == "{\"boxed\":{\"n\":5}}") "OK" else "enc=$s"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerGeneric") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "generic class serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty generic class serializer OK");
+}
+
+#[test]
 fn sealed_class_polymorphic_serializer_in_krusty() {
     // A `@Serializable sealed class` base: `Base.serializer()` returns a runtime `SealedClassSerializer`
     // over its `@Serializable` subclasses, so `Json.encodeToString(Base.serializer(), A(1))` emits the
