@@ -1546,9 +1546,16 @@ impl IrPlugin for SerializationPlugin {
                                 ty: class_ty("kotlin/Int"),
                                 init: Some(izero),
                             }));
-                            // field locals (4 + k), defaulted (nullable refs start as null)
+                            // field locals (4 + k), defaulted. An OPTIONAL element (a constant default)
+                            // starts at its DEFAULT value, so an element omitted from the input (never
+                            // returned by `decodeElementIndex`) keeps the default and the normal
+                            // constructor reproduces it — the const-default equivalent of kotlinc's
+                            // `seen`-mask + `SerializationConstructorMarker` fill (no synthetic ctor needed).
+                            // A non-optional element starts at the type's zero/null (overwritten on decode).
                             for (k, (_, ty)) in fields.iter().enumerate() {
-                                let dc = if is_nullable(ty) {
+                                let dc = if let Some(Some(d)) = field_defaults.get(k) {
+                                    d.clone()
+                                } else if is_nullable(ty) {
                                     IrConst::Null
                                 } else {
                                     default_const(ty)
