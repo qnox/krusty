@@ -592,6 +592,22 @@ serializer). Verified: `Holder(val b: Box<Int>)` → `{"b":{"boxed":7}}`. **Main
 (generics, genericBaseClass\*) still additionally need default values, sealed-parametrized interfaces, and
 decode-side member access — so no NEW ser-corpus green from this alone; corpus stays 7/69.
 
+#### Update (2026-06-25) — default values, step 1: descriptor `isOptional`
+
+A primary-constructor property with a CONSTANT default (`val b: Int = 5`, `val t: String? = null`) is now
+marked an OPTIONAL descriptor element (`addElement(name, isOptional=true)`), matching kotlinc's ABI —
+`descriptor.isElementOptional(i)` reports it. New `IrClass.field_defaults: Vec<Option<IrConst>>` (parallel
+to fields; the const-folded default via `const_default_of` — null/int/long/bool/double/float/char/string
+literals; `None` for no-default or a non-constant default), consumed by the descriptor builder. serialize/
+deserialize are UNCHANGED this round (so no encode behavior change / no regression — encode was and stays
+always-emit). **Main box gate 1750/0**, 19 e2e (new: `default_value_descriptor_is_optional_in_krusty`). This
+is step 1 of full default-value support; the remaining steps (each its own round) are ENCODE-omission
+(`if (shouldEncodeElementDefault(desc,i) || value.x != default) encode…`, wrapping each element in an
+`IrWhen`; comparison via `RefNe` for a null default / `PrimitiveBinOp Ne` for a primitive) and DECODE
+(the `seen` bitmask + a synthesized `C(int seen, …fields, SerializationConstructorMarker)` mask
+constructor that fills omitted optionals from their defaults). Only both-directions-complete unlocks the
+default-value corpus files (generics.kt etc., which also need sealed-parametrized + decode member access).
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

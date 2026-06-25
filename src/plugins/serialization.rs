@@ -799,6 +799,10 @@ impl IrPlugin for SerializationPlugin {
             );
 
             let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize].fields.clone();
+            // Per-property constant default (`Some` ⇒ the element is `isOptional` — omitted on encode when
+            // it still equals the default).
+            let foo_defaults: Vec<Option<IrConst>> =
+                ir.classes[class_id as usize].field_defaults.clone();
             // Generic `@Serializable class C<T…>`: the `$serializer` is a CLASS (not a singleton object)
             // with one `KSerializer` constructor parameter per type parameter (`typeSerialK`, stored at
             // fields `1..=N`, after the `descriptor` field 0), used as the element serializer for any
@@ -949,10 +953,12 @@ impl IrPlugin for SerializationPlugin {
                     init: Some(pgsd),
                 });
                 init_stmts = vec![dvar];
-                for (pname, _) in &foo_fields {
+                for (i, (pname, _)) in foo_fields.iter().enumerate() {
                     let d = ir.add_expr(IrExpr::GetValue(desc_local));
                     let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name(pname))));
-                    let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                    // A property with a constant default is an OPTIONAL element (`addElement(name, true)`).
+                    let is_optional = foo_defaults.get(i).is_some_and(|d| d.is_some());
+                    let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
                     init_stmts.push(ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
                             owner: pgsd_internal.to_string(),

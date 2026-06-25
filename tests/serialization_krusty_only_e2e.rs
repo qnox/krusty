@@ -331,6 +331,32 @@ fun box(): String {
 }
 
 #[test]
+fn default_value_descriptor_is_optional_in_krusty() {
+    // A primary-constructor property with a CONSTANT default (`b: Int = 5`, `t: String? = null`) is an
+    // OPTIONAL descriptor element — `descriptor.isElementOptional(i) == true` (matches kotlinc's ABI);
+    // a property with no default is not.
+    let src = r#"import kotlinx.serialization.*
+@Serializable class C(val a: Int, val b: Int = 5, val t: String? = null)
+fun box(): String {
+    val d = C.serializer().descriptor
+    if (d.isElementOptional(0)) return "a should not be optional"
+    if (!d.isElementOptional(1)) return "b should be optional"
+    if (!d.isElementOptional(2)) return "t should be optional"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerOptional") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "default-value isElementOptional wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty default-value descriptor isOptional OK");
+}
+
+#[test]
 fn generic_class_serializer_in_krusty() {
     // A generic `@Serializable class Box<T>(val boxed: T)`: its `$serializer` is a CLASS with one
     // `KSerializer` constructor argument per type parameter; `Box.serializer(Inner.serializer())` builds
