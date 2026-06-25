@@ -270,6 +270,36 @@ fun box(): String {
 }
 
 #[test]
+fn descriptor_element_names_extension_property_in_krusty() {
+    // `descriptor.elementNames` / `.elementDescriptors` are CLASSPATH EXTENSION properties (getters
+    // `SerialDescriptorKt.getElementNames(d)` / `getElementDescriptors(d)`). krusty resolves a classpath
+    // extension property `recv.x` to its static `get<X>(recv)` getter and lowers it to `invokestatic`.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+
+@Serializable
+class Foo(val a: Int, val b: String)
+
+fun box(): String {
+    val names = Foo.serializer().descriptor.elementNames.joinToString()
+    if (names != "a, b") return "names=$names"
+    val n = Foo.serializer().descriptor.elementDescriptors.count()
+    if (n != 2) return "count=$n"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerElemNames") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "elementNames extension property wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty descriptor.elementNames extension property OK");
+}
+
+#[test]
 fn reified_serializer_free_function_and_data_object_in_krusty() {
     // `serializer<T>()` (the reified free function `kotlinx.serialization.serializer`) can't be called
     // directly (throws at runtime) — krusty desugars it to `T.serializer()`. Also exercises a

@@ -2723,6 +2723,10 @@ pub struct TypeInfo {
     /// A bare `Name` expr that resolves to a CLASSPATH `object` used as a value → the object's internal
     /// name. Lowering emits `getstatic <internal>.INSTANCE` (`ExternalStaticField`) for it.
     pub obj_value_refs: HashMap<ExprId, String>,
+    /// A property-read `recv.name` that resolved to a CLASSPATH EXTENSION property — its getter is a
+    /// static `get<Name>(recv)` on `(owner, method, descriptor)` (e.g. `d.elementDescriptors` →
+    /// `SerialDescriptorKt.getElementDescriptors(d)`). Lowering emits that `invokestatic`.
+    pub ext_prop_calls: HashMap<ExprId, (String, String, String)>,
     /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
     /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
     pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
@@ -2818,6 +2822,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_sigs: HashMap::new(),
         local_call_map: HashMap::new(),
         obj_value_refs: HashMap::new(),
+        ext_prop_calls: HashMap::new(),
         companion_calls: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
@@ -3295,6 +3300,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_sigs: c.local_fun_sigs,
         local_call_map: c.local_call_map,
         obj_value_refs: c.obj_value_refs,
+        ext_prop_calls: c.ext_prop_calls,
         companion_calls: c.companion_calls,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
@@ -3333,6 +3339,7 @@ struct Checker<'a> {
     local_fun_sigs: HashMap<StmtId, (String, Signature)>,
     local_call_map: HashMap<ExprId, StmtId>,
     obj_value_refs: HashMap<ExprId, String>,
+    ext_prop_calls: HashMap<ExprId, (String, String, String)>,
     companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
@@ -4789,7 +4796,7 @@ impl<'a> Checker<'a> {
                     t
                 } else {
                     match &args {
-                        None => self.check_member(rt, &name, self.span(e)),
+                        None => self.check_member(rt, &name, self.span(e), Some(e)),
                         Some(a) => {
                             let arg_tys: Vec<Ty> = a.iter().map(|x| self.expr(*x)).collect();
                             if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
@@ -5126,7 +5133,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let rt = self.expr(receiver);
-                self.check_member(rt, &name, self.span(e))
+                self.check_member(rt, &name, self.span(e), Some(e))
             }
             Expr::Call { callee, args } => self.check_call(e, callee, &args, self.span(e)),
             Expr::If {
@@ -6028,7 +6035,7 @@ impl<'a> Checker<'a> {
         Ty::obj(internal)
     }
 
-    fn check_member(&mut self, rt: Ty, name: &str, span: Span) -> Ty {
+    fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
         }
@@ -6123,6 +6130,44 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // Classpath EXTENSION property: `recv.name` whose getter is a top-level `get<Name>(recv)` static
+        // (e.g. `descriptor.elementDescriptors` → `SerialDescriptorKt.getElementDescriptors(descriptor)`).
+        // Tried last, after members/user-ext-props/library getters, so it never shadows a real member.
+        if let Ty::Obj(_, _) = rt {
+            // `x` → `getX`; a boolean `isFoo` property keeps its name (mirrors the library-getter rule).
+            let getter = if name.starts_with("is")
+                && name
+                    .as_bytes()
+                    .get(2)
+                    .is_some_and(|b| b.is_ascii_uppercase())
+            {
+                name.to_string()
+            } else {
+                let mut c = name.chars();
+                format!(
+                    "get{}{}",
+                    c.next()
+                        .map(|f| f.to_uppercase().to_string())
+                        .unwrap_or_default(),
+                    c.as_str()
+                )
+            };
+            if let Some(cl) = self
+                .syms
+                .libraries
+                .resolve_callable(&getter, Some(rt), &[], &[])
+            {
+                if !matches!(cl.ret, Ty::Unit | Ty::Error) {
+                    if let Some(e) = mexpr {
+                        self.ext_prop_calls.insert(
+                            e,
+                            (cl.owner.clone(), cl.name.clone(), cl.descriptor.clone()),
+                        );
+                    }
+                    return cl.ret;
+                }
+            }
+        }
         self.diags.error(
             span,
             format!("unresolved member '{name}' on '{}'", rt.name()),
@@ -6135,7 +6180,7 @@ impl<'a> Checker<'a> {
     /// bare name `length` inside a receiver-lambda body (`this`-relative) for an arbitrary receiver type.
     fn try_member_read(&mut self, rt: Ty, name: &str, span: Span) -> Option<Ty> {
         let n = self.diags.diags.len();
-        let t = self.check_member(rt, name, span);
+        let t = self.check_member(rt, name, span, None);
         if self.diags.diags.len() > n || t == Ty::Error {
             self.diags.diags.truncate(n);
             return None;

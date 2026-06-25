@@ -526,6 +526,22 @@ nested `data` decl arms now dispatch to `parse_object()` when followed by `objec
 `data object` main-corpus file)**, 0 FAIL. Test:
 `serialization_krusty_only_e2e::reified_serializer_free_function_and_data_object_in_krusty`.
 
+#### Update (2026-06-25) — classpath extension-property resolution → main gate 1746 → 1748
+
+A classpath EXTENSION property read `recv.x` (whose getter is a top-level static `get<X>(recv)`) now
+resolves and lowers: `check_member` (after members / user-ext-props / library getters — tried LAST so it
+never shadows a real member) calls `resolve_callable("get<X>", Some(recv), …)`; on a hit it records
+`(owner, method, descriptor)` in `TypeInfo.ext_prop_calls` and returns the getter's return type, and
+ir_lower's `Expr::Member` arm emits `invokestatic owner.get<X>(recv)`. A boolean `isFoo` property keeps its
+name (mirrors the library-getter rule). Example: `descriptor.elementDescriptors` /
+`descriptor.elementNames` → `SerialDescriptorKt.getElementDescriptors|getElementNames(descriptor)`. Broadly
+useful (ANY classpath extension property, e.g. `List.indices`): **main box gate 1746 → 1748 (+2), 0 FAIL**.
+Test: `serialization_krusty_only_e2e::descriptor_element_names_extension_property_in_krusty`. This unblocks
+the FRONT END of the `elementDescriptors` corpus cluster (classSerializerAsObject, multipleGenericsPolymorphic,
+starProjections — starProjections now compiles + runs); each still needs a further feature (List `[]`
+indexing + generic collection element-type recovery; polymorphic type-parameter serializers), so no NEW
+serialization-corpus green yet — corpus stays 6/69.
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

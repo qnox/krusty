@@ -10411,6 +10411,23 @@ impl<'a> Lower<'a> {
                         descriptor: format!("L{internal};"),
                     }));
                 }
+                // A classpath EXTENSION property recorded by the checker (`d.elementDescriptors`) →
+                // `invokestatic <Kt>.get<Name>(recv)`.
+                if let Some((owner, method, descriptor)) = self.info.ext_prop_calls.get(&e).cloned()
+                {
+                    let a = self.expr(receiver)?;
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Static {
+                            owner,
+                            name: method,
+                            descriptor,
+                            inline: false,
+                            must_inline: false,
+                        },
+                        dispatch_receiver: None,
+                        args: vec![a],
+                    }));
+                }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
                 let rty = self.info.ty(receiver);
                 if let Some(&gfid) = self.ext_prop_get_ids.get(&(rty.descriptor(), name.clone())) {
