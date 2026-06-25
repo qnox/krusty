@@ -42,6 +42,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         ext_fun_ids: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
+        const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
@@ -1132,6 +1133,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             } else {
                 let idx = lo.statics.len() as u32;
                 lo.statics.insert(p.name.clone(), (idx, ty));
+                // A top-level `const val` with a compile-time literal initializer: record its value so a
+                // same-file read inlines it (`ldc`), byte-identical to kotlinc, instead of `getstatic`.
+                if p.is_const {
+                    if let Some(c) = p.init.and_then(|i| ast_literal_const(file, i, ty)) {
+                        lo.const_lits.insert(p.name.clone(), c);
+                    }
+                }
             }
         }
     }
@@ -2413,6 +2421,31 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 /// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
 /// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
 /// block-bodied) without an extension receiver.
+/// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
+/// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
+/// `getstatic`). Lets a same-file const read inline the value (`ldc`), byte-identical to kotlinc.
+fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
+    use crate::ir::IrConst;
+    use ast::Expr;
+    Some(match file.expr(e) {
+        Expr::IntLit(v) => match ty {
+            Ty::Byte => IrConst::Byte(*v as i8),
+            Ty::Short => IrConst::Short(*v as i16),
+            Ty::Char => IrConst::Char(char::from_u32(*v as u32)?),
+            _ => IrConst::Int(*v as i32),
+        },
+        Expr::LongLit(v) => IrConst::Long(*v),
+        Expr::DoubleLit(v) => IrConst::Double(*v),
+        Expr::FloatLit(v) => IrConst::Float(*v),
+        Expr::BoolLit(b) => IrConst::Boolean(*b),
+        Expr::StringLit(s) => IrConst::String(s.clone()),
+        Expr::CharLit(c) => IrConst::Char(*c),
+        Expr::UIntLit(v) => IrConst::Int(*v as i32),
+        Expr::ULongLit(v) => IrConst::Long(*v),
+        _ => return None,
+    })
+}
+
 /// Whether a class's `companion object` properties are all lowerable: each a `const val` with a plain
 /// compile-time initializer (no getter/setter/delegate). Such a const becomes a `public static final` +
 /// `ConstantValue` field on the OUTER class (kotlinc's layout). An empty list is trivially lowerable.
@@ -2728,6 +2761,9 @@ pub(crate) struct Lower<'a> {
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
     companion_consts: HashMap<(String, String), Ty>,
+    /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
+    /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
+    const_lits: HashMap<String, crate::ir::IrConst>,
     ext_prop_set_ids: HashMap<(String, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
@@ -10281,6 +10317,9 @@ impl<'a> Lower<'a> {
                         dispatch_receiver: None,
                         args: vec![],
                     })
+                } else if let Some(c) = self.const_lits.get(&n).cloned() {
+                    // A same-file `const val` read → inline its literal (`ldc`), like kotlinc.
+                    self.ir.add_expr(IrExpr::Const(c))
                 } else if let Some(&(idx, _)) = self.statics.get(&n) {
                     self.ir.add_expr(IrExpr::GetStatic(idx))
                 } else if let Some((facade, ty, _, is_const)) =
