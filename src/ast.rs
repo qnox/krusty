@@ -492,6 +492,10 @@ pub struct ClassDecl {
     /// Interface delegation `: Iface by delegate` — `(iface simple name, delegate variable name)`. The
     /// class forwards each of `Iface`'s methods to `delegate` (a `val` constructor-parameter field).
     pub delegations: Vec<(String, String)>,
+    /// Interface delegation to an EXPRESSION `: Iface by <expr>` (`by Impl()`) — `(iface simple name,
+    /// delegate expression)`. The expression is evaluated once into a synthesized `$$delegate_e<j>`
+    /// field (stored in the constructor); each of `Iface`'s methods forwards to that field.
+    pub delegation_exprs: Vec<(String, ExprId)>,
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
     pub base_class: Option<String>,
     pub base_args: Vec<ExprId>,

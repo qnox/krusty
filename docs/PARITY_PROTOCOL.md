@@ -978,3 +978,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `field_accessor_props`); only the `field` keyword reaches the field. Two miscompiles (internal
   read/write, then `x++`) were caught by review and fixed before landing. Gate 1767/0.
   `tests/backing_field_accessor_e2e.rs`.
+- **Interface delegation to an expression (`class D : I by Impl()`).** Was a parser hard error ("only
+  `by <val-parameter>`"). Now the parser captures the delegate expression (`delegation_exprs`), the
+  checker types it in the CTOR scope (so `by mk(x)` referencing a ctor param resolves), and the
+  lowering evaluates it once into a `$$delegate_e<j>` field + forwards the interface methods (the
+  forwarder was refactored to `forward_iface_methods`, shared with the `val`-param path). Review caught
+  two correctness regressions (delegate typed in the wrong scope → spurious errors; `parse_expr`
+  swallowing the class-body `{ }` → added a `no_trailing_lambda` parser flag) and the gate caught two
+  miscompiles (a VALUE-class delegate is unboxed and doesn't implement `I` → skip; a `.`-containing
+  filename emitted an illegal facade name → `file_class_name` now sanitizes). Gate 1767 → 1773 box()=OK,
+  0 miscompiles. `tests/interface_delegation_expr_e2e.rs`.
