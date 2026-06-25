@@ -16,7 +16,8 @@
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
-use crate::ir::{Callee, ExprId, IrCatch, IrExpr, IrFile, IrType};
+use crate::ir::{Callee, ExprId, IrCatch, IrExpr, IrFile};
+use crate::types::Ty;
 use crate::jvm::ir_emit::ir_ty_to_jvm;
 use std::collections::{HashMap, HashSet};
 
@@ -36,7 +37,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // type-parameter bound (`X<T: String?>` → null-capable `Object?`): that's what `nullable_is_boxed`
     // and the `checkNotNullParameter` elision key on, and unlike using the bound itself it doesn't disturb
     // the `Object`-repr that the `*Generic` files assume.
-    let under: HashMap<String, IrType> = ir
+    let under: HashMap<String, Ty> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
@@ -51,14 +52,14 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     .as_ref()
                     .is_some_and(|name| {
                         match c.type_param_bounds.iter().find(|(n, _)| n == name) {
-                            Some((_, b)) => matches!(b, IrType::Class { nullable: true, .. }),
+                            Some((_, b)) => b.is_nullable(),
                             None => true,
                         }
                     });
                 let u = if null_capable {
-                    mark_nullable_ty(t)
+                    Ty::nullable(*t)
                 } else {
-                    t.clone()
+                    *t
                 };
                 (c.fq_name.clone(), u)
             })
@@ -93,22 +94,22 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
 
     // Pre-erasure signatures, so box/unbox at call boundaries can see `Object`/generic param/field
     // types (which erasure leaves alone but values flowing in must be boxed to reach).
-    let orig_params: Vec<Vec<IrType>> = ir.functions.iter().map(|f| f.params.clone()).collect();
-    let orig_fields: Vec<Vec<IrType>> = ir
+    let orig_params: Vec<Vec<Ty>> = ir.functions.iter().map(|f| f.params.clone()).collect();
+    let orig_fields: Vec<Vec<Ty>> = ir
         .classes
         .iter()
         .map(|c| c.fields.iter().map(|f| f.ty.clone()).collect())
         .collect();
     // Pre-erasure constructor-parameter types per class (parallel to `ir.classes`) — the slot types for
     // an `init { … }` block's box/unbox analysis (slot 0 = `this`, slots 1.. = the ctor params).
-    let orig_ctor_args: Vec<Vec<IrType>> = ir
+    let orig_ctor_args: Vec<Vec<Ty>> = ir
         .classes
         .iter()
         .map(|c| c.ctor_args.iter().map(|(t, _)| t.clone()).collect())
         .collect();
     // Pre-erasure secondary-constructor parameter types (class → ctor → params) — slot types for a
     // regular class's secondary-`<init>` body/delegation box/unbox (slot 0 = `this`, slots 1.. = params).
-    let orig_secondary: Vec<Vec<Vec<IrType>>> = ir
+    let orig_secondary: Vec<Vec<Vec<Ty>>> = ir
         .classes
         .iter()
         .map(|c| c.secondary_ctors.iter().map(|s| s.params.clone()).collect())
@@ -171,12 +172,12 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
 
     // Per-function value-slot types (parameters + local `Variable`s) and return types, captured BEFORE
     // erasure so the box/unbox analysis sees `Class{X}` (non-null = unboxed, nullable = boxed).
-    let orig_rets: Vec<IrType> = ir.functions.iter().map(|f| f.ret.clone()).collect();
-    let slot_types: Vec<HashMap<u32, IrType>> = ir
+    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
         .map(|f| {
-            let mut m: HashMap<u32, IrType> = HashMap::new();
+            let mut m: HashMap<u32, Ty> = HashMap::new();
             let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
             for (i, p) in f.params.iter().enumerate() {
                 m.insert(base + i as u32, p.clone());
@@ -197,7 +198,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // 1. Erase signatures + drop null-checks on params that erased to a non-reference. `box-impl`
     //    returns the boxed `X` (the one position not erased).
     let is_vc_ty =
-        |t: &IrType| matches!(t, IrType::Class { fq_name, .. } if under.contains_key(fq_name));
+        |t: &Ty| t.non_null().obj_internal().is_some_and(|fq| under.contains_key(fq));
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(String, String, usize), String> = HashMap::new();
@@ -321,11 +322,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     b.target_name = Some(m.clone());
                 }
                 let concrete_ret_vc = match &b.concrete_ret {
-                    IrType::Class {
-                        fq_name,
-                        nullable: false,
-                        ..
-                    } if under.contains_key(fq_name) => Some(fq_name.clone()),
+                    Ty::Obj(fq_name, _) if under.contains_key(*fq_name) => Some(fq_name.to_string()),
                     _ => None,
                 };
                 if let Some(fq_name) = concrete_ret_vc {
@@ -355,9 +352,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     // returns the erased underlying, NO box. A nullable `X?` that BOXES (over a primitive /
                     // null-capable chain, e.g. `X(val x: Any?)` → `LX;`) or a generic `T` (erased `Object`)
                     // → bridge BOXES the value class back.
-                    let supertype_returns_vc = matches!(&b.erased_ret,
-                        IrType::Class { fq_name, nullable, .. }
-                            if under.contains_key(fq_name) && (!*nullable || !nullable_is_boxed(fq_name, &under)));
+                    let supertype_returns_vc = b.erased_ret.non_null().obj_internal().is_some_and(|fq_name| {
+                        under.contains_key(fq_name)
+                            && (!b.erased_ret.is_nullable() || !nullable_is_boxed(fq_name, &under))
+                    });
                     // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere — the bridge
                     // returns the override's already-`Object` result directly, NO `box-impl` (krusty never
                     // materializes its box object); same as a supertype that returns the value class unboxed.
@@ -379,11 +377,9 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                         .concrete_params
                         .iter()
                         .map(|p| match p {
-                            IrType::Class {
-                                fq_name,
-                                nullable: false,
-                                ..
-                            } if under.contains_key(fq_name) => Some(fq_name.clone()),
+                            Ty::Obj(fq_name, _) if under.contains_key(*fq_name) => {
+                                Some(fq_name.to_string())
+                            }
                             _ => None,
                         })
                         .collect();
@@ -441,8 +437,9 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 // then unboxes. An EXTERNAL value class (`Result`) has NO box — it is always its underlying
                 // — so `as Result` must erase to the underlying (`as Any` → no `checkcast Result`, which
                 // would `ClassCastException` the raw value).
-                let is_vc_ty = matches!(type_operand, IrType::Class { fq_name, .. }
-                    if under.contains_key(fq_name) && !external_vc.contains(fq_name));
+                let is_vc_ty = type_operand.non_null().obj_internal().is_some_and(|fq_name| {
+                    under.contains_key(fq_name) && !external_vc.contains(fq_name)
+                });
                 if !is_vc_ty {
                     *type_operand = erase(type_operand, &under);
                 }
@@ -456,7 +453,10 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             // An `Array<X>` of a value class is a reference array of the BOXED `X` (kotlinc) — keep the
             // element type boxed (don't erase to the underlying); elements are `box-impl`'d when stored.
             IrExpr::Vararg { element_type, .. } | IrExpr::NewArray { element_type, .. } => {
-                if !matches!(element_type, IrType::Class { fq_name, .. } if under.contains_key(fq_name))
+                if !element_type
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|fq_name| under.contains_key(fq_name))
                 {
                     *element_type = erase(element_type, &under)
                 }
@@ -488,7 +488,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 | "<init>"
         ) || name.starts_with("get")
     };
-    let mut s4_bodies: Vec<(ExprId, HashMap<u32, IrType>, Option<u32>)> = Vec::new();
+    let mut s4_bodies: Vec<(ExprId, HashMap<u32, Ty>, Option<u32>)> = Vec::new();
     for (fid, f) in ir.functions.iter().enumerate() {
         // SYNTHESIZED value-class members aren't rewritten (emitted boxed-correct) — EXCEPT `<init>`
         // (field-init/init-block over unboxed ctor params) and `constructor-impl` (moved `init { … }`). A
@@ -570,7 +570,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 let u = under
                     .get(&fq[cls])
                     .map(|t| erase(t, &under))
-                    .unwrap_or(IrType::Error);
+                    .unwrap_or(Ty::Error);
                 let ret = desc(&u);
                 let params: String = match ctor_params {
                     Some(ps) => ps.iter().map(|p| desc(&erase(p, &under))).collect(),
@@ -593,22 +593,22 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand:
-                    IrType::Class {
-                        nullable: true,
-                        fq_name,
-                        ..
-                    },
-            } if under.contains_key(fq_name)
+                type_operand,
+            } if type_operand.is_nullable()
+                && type_operand
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|fq_name| under.contains_key(fq_name))
                 && !matches!(
                     repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, *arg),
                     Repr::Boxed(_)
                 ) =>
             {
+                let fq_name = type_operand.non_null().obj_internal().unwrap().to_string();
                 let u = under
-                    .get(fq_name)
+                    .get(&fq_name)
                     .map(|t| erase(t, &under))
-                    .unwrap_or(IrType::Error);
+                    .unwrap_or(Ty::Error);
                 Some(Rw::Ctor(IrExpr::Call {
                     callee: Callee::Static {
                         owner: fq_name.clone(),
@@ -686,7 +686,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // Each body to box/unbox: every non-value-class-member function body (with its captured slot types),
     // plus every class `init { … }` block (slots = `this` + the ctor params), so a value-class member
     // call / boundary INSIDE an init block (`class B(val a: A) { init { a.f() } }`) is boxed too.
-    let mut bodies: Vec<(ExprId, HashMap<u32, IrType>)> = Vec::new();
+    let mut bodies: Vec<(ExprId, HashMap<u32, Ty>)> = Vec::new();
     // `fid` indexes two parallel vecs (`ir.functions` and `slot_types`), so the range loop is wanted.
     #[allow(clippy::needless_range_loop)]
     for fid in 0..ir.functions.len() {
@@ -752,7 +752,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 type_operand,
             } = &ir.exprs[id as usize]
             {
-                let to_self = matches!(type_operand, IrType::Class { fq_name, .. } if under.contains_key(fq_name));
+                let to_self = type_operand.non_null().obj_internal().is_some_and(|fq_name| under.contains_key(fq_name));
                 if let Repr::Unboxed(x) =
                     repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, *arg)
                 {
@@ -802,7 +802,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                     let params = ir.functions[fid as usize].params.clone();
                     for (k, a) in args.clone().into_iter().enumerate() {
                         let Some(a) = a else { continue };
-                        if let Some(IrType::Class { fq_name, .. }) = params.get(k) {
+                        if let Some(fq_name) = params.get(k).and_then(|p| p.non_null().obj_internal()) {
                             if under.contains_key(fq_name)
                                 && matches!(repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, a), Repr::Unboxed(ref x) if x == fq_name)
                             {
@@ -813,9 +813,9 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                                     slots,
                                     a,
                                 ) {
-                                    BoxOp::Box(fq_name.clone())
+                                    BoxOp::Box(fq_name.to_string())
                                 } else {
-                                    BoxOp::BoxNull(fq_name.clone())
+                                    BoxOp::BoxNull(fq_name.to_string())
                                 };
                                 ops.push((a, op));
                             }
@@ -871,8 +871,8 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                         // `0.0 != -0.0`), which the synthesized `equals`/`areEqual` path implements but a
                         // raw `dcmp`/`fcmp` does not — so box even a same-class pair to route through it.
                         let total_order = matches!(
-                            under.get(&x).map(|u| erase(u, &under)),
-                            Some(IrType::Class { fq_name, .. }) if fq_name == "kotlin/Float" || fq_name == "kotlin/Double"
+                            under.get(&x).map(|u| erase(u, &under)).and_then(|u| u.non_null().obj_internal()),
+                            Some(fq_name) if fq_name == "kotlin/Float" || fq_name == "kotlin/Double"
                         );
                         // "Same value class, same representation" — both UNBOXED. If the other side is
                         // BOXED (a nullable-`X` over a primitive, say), box this one too so both compare
@@ -1000,7 +1000,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 }
             }
             // Each `(value expr, target type)` boundary in this expression.
-            let pairs: Vec<(ExprId, IrType)> = match &ir.exprs[id as usize] {
+            let pairs: Vec<(ExprId, Ty)> = match &ir.exprs[id as usize] {
                 IrExpr::New { class, args, .. } => args
                     .iter()
                     .zip(orig_fields[*class as usize].iter())
@@ -1030,7 +1030,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                                 // boxed `LX;` param — the dedicated arg-boxing block above handles an
                                 // unboxed arg into it, and a boxed arg flows in unchanged. Exclude it from
                                 // the generic boundary (whose `target()` would mis-`Unbox` a boxed arg).
-                                if matches!(current.get(i), Some(IrType::Class { fq_name, .. }) if under.contains_key(fq_name)) {
+                                if current.get(i).and_then(|t| t.non_null().obj_internal()).is_some_and(|fq_name| under.contains_key(fq_name)) {
                                     return None;
                                 }
                                 Some((a.as_ref().copied()?, params.get(i)?.clone()))
@@ -1060,7 +1060,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 let supertype_box = matches!(&tgt, Target::Boxed)
                     || (matches!(tgt, Target::Other)
                         && is_ref(&p)
-                        && !matches!(&p, IrType::Class { fq_name, .. } if fq_name == match &repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, a) { Repr::Unboxed(x) | Repr::Boxed(x) => x.as_str(), Repr::NotVc => "" }));
+                        && p.non_null().obj_internal() != Some(match &repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, a) { Repr::Unboxed(x) | Repr::Boxed(x) => x.as_str(), Repr::NotVc => "" }));
                 match repr(&ir.exprs, &orig_rets, &orig_fields, slots, &under, a) {
                     Repr::Unboxed(x) if supertype_box => {
                         // A possibly-null operand (`X?` over a reference) boxes null-safely so the
@@ -1149,8 +1149,8 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             if let Some(body) = ir.functions[fid].body {
                 box_tail(ir, body, &x, &under);
             }
-        } else if matches!(&orig_rets[fid], IrType::Class { fq_name, .. }
-            if fq_name == "kotlin/Any" || vc_interfaces.contains(fq_name))
+        } else if orig_rets[fid].non_null().obj_internal().is_some_and(|fq_name|
+            fq_name == "kotlin/Any" || vc_interfaces.contains(fq_name))
         {
             // A function declared to return `Any` or an interface a value class implements (NOT the
             // value class itself) boxes a value-class tail so the erased call hands back a box (`is X`/
@@ -1158,17 +1158,12 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             if let Some(body) = ir.functions[fid].body {
                 box_vc_tail(ir, body, &under, &orig_rets, false);
             }
-        } else if let IrType::Class {
-            fq_name,
-            nullable: false,
-            ..
-        } = &orig_rets[fid]
-        {
+        } else if let Ty::Obj(fq_name, _) = &orig_rets[fid] {
             // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`) whose tail is a
             // BOXED value (the `!!` of a nullable safe-call yields a boxed `Z`) must `unbox-impl` it — the
             // erased return is the underlying.
-            if under.contains_key(fq_name) {
-                let x = fq_name.clone();
+            if under.contains_key(*fq_name) {
+                let x = fq_name.to_string();
                 if let Some(body) = ir.functions[fid].body {
                     unbox_tail(
                         ir,
@@ -1207,11 +1202,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         // A value-class result is boxed; the impl method then returns the BOX type `X` (its erased
         // underlying return would mis-type the boxed value, e.g. `LX;` vs `String`).
         if let Some(x) = tail_vc(&ir.exprs, &orig_rets, body) {
-            ir.functions[impl_fn as usize].ret = IrType::Class {
-                fq_name: x.clone(),
-                type_args: vec![],
-                nullable: false,
-            };
+            ir.functions[impl_fn as usize].ret = Ty::obj(&x);
         }
         box_vc_tail(ir, body, &under, &orig_rets, false);
     }
@@ -1229,8 +1220,8 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
 fn box_vc_tail(
     ir: &mut IrFile,
     id: ExprId,
-    under: &HashMap<String, IrType>,
-    rets: &[IrType],
+    under: &HashMap<String, Ty>,
+    rets: &[Ty],
     prim_only: bool,
 ) {
     match &ir.exprs[id as usize] {
@@ -1279,7 +1270,7 @@ fn box_vc_tail(
 }
 
 /// The value class produced at a tail position of `id` (recursing `when`/block/return tails), if any.
-fn tail_vc(exprs: &[IrExpr], rets: &[IrType], id: ExprId) -> Option<String> {
+fn tail_vc(exprs: &[IrExpr], rets: &[Ty], id: ExprId) -> Option<String> {
     match &exprs[id as usize] {
         IrExpr::When { branches } => branches.iter().find_map(|(_, r)| tail_vc(exprs, rets, *r)),
         IrExpr::Block { value: Some(v), .. } => tail_vc(exprs, rets, *v),
@@ -1291,7 +1282,7 @@ fn tail_vc(exprs: &[IrExpr], rets: &[IrType], id: ExprId) -> Option<String> {
 
 /// The value class an expr produces UNBOXED (a `constructor-impl`/`unbox-impl` result, or a local call
 /// whose return type is a non-null value class), if any.
-fn unboxed_vc_class(exprs: &[IrExpr], rets: &[IrType], id: ExprId, calls: bool) -> Option<String> {
+fn unboxed_vc_class(exprs: &[IrExpr], rets: &[Ty], id: ExprId, calls: bool) -> Option<String> {
     match &exprs[id as usize] {
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
@@ -1303,11 +1294,7 @@ fn unboxed_vc_class(exprs: &[IrExpr], rets: &[IrType], id: ExprId, calls: bool) 
             callee: Callee::Local(fid),
             ..
         } if calls => match rets.get(*fid as usize) {
-            Some(IrType::Class {
-                fq_name,
-                nullable: false,
-                ..
-            }) => Some(fq_name.clone()),
+            Some(Ty::Obj(fq_name, _)) => Some(fq_name.to_string()),
             _ => None,
         },
         IrExpr::Block { value: Some(v), .. } => unboxed_vc_class(exprs, rets, *v, calls),
@@ -1341,7 +1328,7 @@ enum Target {
 /// Whether a NULLABLE value class `X?` is represented BOXED. Only true when its underlying erases to a
 /// primitive (a primitive can't carry null, so `X?` keeps the boxed `X`). Over a reference underlying,
 /// `X?` erases to that underlying reference — represented unboxed, exactly like a non-null `X`.
-fn nullable_is_boxed(x: &str, under: &HashMap<String, IrType>) -> bool {
+fn nullable_is_boxed(x: &str, under: &HashMap<String, Ty>) -> bool {
     // `X?` stays UNBOXED (its underlying reference carries null) only when the underlying is a NON-NULL
     // reference. Over a primitive (can't hold null) OR a NULLABLE reference (where `X(null)` and a `null`
     // `X?` would otherwise be indistinguishable), `X?` is the boxed `X`.
@@ -1355,27 +1342,24 @@ fn nullable_is_boxed(x: &str, under: &HashMap<String, IrType>) -> bool {
 /// underlying chain is declared nullable (`X(val v: Int?)`; `ZN(val z: Z1?)` → `ZN2(val z: ZN)` null-capable
 /// through `Z1?`). `erase` collapses a nullable-over-non-null-reference to a non-null underlying, so this
 /// walks the UNERASED chain to see the `?` erasure drops.
-fn underlying_null_capable(t: &IrType, under: &HashMap<String, IrType>) -> bool {
-    match t {
-        IrType::Class { nullable: true, .. } => true,
-        IrType::Class { fq_name, .. } => under
+fn underlying_null_capable(t: &Ty, under: &HashMap<String, Ty>) -> bool {
+    if t.is_nullable() {
+        return true;
+    }
+    match t.obj_internal() {
+        Some(fq_name) => under
             .get(fq_name)
             .is_some_and(|u| underlying_null_capable(u, under)),
-        _ => false,
+        None => false,
     }
 }
 
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
-fn vc_underlying_nullable(t: &IrType, under: &HashMap<String, IrType>) -> bool {
-    if let IrType::Class {
-        fq_name,
-        nullable: false,
-        ..
-    } = t
-    {
-        if let Some(u) = under.get(fq_name) {
+fn vc_underlying_nullable(t: &Ty, under: &HashMap<String, Ty>) -> bool {
+    if let Ty::Obj(fq_name, _) = t {
+        if let Some(u) = under.get(*fq_name) {
             return underlying_null_capable(u, under);
         }
     }
@@ -1386,20 +1370,12 @@ fn vc_underlying_nullable(t: &IrType, under: &HashMap<String, IrType>) -> bool {
 /// hit the value class's non-null ctor check. A construction/`!!`/non-nullable slot or return qualifies.
 fn operand_nonnull(
     exprs: &[IrExpr],
-    rets: &[IrType],
-    fields: &[Vec<IrType>],
-    slots: &HashMap<u32, IrType>,
+    rets: &[Ty],
+    fields: &[Vec<Ty>],
+    slots: &HashMap<u32, Ty>,
     id: ExprId,
 ) -> bool {
-    let non_null_ty = |t: &IrType| {
-        matches!(
-            t,
-            IrType::Class {
-                nullable: false,
-                ..
-            }
-        )
-    };
+    let non_null_ty = |t: &Ty| matches!(t, Ty::Obj(..));
     match &exprs[id as usize] {
         IrExpr::New { .. } => true,
         // A read of a non-nullable field yields a non-null value (a `val a: X` data-class property is
@@ -1423,45 +1399,44 @@ fn operand_nonnull(
     }
 }
 
-fn repr_of_ty(t: &IrType, under: &HashMap<String, IrType>) -> Repr {
-    if let IrType::Class {
-        fq_name, nullable, ..
-    } = t
-    {
+fn repr_of_ty(t: &Ty, under: &HashMap<String, Ty>) -> Repr {
+    if let Some(fq_name) = t.non_null().obj_internal() {
+        let nullable = t.is_nullable();
         if under.contains_key(fq_name) {
-            return if *nullable && nullable_is_boxed(fq_name, under) {
-                Repr::Boxed(fq_name.clone())
+            return if nullable && nullable_is_boxed(fq_name, under) {
+                Repr::Boxed(fq_name.to_string())
             } else {
-                Repr::Unboxed(fq_name.clone())
+                Repr::Unboxed(fq_name.to_string())
             };
         }
     }
     Repr::NotVc
 }
 
-fn target(t: &IrType, under: &HashMap<String, IrType>) -> Target {
-    match t {
-        IrType::Class {
-            fq_name, nullable, ..
-        } if under.contains_key(fq_name) => {
-            if *nullable && nullable_is_boxed(fq_name, under) {
+fn target(t: &Ty, under: &HashMap<String, Ty>) -> Target {
+    if let Some(fq_name) = t.non_null().obj_internal() {
+        let nullable = t.is_nullable();
+        if under.contains_key(fq_name) {
+            return if nullable && nullable_is_boxed(fq_name, under) {
                 Target::Boxed
             } else {
-                Target::UnboxedX(fq_name.clone())
-            }
+                Target::UnboxedX(fq_name.to_string())
+            };
         }
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Any" => Target::Boxed,
-        _ => Target::Other,
+        if fq_name == "kotlin/Any" {
+            return Target::Boxed;
+        }
     }
+    Target::Other
 }
 
 /// The representation of the value the expr at `id` produces (after the construction/property rewrite).
 fn repr(
     exprs: &[IrExpr],
-    rets: &[IrType],
-    fields: &[Vec<IrType>],
-    slots: &HashMap<u32, IrType>,
-    under: &HashMap<String, IrType>,
+    rets: &[Ty],
+    fields: &[Vec<Ty>],
+    slots: &HashMap<u32, Ty>,
+    under: &HashMap<String, Ty>,
     id: ExprId,
 ) -> Repr {
     match &exprs[id as usize] {
@@ -1500,12 +1475,19 @@ fn repr(
         // so a following member call boxes it (`box-impl`) like any other unboxed receiver.
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::Cast | crate::ir::IrTypeOp::CastNonNull,
-            type_operand: IrType::Class { fq_name, .. },
+            type_operand,
             arg,
-        } if under.contains_key(fq_name) => match repr(exprs, rets, fields, slots, under, *arg) {
-            Repr::Unboxed(x) if x == *fq_name => Repr::Unboxed(x),
-            _ => Repr::Boxed(fq_name.clone()),
-        },
+        } if type_operand
+            .non_null()
+            .obj_internal()
+            .is_some_and(|fq| under.contains_key(fq)) =>
+        {
+            let fq_name = type_operand.non_null().obj_internal().unwrap();
+            match repr(exprs, rets, fields, slots, under, *arg) {
+                Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
+                _ => Repr::Boxed(fq_name.to_string()),
+            }
+        }
         // A sole-field access coerces to the underlying type — its representation is that type's, NOT
         // the value class's (so `vc.field` reads as the underlying, e.g. an `Int`, not a `Meters`).
         IrExpr::TypeOp {
@@ -1520,7 +1502,7 @@ fn repr(
 }
 
 /// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
-fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, IrType>) {
+fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, Ty>) {
     let orig = ir.exprs[id as usize].clone();
     let new_id = ir.exprs.len() as ExprId;
     ir.exprs.push(orig);
@@ -1528,16 +1510,12 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, IrTy
     ir.exprs.push(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg: new_id,
-        type_operand: IrType::Class {
-            fq_name: x.to_string(),
-            type_args: vec![],
-            nullable: false,
-        },
+        type_operand: Ty::obj(x),
     });
     let u = under
         .get(x)
         .map(|t| erase(t, under))
-        .unwrap_or(IrType::Error);
+        .unwrap_or(Ty::Error);
     let d = desc(&u);
     ir.exprs[id as usize] = IrExpr::Call {
         callee: Callee::Virtual {
@@ -1559,16 +1537,16 @@ fn prop_access(
     ir: &mut IrFile,
     receiver: ExprId,
     x: &str,
-    under: &HashMap<String, IrType>,
-    fields: &[Vec<IrType>],
-    rets: &[IrType],
-    slots: &HashMap<u32, IrType>,
+    under: &HashMap<String, Ty>,
+    fields: &[Vec<Ty>],
+    rets: &[Ty],
+    slots: &HashMap<u32, Ty>,
     boxed_this: Option<u32>,
 ) -> IrExpr {
     let u = under
         .get(x)
         .map(|t| erase(t, under))
-        .unwrap_or(IrType::Error);
+        .unwrap_or(Ty::Error);
     // `this.field` inside a USER value-class member: `this` (the `boxed_this` slot) is the BOXED object →
     // unbox. Otherwise `unbox-impl` on a boxed receiver, identity on an unboxed one. Wrap in a coercion to
     // the underlying so later representation analysis (`==` boxing) treats it as the underlying.
@@ -1612,14 +1590,14 @@ fn prop_access(
 fn is_boxed_vc(
     exprs: &[IrExpr],
     funcs: &[crate::ir::IrFunction],
-    fields: &[Vec<IrType>],
-    rets: &[IrType],
-    slots: &HashMap<u32, IrType>,
-    under: &HashMap<String, IrType>,
+    fields: &[Vec<Ty>],
+    rets: &[Ty],
+    slots: &HashMap<u32, Ty>,
+    under: &HashMap<String, Ty>,
     id: ExprId,
     x: &str,
 ) -> bool {
-    let is_x = |t: &IrType| matches!(t, IrType::Class { fq_name, .. } if fq_name == x);
+    let is_x = |t: &Ty| t.non_null().obj_internal() == Some(x);
     match &exprs[id as usize] {
         // A local/param slot whose declared type is a BOXED value class `x` (a nullable `X?`, e.g. the
         // `?.` receiver temp) holds a boxed `x` — so a `.field` on it `unbox-impl`s.
@@ -1687,15 +1665,12 @@ fn is_boxed_vc(
 }
 
 /// A NULLABLE value-class type `X?` (which stays boxed) → its internal name.
-fn boxed_vc(t: &IrType, under: &HashMap<String, IrType>) -> Option<String> {
-    if let IrType::Class {
-        fq_name,
-        nullable: true,
-        ..
-    } = t
-    {
-        if under.contains_key(fq_name) && nullable_is_boxed(fq_name, under) {
-            return Some(fq_name.clone());
+fn boxed_vc(t: &Ty, under: &HashMap<String, Ty>) -> Option<String> {
+    if t.is_nullable() {
+        if let Some(fq_name) = t.non_null().obj_internal() {
+            if under.contains_key(fq_name) && nullable_is_boxed(fq_name, under) {
+                return Some(fq_name.to_string());
+            }
         }
     }
     None
@@ -1722,10 +1697,10 @@ fn unbox_tail(
     ir: &mut IrFile,
     id: ExprId,
     x: &str,
-    under: &HashMap<String, IrType>,
-    rets: &[IrType],
-    fields: &[Vec<IrType>],
-    slots: &HashMap<u32, IrType>,
+    under: &HashMap<String, Ty>,
+    rets: &[Ty],
+    fields: &[Vec<Ty>],
+    slots: &HashMap<u32, Ty>,
 ) {
     match &ir.exprs[id as usize] {
         IrExpr::Return(Some(v)) | IrExpr::Block { value: Some(v), .. } => {
@@ -1745,7 +1720,7 @@ fn unbox_tail(
     }
 }
 
-fn box_tail(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, IrType>) {
+fn box_tail(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, Ty>) {
     match &ir.exprs[id as usize] {
         IrExpr::When { branches } => {
             let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
@@ -1776,14 +1751,14 @@ fn box_tail(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, IrType
 }
 
 /// Replace the expr at `id` with `box-impl(<original expr at id>)`.
-fn box_wrap(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, IrType>) {
+fn box_wrap(ir: &mut IrFile, id: ExprId, x: &str, under: &HashMap<String, Ty>) {
     let orig = ir.exprs[id as usize].clone();
     let new_id = ir.exprs.len() as ExprId;
     ir.exprs.push(orig);
     let u = under
         .get(x)
         .map(|t| erase(t, under))
-        .unwrap_or(IrType::Error);
+        .unwrap_or(Ty::Error);
     let d = desc(&u);
     ir.exprs[id as usize] = IrExpr::Call {
         callee: Callee::Static {
@@ -1804,7 +1779,7 @@ fn box_wrap_nullable(
     ir: &mut IrFile,
     id: ExprId,
     x: &str,
-    under: &HashMap<String, IrType>,
+    under: &HashMap<String, Ty>,
     slot: u32,
 ) {
     let orig = ir.exprs[id as usize].clone();
@@ -1813,7 +1788,7 @@ fn box_wrap_nullable(
     let u = under
         .get(x)
         .map(|t| erase(t, under))
-        .unwrap_or(IrType::Error);
+        .unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
         index: slot,
@@ -1861,51 +1836,33 @@ fn box_wrap_nullable(
 /// `X?` erases to the underlying ONLY when that underlying is a reference (which can itself hold null);
 /// over a primitive underlying, `X?` stays the boxed `X` (a primitive can't represent null). Non-value
 /// types pass through.
-fn erase(t: &IrType, under: &HashMap<String, IrType>) -> IrType {
-    if let IrType::Class {
-        fq_name, nullable, ..
-    } = t
-    {
+fn erase(t: &Ty, under: &HashMap<String, Ty>) -> Ty {
+    if let Some(fq_name) = t.non_null().obj_internal() {
+        let nullable = t.is_nullable();
         if let Some(u) = under.get(fq_name) {
             // A non-null `X` always erases to its underlying. A nullable `X?` erases ONLY when it is NOT
             // boxed (`nullable_is_boxed` is the single source of truth — over a non-null reference that
             // carries `null` itself); otherwise it stays the boxed `X` so `X(null)` ≠ `null`. Delegating
             // keeps erasure consistent with the box/unbox analysis for arbitrarily nested chains.
-            if !*nullable || !nullable_is_boxed(fq_name, under) {
+            if !nullable || !nullable_is_boxed(fq_name, under) {
                 return erase(u, under);
             }
         }
     }
-    t.clone()
+    *t
 }
 
 /// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
 /// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
 /// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
 /// `Class` is a reference.
-/// A `Class` type forced nullable (carry a generic value class's nullable type-parameter bound).
-fn mark_nullable_ty(t: &IrType) -> IrType {
-    match t {
-        IrType::Class {
-            fq_name, type_args, ..
-        } => IrType::Class {
-            fq_name: fq_name.clone(),
-            type_args: type_args.clone(),
-            nullable: true,
-        },
-        _ => t.clone(),
+fn is_ref(t: &Ty) -> bool {
+    if t.is_nullable() {
+        return true;
     }
-}
-
-fn is_ref(t: &IrType) -> bool {
-    match t {
-        IrType::Class {
-            fq_name,
-            nullable: false,
-            ..
-        } => !is_primitive_class(fq_name),
-        IrType::Class { .. } => true,
-        _ => false,
+    match t.obj_internal() {
+        Some(fq_name) => !is_primitive_class(fq_name),
+        None => false,
     }
 }
 
@@ -1986,40 +1943,20 @@ fn descriptor_param_refs(descriptor: &str) -> Vec<bool> {
 fn synth_value_members(
     ir: &mut IrFile,
     class_id: u32,
-    under: &HashMap<String, IrType>,
+    under: &HashMap<String, Ty>,
     has_init: bool,
 ) {
     let internal = ir.classes[class_id as usize].fq_name.clone();
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
-    let u_ir = under.get(&internal).cloned().unwrap_or(IrType::Error);
-    let x_ir = IrType::Class {
-        fq_name: internal.clone(),
-        type_args: vec![],
-        nullable: false,
-    };
-    let bool_ir = IrType::Class {
-        fq_name: "kotlin/Boolean".into(),
-        type_args: vec![],
-        nullable: false,
-    };
-    let int_ir = IrType::Class {
-        fq_name: "kotlin/Int".into(),
-        type_args: vec![],
-        nullable: false,
-    };
-    let str_ir = IrType::Class {
-        fq_name: "kotlin/String".into(),
-        type_args: vec![],
-        nullable: false,
-    };
-    let any_ir = IrType::Class {
-        fq_name: "kotlin/Any".into(),
-        type_args: vec![],
-        nullable: false,
-    };
+    let u_ir = under.get(&internal).copied().unwrap_or(Ty::Error);
+    let x_ir = Ty::obj(&internal);
+    let bool_ir = Ty::obj("kotlin/Boolean");
+    let int_ir = Ty::obj("kotlin/Int");
+    let str_ir = Ty::obj("kotlin/String");
+    let any_ir = Ty::obj("kotlin/Any");
 
     let add_static =
-        |ir: &mut IrFile, name: &str, params: Vec<IrType>, ret: IrType, body: ExprId| {
+        |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| {
             let fid = ir.add_fun(crate::ir::IrFunction {
                 name: name.to_string(),
                 params,
@@ -2031,7 +1968,7 @@ fn synth_value_members(
             });
             ir.classes[class_id as usize].methods.push(fid);
         };
-    let add_inst = |ir: &mut IrFile, name: &str, params: Vec<IrType>, ret: IrType, body: ExprId| {
+    let add_inst = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| {
         // Don't synthesize over a user-defined member of the same name.
         let exists = ir.classes[class_id as usize]
             .methods
@@ -2139,9 +2076,9 @@ fn synth_value_members(
     // primitive of a nested chain: `ZN(val z: Z1?)` erases to a BOXED `Z1` (`LZ1;`), so it hashes/compares
     // as a reference (`Objects.hashCode`/`areEqual` → `Z1`'s own members), not as the final `Int`.
     let eu = erase(&u_ir, under);
-    let final_fq = match &eu {
-        IrType::Class { fq_name, .. } => fq_name.clone(),
-        _ => String::new(),
+    let final_fq = match eu.non_null().obj_internal() {
+        Some(fq_name) => fq_name.to_string(),
+        None => String::new(),
     };
     let is_ref_under = is_ref(&eu);
     // equals-impl0(U, U): Boolean
@@ -2369,14 +2306,12 @@ fn field_ne_ir(ir: &mut IrFile, a: ExprId, b: ExprId, fq: &str) -> ExprId {
 
 /// kotlinc's inline-class mangling info for an IR type, against the value classes in `under`.
 fn mangling_info(
-    t: &IrType,
-    under: &HashMap<String, IrType>,
+    t: &Ty,
+    under: &HashMap<String, Ty>,
 ) -> crate::jvm::inline_class::InfoForMangling {
-    let (fq_name, is_nullable) = match t {
-        IrType::Class {
-            fq_name, nullable, ..
-        } => (fq_name.clone(), *nullable),
-        _ => (String::new(), false),
+    let (fq_name, is_nullable) = match t.non_null().obj_internal() {
+        Some(fq_name) => (fq_name.to_string(), t.is_nullable()),
+        None => (String::new(), false),
     };
     crate::jvm::inline_class::InfoForMangling {
         is_value: under.contains_key(&fq_name),
@@ -2389,9 +2324,9 @@ fn mangling_info(
 /// parameter, or a value-class return, triggers it). Plain `base` otherwise.
 fn vc_mangle(
     base: &str,
-    params: &[IrType],
-    ret: &IrType,
-    under: &HashMap<String, IrType>,
+    params: &[Ty],
+    ret: &Ty,
+    under: &HashMap<String, Ty>,
     is_file_class: bool,
 ) -> String {
     // PARAM mangling (kotlinc `IrType.getRequiresMangling`) EXEMPTS `kotlin.Result`
@@ -2415,7 +2350,7 @@ fn vc_mangle(
 
 /// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
 /// becomes its underlying descriptor (`(LIv;)Ljava/lang/String;` → `(I)Ljava/lang/String;`).
-fn erase_descriptor(descriptor: &str, under: &HashMap<String, IrType>) -> String {
+fn erase_descriptor(descriptor: &str, under: &HashMap<String, Ty>) -> String {
     let bytes = descriptor.as_bytes();
     let mut out = String::with_capacity(descriptor.len());
     let mut i = 0;
@@ -2455,7 +2390,7 @@ fn is_primitive_class(fq: &str) -> bool {
     )
 }
 
-fn desc(t: &IrType) -> String {
+fn desc(t: &Ty) -> String {
     ir_ty_to_jvm(t).descriptor()
 }
 
@@ -2473,8 +2408,8 @@ fn getter_name(field: &str) -> String {
 /// Slot-type map for a body rooted at `root` running over `params` (slot 0 = `this`, params at 1..), plus
 /// any local `Variable`s declared inside it — used to give an `init`/secondary-ctor/super-arg body the same
 /// slot-typed box/unbox analysis a function body gets from its captured `slot_types`.
-fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[IrType]) -> HashMap<u32, IrType> {
-    let mut slots: HashMap<u32, IrType> = HashMap::new();
+fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[Ty]) -> HashMap<u32, Ty> {
+    let mut slots: HashMap<u32, Ty> = HashMap::new();
     for (i, t) in params.iter().enumerate() {
         slots.insert(1 + i as u32, t.clone());
     }

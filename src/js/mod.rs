@@ -6,7 +6,8 @@
 //! target-neutral. Covers the core subset (`ir_lower`'s output): functions, simple classes,
 //! control flow, and stdlib intrinsics realized from the JS platform.
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::types::Ty;
 
 /// Emit a whole file's IR as a JavaScript module (one `class` per IR class, one `function` per
 /// top-level function).
@@ -67,9 +68,9 @@ fn class_simple(fq: &str) -> &str {
 }
 
 /// `x instanceof T` in JS — `String` is a primitive (`typeof`), a class is a real `instanceof`.
-fn js_instanceof(arg: &str, t: &IrType) -> String {
-    if let IrType::Class { fq_name, .. } = t {
-        match fq_name.as_str() {
+fn js_instanceof(arg: &str, t: &Ty) -> String {
+    if let Some(fq_name) = t.non_null().obj_internal() {
+        match fq_name {
             "kotlin/String" => return format!("(typeof {arg} === \"string\")"),
             _ => return format!("({arg} instanceof {})", class_simple(fq_name)),
         }

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrType, IrTypeOp};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::method_descriptor;
@@ -120,12 +120,12 @@ fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
 }
 
 fn jvm_can_emit(ir: &IrFile) -> bool {
-    fn ty_ok(t: &IrType) -> bool {
-        match t {
-            IrType::Function { params, ret, .. } => {
-                params.len() <= 22 && params.iter().all(ty_ok) && ty_ok(ret)
+    fn ty_ok(t: &Ty) -> bool {
+        match t.non_null() {
+            Ty::Fun(s) => {
+                s.params.len() <= 22 && s.params.iter().all(ty_ok) && ty_ok(&s.ret)
             }
-            IrType::Class { type_args, .. } => type_args.iter().all(ty_ok),
+            Ty::Obj(_, type_args) => type_args.iter().all(ty_ok),
             _ => true,
         }
     }
@@ -819,7 +819,7 @@ fn emit_enum_entry_subclass(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
-    user_tys: &[IrType],
+    user_tys: &[Ty],
 ) -> Vec<u8> {
     let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
@@ -1053,7 +1053,7 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         _ => 0,
     };
     let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
-    let returns_void = matches!(fr.ret_ty, IrType::Unit | IrType::Nothing);
+    let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
     // JVM method descriptor of the target call (`(argDescs)retDesc`) and the kotlin reference signature
     // (`name(argDescs)retDesc`) — both over the CALL arguments (the receiver, if any, is excluded).
     let mut call_desc = String::from("(");
@@ -1202,7 +1202,7 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
 /// The `kotlin/jvm/internal/Ref$XxxRef` holder class and its `element` field descriptor for a boxed
 /// mutable local of element type `elem` (a primitive picks its specialized `Ref`, any reference uses
 /// `Ref$ObjectRef` whose `element` is `Object`).
-fn ref_class(elem: &IrType) -> (&'static str, &'static str) {
+fn ref_class(elem: &Ty) -> (&'static str, &'static str) {
     match ir_ty_to_jvm(elem) {
         Ty::Int => ("kotlin/jvm/internal/Ref$IntRef", "I"),
         Ty::Long => ("kotlin/jvm/internal/Ref$LongRef", "J"),
@@ -1763,7 +1763,7 @@ fn jvm_type_params(g: &crate::ir::IrGenericSig) -> Option<String> {
 
 /// A type-parameter upper bound as a JVM signature element: `kotlin/Any` → `Ljava/lang/Object;`, a
 /// primitive → its boxed wrapper (`kotlin/Int` → `Ljava/lang/Integer;`). `None` for anything else.
-fn jvm_bound_descriptor(bound: &crate::ir::IrType) -> Option<String> {
+fn jvm_bound_descriptor(bound: &Ty) -> Option<String> {
     let ty = ir_ty_to_jvm(bound);
     if ty == Ty::obj("kotlin/Any") {
         return Some("Ljava/lang/Object;".to_string());
@@ -2957,9 +2957,9 @@ impl<'a> Emitter<'a> {
                     }
                     IrTypeOp::CastNonNull => {
                         // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
-                        let kotlin_name = match type_operand {
-                            IrType::Class { fq_name, .. } => fq_name.replace('/', "."),
-                            IrType::TypeParameter { name, .. } => name.clone(),
+                        let kotlin_name = match type_operand.non_null() {
+                            Ty::Obj(fq_name, _) => fq_name.replace('/', "."),
+                            Ty::TyParam(name, _) => name.to_string(),
                             _ => "kotlin.Any".to_string(),
                         };
                         code.dup();
@@ -4335,7 +4335,7 @@ impl<'a> Emitter<'a> {
         body: u32,
         catches: &[crate::ir::IrCatch],
         finally: Option<u32>,
-        result: &IrType,
+        result: &Ty,
         code: &mut CodeBuilder,
     ) {
         let rt = ir_ty_to_jvm(result);
@@ -4954,13 +4954,13 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
     }
 }
 
-pub fn ir_ty_to_jvm(t: &IrType) -> Ty {
-    match t {
-        IrType::Unit => Ty::Unit,
-        IrType::Nothing => Ty::Nothing,
-        IrType::Class {
-            fq_name, type_args, ..
-        } => match fq_name.as_str() {
+pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
+    // Nullability is erased at the JVM-type level (a nullable reference keeps its descriptor; a
+    // nullable primitive's boxing is handled where it matters), so peel the `?` first.
+    match t.non_null() {
+        Ty::Unit => Ty::Unit,
+        Ty::Nothing => Ty::Nothing,
+        Ty::Obj(fq_name, type_args) => match fq_name {
             "kotlin/Int" => Ty::Int,
             "kotlin/Long" => Ty::Long,
             "kotlin/Short" => Ty::Short,
@@ -4994,16 +4994,14 @@ pub fn ir_ty_to_jvm(t: &IrType) -> Ty {
         },
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
-        IrType::Function {
-            params, suspend, ..
-        } => Ty::obj(&format!(
+        Ty::Fun(s) => Ty::obj(&format!(
             "kotlin/jvm/functions/Function{}",
-            params.len() + usize::from(*suspend)
+            s.params.len() + usize::from(s.suspend)
         )),
         // JVM erasure of a type parameter: collapse `T` to its declared upper bound (which itself
         // erases to `java/lang/Object` for an `Any` bound). This is the ONE place `T` becomes a
         // concrete JVM type.
-        IrType::TypeParameter { bound, .. } => ir_ty_to_jvm(bound),
+        Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
         _ => Ty::Error,
     }
 }
@@ -5035,8 +5033,8 @@ fn valueof_desc(t: Ty) -> &'static str {
 }
 
 /// `true` if a lowered IR type is a nullable reference (`String?` etc.).
-fn ir_ty_nullable(t: &IrType) -> bool {
-    matches!(t, IrType::Class { nullable: true, .. })
+fn ir_ty_nullable(t: &Ty) -> bool {
+    t.is_nullable()
 }
 
 /// JVM accessor names for a top-level property, matching kotlinc: `x`→`getX`/`setX`; an `is`-prefixed

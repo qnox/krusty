@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrType,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction,
     IrTypeOp,
 };
 use crate::resolve::{SymbolTable, TypeInfo};
@@ -78,7 +78,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         lambda_seq: 0,
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
-        cur_ret_ty: IrType::Unit,
+        cur_ret_ty: Ty::Unit,
         try_finally_stack: Vec::new(),
         companions: HashMap::new(),
         computed_props: HashMap::new(),
@@ -400,11 +400,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // Parallel `None` for each synthetic interface-delegation `$$delegate_N`/`$$delegate_e<j>` field.
             field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
             field_type_params.extend(expr_delegate_fields.iter().map(|_| None));
-            let class_ty = IrType::Class {
-                fq_name: internal.clone(),
-                type_args: vec![],
-                nullable: false,
-            };
+            let class_ty = Ty::obj(&internal);
             // Resolve a base class (`: A(args)`): only a non-interface class declared in this file is
             // supported; extending a classpath/Java type isn't modeled yet → bail.
             let super_internal: Option<String> = match &c.base_class {
@@ -483,23 +479,25 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // `Box<Int>` keeps `<Int>` — the serialization extension needs it to build a nested
                     // generic element serializer (`Box.serializer(IntSerializer)`); descriptors still
                     // erase, so this is additive metadata on the field type only.
-                    let ir = match (c.props.iter().find(|p| p.name == *n), ir) {
-                        (
-                            Some(p),
-                            IrType::Class {
-                                fq_name, nullable, ..
-                            },
-                        ) if !p.ty.targs.is_empty() => IrType::Class {
-                            fq_name,
-                            type_args: p
+                    let ir = match c.props.iter().find(|p| p.name == *n) {
+                        Some(p)
+                            if !p.ty.targs.is_empty() && ir.non_null().obj_internal().is_some() =>
+                        {
+                            let fq_name = ir.non_null().obj_internal().unwrap();
+                            let targs: Vec<Ty> = p
                                 .ty
                                 .targs
                                 .iter()
                                 .map(|a| ty_to_ir(ty_of(file, a)))
-                                .collect(),
-                            nullable,
-                        },
-                        (_, ir) => ir,
+                                .collect();
+                            let base = Ty::obj_args(fq_name, &targs);
+                            if ir.is_nullable() {
+                                Ty::nullable(base)
+                            } else {
+                                base
+                            }
+                        }
+                        _ => ir,
                     };
                     // A field carries its declared nullability into the IrType (`Ty` drops it). The
                     // JVM value-class pass keys boxing + null-check elision on a value class's
@@ -585,7 +583,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             for (mi, m) in c.methods.iter().enumerate() {
                 let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
                 let ret = sig.ret;
-                let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                 let param_checks = param_checks_for(m, &sig.params);
                 // The checker `Ty` carries no nullability, so recover the declared `?` from the method's
                 // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
@@ -679,7 +677,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     let fid = lo.ir.add_fun(IrFunction {
                         name: sname.clone(),
                         params: vec![ty_to_ir(prop_ty)],
-                        ret: IrType::Unit,
+                        ret: Ty::Unit,
                         body: None,
                         is_static: false,
                         dispatch_receiver: Some(internal.clone()),
@@ -724,7 +722,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
                                 params: vec![ty_to_ir(ty)],
-                                ret: IrType::Unit,
+                                ret: Ty::Unit,
                                 body: None,
                                 is_static: false,
                                 dispatch_receiver: Some(internal.clone()),
@@ -823,7 +821,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
                                 params: vec![fty_ir.clone()],
-                                ret: IrType::Unit,
+                                ret: Ty::Unit,
                                 body: Some(body),
                                 is_static: false,
                                 dispatch_receiver: Some(internal.clone()),
@@ -933,7 +931,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 for (mi, m) in c.companion_methods.iter().enumerate() {
                     let sig = csig.static_methods.get(&m.name)?;
                     let ret = sig.ret;
-                    let params: Vec<IrType> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                    let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                     let param_checks = param_checks_for(m, &sig.params);
                     let fid = lo.ir.add_fun(IrFunction {
                         name: m.name.clone(),
@@ -1029,7 +1027,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     sigs.iter()
                         .find(|s| crate::resolve::erased_params_key(s) == want)?
                 };
-                let params: Vec<IrType> = sig
+                let params: Vec<Ty> = sig
                     .params
                     .iter()
                     .enumerate()
@@ -1088,7 +1086,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             if let Some((mangled, sig)) = info.local_fun_sigs.get(&stmt_id) {
                 // Captured outer locals become extra leading parameters (a boxed var is passed as its
                 // `Ref` holder reference, an ordinary one by value), then the declared parameters.
-                let mut params: Vec<IrType> = Vec::new();
+                let mut params: Vec<Ty> = Vec::new();
                 if let Some(caps) = info.local_fun_captures.get(&stmt_id) {
                     for (name, ty) in caps {
                         params.push(captured_param_ir(name, *ty, &info.boxed_vars));
@@ -1480,7 +1478,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 if let Some((_, _, impl_fid, _)) =
                                     lo.resolve_method(&internal, &m.name)
                                 {
-                                    let ip: Vec<IrType> =
+                                    let ip: Vec<Ty> =
                                         m.params.iter().map(|t| ty_to_ir(*t)).collect();
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
@@ -1624,7 +1622,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 pty,
                             ));
                             let sbody = setter.body.clone().unwrap();
-                            lo.lower_body(&sbody, &IrType::Unit, fid)?;
+                            lo.lower_body(&sbody, &Ty::Unit, fid)?;
                             lo.cur_field = None;
                         }
                     }
@@ -1820,7 +1818,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
-                    let super_field_tys: Vec<IrType> = lo.classes[&internal]
+                    let super_field_tys: Vec<Ty> = lo.classes[&internal]
                         .super_internal
                         .clone()
                         .and_then(|s| lo.classes.get(&s).map(|sup| sup.id))
@@ -2060,7 +2058,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !c.secondary_ctors.is_empty() {
                     use crate::ir::CtorDelegateTarget;
                     let class_id = lo.classes[&internal].id;
-                    let primary_param_tys: Vec<IrType> = {
+                    let primary_param_tys: Vec<Ty> = {
                         let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
                         lo.ir.classes[class_id as usize].fields[..n]
                             .iter()
@@ -2068,7 +2066,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             .collect()
                     };
                     // The IR param types of every secondary ctor (for resolving a sibling `this(…)`).
-                    let sec_param_tys: Vec<Vec<IrType>> = c
+                    let sec_param_tys: Vec<Vec<Ty>> = c
                         .secondary_ctors
                         .iter()
                         .map(|sc| {
@@ -2104,7 +2102,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let (delegate, delegate_args, target_tys, run_init): (
                             CtorDelegateTarget,
                             Vec<AstExprId>,
-                            Vec<IrType>,
+                            Vec<Ty>,
                             bool,
                         ) = match &sc.delegation {
                             ast::CtorDelegation::This(args) => {
@@ -2114,7 +2112,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     // Pick the sibling secondary ctor this `this(…)` targets: prefer the
                                     // one whose parameter types accept the arguments, else the unique
                                     // same-arity ctor. (Ambiguity type-matching can't resolve bails.)
-                                    let arg_irs: Vec<IrType> =
+                                    let arg_irs: Vec<Ty> =
                                         args.iter().map(|a| ty_to_ir(lo.info.ty(*a))).collect();
                                     let typed = sec_param_tys.iter().find(|p| {
                                         p.len() == arg_irs.len()
@@ -2126,7 +2124,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     match typed {
                                         Some(p) => p.clone(),
                                         None => {
-                                            let same: Vec<&Vec<IrType>> = sec_param_tys
+                                            let same: Vec<&Vec<Ty>> = sec_param_tys
                                                 .iter()
                                                 .filter(|p| p.len() == args.len())
                                                 .collect();
@@ -2254,7 +2252,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                    let field_tys: Vec<IrType> = lo.ir.classes[class_id as usize].fields
+                    let field_tys: Vec<Ty> = lo.ir.classes[class_id as usize].fields
                         [..ctor_count]
                         .iter()
                         .map(|f| f.ty.clone())
@@ -2413,7 +2411,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     .find(|(n, _)| n == &bm.name)
                                     .map(|(_, s)| s)?,
                             };
-                            let params: Vec<IrType> =
+                            let params: Vec<Ty> =
                                 sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: bm.name.clone(),
@@ -2576,7 +2574,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
     let nothing_bridge = lo.ir.classes.iter().any(|c| {
         c.bridges.iter().any(|b| {
-            matches!(&b.concrete_ret, IrType::Class { fq_name, .. } if fq_name == "java/lang/Void")
+            b.concrete_ret.non_null().obj_internal() == Some("java/lang/Void")
         })
     });
     if nothing_bridge {
@@ -2588,9 +2586,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // its existing dedicated handling, and erasing it here would disturb that.
     {
         let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let note = |t: &IrType, set: &mut std::collections::HashSet<String>| {
-            if let IrType::Class { fq_name, .. } = t {
-                set.insert(fq_name.clone());
+        let note = |t: &Ty, set: &mut std::collections::HashSet<String>| {
+            if let Some(fq_name) = t.non_null().obj_internal() {
+                set.insert(fq_name.to_string());
             }
         };
         for f in &lo.ir.functions {
@@ -2625,16 +2623,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if !under.is_primitive() {
                     // The underlying reference is null-capable (`Result`'s `Any?`), mirroring how the pass
                     // marks a type-parameter value-class field.
-                    let ir_under = match ty_to_ir(under) {
-                        IrType::Class {
-                            fq_name, type_args, ..
-                        } => IrType::Class {
-                            fq_name,
-                            type_args,
-                            nullable: true,
-                        },
-                        other => other,
-                    };
+                    let ir_under = Ty::nullable(ty_to_ir(under));
                     lo.ir.external_value_classes.insert(fq, ir_under);
                 }
             }
@@ -2655,18 +2644,14 @@ fn collect_tparams(
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
     non_null: &std::collections::HashSet<String>,
-) -> Vec<(String, IrType, bool)> {
+) -> Vec<(String, Ty, bool)> {
     names
         .iter()
         .map(|name| {
             let bound_ref = bounds.iter().find(|(n, _)| n == name).map(|(_, tr)| tr);
             let bound = bound_ref
                 .map(|tr| ty_to_ir(ty_of(file, tr)))
-                .unwrap_or(IrType::Class {
-                    fq_name: "kotlin/Any".to_string(),
-                    type_args: vec![],
-                    nullable: true,
-                });
+                .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
             let non_null = non_null.contains(name) || bound_ref.is_some_and(|tr| !tr.nullable);
             (name.clone(), bound, non_null)
         })
@@ -3041,7 +3026,7 @@ pub(crate) struct Lower<'a> {
     /// When lowering a property's custom accessor body (`get()`/`set()`), the property's backing field
     /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
     /// outside an accessor body.
-    cur_field: Option<(u32, u32, IrType)>,
+    cur_field: Option<(u32, u32, Ty)>,
     /// `(class internal, property name)` for every property with a CUSTOM accessor over a backing
     /// field. Such a property is read/written ONLY through `getX`/`setX` (even in-class) — never as a
     /// direct field — so `resolve_field` declines it (the `field` keyword reaches the field via
@@ -3058,7 +3043,7 @@ pub(crate) struct Lower<'a> {
     /// Type parameters in scope for the function body being lowered: `(name, bound, non_null)`. `bound`
     /// is the declared upper bound as an un-erased `IrType` (`kotlin/Any` when unbounded); `non_null`
     /// is set for a non-nullable bound (`<T : Any>`, `<T : Foo>`) — drives the `as T` null assertion.
-    cur_tparams: Vec<(String, IrType, bool)>,
+    cur_tparams: Vec<(String, Ty, bool)>,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
@@ -3069,7 +3054,7 @@ pub(crate) struct Lower<'a> {
     local_fun_ids: HashMap<crate::ast::StmtId, u32>,
     /// Return type of the function currently being lowered — used to coerce `return` values (e.g. a
     /// generic-erased `Object` return gets the `checkcast` kotlinc inserts).
-    cur_ret_ty: IrType,
+    cur_ret_ty: Ty,
     /// `finally` blocks of the enclosing `try`s (outermost first) whose protected region covers the
     /// statement being lowered. A `return` inside them must run each `finally` (innermost first) before
     /// transferring control — so the lowerer inlines them at the `return`. Pushed while a try-body/catch
@@ -3109,12 +3094,12 @@ pub(crate) struct Lower<'a> {
     /// break@end` (the body is wrapped in a `do { … } while(false)` labeled `end`), turning the function
     /// return into a jump to the body's end. Innermost (`.last()`) is the enclosing inline fn; lambda
     /// args with returns are pre-bailed, so a `return` always belongs to the innermost inline body.
-    inline_return: Vec<(u32, String, IrType)>,
+    inline_return: Vec<(u32, String, Ty)>,
     /// Active *labeled* lambda-return targets while splicing an inline lambda whose body contains a
     /// `return@<label>` (a local return from that lambda). Each is `(label, result slot, end label,
     /// return type)`: a `return@label x` lowers to `slot = x; break@end`, the spliced lambda body being
     /// wrapped in a `do { … } while(false)`. The label is the inline fn name the lambda was passed to.
-    inline_lambda_ret: Vec<(String, u32, String, IrType)>,
+    inline_lambda_ret: Vec<(String, u32, String, Ty)>,
 }
 
 impl<'a> Lower<'a> {
@@ -3135,7 +3120,7 @@ impl<'a> Lower<'a> {
 
     /// The parameter types of a class's superclass constructor (`super(args)` targets these). Empty for
     /// `java/lang/Object` or a base whose IR class isn't in this file (then we can't model the call).
-    fn super_ctor_param_tys(&self, internal: &str) -> Vec<IrType> {
+    fn super_ctor_param_tys(&self, internal: &str) -> Vec<Ty> {
         self.classes[internal]
             .super_internal
             .clone()
@@ -3545,7 +3530,7 @@ impl<'a> Lower<'a> {
                 return None;
             }
             if !cs.is_interface && cs.ctor_params.len() == args.len() {
-                let params: Vec<IrType> = cs.ctor_params.iter().map(|t| ty_to_ir(*t)).collect();
+                let params: Vec<Ty> = cs.ctor_params.iter().map(|t| ty_to_ir(*t)).collect();
                 let mut a = Vec::new();
                 for (arg, pty) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, pty)?);
@@ -3623,8 +3608,8 @@ impl<'a> Lower<'a> {
     /// verifies (`asSeq<String>(x).length`); the wrapper is unboxed to a primitive only at a use site
     /// that needs it, by the normal coercion path — never eagerly here (an `Int?` consumer keeps it
     /// boxed, and `null` must not be unboxed).
-    fn coerce_erased_call_result(&mut self, e: AstExprId, call: u32, ret: &IrType) -> u32 {
-        let erased = matches!(ret, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any");
+    fn coerce_erased_call_result(&mut self, e: AstExprId, call: u32, ret: &Ty) -> u32 {
+        let erased = ret.non_null().obj_internal() == Some("kotlin/Any");
         if !erased {
             return call;
         }
@@ -4093,7 +4078,7 @@ impl<'a> Lower<'a> {
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
         self.lambda_seq += 1;
         // Impl parameters: captured variables first, then the lambda's own parameters.
-        let mut params_ir: Vec<IrType> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
+        let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         params_ir.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
@@ -4186,7 +4171,7 @@ impl<'a> Lower<'a> {
         // Fields: one per captured variable. `<init>(cap0.., Continuation completion)` stores each
         // capture, then `super(jvm_arity, completion)`. Ctor value-indices: this=0, cap_i=1+i,
         // completion=1+n_cap.
-        let mut fields: Vec<(String, IrType)> = captures
+        let mut fields: Vec<(String, Ty)> = captures
             .iter()
             .map(|(name, _, ty)| (name.clone(), ty_to_ir(*ty)))
             .collect();
@@ -4200,7 +4185,7 @@ impl<'a> Lower<'a> {
         // suspension inline machine a `label` field is appended below (`label_idx`); the general
         // (multi-suspension) machine has its `result`/`label`/spilled fields added by the coroutine pass.
         let label_idx = n_cap + arity as u32;
-        let ctor_args: Vec<(IrType, bool)> = captures
+        let ctor_args: Vec<(Ty, bool)> = captures
             .iter()
             .map(|(_, _, ty)| (ty_to_ir(*ty), false))
             .chain(std::iter::once((cont_ir.clone(), false)))
@@ -4324,7 +4309,7 @@ impl<'a> Lower<'a> {
             // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
             // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
             // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
-            let (tail, bound): (u32, Option<(u32, IrType)>) =
+            let (tail, bound): (u32, Option<(u32, Ty)>) =
                 match &self.ir.exprs[body_val as usize] {
                     IrExpr::Block {
                         stmts,
@@ -4657,11 +4642,7 @@ impl<'a> Lower<'a> {
         // invoke(Object p0.., Object completion): `r = new This(this.cap.., (Continuation)completion);
         // r.param_i = (paramType)p_i; return r.invokeSuspend(Unit.INSTANCE)`. Value-indices: this=0,
         // params 1..=arity, completion=arity+1, the fresh `r` local at arity+2.
-        let lambda_ty = IrType::Class {
-            fq_name: internal.clone(),
-            type_args: vec![],
-            nullable: false,
-        };
+        let lambda_ty = Ty::obj(&internal);
         let completion_idx = arity as u32 + 1;
         let mut new_args: Vec<u32> = (0..n_cap)
             .map(|i| {
@@ -4749,7 +4730,7 @@ impl<'a> Lower<'a> {
         internal: &str,
         class_id: ClassId,
         name: &str,
-        params: Vec<IrType>,
+        params: Vec<Ty>,
         ret: Ty,
         body: u32,
         force_override: bool,
@@ -4892,7 +4873,7 @@ impl<'a> Lower<'a> {
             .map(|(n, s)| (n.clone(), s.params.clone(), s.ret))
             .collect();
         for (mname, params, ret) in methods {
-            let params_ir: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
+            let params_ir: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
             let descriptor = format!(
                 "({}){}",
                 params.iter().map(|t| t.descriptor()).collect::<String>(),
@@ -5022,10 +5003,7 @@ impl<'a> Lower<'a> {
     /// Whether class `class_id`'s field `i` has a nullable reference type (its lowered `IrType` carries
     /// the `?`), so `hashCode` keeps it on the null-safe `Objects.hashCode` path.
     fn field_nullable(&self, class_id: ClassId, i: usize) -> bool {
-        matches!(
-            self.ir.classes[class_id as usize].fields[i].ty,
-            IrType::Class { nullable: true, .. }
-        )
+        self.ir.classes[class_id as usize].fields[i].ty.is_nullable()
     }
     fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> u32 {
         match t {
@@ -5123,7 +5101,7 @@ impl<'a> Lower<'a> {
         // copy(f1, f2, …): `return P(f1, f2, …)`. Emitted BEFORE toString/hashCode/equals to match
         // kotlinc's data-class member order (componentN, copy, copy$default, toString, hashCode, equals).
         {
-            let params: Vec<IrType> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
+            let params: Vec<Ty> = fields.iter().map(|(_, t)| ty_to_ir(*t)).collect();
             let args: Vec<u32> = (0..fields.len())
                 .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
                 .collect();
@@ -5668,7 +5646,7 @@ impl<'a> Lower<'a> {
         call: AstExprId,
         param_meta: &[(String, Option<AstExprId>)],
         args: &[AstExprId],
-        ir_params: &[IrType],
+        ir_params: &[Ty],
     ) -> Option<Vec<u32>> {
         let n = ir_params.len();
         if args.len() > n {
@@ -6079,7 +6057,7 @@ impl<'a> Lower<'a> {
         } else {
             crate::ir::FrDispatch::VirtualUnbound
         };
-        let param_tys: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
+        let param_tys: Vec<Ty> = params.iter().map(|t| ty_to_ir(*t)).collect();
         Some(self.make_func_ref(
             e.0,
             bound,
@@ -6160,7 +6138,7 @@ impl<'a> Lower<'a> {
         // Name with the ref's globally-unique AST expr id (not the per-function `lambda_seq`): two
         // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
         let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
-        let mut impl_params: Vec<IrType> = vec![ty_to_ir(rty)];
+        let mut impl_params: Vec<Ty> = vec![ty_to_ir(rty)];
         impl_params.extend(params.iter().map(|t| ty_to_ir(*t)));
         let bfid = self.ir.add_fun(IrFunction {
             name: impl_name,
@@ -6196,8 +6174,8 @@ impl<'a> Lower<'a> {
         call_owner: String,
         call_name: String,
         call_interface: bool,
-        param_tys: Vec<IrType>,
-        ret_ty: IrType,
+        param_tys: Vec<Ty>,
+        ret_ty: Ty,
         capture: Option<u32>,
     ) -> u32 {
         let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
@@ -6267,11 +6245,11 @@ impl<'a> Lower<'a> {
         let cur = self.cur_class.as_ref()?;
         let cur_id = self.classes.get(cur)?.id;
         let outer = match self.ir.classes[cur_id as usize].fields.first() {
-            Some(IrField {
-                name: n0,
-                ty: IrType::Class { fq_name, .. },
-                ..
-            }) if n0 == "this$0" => fq_name.clone(),
+            Some(IrField { name: n0, ty, .. })
+                if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
+            {
+                ty.non_null().obj_internal().unwrap().to_string()
+            }
             _ => return None,
         };
         let (c, i, f, _) = self.resolve_method(&outer, name)?;
@@ -6956,16 +6934,13 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
     }
 
-    pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &IrType) -> Option<u32> {
+    pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
         // A value flowing into a `suspend` function-type parameter. A LAMBDA literal becomes a concrete
         // `SuspendLambda` subclass (`lower_suspend_lambda`); any other value (a suspend function value
         // passed through) needs continuation threading not yet modeled, so it bails (skip the file).
-        if let IrType::Function {
-            suspend: true,
-            params,
-            ..
-        } = target
-        {
+        if let Ty::Fun(s) = target.non_null() {
+          if s.suspend {
+            let params = &s.params;
             if let Expr::Lambda {
                 params: lparams,
                 body,
@@ -6995,6 +6970,7 @@ impl<'a> Lower<'a> {
                 }
             }
             return None;
+          }
         }
         let at = self.info.ty(arg);
         // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
@@ -7020,7 +6996,7 @@ impl<'a> Lower<'a> {
         // `kotlin.UInt`/`ULong` value type — but krusty erases unsigned to `int` and would emit an
         // `Integer` unbox (ClassCastException). Skip rather than miscompile.
         if at.is_reference()
-            && matches!(target, IrType::Class { fq_name, .. } if fq_name == "kotlin/UInt" || fq_name == "kotlin/ULong")
+            && matches!(target.non_null().obj_internal(), Some("kotlin/UInt" | "kotlin/ULong"))
         {
             return None;
         }
@@ -7032,8 +7008,8 @@ impl<'a> Lower<'a> {
             }))
         } else if at.is_reference()
             && !target_ref
-            && *target != IrType::Unit
-            && *target != IrType::Error
+            && *target != Ty::Unit
+            && *target != Ty::Error
         {
             Some(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -7042,8 +7018,8 @@ impl<'a> Lower<'a> {
             }))
         } else if at.is_primitive()
             && !target_ref
-            && *target != IrType::Error
-            && *target != IrType::Unit
+            && *target != Ty::Error
+            && *target != Ty::Unit
             && ty_to_ir(at) != *target
         {
             // Primitive numeric widening/narrowing (`Int` → `Long`, `Double` → `Int`): emit a
@@ -7577,7 +7553,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn lower_body(&mut self, body: &FunBody, ret_ty: &IrType, fid: u32) -> Option<()> {
+    fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
         self.cur_ret_ty = ret_ty.clone();
         // Defensive: the stack is push/pop-balanced within a body, but a bail mid-lowering of a previous
         // body must not leak an enclosing `finally` into this one.
@@ -7587,7 +7563,7 @@ impl<'a> Lower<'a> {
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
-                let stmts = if *ret_ty == IrType::Unit || diverges {
+                let stmts = if *ret_ty == Ty::Unit || diverges {
                     vec![self.expr(*e)?] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
                 } else {
                     // Coerce the body to the return type (a generic-erased `Object` return gets the
@@ -7604,7 +7580,7 @@ impl<'a> Lower<'a> {
         Some(())
     }
 
-    fn block_as_body(&mut self, block: AstExprId, ret_ty: &IrType) -> Option<u32> {
+    fn block_as_body(&mut self, block: AstExprId, ret_ty: &Ty) -> Option<u32> {
         let Expr::Block { stmts, trailing } = self.afile.expr(block).clone() else {
             return None;
         };
@@ -7633,12 +7609,12 @@ impl<'a> Lower<'a> {
             // A value-less statement (e.g. a no-`else` `when`) can only be a value-returning
             // function's body if it's exhaustive (hence diverging). krusty doesn't prove
             // exhaustiveness, so bail rather than emit `return <no-value>`.
-            if *ret_ty != IrType::Unit && !diverges && tt == Ty::Unit {
+            if *ret_ty != Ty::Unit && !diverges && tt == Ty::Unit {
                 self.scope.truncate(depth);
                 return None;
             }
             let ve = self.expr(t)?;
-            if *ret_ty == IrType::Unit || diverges {
+            if *ret_ty == Ty::Unit || diverges {
                 out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
             } else {
                 out.push(self.ir.add_expr(IrExpr::Return(Some(ve))));
@@ -7657,7 +7633,7 @@ impl<'a> Lower<'a> {
     fn lower_tailrec_body(
         &mut self,
         f: &ast::FunDecl,
-        ret_ty: &IrType,
+        ret_ty: &Ty,
         fid: u32,
         param_vals: Vec<u32>,
         param_tys: Vec<Ty>,
@@ -7672,7 +7648,7 @@ impl<'a> Lower<'a> {
             param_tys,
             label: label.clone(),
         });
-        let unit = *ret_ty == IrType::Unit;
+        let unit = *ret_ty == Ty::Unit;
         let loop_body = match &f.body {
             // A `Unit` body recurses with a bare expression STATEMENT (`if (c) f(args)`), not
             // `return f(args)` — handled by a tail-statement walk (`lower_tail_unit`); a value body uses
@@ -7744,7 +7720,7 @@ impl<'a> Lower<'a> {
     /// Lower an expression in TAIL position of a `tailrec` body: an `if` recurses into both branches; a
     /// self-call becomes update+continue; any other expression returns its value (bailing if it still
     /// contains a self-call — that would be non-tail recursion).
-    fn lower_tail_expr(&mut self, e: AstExprId, ret_ty: &IrType) -> Option<u32> {
+    fn lower_tail_expr(&mut self, e: AstExprId, ret_ty: &Ty) -> Option<u32> {
         match self.afile.expr(e).clone() {
             Expr::If {
                 cond,
@@ -8072,7 +8048,7 @@ impl<'a> Lower<'a> {
                     let mut stmts = Vec::new();
                     // A `Unit`-returning inline fn has no result slot — `return`/`return Unit` is a bare
                     // `break`. Otherwise assign the (coerced) value to the result slot, then break.
-                    if rty != IrType::Unit {
+                    if rty != Ty::Unit {
                         let val = match e {
                             Some(e) if self.info.ty(e) != Ty::Nothing => self.lower_arg(e, &rty)?,
                             Some(e) => self.expr(e)?,
@@ -8092,7 +8068,7 @@ impl<'a> Lower<'a> {
                 let v = match e {
                     // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
                     Some(e)
-                        if self.cur_ret_ty != IrType::Unit && self.info.ty(e) != Ty::Nothing =>
+                        if self.cur_ret_ty != Ty::Unit && self.info.ty(e) != Ty::Nothing =>
                     {
                         let rt = self.cur_ret_ty.clone();
                         Some(self.lower_arg(e, &rt)?)
@@ -8260,7 +8236,7 @@ impl<'a> Lower<'a> {
                                         .obj_internal()
                                         .and_then(|internal| self.resolve_method(internal, name))
                                         .is_some_and(|(_, _, fid, _)| {
-                                            matches!(self.ir.functions[fid as usize].ret, IrType::Class { nullable: true, .. })
+                                            self.ir.functions[fid as usize].ret.is_nullable()
                                         })
                                 }
                                 _ => false,
@@ -8456,7 +8432,7 @@ impl<'a> Lower<'a> {
                             facade,
                             name: setter_name(&name),
                             params: vec![ty_to_ir(ty)],
-                            ret: crate::ir::IrType::Unit,
+                            ret: Ty::Unit,
                         },
                         dispatch_receiver: None,
                         args: vec![val],
@@ -8709,7 +8685,7 @@ impl<'a> Lower<'a> {
                                     owner,
                                     name: setter_name(&name),
                                     params: vec![ty_to_ir(pty)],
-                                    ret: crate::ir::IrType::Unit,
+                                    ret: Ty::Unit,
                                     interface,
                                 },
                                 dispatch_receiver: Some(r),
@@ -9760,7 +9736,7 @@ impl<'a> Lower<'a> {
         }
         let body_val = body_val?;
         if let Some((slot, label)) = target {
-            let unit_ret = ret_ty == IrType::Unit;
+            let unit_ret = ret_ty == Ty::Unit;
             // `while(true) { <body>; [result = fall-through value;] break@end }` — runs the inlined body
             // exactly once (the trailing `break` exits), while any `return` inside breaks early (after
             // setting the result). A standard `while(true)`+`break` shape the frame emitter handles.
@@ -9802,8 +9778,8 @@ impl<'a> Lower<'a> {
                 // loop head (an uninitialized slot is `top` there but the body assigns it → mismatch).
                 let init = if ir_type_is_reference(&ret_ty) {
                     IrConst::Null
-                } else if let IrType::Class { fq_name, .. } = &ret_ty {
-                    match fq_name.as_str() {
+                } else if let Some(fq_name) = ret_ty.non_null().obj_internal() {
+                    match fq_name {
                         "kotlin/Long" => IrConst::Long(0),
                         "kotlin/Float" => IrConst::Float(0.0),
                         "kotlin/Double" => IrConst::Double(0.0),
@@ -9880,7 +9856,7 @@ impl<'a> Lower<'a> {
             }
             let brk = format!("$lamret${}", self.fresh_value());
             self.inline_lambda_ret
-                .push((lam_label.clone(), 0, brk.clone(), IrType::Unit));
+                .push((lam_label.clone(), 0, brk.clone(), Ty::Unit));
             let body_val = self.expr(lam_body);
             self.inline_lambda_ret.pop();
             self.scope.truncate(depth);
@@ -10103,7 +10079,7 @@ impl<'a> Lower<'a> {
                 }
                 let v = match value {
                     Some(ve)
-                        if self.cur_ret_ty != IrType::Unit && self.info.ty(ve) != Ty::Nothing =>
+                        if self.cur_ret_ty != Ty::Unit && self.info.ty(ve) != Ty::Nothing =>
                     {
                         let rt = self.cur_ret_ty.clone();
                         Some(self.lower_arg(ve, &rt)?)
@@ -10606,7 +10582,7 @@ impl<'a> Lower<'a> {
                     let class_id = ci.id;
                     let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
                     let ctor_args = self.ir.classes[class_id as usize].ctor_args.clone();
-                    let field_tys: Vec<IrType> = if ctor_args.is_empty() {
+                    let field_tys: Vec<Ty> = if ctor_args.is_empty() {
                         self.ir.classes[class_id as usize].fields[..ctor_count]
                             .iter()
                             .map(|f| f.ty.clone())
@@ -10668,7 +10644,7 @@ impl<'a> Lower<'a> {
                 {
                     return None;
                 }
-                if ret == IrType::Nothing {
+                if ret == Ty::Nothing {
                     return None;
                 }
                 // A top-level function reference → a `FunctionReferenceImpl` subclass whose `invoke`
@@ -10903,11 +10879,11 @@ impl<'a> Lower<'a> {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
                             let cur_id = self.classes.get(&cur)?.id;
                             let outer = match self.ir.classes[cur_id as usize].fields.first() {
-                                Some(IrField {
-                                    name: n0,
-                                    ty: IrType::Class { fq_name, .. },
-                                    ..
-                                }) if n0 == "this$0" => fq_name.clone(),
+                                Some(IrField { name: n0, ty, .. })
+                                    if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
+                                {
+                                    ty.non_null().obj_internal().unwrap().to_string()
+                                }
                                 _ => return None,
                             };
                             let this0 = self.ir.add_expr(IrExpr::GetField {
@@ -12178,10 +12154,7 @@ impl<'a> Lower<'a> {
                     } else {
                         IrTypeOp::Cast
                     };
-                    let type_operand = IrType::TypeParameter {
-                        name: name.clone(),
-                        bound: Box::new(bound.clone()),
-                    };
+                    let type_operand = Ty::ty_param(name, *bound);
                     return Some(self.ir.add_expr(IrExpr::TypeOp {
                         op,
                         arg,
@@ -12464,11 +12437,7 @@ impl<'a> Lower<'a> {
                 // A value-class companion fn's params are erased reference types (`success(Object)`,
                 // `failure(Throwable)`) — target `Object` so a primitive argument is boxed (`Integer.
                 // valueOf`), matching kotlinc; a reference argument passes through unchanged.
-                let obj_ty = IrType::Class {
-                    fq_name: "kotlin/Any".to_string(),
-                    type_args: vec![],
-                    nullable: true,
-                };
+                let obj_ty = Ty::nullable(Ty::obj("kotlin/Any"));
                 let mut ir_args = Vec::with_capacity(args.len());
                 for &a in &args {
                     ir_args.push(self.lower_arg(a, &obj_ty)?);
@@ -13062,7 +13031,7 @@ impl<'a> Lower<'a> {
                         // ctor-param list (`ctor_args`, property + plain params) when present, else the
                         // leading parameter fields (synthesized classes have empty `ctor_args`).
                         let ctor_args = self.ir.classes[class as usize].ctor_args.clone();
-                        let field_tys: Vec<IrType> = if ctor_args.is_empty() {
+                        let field_tys: Vec<Ty> = if ctor_args.is_empty() {
                             self.ir.classes[class as usize].fields[..ctor_count]
                                 .iter()
                                 .map(|f| f.ty.clone())
@@ -13151,7 +13120,7 @@ impl<'a> Lower<'a> {
                         // A secondary constructor whose parameter types MATCH the arguments is preferred
                         // over a lenient primary match (`Sc("x")` is the `String` secondary, not the
                         // `Int` primary coerced). Compare the argument IR types to each secondary's.
-                        let arg_irs: Vec<IrType> =
+                        let arg_irs: Vec<Ty> =
                             args.iter().map(|a| ty_to_ir(self.info.ty(*a))).collect();
                         let secs = self.ir.classes[class as usize].secondary_ctors.clone();
                         // Whether the PRIMARY constructor can accept the args (each assignable to a field
@@ -13335,18 +13304,16 @@ impl<'a> Lower<'a> {
                             // The inner's `this$0` field type must match the receiver's type (the outer
                             // instance) — guards against a same-named method returning an inner-typed value.
                             let this0_outer = match c.fields.first() {
-                                Some(IrField {
-                                    name: n0,
-                                    ty: IrType::Class { fq_name, .. },
-                                    ..
-                                }) if n0 == "this$0" => Some(fq_name.as_str()),
+                                Some(IrField { name: n0, ty, .. }) if n0 == "this$0" => {
+                                    ty.non_null().obj_internal()
+                                }
                                 _ => None,
                             };
                             c.fq_name.ends_with(&format!("${name}"))
                                 && this0_outer == self.info.ty(receiver).obj_internal()
                         })
                     {
-                        let field_tys: Vec<IrType> = self.ir.classes[class_id as usize]
+                        let field_tys: Vec<Ty> = self.ir.classes[class_id as usize]
                             .ctor_args
                             .iter()
                             .map(|(t, _)| t.clone())
@@ -13532,7 +13499,7 @@ impl<'a> Lower<'a> {
                                 let class = ci.id;
                                 let ctor_count =
                                     self.ir.classes[class as usize].ctor_param_count as usize;
-                                let field_tys: Vec<IrType> = self.ir.classes[class as usize].fields
+                                let field_tys: Vec<Ty> = self.ir.classes[class as usize].fields
                                     [..ctor_count]
                                     .iter()
                                     .map(|f| f.ty.clone())
@@ -14599,7 +14566,7 @@ fn file_expr_is_primitive(file: &ast::File, e: AstExprId) -> bool {
 
 /// The IR parameter type for a captured local lifted into a local function: a boxed (closure-written)
 /// var is passed as its `Ref$XxxRef` holder reference; an ordinary captured local by its own value.
-fn captured_param_ir(name: &str, ty: Ty, boxed: &std::collections::HashSet<String>) -> IrType {
+fn captured_param_ir(name: &str, ty: Ty, boxed: &std::collections::HashSet<String>) -> Ty {
     if boxed.contains(name) {
         ty_to_ir(Ty::obj(ref_holder_internal(ty)))
     } else {
@@ -14662,11 +14629,11 @@ fn class_internal(file: &ast::File, name: &str) -> String {
 /// For an array-typed IR field, the `java.util.Arrays.toString` array-parameter
 /// descriptor (`[Z`, `[Ljava/lang/Object;` for a reference array); `None` if the field isn't an array.
 /// A `data class` renders/compares/hashes array properties through `java.util.Arrays`, like kotlinc.
-fn data_array_param(t: &IrType) -> Option<&'static str> {
-    let IrType::Class { fq_name, .. } = t else {
+fn data_array_param(t: &Ty) -> Option<&'static str> {
+    let Some(fq_name) = t.non_null().obj_internal() else {
         return None;
     };
-    Some(match fq_name.as_str() {
+    Some(match fq_name {
         "kotlin/BooleanArray" => "[Z",
         "kotlin/CharArray" => "[C",
         "kotlin/ByteArray" => "[B",
@@ -14759,12 +14726,8 @@ fn fn_generic_sig(f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
 fn type_param_bounds_ir(
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
-) -> Option<Vec<(String, IrType)>> {
-    let any = || IrType::Class {
-        fq_name: "kotlin/Any".to_string(),
-        type_args: vec![],
-        nullable: false,
-    };
+) -> Option<Vec<(String, Ty)>> {
+    let any = || Ty::obj("kotlin/Any");
     let mut out = Vec::with_capacity(names.len());
     for tp in names {
         let bound = match bounds.iter().find(|(n, _)| n == tp) {
@@ -14850,10 +14813,13 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {
 }
 
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
-fn ir_type_is_reference(t: &IrType) -> bool {
-    match t {
-        IrType::Class { fq_name, .. } => !matches!(
-            fq_name.as_str(),
+fn ir_type_is_reference(t: &Ty) -> bool {
+    if matches!(t.non_null(), Ty::Fun(_)) {
+        return true;
+    }
+    match t.non_null().obj_internal() {
+        Some(fq_name) => !matches!(
+            fq_name,
             "kotlin/Int"
                 | "kotlin/Long"
                 | "kotlin/Short"
@@ -14863,14 +14829,16 @@ fn ir_type_is_reference(t: &IrType) -> bool {
                 | "kotlin/Double"
                 | "kotlin/Float"
         ),
-        IrType::Function { .. } => true,
-        _ => false,
+        None => false,
     }
 }
 
 /// Whether `t` is exactly `java/lang/Object` / `kotlin/Any` (the erased top type — no `checkcast` to it).
-fn ir_type_is_object(t: &IrType) -> bool {
-    matches!(t, IrType::Class { fq_name, .. } if fq_name == "java/lang/Any" || fq_name == "kotlin/Any" || fq_name == "java/lang/Object")
+fn ir_type_is_object(t: &Ty) -> bool {
+    matches!(
+        t.non_null().obj_internal(),
+        Some("java/lang/Any" | "kotlin/Any" | "java/lang/Object")
+    )
 }
 
 /// Conservative "is `arg` assignable to `param`" for constructor-overload selection: an exact match,
@@ -14878,7 +14846,7 @@ fn ir_type_is_object(t: &IrType) -> bool {
 /// Deliberately strict otherwise (no class-hierarchy data here) — used only to tell whether the PRIMARY
 /// constructor can accept the args before falling back to a secondary (`IC("abc")`: a `String` is NOT
 /// assignable to the primary's `List<T>` param, but IS to the secondary's erased `T`).
-fn ir_arg_assignable(arg: &IrType, param: &IrType) -> bool {
+fn ir_arg_assignable(arg: &Ty, param: &Ty) -> bool {
     arg == param || (ir_type_is_object(param) && ir_type_is_reference(arg))
 }
 
@@ -14986,24 +14954,13 @@ fn progression_counted_elem(internal: &str) -> Option<(Ty, &'static str)> {
     }
 }
 
-/// Force an `IrType::Class` to be nullable — carry a declared `?` into the IrType (`Ty` drops it). The
-/// JVM value-class pass keys unboxed-vs-boxed representation on a value class's underlying nullability.
-fn mark_nullable(t: IrType) -> IrType {
-    if let IrType::Class {
-        fq_name, type_args, ..
-    } = t
-    {
-        IrType::Class {
-            fq_name,
-            type_args,
-            nullable: true,
-        }
-    } else {
-        t
-    }
+/// Carry a declared `?` into a field/underlying type. The JVM value-class pass keys unboxed-vs-boxed
+/// representation on a value class's underlying nullability.
+fn mark_nullable(t: Ty) -> Ty {
+    Ty::nullable(t)
 }
 
-pub(crate) fn ty_to_ir(t: Ty) -> IrType {
+pub(crate) fn ty_to_ir(t: Ty) -> Ty {
     let fq = match t {
         Ty::Int => "kotlin/Int",
         Ty::Long => "kotlin/Long",
@@ -15018,33 +14975,26 @@ pub(crate) fn ty_to_ir(t: Ty) -> IrType {
         Ty::Double => "kotlin/Double",
         Ty::Float => "kotlin/Float",
         Ty::String => "kotlin/String",
-        Ty::Unit => return IrType::Unit,
-        Ty::Nothing => return IrType::Nothing,
+        Ty::Unit => return Ty::Unit,
+        Ty::Nothing => return Ty::Nothing,
         // (see `ir_array_element` below for the inverse — extracting an array IrType's element.)
         // A reference `Array<T>` keeps its element as a type argument (the JVM backend boxes a
         // primitive `T` when it lays out the array; the front end keeps the logical element).
         Ty::Obj("kotlin/Array", args) => {
-            return IrType::Class {
-                fq_name: "kotlin/Array".to_string(),
-                type_args: args.iter().map(|t| ty_to_ir(*t)).collect(),
-                nullable: false,
-            }
+            let targs: Vec<Ty> = args.iter().map(|t| ty_to_ir(*t)).collect();
+            return Ty::obj_args("kotlin/Array", &targs);
         }
-        Ty::Obj(n, _) => {
-            return IrType::Class {
-                fq_name: n.to_string(),
-                type_args: vec![],
-                nullable: false,
-            }
-        }
+        Ty::Obj(n, _) => return Ty::obj(n),
         // A Kotlin function type `(A,…) -> R` is kept structural so each backend picks its own
         // representation (the JVM maps it to `kotlin/jvm/functions/FunctionN`, JS to a closure, …).
         Ty::Fun(s) => {
-            return IrType::Function {
-                params: s.params.iter().map(|t| ty_to_ir(*t)).collect(),
-                ret: Box::new(ty_to_ir(s.ret)),
-                suspend: s.suspend,
-            }
+            let params: Vec<Ty> = s.params.iter().map(|t| ty_to_ir(*t)).collect();
+            let ret = ty_to_ir(s.ret);
+            return if s.suspend {
+                Ty::fun_suspend(params, ret)
+            } else {
+                Ty::fun(params, ret)
+            };
         }
         // An array is a regular class type (`kotlin/IntArray`, `kotlin/Array<T>`); the backend lowers
         // its representation. Primitive arrays encode the element in the class name.
@@ -15063,43 +15013,26 @@ pub(crate) fn ty_to_ir(t: Ty) -> IrType {
                 // doesn't collide with a boxed `Array<Int>` at the `kotlin/Array` element-boxing step.
                 Ty::UInt => "kotlin/IntArray",
                 Ty::ULong => "kotlin/LongArray",
-                _ => {
-                    return IrType::Class {
-                        fq_name: "kotlin/Array".to_string(),
-                        type_args: vec![ty_to_ir(*e)],
-                        nullable: false,
-                    }
-                }
+                _ => return Ty::obj_args("kotlin/Array", &[ty_to_ir(*e)]),
             };
-            return IrType::Class {
-                fq_name: fq.to_string(),
-                type_args: vec![],
-                nullable: false,
-            };
+            return Ty::obj(fq);
         }
-        _ => return IrType::Error,
+        _ => return Ty::Error,
     };
-    IrType::Class {
-        fq_name: fq.to_string(),
-        type_args: vec![],
-        nullable: false,
-    }
+    Ty::obj(fq)
 }
 
 /// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a
 /// primitive specialized array (`kotlin/IntArray` → `kotlin/Int`). `None` for a non-array type. Used
 /// to materialize an empty array (`emptyArray<T>()`) of the target's element type.
-fn ir_array_element(t: &IrType) -> Option<IrType> {
-    let IrType::Class {
-        fq_name, type_args, ..
-    } = t
-    else {
+fn ir_array_element(t: &Ty) -> Option<Ty> {
+    let Some(fq_name) = t.non_null().obj_internal() else {
         return None;
     };
     if fq_name == "kotlin/Array" {
-        return type_args.first().cloned();
+        return t.non_null().type_args().first().copied();
     }
-    let prim = match fq_name.as_str() {
+    let prim = match fq_name {
         "kotlin/IntArray" => "kotlin/Int",
         "kotlin/LongArray" => "kotlin/Long",
         "kotlin/DoubleArray" => "kotlin/Double",
@@ -15110,11 +15043,7 @@ fn ir_array_element(t: &IrType) -> Option<IrType> {
         "kotlin/ShortArray" => "kotlin/Short",
         _ => return None,
     };
-    Some(IrType::Class {
-        fq_name: prim.to_string(),
-        type_args: vec![],
-        nullable: false,
-    })
+    Some(Ty::obj(prim))
 }
 
 /// Per-parameter `Some(name)` when a non-null assertion (`Intrinsics.checkNotNullParameter`) should
