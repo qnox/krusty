@@ -15017,6 +15017,17 @@ pub(crate) fn ty_to_ir(t: Ty) -> Ty {
             };
             return Ty::obj(fq);
         }
+        // A nullable type. A nullable PRIMITIVE is a boxed wrapper reference in the IR (the wrapper
+        // class) — matching the representation from before nullable primitives became `Ty::Nullable`,
+        // so the codegen for a boxed `Int?` is unchanged (a reference, never an unboxed `int` slot). A
+        // nullable REFERENCE keeps its reference form. Without this arm a nullable primitive fell to
+        // `Ty::Error` and miscompiled.
+        Ty::Nullable(inner) => {
+            return match crate::jvm::jvm_class_map::wrapper_internal(*inner) {
+                Some(wrapper) => Ty::obj(wrapper),
+                None => ty_to_ir(*inner),
+            };
+        }
         _ => return Ty::Error,
     };
     Ty::obj(fq)
