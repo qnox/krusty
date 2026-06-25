@@ -2946,13 +2946,18 @@ impl<'a> Emitter<'a> {
                         code.ixor();
                     }
                     IrTypeOp::Cast => {
-                        let ci = self.cw.class_ref(&internal);
-                        code.checkcast(ci);
+                        // A cast whose erased target is `java/lang/Object` (e.g. an unbounded `as T`) is
+                        // a no-op — kotlinc emits no `checkcast` to `Object`.
+                        if internal != "java/lang/Object" {
+                            let ci = self.cw.class_ref(&internal);
+                            code.checkcast(ci);
+                        }
                     }
                     IrTypeOp::CastNonNull => {
                         // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
                         let kotlin_name = match type_operand {
                             IrType::Class { fq_name, .. } => fq_name.replace('/', "."),
+                            IrType::TypeParameter { name, .. } => name.clone(),
                             _ => "kotlin.Any".to_string(),
                         };
                         code.dup();
@@ -2966,8 +2971,11 @@ impl<'a> Emitter<'a> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         );
                         code.invokestatic(m, 2, 0);
-                        let ci = self.cw.class_ref(&internal);
-                        code.checkcast(ci);
+                        // Erased bound `java/lang/Object` (an `<T : Any>` cast) needs no `checkcast`.
+                        if internal != "java/lang/Object" {
+                            let ci = self.cw.class_ref(&internal);
+                            code.checkcast(ci);
+                        }
                     }
                     // Box a primitive into a reference target, unbox a wrapper into a primitive, or
                     // widen/narrow between primitive numeric types (`Int`→`Long`, `Double`→`Int`, …).
@@ -5044,6 +5052,10 @@ pub fn ir_ty_to_jvm(t: &IrType) -> Ty {
             "kotlin/jvm/functions/Function{}",
             params.len() + usize::from(*suspend)
         )),
+        // JVM erasure of a type parameter: collapse `T` to its declared upper bound (which itself
+        // erases to `java/lang/Object` for an `Any` bound). This is the ONE place `T` becomes a
+        // concrete JVM type.
+        IrType::TypeParameter { bound, .. } => ir_ty_to_jvm(bound),
         _ => Ty::Error,
     }
 }

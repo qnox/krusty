@@ -5990,6 +5990,40 @@ impl<'a> Checker<'a> {
             .and_then(|r| binds.get(r.name.as_str()).copied())
     }
 
+    /// A user top-level generic function called with an EXPLICIT type argument (`asSeq<String>(x)`)
+    /// whose declared return is a bare type parameter (`fun <T> asSeq(...): T`): the call's result
+    /// type is the supplied argument (`String`), so members of the result resolve (`…length`). `None`
+    /// when there's no explicit type argument or the return isn't one of the function's type params.
+    fn explicit_generic_return(&self, call: ExprId, fname: &str) -> Option<Ty> {
+        let targs = self.file.call_type_args.get(&call.0)?;
+        let idx = self
+            .file
+            .decls
+            .iter()
+            .find_map(|&d| match self.file.decl(d) {
+                Decl::Fun(f)
+                    if f.name == fname && f.receiver.is_none() && !f.type_params.is_empty() =>
+                {
+                    let ret = f.ret.as_ref()?;
+                    f.type_params.iter().position(|tp| tp == &ret.name)
+                }
+                _ => None,
+            })?;
+        // The result IS the supplied type argument (`asSeq<String>(…)` is a `String`). A generic slot
+        // is physically a BOXED reference on the JVM, so a primitive argument refines to its boxed
+        // wrapper (`<Int>`/`<Int?>` → `Integer`) — the actual runtime representation of the erased
+        // result. The wrapper is unboxed to the primitive only where a use site demands it, by krusty's
+        // normal nullable-primitive machinery; we never collapse the result to the erased `Any`/`Object`.
+        let arg = targs.get(idx)?;
+        let t = self.resolve_ty_no_diag(arg);
+        let t = if !t.is_reference() {
+            Ty::obj(nullable_prim_wrapper(t)?)
+        } else {
+            t
+        };
+        (t != Ty::Error).then_some(t)
+    }
+
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
     /// type `String` instead of the default `Object`.
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
@@ -7622,6 +7656,11 @@ impl<'a> Checker<'a> {
                         if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
                             ret_ty = r;
                         }
+                    }
+                    // An EXPLICIT type argument (`asSeq<String>(x)`) on a generic call whose return is a
+                    // bare type parameter takes precedence — the result type is the supplied argument.
+                    if let Some(r) = self.explicit_generic_return(call, &fname) {
+                        ret_ty = r;
                     }
                     if cs.vararg {
                         let fixed = params.len() - 1;
