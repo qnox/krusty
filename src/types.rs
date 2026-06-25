@@ -116,6 +116,12 @@ pub enum Ty {
     /// Kotlin-level fact: a nullable primitive (`Int?`) is a JVM *reference* (boxed `java/lang/Integer`)
     /// — that representation choice lives in the JVM backend / [`Ty::descriptor`], not in the checker.
     Nullable(&'static Ty),
+    /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
+    /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
+    /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); JVM
+    /// **erasure** — collapsing `T` to its bound's class, or a primitive for a specialized `<T : Int>` —
+    /// is a backend concern that happens in [`Ty::descriptor`]/emit, never in the checker.
+    TyParam(&'static str, &'static Ty),
 }
 
 impl Ty {
@@ -173,6 +179,32 @@ impl Ty {
         match self {
             Ty::Nullable(inner) => *inner,
             _ => self,
+        }
+    }
+
+    /// A generic type-parameter type `T` with the given declared upper bound (`kotlin/Any` if unbounded).
+    pub fn ty_param(name: &str, bound: Ty) -> Ty {
+        Ty::TyParam(intern(name), intern_ty(bound))
+    }
+
+    /// Whether this is a generic type-parameter reference (`T`).
+    pub fn is_ty_param(self) -> bool {
+        matches!(self, Ty::TyParam(..))
+    }
+
+    /// The name of a type-parameter type (`T`), else `None`.
+    pub fn ty_param_name(self) -> Option<&'static str> {
+        match self {
+            Ty::TyParam(n, _) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The declared upper bound of a type-parameter type, else `None`.
+    pub fn ty_param_bound(self) -> Option<Ty> {
+        match self {
+            Ty::TyParam(_, b) => Some(*b),
+            _ => None,
         }
     }
 
@@ -330,6 +362,7 @@ impl Ty {
             Ty::Error => "<error>",
             Ty::Fun(_) => "Function",
             Ty::Nullable(inner) => inner.name(),
+            Ty::TyParam(n, _) => n,
         }
     }
 
@@ -342,12 +375,16 @@ impl Ty {
     }
 
     /// True for JVM reference types (where `null` is a valid value). Any nullable type is a
-    /// reference: a nullable primitive (`Int?`) boxes to its wrapper.
+    /// reference: a nullable primitive (`Int?`) boxes to its wrapper. A type parameter follows its
+    /// bound (an unbounded `T` is a reference; a specialized `<T : Int>` is not).
     pub fn is_reference(self) -> bool {
-        matches!(
-            self,
-            Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_) | Ty::Nullable(_)
-        )
+        match self {
+            Ty::TyParam(_, b) => b.is_reference(),
+            _ => matches!(
+                self,
+                Ty::String | Ty::Obj(..) | Ty::Null | Ty::Array(_) | Ty::Fun(_) | Ty::Nullable(_)
+            ),
+        }
     }
 
     pub fn is_numeric(self) -> bool {
@@ -438,6 +475,9 @@ impl Ty {
                 Ty::ULong => obj_desc("kotlin/ULong"),
                 other => other.boxed_ref().unwrap_or(other).descriptor(),
             },
+            // JVM erasure: a type parameter `T` erases to its bound's descriptor (a `<T : Int>` bound
+            // specializes to the primitive `I`; an unbounded `T` bound is `kotlin/Any` → `Object`).
+            Ty::TyParam(_, bound) => bound.descriptor(),
         }
     }
 
@@ -477,6 +517,41 @@ impl Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ty_param_carries_name_and_bound() {
+        let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
+        assert!(t.is_ty_param());
+        assert_eq!(t.ty_param_name(), Some("T"));
+        assert_eq!(t.ty_param_bound(), Some(Ty::obj("kotlin/CharSequence")));
+    }
+
+    #[test]
+    fn ty_param_descriptor_erases_to_its_bound() {
+        // Erasure is a JVM-emit concern: `descriptor()` (the Ty→bytecode boundary) erases `T` to its
+        // bound. An unbounded `T` (bound = `kotlin/Any`) erases to `java/lang/Object`.
+        let bounded = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
+        assert_eq!(
+            bounded.descriptor(),
+            Ty::obj("kotlin/CharSequence").descriptor()
+        );
+        let unbounded = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        assert_eq!(unbounded.descriptor(), Ty::obj("kotlin/Any").descriptor());
+    }
+
+    #[test]
+    fn ty_param_is_reference_follows_its_bound() {
+        assert!(Ty::ty_param("T", Ty::obj("kotlin/Any")).is_reference());
+        // A primitive-bounded `<T : Int>` is not a reference (it specializes to the primitive).
+        assert!(!Ty::ty_param("T", Ty::Int).is_reference());
+    }
+
+    #[test]
+    fn non_ty_param_reports_none() {
+        assert!(!Ty::Int.is_ty_param());
+        assert_eq!(Ty::Int.ty_param_name(), None);
+        assert_eq!(Ty::Int.ty_param_bound(), None);
+    }
 
     #[test]
     fn nullable_wraps_inner_and_reports_nullable() {
