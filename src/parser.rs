@@ -1154,14 +1154,26 @@ impl<'a> Parser<'a> {
 
     /// `companion object [Name] [: Super] { fun…; val… }` — collect its functions/properties to be
     /// emitted as `static`/`static final` members of the enclosing class.
-    fn parse_companion(&mut self, methods: &mut Vec<FunDecl>, props: &mut Vec<PropDecl>) {
+    fn parse_companion(
+        &mut self,
+        methods: &mut Vec<FunDecl>,
+        props: &mut Vec<PropDecl>,
+        base: &mut Option<String>,
+        base_args: &mut Vec<ExprId>,
+        supertypes: &mut Vec<String>,
+    ) {
         self.bump(); // 'companion'
         self.bump(); // 'object'
         if self.at(TokenKind::Ident) {
             self.bump(); // optional companion name
         }
-        // tolerate (and ignore) a supertype list on the companion
-        let _ = self.parse_supertypes();
+        // Capture the companion's supertype list (`companion object : Base(args), I`): the synthesized
+        // `C$Companion` extends `Base` (ctor `super(args)`) and implements the interfaces, so the
+        // companion can be used as a value of that supertype (e.g. `EmptyContinuation` as a `Continuation`).
+        let (ifaces, b, b_args, _delegations, _expr_delegations) = self.parse_supertypes();
+        *base = b;
+        *base_args = b_args;
+        *supertypes = ifaces;
         self.skip_newlines();
         if !self.eat(TokenKind::LBrace) {
             return;
@@ -1404,6 +1416,9 @@ impl<'a> Parser<'a> {
             methods,
             companion_methods: Vec::new(),
             companion_props: Vec::new(),
+            companion_base: None,
+            companion_base_args: Vec::new(),
+            companion_supertypes: Vec::new(),
             body_props: Vec::new(),
             init_order: Vec::new(),
             is_data: false,
@@ -1800,6 +1815,9 @@ impl<'a> Parser<'a> {
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut companion_methods: Vec<FunDecl> = Vec::new();
         let mut companion_props: Vec<PropDecl> = Vec::new();
+        let mut companion_base: Option<String> = None;
+        let mut companion_base_args: Vec<ExprId> = Vec::new();
+        let mut companion_supertypes: Vec<String> = Vec::new();
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
@@ -1855,7 +1873,13 @@ impl<'a> Parser<'a> {
                                 t.kind == TokenKind::Ident && t.text(self.src) == "object"
                             }) =>
                     {
-                        self.parse_companion(&mut companion_methods, &mut companion_props);
+                        self.parse_companion(
+                            &mut companion_methods,
+                            &mut companion_props,
+                            &mut companion_base,
+                            &mut companion_base_args,
+                            &mut companion_supertypes,
+                        );
                     }
                     // Silently skip nested type declarations (inner/nested class, object,
                     // interface, typealias) and secondary constructors.  Parsing them properly
@@ -1979,6 +2003,9 @@ impl<'a> Parser<'a> {
             methods,
             companion_methods,
             companion_props,
+            companion_base,
+            companion_base_args,
+            companion_supertypes,
             body_props,
             init_order,
             is_data: false,
@@ -2188,6 +2215,9 @@ impl<'a> Parser<'a> {
             methods,
             companion_methods: Vec::new(),
             companion_props: Vec::new(),
+            companion_base: None,
+            companion_base_args: Vec::new(),
+            companion_supertypes: Vec::new(),
             body_props,
             init_order: Vec::new(),
             is_data: false,
@@ -2315,6 +2345,9 @@ impl<'a> Parser<'a> {
             methods,
             companion_methods: Vec::new(),
             companion_props: Vec::new(),
+            companion_base: None,
+            companion_base_args: Vec::new(),
+            companion_supertypes: Vec::new(),
             body_props,
             init_order,
             is_data: false,
@@ -2447,6 +2480,9 @@ impl<'a> Parser<'a> {
             methods,
             companion_methods: Vec::new(),
             companion_props: Vec::new(),
+            companion_base: None,
+            companion_base_args: Vec::new(),
+            companion_supertypes: Vec::new(),
             body_props,
             init_order,
             is_data: false,

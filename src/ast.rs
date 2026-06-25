@@ -448,6 +448,13 @@ pub struct ClassDecl {
     /// `companion object { … }` properties (`const val`/`val`) — emitted as `static final` fields and
     /// read as `ClassName.PROP`.
     pub companion_props: Vec<PropDecl>,
+    /// A `companion object`'s declared base CLASS (`companion object : Base(args)`), if any — the
+    /// synthesized `C$Companion` extends it (instead of `kotlin/Any`) and its ctor calls `super(args)`.
+    pub companion_base: Option<String>,
+    /// The `super(args)` arguments for [`companion_base`].
+    pub companion_base_args: Vec<ExprId>,
+    /// A `companion object`'s declared interface supertypes (`companion object : I1, I2`).
+    pub companion_supertypes: Vec<String>,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
