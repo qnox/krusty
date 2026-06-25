@@ -3723,13 +3723,25 @@ impl<'a> Checker<'a> {
         let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
         for arm in arms {
             for &c in &arm.conditions {
-                if let Expr::Is {
-                    ty, negated: false, ..
-                } = self.file.expr(c)
-                {
-                    if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
-                        covered.insert(n.to_string());
+                match self.file.expr(c) {
+                    // `is Sub` — type-test arm.
+                    Expr::Is {
+                        ty, negated: false, ..
+                    } => {
+                        if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
+                            covered.insert(n.to_string());
+                        }
                     }
+                    // `Sub ->` — value arm naming a singleton object subclass (`object A : S`); a bare
+                    // name resolving to a known class whose internal is one of the sealed subclasses.
+                    Expr::Name(n) => {
+                        if let Some(ci) = self.syms.classes.get(n) {
+                            if subs.contains(&ci.internal) {
+                                covered.insert(ci.internal.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4150,6 +4162,19 @@ impl<'a> Checker<'a> {
             }
         }
         false
+    }
+
+    /// Are two reference types comparable as `when`-subject value arms? A `when (s) { A -> … }` over a
+    /// sealed subject `s: S` matches the *object* `A` (a subtype of `S`) by `==` — valid in Kotlin
+    /// whenever one operand's type is a subtype of the other (the comparison can be non-trivially true).
+    /// Only object/array reference types qualify; primitives go through `Ty::promote`.
+    fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
+        match (st, ct) {
+            (Ty::Obj(a, _), Ty::Obj(b, _)) => {
+                self.obj_is_subtype(a, b) || self.obj_is_subtype(b, a)
+            }
+            _ => false,
+        }
     }
 
     /// Resolve a method (own or inherited from the base-class chain) on a class internal name.
@@ -5272,7 +5297,8 @@ impl<'a> Checker<'a> {
                                     && st != Ty::Error
                                     && ct != Ty::Error
                                     && st != ct
-                                    && Ty::promote(st, ct).is_none() =>
+                                    && Ty::promote(st, ct).is_none()
+                                    && !self.when_objs_comparable(st, ct) =>
                             {
                                 self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
                             }

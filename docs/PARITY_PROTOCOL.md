@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1766 OK / 0 FAIL** (scanned 7351, Phase 456).
+  repo's `compiler/testData/codegen/box`). Current gate: **1767 OK / 0 FAIL** (scanned 7351, Phase 457).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 457 — sealed-object `when` value-match (gate 1766 → 1767, +1, FAIL=0).** A `when (s) { A -> … }`
+  over a sealed subject `s: S` that matches a singleton object subclass (`object A : S()`) by *value*
+  (`==`), not `is`, failed two checks: (1) the when-comparability rule rejected the arm condition `A`
+  (type `A`) as "not comparable to subject `S`" — fixed by `when_objs_comparable`, which permits two
+  reference types when one is a subtype of the other (`obj_is_subtype` either direction); (2)
+  `when_sealed_exhaustive` only counted `is Sub` arms, so a value-arm `when` was deemed non-exhaustive and
+  typed `Unit` (→ "return type mismatch") — it now also counts a bare-`Name` arm resolving to a class
+  whose internal is one of the sealed subclasses. TDD: tests/sealed_object_value_match_e2e.rs.
 
 - **Phase 456 — `object O : Base(args)` extends a class (gate 1762 → 1766, +4, FAIL=0).** `parse_object`
   previously discarded an object's base class and super-args; it now captures them (`base_class`,
