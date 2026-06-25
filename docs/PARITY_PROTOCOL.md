@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 449).
+  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 450).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P73 — `const val` byte-parity: `ConstantValue` attribute + no `<clinit>` (gate 1750 → 1750,
+  +0 corpus, byte-equality FIX, FAIL=0).** krusty was NOT byte-equal to kotlinc for ANY `const val`: it
+  emitted the field with no `ConstantValue` attribute and a `<clinit>` doing `ldc; putstatic`, while
+  kotlinc emits the field WITH a `ConstantValue` attribute and an EMPTY (omitted) `<clinit>` — the JVM
+  initializes the field from the attribute. Fix targets the directive's hard bar ("bytecode must be
+  equal"): `classfile.rs` `FieldInfo` gains a `const_value` + an `add_field_const` that serializes the
+  `ConstantValue` attribute; `emit_statics` emits it for a compile-time-literal `const val` and SKIPS that
+  static's `<clinit>` store; when every static is so folded, NO `<clinit>` method is emitted at all.
+  Verified byte-identical to kotlinc (field `ConstantValue: String OK` / `int 42`, no `<clinit>`). Const
+  READS are still `getstatic` (kotlinc inlines `ldc`) — a separate, broader follow-up. +0 corpus (const
+  was already runtime-correct); this is a pure byte-parity improvement. TDD:
+  tests/const_constantvalue_e2e.rs (parses the facade: asserts `ConstantValue` present + no `<clinit>`).
 
 - **Phase P72 — member/extension resolution on Kotlin MAPPED collection types (gate 1750 → 1750, +0
   corpus, byte-equal, FAIL=0).** `kotlin.collections.List`/`Set`/`Map`/`Iterable`/… have no own JVM

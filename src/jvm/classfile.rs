@@ -249,6 +249,10 @@ struct FieldInfo {
     /// `Signature` attribute: constant-pool UTF8 index of the generic signature (e.g. a type-parameter
     /// field `val a: A` → `TA;`), or `None`.
     signature: Option<u16>,
+    /// `ConstantValue` attribute: constant-pool index of the compile-time constant (`const val`), or
+    /// `None`. kotlinc emits this on a `const val` field (and leaves `<clinit>` empty); the JVM
+    /// initializes the field from it.
+    const_value: Option<u16>,
 }
 
 pub struct ClassWriter {
@@ -338,6 +342,22 @@ impl ClassWriter {
             name: n,
             desc: d,
             signature: sig,
+            const_value: None,
+        });
+    }
+
+    /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
+    /// `const_string`/`const_int`/… ). kotlinc emits this on a `const val`; the JVM initializes the
+    /// field, so its `<clinit>` store is omitted.
+    pub fn add_field_const(&mut self, access: u16, name: &str, desc: &str, const_idx: u16) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.fields.push(FieldInfo {
+            access,
+            name: n,
+            desc: d,
+            signature: None,
+            const_value: Some(const_idx),
         });
     }
 
@@ -504,6 +524,12 @@ impl ClassWriter {
         } else {
             None
         };
+        // Intern `ConstantValue` only if a `const val` field carries one.
+        let constval_attr_name = if self.fields.iter().any(|f| f.const_value.is_some()) {
+            Some(self.cp.utf8("ConstantValue"))
+        } else {
+            None
+        };
         // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
         // remaining indices must already be interned). All handle/argument indices were interned
         // when `add_bootstrap` ran during code emission.
@@ -537,14 +563,18 @@ impl ClassWriter {
             u2(&mut out, f.access);
             u2(&mut out, f.name);
             u2(&mut out, f.desc);
-            match f.signature {
-                None => u2(&mut out, 0), // no field attributes
-                Some(si) => {
-                    u2(&mut out, 1); // one attribute: Signature
-                    u2(&mut out, signature_attr_name.unwrap());
-                    u4(&mut out, 2);
-                    u2(&mut out, si);
-                }
+            let nattr = f.signature.is_some() as u16 + f.const_value.is_some() as u16;
+            u2(&mut out, nattr);
+            // `ConstantValue` first (kotlinc's field-attribute order on a `const val`).
+            if let Some(cv) = f.const_value {
+                u2(&mut out, constval_attr_name.unwrap());
+                u4(&mut out, 2);
+                u2(&mut out, cv);
+            }
+            if let Some(si) = f.signature {
+                u2(&mut out, signature_attr_name.unwrap());
+                u4(&mut out, 2);
+                u2(&mut out, si);
             }
         }
         u2(&mut out, self.methods.len() as u16);
