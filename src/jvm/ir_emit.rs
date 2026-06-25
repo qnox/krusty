@@ -38,6 +38,25 @@ pub fn emit_all(
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    // Default: no per-class `@Metadata` — krusty-core emit is byte-identical to before (the
+    // `bytecode_parity_e2e` gate compares classes byte-for-byte vs kotlinc, so the default path must
+    // stay untouched). A caller that needs cross-module class metadata (krusty-compose's LibraryBinary
+    // modules) uses [`emit_all_with_class_meta`].
+    emit_all_with_class_meta(ir, facade, bodies, metadata, &|_| None)
+}
+
+/// Like [`emit_all`], but `class_meta` may supply a per-class `@kotlin.Metadata` (keyed by the class's
+/// internal/fq name) attached to that emitted class. This lets a separately-compiled module expose its
+/// classes' Kotlin signatures (member source params, etc.) so a dependent module resolves them — the
+/// cross-module analogue of the facade `metadata`. OPT-IN: the default [`emit_all`] passes a provider
+/// that returns `None` for every class, so krusty-core's emit is unchanged.
+pub fn emit_all_with_class_meta(
+    ir: &IrFile,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+    metadata: Option<&KotlinMetadata>,
+    class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
     }
@@ -67,9 +86,13 @@ pub fn emit_all(
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     out.push((facade.to_string(), cw.finish()));
-    // Each class.
+    // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
-        out.push((c.fq_name.clone(), emit_class(ir, c, facade, bodies)));
+        let cm = class_meta(&c.fq_name);
+        out.push((
+            c.fq_name.clone(),
+            emit_class(ir, c, facade, bodies, cm.as_ref()),
+        ));
     }
     if INLINE_BAIL.with(|b| b.get()) {
         return None; // an un-spliceable `must_inline` call — skip the file, never miscompile
@@ -284,12 +307,13 @@ fn emit_class(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    class_meta: Option<&KotlinMetadata>,
 ) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, bodies);
     }
     if c.is_interface {
-        return emit_interface_class(ir, c, facade, bodies);
+        return emit_interface_class(ir, c, facade, bodies, class_meta);
     }
     if let Some(user_tys) = &c.enum_entry_of {
         return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
@@ -712,6 +736,9 @@ fn emit_class(
         }
     }
     emit_bridges(c, &mut cw);
+    if let Some(m) = class_meta {
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
     cw.finish()
 }
 
@@ -1265,6 +1292,7 @@ fn emit_interface_class(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    class_meta: Option<&KotlinMetadata>,
 ) -> Vec<u8> {
     let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
@@ -1286,6 +1314,9 @@ fn emit_interface_class(
             );
             // PUBLIC | ABSTRACT
         }
+    }
+    if let Some(m) = class_meta {
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
 }
@@ -4901,7 +4932,7 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
     }
 }
 
-pub(crate) fn ir_ty_to_jvm(t: &IrType) -> Ty {
+pub fn ir_ty_to_jvm(t: &IrType) -> Ty {
     match t {
         IrType::Unit => Ty::Unit,
         IrType::Nothing => Ty::Nothing,
