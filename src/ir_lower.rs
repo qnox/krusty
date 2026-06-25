@@ -344,11 +344,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .map(|p| (format!("$$delegate_{i}"), ty_of(file, &p.ty)))
                 })
                 .collect();
+            // Interface delegation to an EXPRESSION (`: I by Impl()`): a synthesized `$$delegate_e<j>`
+            // field holding the once-evaluated expression (stored in the ctor).
+            let expr_delegate_fields: Vec<(String, Ty)> = c
+                .delegation_exprs
+                .iter()
+                .enumerate()
+                .map(|(j, (_, e))| (format!("$$delegate_e{j}"), info.ty(*e)))
+                .collect();
             let fields: Vec<(String, Ty)> = ctor_fields
                 .into_iter()
                 .chain(body_fields)
                 .chain(delegate_fields.iter().cloned())
                 .chain(iface_delegate_fields.iter().cloned())
+                .chain(expr_delegate_fields.iter().cloned())
                 .collect();
             // Field indices backing a `lateinit var` (matched by name in the final `fields`, so any
             // `this$0` offset is handled). The backend null-checks every read of these fields.
@@ -388,8 +397,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             );
             // Parallel `None` for each synthetic `x$delegate` field (concrete delegate type, no type-param).
             field_type_params.extend(delegate_fields.iter().map(|_| None));
-            // Parallel `None` for each synthetic interface-delegation `$$delegate_N` field.
+            // Parallel `None` for each synthetic interface-delegation `$$delegate_N`/`$$delegate_e<j>` field.
             field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
+            field_type_params.extend(expr_delegate_fields.iter().map(|_| None));
             let class_ty = IrType::Class {
                 fq_name: internal.clone(),
                 type_args: vec![],
@@ -966,7 +976,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // (`box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0`/`equals`/`hashCode`/`toString`).
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
-            if !c.delegations.is_empty() {
+            if !c.delegations.is_empty() || !c.delegation_exprs.is_empty() {
                 lo.synth_delegation_forwarders(file, c, &internal, id)?;
             }
         }
@@ -1858,7 +1868,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let has_iface_synth_delegate = c
                     .delegations
                     .iter()
-                    .any(|(_, d)| !c.props.iter().any(|p| p.is_property && &p.name == d));
+                    .any(|(_, d)| !c.props.iter().any(|p| p.is_property && &p.name == d))
+                    || !c.delegation_exprs.is_empty();
                 if (!c.init_order.is_empty() || has_delegated || has_iface_synth_delegate)
                     && c.has_primary_ctor
                 {
@@ -1901,6 +1912,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         let (pv, _) = lo.lookup(dname)?;
                         let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
                         let val_e = lo.ir.add_expr(IrExpr::GetValue(pv));
+                        let sf = lo.ir.add_expr(IrExpr::SetField {
+                            receiver: this_e,
+                            class: class_id,
+                            index: fidx,
+                            value: val_e,
+                        });
+                        stmts.push(sf);
+                    }
+                    // Expression delegates (`: I by Impl()`): evaluate the expression once into its
+                    // `$$delegate_e<j>` field.
+                    for (j, (_iface, e)) in c.delegation_exprs.iter().enumerate() {
+                        let synth = format!("$$delegate_e{j}");
+                        let fidx = lo.ir.classes[class_id as usize]
+                            .fields
+                            .iter()
+                            .position(|(n, _)| n == &synth)?
+                            as u32;
+                        let fty = lo.ir.classes[class_id as usize].fields[fidx as usize]
+                            .1
+                            .clone();
+                        let val_e = lo.lower_arg(*e, &fty)?;
+                        let this_e = lo.ir.add_expr(IrExpr::GetValue(this_v));
                         let sf = lo.ir.add_expr(IrExpr::SetField {
                             receiver: this_e,
                             class: class_id,
@@ -4775,26 +4808,6 @@ impl<'a> Lower<'a> {
             // A `val`-param delegate has its own field (`a`); a non-`val` param uses the synthesized
             // `$$delegate_<di>` (see field synthesis + the ctor store).
             let is_synth = !c.props.iter().any(|p| p.is_property && &p.name == delegate);
-            // For the NEWLY-enabled non-`val` path only, bail (skip, never miscompile) on two shapes the
-            // method-only forwarder can't model — leaving the long-standing `val`-param path untouched: an
-            // interface with PROPERTIES (its `getX`/`setX` would go un-forwarded → `AbstractMethodError`),
-            // and a GENERIC interface (`A<Long, Int>` needs substituted-type bridges — a raw erased forward
-            // mis-coerces args, e.g. `Int`→`Long`).
-            if is_synth {
-                if self
-                    .syms
-                    .classes
-                    .get(iface_name)
-                    .is_some_and(|s| !s.props.is_empty())
-                {
-                    return None;
-                }
-                if file.decls.iter().any(|&d| {
-                    matches!(file.decl(d), Decl::Class(ic) if ic.name == *iface_name && !ic.type_params.is_empty())
-                }) {
-                    return None;
-                }
-            }
             let synth_name = format!("$$delegate_{di}");
             let delegate_idx =
                 self.classes
@@ -4802,50 +4815,111 @@ impl<'a> Lower<'a> {
                     .fields
                     .iter()
                     .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
-            let iface_internal = class_internal(file, iface_name);
-            let methods: Vec<(String, Vec<Ty>, Ty)> = self
+            self.forward_iface_methods(
+                file,
+                iface_name,
+                delegate_idx,
+                class_id,
+                internal,
+                is_synth,
+            )?;
+        }
+        // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
+        for (j, (iface_name, e)) in c.delegation_exprs.iter().enumerate() {
+            // A VALUE-class delegate is unboxed (e.g. `Z(x)` → `Integer`) and does not implement the
+            // interface at runtime — forwarding an interface call to it fails. Skip (never miscompile).
+            if self
+                .info
+                .ty(*e)
+                .obj_internal()
+                .is_some_and(|i| self.is_value_class(i))
+            {
+                return None;
+            }
+            let synth_name = format!("$$delegate_e{j}");
+            let delegate_idx = self
+                .classes
+                .get(internal)?
+                .fields
+                .iter()
+                .position(|(n, _)| n == &synth_name)? as u32;
+            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal, true)?;
+        }
+        Some(())
+    }
+
+    /// Synthesize, on `internal`, a forwarding method for each of interface `iface_name`'s methods that
+    /// calls it on the delegate field at `delegate_idx` (`fun m(args) = this.<field>.m(args)`). When
+    /// the delegate is synthesized (a non-`val` param or an expression — not a `val`-param field), bail
+    /// (skip the file) on a PROPERTY interface (`getX`/`setX` would go un-forwarded → `AbstractMethodError`)
+    /// or a GENERIC one (`A<Long, Int>` needs substituted-type bridges a raw forward mis-coerces).
+    fn forward_iface_methods(
+        &mut self,
+        file: &ast::File,
+        iface_name: &str,
+        delegate_idx: u32,
+        class_id: ClassId,
+        internal: &str,
+        is_synth: bool,
+    ) -> Option<()> {
+        if is_synth {
+            if self
                 .syms
                 .classes
-                .get(iface_name)?
-                .methods
-                .iter()
-                .map(|(n, s)| (n.clone(), s.params.clone(), s.ret))
-                .collect();
-            for (mname, params, ret) in methods {
-                let params_ir: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
-                let descriptor = format!(
-                    "({}){}",
-                    params.iter().map(|t| t.descriptor()).collect::<String>(),
-                    ret.descriptor()
-                );
-                let field = self.this_field(class_id, delegate_idx);
-                let args: Vec<u32> = (0..params.len())
-                    .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
-                    .collect();
-                let call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: iface_internal.clone(),
-                        name: mname.clone(),
-                        descriptor,
-                        interface: true,
-                    },
-                    dispatch_receiver: Some(field),
-                    args,
-                });
-                let body = if ret == Ty::Unit {
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![call],
-                        value: None,
-                    })
-                } else {
-                    let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![ret_stmt],
-                        value: None,
-                    })
-                };
-                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+                .get(iface_name)
+                .is_some_and(|s| !s.props.is_empty())
+            {
+                return None;
             }
+            if file.decls.iter().any(|&d| {
+                matches!(file.decl(d), Decl::Class(ic) if ic.name == *iface_name && !ic.type_params.is_empty())
+            }) {
+                return None;
+            }
+        }
+        let iface_internal = class_internal(file, iface_name);
+        let methods: Vec<(String, Vec<Ty>, Ty)> = self
+            .syms
+            .classes
+            .get(iface_name)?
+            .methods
+            .iter()
+            .map(|(n, s)| (n.clone(), s.params.clone(), s.ret))
+            .collect();
+        for (mname, params, ret) in methods {
+            let params_ir: Vec<IrType> = params.iter().map(|t| ty_to_ir(*t)).collect();
+            let descriptor = format!(
+                "({}){}",
+                params.iter().map(|t| t.descriptor()).collect::<String>(),
+                ret.descriptor()
+            );
+            let field = self.this_field(class_id, delegate_idx);
+            let args: Vec<u32> = (0..params.len())
+                .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                .collect();
+            let call = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: iface_internal.clone(),
+                    name: mname.clone(),
+                    descriptor,
+                    interface: true,
+                },
+                dispatch_receiver: Some(field),
+                args,
+            });
+            let body = if ret == Ty::Unit {
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![call],
+                    value: None,
+                })
+            } else {
+                let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret_stmt],
+                    value: None,
+                })
+            };
+            self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
         }
         Some(())
     }

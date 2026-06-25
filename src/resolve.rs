@@ -3074,6 +3074,11 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 for arg in &cl.base_args {
                     c.expr(*arg);
                 }
+                // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
+                // so they're typed here — with the ctor params and `this` in scope.
+                for (_iface, e) in &cl.delegation_exprs {
+                    c.expr(*e);
+                }
                 for bp in &cl.body_props {
                     if let Some(init) = bp.init {
                         let it = c.expr(init);

@@ -35,8 +35,9 @@ differential test harness against the real compiler:
   `&&`/`||`, `if`/`while`, blocks with `val`/`var` locals, string concat, calls.
 - **Classes** — primary-constructor properties (`val`/`var` → backing fields + `getX`/`setX`),
   member functions (instance methods with property access), **named constructor arguments**
-  (`C(b = 9)`, skipping leading literal defaults), and **custom property accessors** over a backing
-  field (`val x = "O"; get() = field + "K"`).
+  (`C(b = 9)`, skipping leading literal defaults), **custom property accessors** over a backing
+  field (`val x = "O"; get() = field + "K"`), and **interface delegation** to a `val`-param or an
+  expression (`class D : I by Impl()`).
 - **Type operators** — `is`/`as`/`as?`, including the unchecked cast to a type parameter (`x as T`,
   erased to its bound only at JVM emit), the nullable reference cast (`x as Foo?`, a `null`-passing
   `checkcast`), and the primitive→reference box cast (`42 as Any`, `b as Byte?`).

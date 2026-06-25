@@ -27,6 +27,7 @@ pub fn parse_with_features(
         file: File::default(),
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
+        no_trailing_lambda: false,
         pending_annotations: Vec::new(),
         pending_annotation_args: Vec::new(),
     };
@@ -462,6 +463,10 @@ struct Parser<'a> {
     diags: &'a mut DiagSink,
     /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
     name_based_destructuring: bool,
+    /// When set, `parse_postfix` does NOT attach a trailing `{ … }` to a call as a lambda argument —
+    /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
+    /// `{` opens the class body, not a lambda on the delegate call).
+    no_trailing_lambda: bool,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
     /// to the declaration that follows (e.g. `@Serializable` → `["Serializable"]`). A `parse_X` reads
     /// it via `take_pending_annotations()` *before* parsing members (member prefixes overwrite it).
@@ -1231,7 +1236,7 @@ impl<'a> Parser<'a> {
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
         let enum_supertypes = if self.at(TokenKind::Colon) {
-            let (supertypes, _base, _args, _del) = self.parse_supertypes();
+            let (supertypes, _base, _args, _del, _del_e) = self.parse_supertypes();
             supertypes
         } else {
             Vec::new()
@@ -1404,6 +1409,7 @@ impl<'a> Parser<'a> {
             inner_of: None,
             supertypes: enum_supertypes,
             delegations: Vec::new(),
+            delegation_exprs: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
@@ -1488,7 +1494,7 @@ impl<'a> Parser<'a> {
                 self.bump();
             } // interface name
             self.parse_type_args();
-            let (supertypes, _, _, _) = self.parse_supertypes();
+            let (supertypes, _, _, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
                 let _ = self.parse_block_expr();
@@ -1772,7 +1778,8 @@ impl<'a> Parser<'a> {
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
-        let (supertypes, base_class, base_args, delegations) = self.parse_supertypes();
+        let (supertypes, base_class, base_args, delegations, delegation_exprs) =
+            self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
         // supertype list, before the body.
         self.parse_where_clause();
@@ -1977,6 +1984,7 @@ impl<'a> Parser<'a> {
             inner_of: None,
             supertypes,
             delegations,
+            delegation_exprs,
             base_class,
             base_args,
             // A class has a primary constructor when it wrote one (parens / `constructor` keyword) OR
@@ -1997,11 +2005,13 @@ impl<'a> Parser<'a> {
         Option<String>,
         Vec<ExprId>,
         Vec<(String, String)>,
+        Vec<(String, ExprId)>,
     ) {
         let mut ifaces = Vec::new();
         let mut base: Option<String> = None;
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
+        let mut delegation_exprs = Vec::new();
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
@@ -2043,7 +2053,8 @@ impl<'a> Parser<'a> {
                     if self.at(TokenKind::Ident) {
                         let delegate = self.text().to_string();
                         let after = self.t.get(self.i + 1).map(|t| t.kind);
-                        // Only a bare variable name (not a call/member) is the simple delegate form.
+                        // A bare variable name (a `val`-param field) is the simple delegate form; any
+                        // other shape (`by Impl()`, `by a.b`, …) is an EXPRESSION delegate.
                         if matches!(
                             after,
                             Some(TokenKind::Comma)
@@ -2053,18 +2064,19 @@ impl<'a> Parser<'a> {
                             self.bump();
                             delegations.push((effective.clone(), delegate));
                         } else {
-                            self.diags.error(
-                                self.tok().span,
-                                "krusty: only `by <val-parameter>` delegation is supported",
-                            );
-                            let _ = self.parse_expr();
+                            // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
+                            let saved = self.no_trailing_lambda;
+                            self.no_trailing_lambda = true;
+                            let e = self.parse_expr();
+                            self.no_trailing_lambda = saved;
+                            delegation_exprs.push((effective.clone(), e));
                         }
                     } else {
-                        self.diags.error(
-                            self.tok().span,
-                            "krusty: only `by <val-parameter>` delegation is supported",
-                        );
-                        let _ = self.parse_expr();
+                        let saved = self.no_trailing_lambda;
+                        self.no_trailing_lambda = true;
+                        let e = self.parse_expr();
+                        self.no_trailing_lambda = saved;
+                        delegation_exprs.push((effective.clone(), e));
                     }
                 }
                 if !self.eat(TokenKind::Comma) {
@@ -2072,7 +2084,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (ifaces, base, base_args, delegations)
+        (ifaces, base, base_args, delegations, delegation_exprs)
     }
 
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
@@ -2092,7 +2104,7 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
-        let (supertypes, _base, _base_args, _) = self.parse_supertypes();
+        let (supertypes, _base, _base_args, _, _) = self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         self.skip_newlines();
@@ -2181,6 +2193,7 @@ impl<'a> Parser<'a> {
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
+            delegation_exprs: Vec::new(),
             base_class: None,
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
@@ -2276,7 +2289,8 @@ impl<'a> Parser<'a> {
     /// not modelled — the checker/lowering reject a body that reads outer locals.
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
         self.bump(); // 'object'
-        let (supertypes, base_class, base_args, delegations) = self.parse_supertypes();
+        let (supertypes, base_class, base_args, delegations, delegation_exprs) =
+            self.parse_supertypes();
         let (methods, body_props, init_order) = self.parse_object_body();
         let end = self.t[self.i.saturating_sub(1)].span;
         let name = format!("Anon$anon${}", span.lo);
@@ -2306,6 +2320,7 @@ impl<'a> Parser<'a> {
             inner_of: None,
             supertypes,
             delegations,
+            delegation_exprs,
             base_class,
             base_args,
             secondary_ctors: Vec::new(),
@@ -2332,7 +2347,8 @@ impl<'a> Parser<'a> {
         let name = self.ident_or_error("object name");
         // Capture the object's implemented INTERFACES (`object X : KSerializer<C>`) AND a base class
         // (`object A : Sealed()`): the general class lowering/emit handles the `extends` + `super(args)`.
-        let (supertypes, base_class, base_args, _delegations) = self.parse_supertypes();
+        let (supertypes, base_class, base_args, _delegations, _delegation_exprs) =
+            self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
@@ -2436,6 +2452,7 @@ impl<'a> Parser<'a> {
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
+            delegation_exprs: Vec::new(),
             base_class,
             base_args,
             secondary_ctors: Vec::new(),
@@ -4221,6 +4238,7 @@ impl<'a> Parser<'a> {
                 }
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
                 // last call argument (same line only, to avoid swallowing an unrelated block).
+                TokenKind::LBrace if self.no_trailing_lambda => break,
                 TokenKind::LBrace => {
                     let lambda = self.parse_lambda();
                     let lspan = self.file.expr_spans[lhs.0 as usize];

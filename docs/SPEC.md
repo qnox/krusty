@@ -775,6 +775,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxed, and the value-class pass would unbox a `null` (NPE) — so it skips rather than miscompile. Test:
   `tests/nullable_cast_e2e.rs`.
 
+- **Interface delegation to an expression (`class D : I by Impl()`).** A delegate that is not a `val`
+  constructor parameter but an arbitrary EXPRESSION: it is evaluated once into a synthesized
+  `$$delegate_e<j>` field (stored in the constructor, with ctor params and `this` in scope, so
+  `by mk(x)` works), and each of `I`'s methods forwards to it. The `{` after `by Impl()` opens the
+  CLASS BODY, never a trailing lambda on the delegate call. Skips (never miscompiles): a VALUE-class
+  delegate (unboxed → doesn't implement `I` at runtime), and — as for the existing non-`val`-param
+  path — a generic or property-bearing interface. A separate fix: `file_class_name` sanitizes
+  characters illegal in a JVM class name (`foo.1.0.kt` → `Foo_1_0Kt`, not a `ClassFormatError`). Test:
+  `tests/interface_delegation_expr_e2e.rs`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
