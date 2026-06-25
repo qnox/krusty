@@ -824,8 +824,8 @@ impl IrFile {
 /// `IrExpr`'s sub-expressions — tree walks (index shifting, scans) delegate here so a new variant is
 /// covered in one place. Written EXHAUSTIVELY (no `_` arm) on purpose: adding an `IrExpr` variant must
 /// fail to compile here rather than silently drop its children from every walk.
-pub fn for_each_child(ir: &IrFile, e: ExprId, f: &mut impl FnMut(ExprId)) {
-    match &ir.exprs[e as usize] {
+pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
+    match &exprs[e as usize] {
         IrExpr::Block { stmts, value } => {
             stmts.iter().for_each(|&s| f(s));
             value.iter().for_each(|&v| f(v));
@@ -933,7 +933,7 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
         _ => {}
     }
     let mut kids = Vec::new();
-    for_each_child(ir, e, &mut |c| kids.push(c));
+    for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
     for c in kids {
         shift_value_indices(ir, c, threshold, by);
     }
