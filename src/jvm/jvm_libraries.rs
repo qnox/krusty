@@ -1219,13 +1219,29 @@ impl SymbolSource for JvmLibraries {
                     };
                     for m in &t.members {
                         if m.name == name {
+                            // Source parameter NAMES (from the class's `@Metadata`) for named-argument
+                            // resolution. A member's `params` are the logical params (no receiver), so the
+                            // names align 1:1 when present. Defaults aren't recovered here (named call
+                            // supplies all).
+                            let call_sig = match self.cp.metadata_member_param_names(
+                                &cn,
+                                &m.name,
+                                m.params.len(),
+                            ) {
+                                Some(names) => crate::libraries::CallSig {
+                                    required: m.params.len(),
+                                    param_names: names,
+                                    ..Default::default()
+                                },
+                                _ => crate::libraries::CallSig::default(),
+                            };
                             overloads.push(FunctionInfo {
                                 kind: FnKind::Member,
                                 receiver: Some(receiver),
                                 ret_nullable: false,
                                 public: true,
                                 receiver_rank: rung,
-                                call_sig: crate::libraries::CallSig::default(),
+                                call_sig,
                                 flags: FnFlags::default(),
                                 callable: LibraryCallable {
                                     name: m.name.clone(),

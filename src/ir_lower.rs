@@ -5798,7 +5798,6 @@ impl<'a> Lower<'a> {
         fname: &str,
         args: &[AstExprId],
     ) -> Option<Vec<AstExprId>> {
-        let names = self.afile.call_arg_names.get(&call.0)?;
         // The single classpath top-level overload with recorded parameter names (federated library set —
         // a classpath function is not a module function, so `ModuleSymbols` wouldn't surface it).
         let sets: Vec<Vec<String>> = self
@@ -5815,6 +5814,48 @@ impl<'a> Lower<'a> {
         let [param_names] = sets.as_slice() else {
             return None;
         };
+        self.reorder_by_param_names(call, args, param_names)
+    }
+
+    /// Reorder a NAMED-argument call to a CLASSPATH instance MEMBER (`g.greet(b = …, a = …)`) into
+    /// declared-parameter order, from the member's `@Metadata` names (decoded into a single
+    /// `FnKind::Member` overload's `CallSig.param_names`). `rt` is the receiver type. `None` when not a
+    /// uniquely-resolvable classpath named member call (caller then leaves the args untouched).
+    fn reorder_classpath_named_member_args(
+        &self,
+        call: AstExprId,
+        rt: Ty,
+        name: &str,
+        args: &[AstExprId],
+    ) -> Option<Vec<AstExprId>> {
+        let sets: Vec<Vec<String>> = self
+            .syms
+            .libraries
+            .functions(name, Some(rt))
+            .overloads
+            .into_iter()
+            .filter(|o| {
+                o.kind == crate::libraries::FnKind::Member && !o.call_sig.param_names.is_empty()
+            })
+            .map(|o| o.call_sig.param_names)
+            .collect();
+        let [param_names] = sets.as_slice() else {
+            return None;
+        };
+        self.reorder_by_param_names(call, args, param_names)
+    }
+
+    /// Map a named/positional argument list onto `param_names`-ordered positions (the shared core of the
+    /// top-level and member classpath named-argument reorders). Requires an exact-arity call (no omitted
+    /// defaults), every label to name a parameter, and — when the placement reorders evaluation — every
+    /// argument to be side-effect-free (a const/name), matching `lower_args_defaulted`. `None` otherwise.
+    fn reorder_by_param_names(
+        &self,
+        call: AstExprId,
+        args: &[AstExprId],
+        param_names: &[String],
+    ) -> Option<Vec<AstExprId>> {
+        let names = self.afile.call_arg_names.get(&call.0)?;
         let n = param_names.len();
         if args.len() != n {
             return None;
@@ -13422,6 +13463,17 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
+                    // NAMED-ARGUMENT call to a CLASSPATH instance member (`g.greet(b = …, a = …)`):
+                    // reorder the arguments into parameter order (from the member's `@Metadata` names) so
+                    // the positional lowering below pairs each argument with its parameter. `None` → leave
+                    // the args untouched (module members keep their own named-arg handling).
+                    let args = if self.afile.call_arg_names.contains_key(&e.0) {
+                        let rt = self.info.ty(receiver);
+                        self.reorder_classpath_named_member_args(e, rt, &name, &args)
+                            .unwrap_or(args)
+                    } else {
+                        args
+                    };
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0) to the base
                     // class's method (the receiver's own override is skipped). The base is the current
                     // class's superclass; the method's signature comes from the super (a user class via

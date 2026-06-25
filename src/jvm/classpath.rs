@@ -466,6 +466,30 @@ impl Classpath {
             .map(|(_, names)| names)
     }
 
+    /// Source parameter NAMES of the class instance MEMBER `internal.jvm_name` of source arity `arity`,
+    /// from the class's own `@Metadata` `Function` records (decoded by `class_functions`, field 9 — NOT
+    /// `package_functions`, which is for a package-facade's top-level functions). Drives named-argument
+    /// resolution of a classpath instance-member call (`g.greet(b = …, a = …)`). Matches by JVM name and
+    /// source arity (the member's `@Metadata` value-parameter count). `None` if no member matches or its
+    /// names are unrecorded.
+    pub fn metadata_member_param_names(
+        &self,
+        internal: &str,
+        jvm_name: &str,
+        arity: usize,
+    ) -> Option<Vec<String>> {
+        let ci = self.find(internal)?;
+        super::metadata::class_functions(&ci)
+            .into_iter()
+            .find(|f| {
+                f.jvm_name == jvm_name
+                    && f.value_param_names.len() == arity
+                    && !f.value_param_names.is_empty()
+                    && !f.value_param_names.iter().any(String::is_empty)
+            })
+            .map(|f| f.value_param_names)
+    }
+
     /// All Kotlin extension-receiver internal names of `fn_name` in `internal` (`plusAssign` →
     /// `[kotlin/collections/MutableCollection, …/MutableMap]`), from `@Metadata`. A name is overloaded
     /// across receivers, so a receiver applies if it is a subtype of ANY entry. The JVM signature erases
