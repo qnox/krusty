@@ -733,6 +733,12 @@ fn kotlin_codegen_box_conformance() {
                     if !backend_applicable(&src, &["JVM", "JVM_IR"]) {
                         return (file.clone(), TestResult::Skip);
                     }
+                    // A test whose expected outcome assumes a `FREE_COMPILER_ARGS` flag krusty doesn't
+                    // model (e.g. `genericSafeCasts`, which changes `as T` codegen) is unsound to judge
+                    // against krusty's default semantics — skip, don't mis-grade.
+                    if krusty::conformance::needs_unmodeled_compiler_flag(&src) {
+                        return (file.clone(), TestResult::Skip);
+                    }
                     // Skip tests that rely on unsigned-integer-to-string conversion with unsigned semantics.
                     if src.contains("U.toString()") || src.contains("UL.toString()") {
                         return (file.clone(), TestResult::Skip);

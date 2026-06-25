@@ -51,6 +51,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         cur_class: None,
         cur_fn_name: String::new(),
         cur_fn_suspend: false,
+        cur_tparams: Vec::new(),
         lambda_seq: 0,
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
@@ -1165,6 +1166,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
                 lo.cur_fn_suspend = f.is_suspend;
+                // `as T` erasure is wired for TOP-LEVEL function type parameters only (the dominant
+                // bucket). A class/method/inline type-parameter cast finds no match here and falls
+                // through to `ty_ref`, which returns `None` for a bare `T` → the file safely bails
+                // (never miscompiles) exactly as before.
+                lo.cur_tparams = collect_tparams(
+                    file,
+                    &f.type_params,
+                    &f.type_param_bounds,
+                    &f.non_null_type_params,
+                );
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
@@ -2432,6 +2443,34 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 
 /// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
 /// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
+/// The type parameters of a generic function as `(name, bound, non_null)`, for lowering `as T`. `bound`
+/// is the declared upper bound kept VERBATIM as an `IrType` — `<T : CharSequence>` → `CharSequence`,
+/// an unbounded `<T>` → `kotlin/Any` (NOT erased here; the JVM emitter collapses it to a concrete
+/// class). `non_null` marks a non-nullable bound (`<T : Any>`, `<T : Foo>`) — such a cast null-checks
+/// (kotlinc emits `Intrinsics.checkNotNull`); an unbounded `<T>` (= `<T : Any?>`) does not.
+fn collect_tparams(
+    file: &ast::File,
+    names: &[String],
+    bounds: &[(String, ast::TypeRef)],
+    non_null: &std::collections::HashSet<String>,
+) -> Vec<(String, IrType, bool)> {
+    names
+        .iter()
+        .map(|name| {
+            let bound_ref = bounds.iter().find(|(n, _)| n == name).map(|(_, tr)| tr);
+            let bound = bound_ref
+                .map(|tr| ty_to_ir(ty_of(file, tr)))
+                .unwrap_or(IrType::Class {
+                    fq_name: "kotlin/Any".to_string(),
+                    type_args: vec![],
+                    nullable: true,
+                });
+            let non_null = non_null.contains(name) || bound_ref.is_some_and(|tr| !tr.nullable);
+            (name.clone(), bound, non_null)
+        })
+        .collect()
+}
+
 /// block-bodied) without an extension receiver.
 /// A `const val`'s compile-time literal initializer as an `IrConst`, narrowed to its declared type
 /// (`const val b: Byte = 1` → `Byte(1)`). `None` for any non-literal initializer (then the read stays a
@@ -2791,6 +2830,10 @@ pub(crate) struct Lower<'a> {
     /// suspension that the CPS flattener models only at unconditional positions, so `&&`/`||` keep the
     /// eager (operands-unconditional) form there until the flattener models conditional suspension.
     cur_fn_suspend: bool,
+    /// Type parameters in scope for the function body being lowered: `(name, bound, non_null)`. `bound`
+    /// is the declared upper bound as an un-erased `IrType` (`kotlin/Any` when unbounded); `non_null`
+    /// is set for a non-nullable bound (`<T : Any>`, `<T : Foo>`) — drives the `as T` null assertion.
+    cur_tparams: Vec<(String, IrType, bool)>,
     /// Per-enclosing-function counter for lambda impl-method naming.
     lambda_seq: u32,
     /// A boxed mutable-capture local's name → its element (unboxed) type. The scope holds the name
@@ -3306,6 +3349,56 @@ impl<'a> Lower<'a> {
             ctor_desc: ctor.descriptor,
             args: a,
         }))
+    }
+
+    /// Whether top-level function `fname` declares a bare type-parameter return (`fun <T> f(): T`).
+    fn callee_returns_typaram(&self, fname: &str) -> bool {
+        self.afile.decls.iter().any(|&d| {
+            matches!(self.afile.decl(d), Decl::Fun(f)
+                if f.name == fname
+                    && !f.type_params.is_empty()
+                    && f.ret.as_ref().is_some_and(|r| f.type_params.contains(&r.name)))
+        })
+    }
+
+    /// A call to a type-parameter-returning function whose erased `Object` result needs a coercion
+    /// krusty doesn't model — skip the file rather than miscompile. The result of `f<Unit>()` must
+    /// become `Unit.INSTANCE` (not the raw object); inside an `inline` expansion an erased result
+    /// feeding a boxed/`Int?` slot mis-frames the verifier. Both reach here as a tail-returned `T`.
+    fn erased_generic_call_unmodeled(&self, e: AstExprId, fname: &str) -> bool {
+        if !self.callee_returns_typaram(fname) {
+            return false;
+        }
+        let unit_targ = self
+            .afile
+            .call_type_args
+            .get(&e.0)
+            .and_then(|ts| ts.first())
+            .is_some_and(|r| matches!(r.name.as_str(), "Unit" | "Nothing"));
+        unit_targ || !self.inline_active.is_empty()
+    }
+
+    /// A call whose declared return is a type parameter erases to `Object`; the checker recovers the
+    /// real static type at the call site (a primitive type argument arrives here as its boxed wrapper,
+    /// `Integer` — the erased slot's actual reference representation). When that type is a more specific
+    /// reference, insert the `checkcast` kotlinc emits so a member access on the result resolves and
+    /// verifies (`asSeq<String>(x).length`); the wrapper is unboxed to a primitive only at a use site
+    /// that needs it, by the normal coercion path — never eagerly here (an `Int?` consumer keeps it
+    /// boxed, and `null` must not be unboxed).
+    fn coerce_erased_call_result(&mut self, e: AstExprId, call: u32, ret: &IrType) -> u32 {
+        let erased = matches!(ret, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any");
+        if !erased {
+            return call;
+        }
+        let st = self.info.ty(e);
+        if st.is_reference() && st != Ty::obj("kotlin/Any") && st != Ty::Null {
+            return self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: call,
+                type_operand: ty_to_ir(st),
+            });
+        }
+        call
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -11688,6 +11781,28 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 let arg = self.expr(operand)?;
+                // `x as T` — a cast to a type parameter in scope. The IR keeps `T` (with its bound) as
+                // the cast target; the JVM backend erases it (checkcast to the bound, `Object` for an
+                // unbounded `T`). A non-null `T` (`<T : Any>`, `<T : Foo>`) null-checks like kotlinc
+                // (`CastNonNull`); a nullable target (`as T?`, or an unbounded `<T : Any?>`) does not.
+                if let Some((name, bound, non_null)) =
+                    self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name)
+                {
+                    let op = if *non_null && !ty.nullable {
+                        IrTypeOp::CastNonNull
+                    } else {
+                        IrTypeOp::Cast
+                    };
+                    let type_operand = IrType::TypeParameter {
+                        name: name.clone(),
+                        bound: Box::new(bound.clone()),
+                    };
+                    return Some(self.ir.add_expr(IrExpr::TypeOp {
+                        op,
+                        arg,
+                        type_operand,
+                    }));
+                }
                 // `x as Int` (non-null primitive target) is an unbox: `checkcast Integer; intValue()`,
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
                 // reference types, so handle the primitive case before it.
@@ -12246,12 +12361,17 @@ impl<'a> Lower<'a> {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        if self.erased_generic_call_unmodeled(e, &fname) {
+                            return None;
+                        }
                         let a = self.lower_args_defaulted(e, &meta, &args, &params)?;
-                        self.ir.add_expr(IrExpr::Call {
+                        let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Local(fid),
                             dispatch_receiver: None,
                             args: a,
-                        })
+                        });
+                        let ret = self.ir.functions[fid as usize].ret.clone();
+                        self.coerce_erased_call_result(e, call, &ret)
                     } else if let Some(facade) = self.syms.fn_facades.get(&fname).cloned() {
                         // A top-level function defined in ANOTHER file of this multi-file compilation →
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /

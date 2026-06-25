@@ -302,6 +302,23 @@ conformance-badge:
       "$(just max-version)" > docs/badges/kotlin.json
     echo "wrote docs/badges/conformance.json + kotlin.json"
 
+# Run the box-corpus survey — the roadmap of why krusty SKIPS a codegen/box test (the unresolved /
+# unsupported buckets, most-frequent first). Provisions the SAME version-matched, cached corpus +
+# toolchain the conformance gate uses (never a random local checkout), so the buckets reflect the
+# supported Kotlin version. Optional `[CATEGORY]` lists the files in a matching bucket.
+survey *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="$(just max-version)"
+    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    cargo build --release --bin survey >&2
+    if [ -n "{{ARGS}}" ]; then
+        ./target/release/survey "$box" --samples {{ARGS}}
+    else
+        ./target/release/survey "$box"
+    fi
+
 # Install git hooks via lefthook (reads lefthook.yml). Needs lefthook on PATH.
 install-hooks:
     @command -v lefthook >/dev/null 2>&1 || { echo "lefthook not found — install it: https://lefthook.dev (e.g. 'go install github.com/evilmartians/lefthook@latest' or your package manager)" >&2; exit 1; }

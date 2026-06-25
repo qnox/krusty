@@ -25,8 +25,14 @@ pub enum IrType {
         type_args: Vec<IrType>,
         nullable: bool,
     },
-    /// A type-parameter reference (`T`), resolved to its declaration index.
-    TypeParameter(u32),
+    /// A type-parameter reference (`T`) carrying its declared upper bound (`<T : CharSequence>` →
+    /// `bound = CharSequence`; an unbounded `<T>` → `bound = kotlin/Any`). The bound is source-level
+    /// metadata kept verbatim — JVM *erasure* (collapsing `T` to the bound's class, or to
+    /// `java/lang/Object` for an `Any` bound) happens only in `ir_emit`, never in the IR.
+    TypeParameter {
+        name: String,
+        bound: Box<IrType>,
+    },
     /// `(P..) -> R` function type — kept structural so backends choose the representation
     /// (JVM `FunctionN`, a JS closure, …).
     Function {

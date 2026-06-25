@@ -48,7 +48,18 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
 pub fn applies(src: &str) -> bool {
-    backend_applicable(src, BACKENDS)
+    backend_applicable(src, BACKENDS) && !needs_unmodeled_compiler_flag(src)
+}
+
+/// A `// FREE_COMPILER_ARGS:` directive requesting a flag that changes codegen krusty doesn't model —
+/// the test's expected `box()` outcome assumes that flag, so running it against krusty's DEFAULT
+/// semantics is unsound (it would diverge from the flagged reference). `-Xbinary=genericSafeCasts`
+/// turns an unchecked `as T` into a real runtime-typed `checkcast` (so the test expects a CCE that
+/// default `as T` erasure never throws) — exclude rather than mis-judge.
+pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
+    src.lines()
+        .filter(|l| l.starts_with("// FREE_COMPILER_ARGS:"))
+        .any(|l| l.contains("genericSafeCasts"))
 }
 
 /// The EXTRA libraries (beyond kotlin-stdlib, which `kotlinc` always supplies) a test's classpath needs,
