@@ -403,12 +403,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 field_serializers: lo.field_serializers_of(c),
                 field_defaults: fields
                     .iter()
-                    .map(|(n, _)| {
+                    .map(|(n, t)| {
                         c.props
                             .iter()
                             .find(|p| p.name == *n)
                             .and_then(|p| p.default)
                             .and_then(|d| const_default_of(file, d))
+                            // Widen the literal to the field's type so its JVM slot width/kind matches the
+                            // field local (`val x: Long = 5` parses `5` as `Int` — store it as `Long`).
+                            .map(|c| widen_const_to(c, *t))
                     })
                     .collect(),
                 is_value: c.is_value,
@@ -14176,6 +14179,24 @@ fn const_default_of(file: &ast::File, e: AstExprId) -> Option<crate::ir::IrConst
         Expr::StringLit(s) => IrConst::String(s.clone()),
         _ => return None,
     })
+}
+
+/// Widen a const-folded default literal to the field's declared numeric type so its JVM slot
+/// width/kind matches the field local (`val x: Long = 5` folds `5` as `Int` but must store as `Long`;
+/// likewise `Float`/`Double`). Non-numeric or already-matching consts pass through unchanged.
+fn widen_const_to(c: crate::ir::IrConst, t: Ty) -> crate::ir::IrConst {
+    use crate::ir::IrConst;
+    match (t, c) {
+        (Ty::Long, IrConst::Int(v)) => IrConst::Long(v as i64),
+        (Ty::Long, IrConst::Byte(v)) => IrConst::Long(v as i64),
+        (Ty::Long, IrConst::Short(v)) => IrConst::Long(v as i64),
+        (Ty::Double, IrConst::Int(v)) => IrConst::Double(v as f64),
+        (Ty::Double, IrConst::Long(v)) => IrConst::Double(v as f64),
+        (Ty::Double, IrConst::Float(v)) => IrConst::Double(v as f64),
+        (Ty::Float, IrConst::Int(v)) => IrConst::Float(v as f32),
+        (Ty::Float, IrConst::Long(v)) => IrConst::Float(v as f32),
+        (_, c) => c,
+    }
 }
 
 fn serial_names_of(file: &ast::File, c: &ast::ClassDecl) -> Vec<(String, String)> {

@@ -622,6 +622,21 @@ wrap only fires for a field with a constant default). Test:
 `serialization_krusty_only_e2e::default_value_encode_omission_in_krusty`. Remaining step 3 = DECODE (the
 `seen` bitmask + `SerializationConstructorMarker` mask constructor) before a default-value corpus file greens.
 
+#### Update (2026-06-25) — default values, step 3: decode (COMPLETE for constant defaults)
+
+deserialize now initializes each optional field's decode local to its CONSTANT default value (instead of the
+type's zero/null). An element omitted from the input is never returned by `decodeElementIndex`, so its local
+keeps the default and the normal constructor `new C(locals…)` reproduces it — the const-default equivalent of
+kotlinc's `seen`-bitmask + `SerializationConstructorMarker` fill, with NO synthetic constructor. The folded
+literal is widened to the field's numeric type (`val n: Long = 5` parses `5` as `Int`; `widen_const_to` stores
+it as `Long`/`Double`/`Float` to match the local's slot width — a reviewer-caught latent bug). Verified:
+`decodeFromString(C.serializer(), "{\"a\":1}")` → `C(1, 5, null)` (and `Long`/`Double` defaults).
+**Default values are now COMPLETE for constant defaults (encode-omission + decode-fill). Main box gate
+1750 → 1755 (+5, 0 FAIL)** — default-value `@Serializable` classes in the box corpus now round-trip. Tests:
+`default_value_decode_fills_default_in_krusty` (+ encode/isOptional). The remaining limitations are NON-const
+defaults (computed initializers, which DO need the `seen`-mask + mask ctor) and the default-value *corpus*
+files' OTHER needs (sealed-parametrized interfaces, decode-side erased-member access, `C()` ctor-default-args).
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This
