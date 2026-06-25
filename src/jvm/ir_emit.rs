@@ -21,6 +21,7 @@ thread_local! {
 /// encoded protobuf, one byte per `char`) / `d2` (string table) arrays. Attached to the facade class so
 /// another Kotlin/krusty compilation can resolve its top-level declarations — in particular reading the
 /// `IS_SUSPEND` flag + logical signature of a `suspend fun`.
+#[derive(Clone)]
 pub struct KotlinMetadata {
     pub k: i32,
     pub mv: Vec<i32>,
