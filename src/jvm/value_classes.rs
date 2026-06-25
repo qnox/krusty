@@ -41,14 +41,14 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .iter()
         .filter(|c| c.is_value)
         .filter_map(|c| {
-            c.fields.first().map(|(_, t)| {
+            c.fields.first().map(|f| {
+                let t = &f.ty;
                 // A type-parameter field is null-capable (the `Object` underlying can hold `null`) UNLESS
                 // it has an explicit NON-NULL bound: `<T>`/`<T: Any?>`/`<T: String?>` → null-capable;
                 // `<T: String>` → not. (Kotlin's default upper bound is the nullable `Any?`.)
-                let null_capable = c
-                    .field_type_params
-                    .first()
-                    .and_then(|o| o.as_ref())
+                let null_capable = f
+                    .type_param
+                    .as_ref()
                     .is_some_and(|name| {
                         match c.type_param_bounds.iter().find(|(n, _)| n == name) {
                             Some((_, b)) => matches!(b, IrType::Class { nullable: true, .. }),
@@ -97,7 +97,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     let orig_fields: Vec<Vec<IrType>> = ir
         .classes
         .iter()
-        .map(|c| c.fields.iter().map(|(_, t)| t.clone()).collect())
+        .map(|c| c.fields.iter().map(|f| f.ty.clone()).collect())
         .collect();
     // Pre-erasure constructor-parameter types per class (parallel to `ir.classes`) — the slot types for
     // an `init { … }` block's box/unbox analysis (slot 0 = `this`, slots 1.. = the ctor params).
@@ -123,7 +123,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .iter()
         .map(|c| {
             if c.is_value {
-                c.fields.first().map(|(n, _)| getter_name(n))
+                c.fields.first().map(|f| getter_name(&f.name))
             } else {
                 None
             }
@@ -139,7 +139,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
         .filter_map(|c| {
             c.fields
                 .first()
-                .map(|(n, _)| (c.fq_name.clone(), getter_name(n)))
+                .map(|f| (c.fq_name.clone(), getter_name(&f.name)))
         })
         .collect();
 
@@ -412,7 +412,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
             }
         }
         for fld in &mut c.fields {
-            fld.1 = erase(&fld.1, &under);
+            fld.ty = erase(&fld.ty, &under);
         }
         for a in &mut c.ctor_args {
             a.0 = erase(&a.0, &under);
@@ -1990,7 +1990,7 @@ fn synth_value_members(
     has_init: bool,
 ) {
     let internal = ir.classes[class_id as usize].fq_name.clone();
-    let fname = ir.classes[class_id as usize].fields[0].0.clone();
+    let fname = ir.classes[class_id as usize].fields[0].name.clone();
     let u_ir = under.get(&internal).cloned().unwrap_or(IrType::Error);
     let x_ir = IrType::Class {
         fq_name: internal.clone(),

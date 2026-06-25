@@ -463,6 +463,43 @@ pub struct IrFunction {
     pub param_checks: Vec<Option<String>>,
 }
 
+/// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
+/// field's type / generic-param name / constant default / finality / visibility can't desync.
+#[derive(Clone, Debug)]
+pub struct IrField {
+    pub name: String,
+    pub ty: IrType,
+    /// The source type-parameter NAME the field was declared with (`val x: T` → `Some("T")`), else
+    /// `None`. Platform-neutral; lets the value-class pass pick the CORRECT bound for a generic
+    /// underlying (vs guessing), independent of erasure dropping the name.
+    pub type_param: Option<String>,
+    /// The CONSTANT default from a primary-constructor default (`val b: Int = 5` → `Some(Int(5))`,
+    /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). The
+    /// serialization extension marks an element with a default `isOptional`; ignored by the core backend.
+    pub default: Option<IrConst>,
+    /// The backing field is immutable (`val`) — emitted `final`.
+    pub is_final: bool,
+    /// Private backing field — the Kotlin default (reached via accessors). `false` for a non-private
+    /// field read/written cross-class (a coroutine continuation's `result`/`label`). Each backend maps
+    /// this to its own access representation (the JVM emitter → `ACC_PRIVATE`/`ACC_PUBLIC`).
+    pub is_private: bool,
+}
+
+impl IrField {
+    /// A plain backing field with Kotlin defaults: mutable-unknown (`is_final = false`), `private`, no
+    /// generic-param name, no constant default. Synthesized classes build fields from this.
+    pub fn new(name: String, ty: IrType) -> IrField {
+        IrField {
+            name,
+            ty,
+            type_param: None,
+            default: None,
+            is_final: false,
+            is_private: true,
+        }
+    }
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -480,15 +517,10 @@ pub struct IrClass {
     /// bounds). The serialization extension uses the count/order to shape a generic `$serializer`
     /// (one `KSerializer` constructor arg per type parameter). Empty for a non-generic class.
     pub type_params: Vec<String>,
-    /// Parallel to `fields`: the source type-parameter NAME a field was declared with (`val x: T` →
-    /// `Some("T")`), else `None` for a concrete type. Platform-neutral; lets the value-class pass pick the
-    /// CORRECT bound for a generic underlying (vs guessing), independent of erasure dropping the name.
-    pub field_type_params: Vec<Option<String>>,
     pub supertypes: Vec<IrType>,
-    /// Instance fields `(name, type)`. The first `ctor_param_count` are the primary-constructor
-    /// parameters (stored directly from args, in order); any after them are class-body properties
-    /// initialized by `init_body`.
-    pub fields: Vec<(String, IrType)>,
+    /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
+    /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
+    pub fields: Vec<IrField>,
     /// Per-property serial-name overrides from `@SerialName("x")` on a constructor property, as
     /// `(property_name, serial_name)`. Empty for a class with no such annotation. Consumed by the
     /// serialization extension to name descriptor elements; ignored by the core backend.
@@ -502,12 +534,6 @@ pub struct IrClass {
     /// The serialization extension routes that property's `childSerializers`/descriptor element through
     /// an instance of `X` instead of a default builtin/nested serializer. Ignored by the core backend.
     pub field_serializers: Vec<(String, String)>,
-    /// Per-property CONSTANT default values from a primary-constructor default (`val b: Int = 5` →
-    /// `Some(Int(5))`, `val t: T? = null` → `Some(Null)`), parallel to `fields`. `None` for a property
-    /// with no default OR a non-constant default. The serialization extension marks an element with a
-    /// default `isOptional` and omits it on encode when it still equals the default. Ignored by the core
-    /// backend (constructor defaults are realized separately via the `$default` synthetic).
-    pub field_defaults: Vec<Option<IrConst>>,
     /// Indices into `fields` that back a `lateinit var`. EVERY read of such a field (a backend
     /// `GetField`) null-checks it and throws `UninitializedPropertyAccessException` when still unset —
     /// matching kotlinc, which inserts the check at each access site (not only the property getter).
@@ -582,14 +608,6 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<String>,
-    /// Per-field `true` when the backing field is immutable (`val`) — emitted `final`. Parallel to
-    /// `fields` (empty ⇒ none final, for synthesized classes).
-    pub field_final: Vec<bool>,
-    /// Per-field visibility (platform-neutral): `true` = `private` (the default — Kotlin backing fields
-    /// are private, reached via accessors); `false` = non-private, readable/writable cross-class (a
-    /// coroutine continuation's `result`/`label`). Parallel to `fields`; empty ⇒ all private. Each
-    /// backend maps this to its own access representation (the JVM emitter → `ACC_PRIVATE`/`ACC_PUBLIC`).
-    pub field_private: Vec<bool>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
