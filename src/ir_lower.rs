@@ -18,6 +18,27 @@ use crate::ir::{
 use crate::resolve::{SymbolTable, TypeInfo};
 use crate::types::Ty;
 
+// --- Lower-bail diagnostics ----------------------------------------------------------------------
+// `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
+// correct for the compiler, but opaque for the box-corpus `survey` — the roadmap of what to grow next.
+// So lowering records WHY it last bailed in a thread-local: a coarse phase (`gate:class`, `deep:fun`)
+// plus the innermost unsupported expr/stmt variant (`expr Lambda`, `call StringBuilder`). The compiler
+// never reads this; only the `survey` binary does (via `lower_bail_reason`). Zero behavioural effect.
+thread_local! {
+    static BAIL_REASON: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+fn set_bail(reason: &str) {
+    BAIL_REASON.with(|r| *r.borrow_mut() = reason.to_string());
+}
+/// The reason `lower_file` last returned `None` — a diagnostic for the box-corpus survey only.
+pub fn lower_bail_reason() -> String {
+    BAIL_REASON.with(|r| r.borrow().clone())
+}
+/// The leading variant name of a `{:?}`-formatted AST node (`"Call { .. }"` → `"Call"`).
+fn bail_variant(dbg: &str) -> &str {
+    dbg.split(['(', '{', ' ']).next().unwrap_or("?")
+}
+
 struct ClassInfo {
     id: ClassId,
     internal: String,
@@ -69,7 +90,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         inline_lambda_ret: Vec::new(),
     };
 
-    // Only files of top-level functions + *simple* classes take the IR path.
+    set_bail("deep"); // refined below as lowering progresses (survey diagnostic only)
+                      // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
             Decl::Fun(_) => {} // top-level function, extension function, or `inline fun` (expanded at call sites)
@@ -84,7 +106,17 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     || is_computed_prop(p)
                     || p.delegate.is_some()
                     || p.receiver.is_some() => {}
-            _ => return None,
+            other => {
+                set_bail(match other {
+                    Decl::Class(c) if c.is_object() => "gate:object",
+                    Decl::Class(c) if c.is_interface() => "gate:interface",
+                    Decl::Class(c) if c.is_enum() => "gate:enum",
+                    Decl::Class(_) => "gate:class",
+                    Decl::Property(_) => "gate:property",
+                    _ => "gate:other",
+                });
+                return None;
+            }
         }
     }
 
@@ -1169,6 +1201,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         match file.decl(d) {
             Decl::Fun(f) if f.is_inline => {} // inline functions are expanded at call sites, not emitted
             Decl::Fun(f) => {
+                set_bail("deep:fun");
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
@@ -1255,6 +1288,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
             Decl::Class(c) => {
+                set_bail("deep:class");
                 let internal = class_internal(file, &c.name);
                 // A method that overrides a base method with a *different erased signature* (a
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
@@ -2333,6 +2367,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
             Decl::Property(p) => {
+                set_bail("deep:property");
                 lo.scope.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
@@ -7798,6 +7833,17 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
+        let r = self.stmt_inner(s);
+        if r.is_none() && lower_bail_reason().starts_with("deep") {
+            set_bail(&format!(
+                "stmt {}",
+                bail_variant(&format!("{:?}", self.afile.stmt(s)))
+            ));
+        }
+        r
+    }
+
+    fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
         // A compound assignment routed to a user `opAssign` operator (checker-marked) — emit the call.
         if self.info.plus_assign.contains(&s) {
             if let Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } =
@@ -9802,6 +9848,23 @@ impl<'a> Lower<'a> {
         }
         let r = self.expr_inner(e);
         self.expr_depth -= 1;
+        // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
+        // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
+        // coarse `deep*` phase). A `Call` is tagged by its callee name — the single most useful signal.
+        if r.is_none() && lower_bail_reason().starts_with("deep") {
+            let reason = match self.afile.expr(e).clone() {
+                Expr::Call { callee, .. } => {
+                    let name = match self.afile.expr(callee) {
+                        Expr::Name(n) => n.clone(),
+                        Expr::Member { name, .. } => format!(".{name}"),
+                        o => bail_variant(&format!("{o:?}")).to_string(),
+                    };
+                    format!("call {name}")
+                }
+                o => format!("expr {}", bail_variant(&format!("{o:?}"))),
+            };
+            set_bail(&reason);
+        }
         r
     }
 
@@ -12883,23 +12946,30 @@ impl<'a> Lower<'a> {
                                 .iter()
                                 .zip(&field_tys)
                                 .all(|(a, p)| ir_arg_assignable(a, p));
-                        let typed_secondary = secs
-                            .iter()
-                            .find(|sc| sc.params == arg_irs)
-                            .or_else(|| {
-                                (!primary_accepts)
-                                    .then(|| {
-                                        secs.iter().find(|sc| {
-                                            sc.params.len() == arg_irs.len()
-                                                && arg_irs
-                                                    .iter()
-                                                    .zip(&sc.params)
-                                                    .all(|(a, p)| ir_arg_assignable(a, p))
-                                        })
+                        // A named-argument call (`C(b = 9)`) references the PRIMARY ctor's parameter
+                        // names — Kotlin never considers a secondary for it. Only positional calls pick
+                        // a secondary by argument types (otherwise a same-arity secondary that merely
+                        // coincides on types would hijack the named primary call → wrong fields).
+                        let typed_secondary = no_named
+                            .then(|| {
+                                secs.iter()
+                                    .find(|sc| sc.params == arg_irs)
+                                    .or_else(|| {
+                                        (!primary_accepts)
+                                            .then(|| {
+                                                secs.iter().find(|sc| {
+                                                    sc.params.len() == arg_irs.len()
+                                                        && arg_irs
+                                                            .iter()
+                                                            .zip(&sc.params)
+                                                            .all(|(a, p)| ir_arg_assignable(a, p))
+                                                })
+                                            })
+                                            .flatten()
                                     })
-                                    .flatten()
+                                    .cloned()
                             })
-                            .cloned();
+                            .flatten();
                         // The primary constructor (exact/defaulted positional match), else a secondary
                         // constructor selected by argument count.
                         if let Some(sc) = typed_secondary {
@@ -12920,11 +12990,15 @@ impl<'a> Lower<'a> {
                                 args: a,
                                 ctor_params: None,
                             })
-                        } else if let Some(sc) = self.ir.classes[class as usize]
-                            .secondary_ctors
-                            .clone()
-                            .into_iter()
-                            .find(|sc| sc.params.len() == args.len())
+                        } else if let Some(sc) = no_named
+                            .then(|| {
+                                self.ir.classes[class as usize]
+                                    .secondary_ctors
+                                    .clone()
+                                    .into_iter()
+                                    .find(|sc| sc.params.len() == args.len())
+                            })
+                            .flatten()
                         {
                             let mut a = Vec::new();
                             for (arg, pt) in args.iter().zip(&sc.params) {

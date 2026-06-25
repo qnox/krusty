@@ -746,6 +746,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gap), so byte-parity for generics is not yet achieved; runtime (box) is correct. Tests:
   `tests/primitive_bound_generic_e2e.rs`.
 
+- **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
+  upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
+  CharSequence>` (a `checkcast`). A non-null bound (`<T : Any>`, `<T : Foo>`) null-checks first
+  (`Intrinsics.checkNotNull`, throwing on `null`); an unbounded `<T>` (= `<T : Any?>`) does not. krusty
+  keeps `T` (with its bound) in the IR as `IrType::TypeParameter { name, bound }` and erases it ONLY at
+  emit (`ir_ty_to_jvm` collapses it to the bound; the `Object` case emits no `checkcast`) — the type
+  system never erases. A generic call whose result is a bare `T` is refined at the call site to the
+  supplied type argument (a primitive arg → its boxed wrapper, the erased slot's real representation),
+  with the `checkcast` kotlinc inserts on the result. Cases needing a coercion krusty doesn't model — a
+  `<Unit>`/`<Nothing>` argument, an erased generic call inside an `inline` expansion, or the
+  `-Xbinary=genericSafeCasts` flag — skip the file rather than miscompile. Tests:
+  `tests/typeparam_cast_e2e.rs`.
+
+- **Cast to a nullable reference type (`x as Foo?`).** A plain `checkcast Foo` — the JVM `checkcast`
+  passes `null` through, so `null as Foo?` is `null` (never a throw) and a wrong non-null type throws
+  `ClassCastException`; contrast `x as Foo`, which null-checks first (`CastNonNull`). The cast target is
+  resolved by its non-null form (a nullable reference and its non-null form share the JVM class); only
+  the null-throwing behaviour differs. A nullable VALUE-class target (`as Str?`) is excluded — it stays
+  boxed, and the value-class pass would unbox a `null` (NPE) — so it skips rather than miscompile. Test:
+  `tests/nullable_cast_e2e.rs`.
+
+- **Named arguments on a constructor call (`C(b = 9)`).** The primary constructor's parameter names map
+  the labels onto positions, exactly as for a top-level function — including a call that skips a leading
+  parameter whose default is a simple literal (the checker maps via `map_call_args`, the lowering fills
+  the default). A named call references the PRIMARY constructor's parameter names only; it is NEVER routed
+  to a same-arity secondary constructor that merely coincides on argument types (the secondary-selection
+  paths are gated on the call being positional — otherwise `C(b = 9)` against a `constructor(x: Int) :
+  this(x, x)` would set `a` instead of using its default → wrong fields). An omitted parameter with a
+  non-literal default skips at lowering. Tests: `tests/named_ctor_args_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

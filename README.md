@@ -34,7 +34,11 @@ differential test harness against the real compiler:
 - **Top-level functions** — arithmetic (Int/Long/Double + widening), comparisons, short-circuit
   `&&`/`||`, `if`/`while`, blocks with `val`/`var` locals, string concat, calls.
 - **Classes** — primary-constructor properties (`val`/`var` → backing fields + `getX`/`setX`),
-  member functions (instance methods with property access).
+  member functions (instance methods with property access), **named constructor arguments**
+  (`C(b = 9)`, skipping leading literal defaults).
+- **Type operators** — `is`/`as`/`as?`, including the unchecked cast to a type parameter (`x as T`,
+  erased to its bound only at JVM emit) and the nullable reference cast (`x as Foo?`, a `null`-passing
+  `checkcast`).
 - **`@kotlin.Metadata`** — file facades (kind=2) and classes (kind=1), so a **Kotlin** consumer
   compiled by the real `kotlinc` resolves krusty's API (functions *and* classes via property
   syntax) and runs against it.
