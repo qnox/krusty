@@ -1097,6 +1097,10 @@ impl IrPlugin for SerializationPlugin {
                 })
                 .collect();
             let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
+            // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
+            // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
+            let field_defaults: Vec<Option<IrConst>> =
+                ir.classes[class_id as usize].field_defaults.clone();
             // Per-property explicit serializers (`@Serializable(with = X::class)` on a field).
             let field_sers: std::collections::HashMap<String, String> = ir.classes
                 [class_id as usize]
@@ -1247,6 +1251,7 @@ impl IrPlugin for SerializationPlugin {
                         let mut stmts = vec![cvar];
                         let mut bail = false;
                         for (i, (pname, ty)) in fields.iter().enumerate() {
+                            let n_before = stmts.len();
                             let d = this_desc(ir);
                             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
                             // Read the property via its PUBLIC getter (`value.getX()`) — the backing
@@ -1346,6 +1351,56 @@ impl IrPlugin for SerializationPlugin {
                             } else {
                                 bail = true;
                                 break;
+                            }
+                            // OPTIONAL element (a constant default): omit it on encode when it still
+                            // equals the default — wrap the just-pushed encode call in
+                            //   if (c.shouldEncodeElementDefault(desc, i) || value.getX() != default) { … }
+                            if let Some(Some(dc)) = field_defaults.get(i) {
+                                if stmts.len() == n_before + 1 {
+                                    let enc_stmt = stmts.pop().unwrap();
+                                    let cd = this_desc(ir);
+                                    let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                                    let cc = ir.add_expr(IrExpr::GetValue(3));
+                                    let should = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeEncoder",
+                                            "shouldEncodeElementDefault",
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
+                                        ),
+                                        dispatch_receiver: Some(cc),
+                                        args: vec![cd, ci],
+                                    });
+                                    // Re-read `value.getX()` for the comparison (a second, independent
+                                    // node — an IR expr can't be shared across two tree positions). A
+                                    // `@Serializable` property always has an auto-generated side-effect-free
+                                    // accessor, and kotlinc's own `write$Self` likewise reads the field twice
+                                    // (`self.x != default` then `encode…(self.x)`), so this is equivalent.
+                                    let vr = ir.add_expr(IrExpr::GetValue(2));
+                                    let cur = ir.add_expr(IrExpr::Call {
+                                        callee: Callee::Virtual {
+                                            owner: class_internal.clone(),
+                                            name: getter_name(pname),
+                                            descriptor: format!("(){}", ty_descriptor(ty)),
+                                            interface: false,
+                                        },
+                                        dispatch_receiver: Some(vr),
+                                        args: vec![],
+                                    });
+                                    let def = ir.add_expr(IrExpr::Const(dc.clone()));
+                                    let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
+                                        op: crate::ir::IrBinOp::Ne,
+                                        lhs: cur,
+                                        rhs: def,
+                                    });
+                                    let cond = ir.add_expr(IrExpr::PrimitiveBinOp {
+                                        op: crate::ir::IrBinOp::Or,
+                                        lhs: should,
+                                        rhs: neq,
+                                    });
+                                    stmts.push(ir.add_expr(IrExpr::When {
+                                        branches: vec![(Some(cond), enc_stmt)],
+                                    }));
+                                }
                             }
                         }
                         if bail {
