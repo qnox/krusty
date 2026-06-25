@@ -1111,11 +1111,13 @@ pub fn collect_signatures_with_cp(
                         else {
                             break;
                         };
+                        // A base method's return type references the BASE class's type parameters
+                        // (`abstract fun f(): T` in `A<T>`), NOT the subclass's — resolve under the
+                        // base's own params (erased), extended with the method's own (`fun <U> m(): U`).
+                        let bctp = TParams::erased(&bc.type_params);
                         for m in &bc.methods {
                             if let Some(r) = &m.ret {
-                                // The return may reference the METHOD's own type parameters (`fun <U> m(): U`),
-                                // so resolve under class + method params, not just the class's (`ctp`).
-                                let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
+                                let mtp = bctp.extended(&m.type_params, &m.type_param_bounds);
                                 local_rets.insert(
                                     m.name.clone(),
                                     ty_of_ref(r, &class_names, &mtp, diags),
@@ -3602,6 +3604,11 @@ impl<'a> Checker<'a> {
         (params, ret)
     }
 
+    /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
+    fn ty_is_value_class(&self, t: Ty) -> bool {
+        matches!(t, Ty::Obj(n, _) if self.syms.class_by_internal(n).is_some_and(|c| c.value_field.is_some()))
+    }
+
     /// Reject classes whose *effective* implementation of a supertype method has the same erased
     /// parameters but a different return descriptor (covariant or generic return) — including
     /// *fake overrides*, where the implementation is inherited from a base class while the differing
@@ -3615,6 +3622,17 @@ impl<'a> Checker<'a> {
             let Some(impl_sig) = self.syms.method_of(internal, name) else {
                 continue;
             };
+            // A supertype method wants a `@JvmInline value class` return (unboxed), but the concrete
+            // impl is inherited from a generic base and returns the erased `Object` (`fun foo(): T` over
+            // `A<IC>`). The bridge would have to unbox `Object` → value class via the class's unbox-impl —
+            // codegen krusty can't emit (VerifyError / AbstractMethodError). Skip rather than miscompile.
+            if ssig.ret.descriptor() != impl_sig.ret.descriptor()
+                && self.ty_is_value_class(ssig.ret)
+                && impl_sig.ret == obj
+            {
+                self.diags.error(span, format!("krusty: method '{name}' needs a value-class unbox bridge from an erased generic return (unsupported)"));
+                return;
+            }
             let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
             let ip: String = impl_sig.params.iter().map(|t| t.descriptor()).collect();
             let params_differ = sp != ip;

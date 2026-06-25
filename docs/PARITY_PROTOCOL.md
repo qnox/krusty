@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1763 OK / 0 FAIL** (scanned 7351, Phase 458).
+  repo's `compiler/testData/codegen/box`). Current gate: **1773 OK / 0 FAIL** (scanned 7351, Phase 459).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 459 — generic base-member return resolved under the BASE's type params (gate 1763 → 1773, +10,
+  FAIL=0).** Collecting a subclass's signatures walks the base class's methods to seed `local_rets` (so an
+  inferred-body method can call an inherited one). It resolved each base method's return type under the
+  SUBCLASS's type parameters — but a base method's return references the BASE's params
+  (`abstract class A<T> { abstract fun f(): T }`, `class C : A<String>()`), so `T` came back "unresolved
+  reference 'T'". Now resolved under the base's own (erased) params, extended with the method's own. This
+  newly compiled a value-class corner (`class B2 : A<IC>(), I` where `I { fun foo(): IC }`) needing an
+  interface bridge that unboxes the erased `Object` return into the value class — codegen krusty can't
+  emit (VerifyError / AbstractMethodError); `check_no_bridge_needed` now rejects exactly that shape
+  (supertype return is a `@JvmInline value class` while the concrete inherited return is erased
+  `kotlin/Any`), skipping not miscompiling. TDD: tests/generic_base_member_type_e2e.rs.
 
 - **Phase 458 — postfix method chain continues across a newline (correctness; gate 1763, box-OK flat,
   FAIL=0).** Kotlin treats a newline before `.` or `?.` as part of the selector chain, not a statement
