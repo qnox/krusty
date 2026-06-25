@@ -773,7 +773,6 @@ pub fn return_nullable(fns: &[MetaFn]) -> std::collections::HashMap<String, bool
     out
 }
 
-
 // === `.kotlin_builtins` supertype reader ==========================================================
 // A `.kotlin_builtins` resource (e.g. `kotlin/collections/collections.kotlin_builtins`) stores a
 // `BuiltInsProtoBuf.PackageFragment` preceded by a `BuiltInsBinaryVersion` header — a big-endian int

@@ -484,12 +484,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             if !p.ty.targs.is_empty() && ir.non_null().obj_internal().is_some() =>
                         {
                             let fq_name = ir.non_null().obj_internal().unwrap();
-                            let targs: Vec<Ty> = p
-                                .ty
-                                .targs
-                                .iter()
-                                .map(|a| ty_to_ir(ty_of(file, a)))
-                                .collect();
+                            let targs: Vec<Ty> =
+                                p.ty.targs
+                                    .iter()
+                                    .map(|a| ty_to_ir(ty_of(file, a)))
+                                    .collect();
                             let base = Ty::obj_args(fq_name, &targs);
                             if ir.is_nullable() {
                                 Ty::nullable(base)
@@ -2252,8 +2251,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     let class_id = lo.classes[&internal].id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                    let field_tys: Vec<Ty> = lo.ir.classes[class_id as usize].fields
-                        [..ctor_count]
+                    let field_tys: Vec<Ty> = lo.ir.classes[class_id as usize].fields[..ctor_count]
                         .iter()
                         .map(|f| f.ty.clone())
                         .collect();
@@ -2411,8 +2409,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                     .find(|(n, _)| n == &bm.name)
                                     .map(|(_, s)| s)?,
                             };
-                            let params: Vec<Ty> =
-                                sig.params.iter().map(|t| ty_to_ir(*t)).collect();
+                            let params: Vec<Ty> = sig.params.iter().map(|t| ty_to_ir(*t)).collect();
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: bm.name.clone(),
                                 params,
@@ -2573,9 +2570,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
     // bridge emitter can't reconcile (the throwing concrete leaves nothing). Skip the file rather than
     // emit bad bytecode (cf. inlineClasses/overrideReturnNothing).
     let nothing_bridge = lo.ir.classes.iter().any(|c| {
-        c.bridges.iter().any(|b| {
-            b.concrete_ret.non_null().obj_internal() == Some("java/lang/Void")
-        })
+        c.bridges
+            .iter()
+            .any(|b| b.concrete_ret.non_null().obj_internal() == Some("java/lang/Void"))
     });
     if nothing_bridge {
         return None;
@@ -4309,29 +4306,28 @@ impl<'a> Lower<'a> {
             // Extract the suspend `call`, an optional `bound` local (`val a = <call>`) and `tail_expr`
             // (the expression computed after the binding). Shapes: `{ foo() }` (call, no bound), and
             // `{ val a = foo(); <tail> }` (call = the binding init, bound = `a`, tail = the value).
-            let (tail, bound): (u32, Option<(u32, Ty)>) =
-                match &self.ir.exprs[body_val as usize] {
-                    IrExpr::Block {
-                        stmts,
-                        value: Some(v),
-                    } if stmts.is_empty() => (*v, None),
-                    IrExpr::Block {
-                        stmts,
-                        value: Some(v),
-                    } if stmts.len() == 1 => {
-                        if let IrExpr::Variable {
-                            index,
-                            ty,
-                            init: Some(init),
-                        } = &self.ir.exprs[stmts[0] as usize]
-                        {
-                            (*init, Some((*index, ty.clone())))
-                        } else {
-                            return None;
-                        }
+            let (tail, bound): (u32, Option<(u32, Ty)>) = match &self.ir.exprs[body_val as usize] {
+                IrExpr::Block {
+                    stmts,
+                    value: Some(v),
+                } if stmts.is_empty() => (*v, None),
+                IrExpr::Block {
+                    stmts,
+                    value: Some(v),
+                } if stmts.len() == 1 => {
+                    if let IrExpr::Variable {
+                        index,
+                        ty,
+                        init: Some(init),
+                    } = &self.ir.exprs[stmts[0] as usize]
+                    {
+                        (*init, Some((*index, ty.clone())))
+                    } else {
+                        return None;
                     }
-                    _ => (body_val, None),
-                };
+                }
+                _ => (body_val, None),
+            };
             let tail_expr = bound
                 .as_ref()
                 .map(|_| match &self.ir.exprs[body_val as usize] {
@@ -5003,7 +4999,9 @@ impl<'a> Lower<'a> {
     /// Whether class `class_id`'s field `i` has a nullable reference type (its lowered `IrType` carries
     /// the `?`), so `hashCode` keeps it on the null-safe `Objects.hashCode` path.
     fn field_nullable(&self, class_id: ClassId, i: usize) -> bool {
-        self.ir.classes[class_id as usize].fields[i].ty.is_nullable()
+        self.ir.classes[class_id as usize].fields[i]
+            .ty
+            .is_nullable()
     }
     fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> u32 {
         match t {
@@ -6939,38 +6937,38 @@ impl<'a> Lower<'a> {
         // `SuspendLambda` subclass (`lower_suspend_lambda`); any other value (a suspend function value
         // passed through) needs continuation threading not yet modeled, so it bails (skip the file).
         if let Ty::Fun(s) = target.non_null() {
-          if s.suspend {
-            let params = &s.params;
-            if let Expr::Lambda {
-                params: lparams,
-                body,
-            } = self.afile.expr(arg).clone()
-            {
-                // Bind names: explicit, or the implicit single `it`, or none (arity 0).
-                let bind_names: Vec<String> = if !lparams.is_empty() {
-                    lparams.clone()
-                } else if params.len() == 1 {
-                    vec!["it".to_string()]
-                } else if params.is_empty() {
-                    vec![]
-                } else {
-                    return None;
-                };
-                // Parameter `Ty`s come from the lambda's checked type (the expected suspend type drives
-                // them); fall back to the erased IR param types only if absent.
-                let ty_params: Vec<Ty> = self
-                    .info
-                    .ty(arg)
-                    .fun_params()
-                    .map(|p| p.to_vec())
-                    .filter(|p| p.len() == params.len())
-                    .unwrap_or_else(|| params.iter().map(|_| Ty::obj("kotlin/Any")).collect());
-                if bind_names.len() == params.len() {
-                    return self.lower_suspend_lambda(body, &ty_params, bind_names);
+            if s.suspend {
+                let params = &s.params;
+                if let Expr::Lambda {
+                    params: lparams,
+                    body,
+                } = self.afile.expr(arg).clone()
+                {
+                    // Bind names: explicit, or the implicit single `it`, or none (arity 0).
+                    let bind_names: Vec<String> = if !lparams.is_empty() {
+                        lparams.clone()
+                    } else if params.len() == 1 {
+                        vec!["it".to_string()]
+                    } else if params.is_empty() {
+                        vec![]
+                    } else {
+                        return None;
+                    };
+                    // Parameter `Ty`s come from the lambda's checked type (the expected suspend type drives
+                    // them); fall back to the erased IR param types only if absent.
+                    let ty_params: Vec<Ty> = self
+                        .info
+                        .ty(arg)
+                        .fun_params()
+                        .map(|p| p.to_vec())
+                        .filter(|p| p.len() == params.len())
+                        .unwrap_or_else(|| params.iter().map(|_| Ty::obj("kotlin/Any")).collect());
+                    if bind_names.len() == params.len() {
+                        return self.lower_suspend_lambda(body, &ty_params, bind_names);
+                    }
                 }
+                return None;
             }
-            return None;
-          }
         }
         let at = self.info.ty(arg);
         // `emptyArray<T>()` is a reified intrinsic — expand it to a fresh empty array of the *target*
@@ -6996,7 +6994,10 @@ impl<'a> Lower<'a> {
         // `kotlin.UInt`/`ULong` value type — but krusty erases unsigned to `int` and would emit an
         // `Integer` unbox (ClassCastException). Skip rather than miscompile.
         if at.is_reference()
-            && matches!(target.non_null().obj_internal(), Some("kotlin/UInt" | "kotlin/ULong"))
+            && matches!(
+                target.non_null().obj_internal(),
+                Some("kotlin/UInt" | "kotlin/ULong")
+            )
         {
             return None;
         }
@@ -7006,11 +7007,7 @@ impl<'a> Lower<'a> {
                 arg: e,
                 type_operand: target.clone(),
             }))
-        } else if at.is_reference()
-            && !target_ref
-            && *target != Ty::Unit
-            && *target != Ty::Error
-        {
+        } else if at.is_reference() && !target_ref && *target != Ty::Unit && *target != Ty::Error {
             Some(self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: e,
@@ -7149,7 +7146,7 @@ impl<'a> Lower<'a> {
             _ => return None,
         };
         let mapped = crate::resolve::collection_mapped_accessor(name).map(|s| s.to_string());
-        let (m, is_iface) = [Some(name.to_string()), Some(getter_name(name)), mapped]
+        let resolved = [Some(name.to_string()), Some(getter_name(name)), mapped]
             .into_iter()
             .flatten()
             .find_map(|cand| {
@@ -7163,18 +7160,46 @@ impl<'a> Lower<'a> {
                             .map_or(false, |t| t.is_interface());
                         (m, is_iface)
                     })
-            })?;
-        let read = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: internal,
-                name: m.name.clone(),
-                descriptor: m.descriptor,
-                interface: is_iface,
-            },
-            dispatch_receiver: Some(recv),
-            args: vec![],
-        });
-        Some(self.coerce_generic_read(read, e, m.ret))
+            });
+        if let Some((m, is_iface)) = resolved {
+            let read = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: internal,
+                    name: m.name.clone(),
+                    descriptor: m.descriptor,
+                    interface: is_iface,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![],
+            });
+            return Some(self.coerce_generic_read(read, e, m.ret));
+        }
+        // A Kotlin BUILTIN member the classpath `resolve_instance` can't surface — e.g. `String.length`
+        // (a property over `java.lang.String.length()`), `List.size`. Resolved generically from the
+        // builtins metadata + the kotlin↔JVM class map (owner/descriptor/interface), NOT a hardcode.
+        let kotlin_internal = match rt {
+            Ty::String => "kotlin/String".to_string(),
+            Ty::Obj(i, _) => i.to_string(),
+            _ => return None,
+        };
+        if let Some((owner, descriptor, ret_ty, is_iface)) = self
+            .syms
+            .libraries
+            .builtin_member_call(&kotlin_internal, name, 0)
+        {
+            let read = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner,
+                    name: name.to_string(),
+                    descriptor,
+                    interface: is_iface,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![],
+            });
+            return Some(self.coerce_generic_read(read, e, ret_ty));
+        }
+        None
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
@@ -8067,9 +8092,7 @@ impl<'a> Lower<'a> {
                 }
                 let v = match e {
                     // Coerce to the enclosing function's return type (generic-erased `Object` → cast).
-                    Some(e)
-                        if self.cur_ret_ty != Ty::Unit && self.info.ty(e) != Ty::Nothing =>
-                    {
+                    Some(e) if self.cur_ret_ty != Ty::Unit && self.info.ty(e) != Ty::Nothing => {
                         let rt = self.cur_ret_ty.clone();
                         Some(self.lower_arg(e, &rt)?)
                     }
@@ -10078,9 +10101,7 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let v = match value {
-                    Some(ve)
-                        if self.cur_ret_ty != Ty::Unit && self.info.ty(ve) != Ty::Nothing =>
-                    {
+                    Some(ve) if self.cur_ret_ty != Ty::Unit && self.info.ty(ve) != Ty::Nothing => {
                         let rt = self.cur_ret_ty.clone();
                         Some(self.lower_arg(ve, &rt)?)
                     }
@@ -10209,10 +10230,21 @@ impl<'a> Lower<'a> {
                 if !rty.is_reference() || !result_ty.is_reference() {
                     return None;
                 }
-                let internal = if rty == Ty::String {
+                // The receiver internal comes from the NON-null form (`Int?` in a chained `?.let` unwraps
+                // to `Int`). A nullable-primitive receiver has no class internal — the scope-fn path
+                // (tried first) unboxes it itself, so a placeholder owner suffices for the null-check.
+                let nn = rty.non_null();
+                let internal = if nn == Ty::String {
                     "java/lang/String".to_string()
+                } else if let Some(i) = nn.obj_internal() {
+                    i.to_string()
+                } else if nn.is_primitive() {
+                    // A nullable-PRIMITIVE receiver (`Int?` in a chained `?.let`) has no class internal —
+                    // the scope-fn path (tried first) unboxes it; a placeholder owner suffices.
+                    "java/lang/Object".to_string()
                 } else {
-                    rty.obj_internal()?.to_string()
+                    // A non-object, non-primitive receiver (e.g. a literal `null?.…`): unsupported — bail.
+                    return None;
                 };
                 let rv = self.expr(receiver)?;
                 let v = self.fresh_value();

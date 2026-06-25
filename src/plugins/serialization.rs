@@ -17,8 +17,8 @@
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
 use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
-use crate::types::Ty;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
+use crate::types::Ty;
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
@@ -401,8 +401,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
         for (i, a) in type_args.iter().take(n_tp).enumerate() {
             if let Some(e) = element_serializer_expr(ir, a) {
                 arg_sers.push(e);
-            } else if a.non_null().obj_internal() == Some("kotlin/Any")
-                && bounds[i] != "kotlin/Any"
+            } else if a.non_null().obj_internal() == Some("kotlin/Any") && bounds[i] != "kotlin/Any"
             {
                 // A star projection on a BOUNDED type parameter (`Box<*>` with `Box<T : E>`, the arg
                 // erased to `Any`) → `PolymorphicSerializer(E::class)`. Gated on a non-`Any` bound so an
@@ -508,8 +507,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
                     && base.is_some_and(|c| {
                         c.type_params.get(i).is_some_and(|name| {
                             c.type_param_bounds.iter().any(|(n, bt)| {
-                                n == name
-                                    && bt.non_null().obj_internal() != Some("kotlin/Any")
+                                n == name && bt.non_null().obj_internal() != Some("kotlin/Any")
                             })
                         })
                     })
@@ -2002,8 +2000,7 @@ mod tests {
         // encode/decodeNullableSerializableElement with the builtin StringSerializer singleton, not
         // the plain encode/decodeStringElement path (which can't represent null).
         let (mut ir, ctx, id) = serializable_class("N", &["kotlin/Int", "kotlin/String"]);
-        ir.classes[id as usize].fields[1].ty =
-            Ty::nullable(ir.classes[id as usize].fields[1].ty);
+        ir.classes[id as usize].fields[1].ty = Ty::nullable(ir.classes[id as usize].fields[1].ty);
         run(&mut ir, &ctx);
         assert!(
             calls_method(&ir, "encodeNullableSerializableElement"),
@@ -2050,15 +2047,15 @@ mod tests {
         // SerializableElement (not the plain serializable element, which can't represent null).
         let mut ir = IrFile::default();
         let mut inner = synthetic_class("Inner");
-        inner.fields = vec![crate::ir::IrField::new("v".to_string(), class_ty("kotlin/Int"))];
+        inner.fields = vec![crate::ir::IrField::new(
+            "v".to_string(),
+            class_ty("kotlin/Int"),
+        )];
         inner.ctor_param_count = 1;
         let inner_id = ir.add_class(inner);
         let mut outer = synthetic_class("Outer");
         outer.fields = vec![
-            crate::ir::IrField::new(
-                "inner".to_string(),
-                Ty::nullable(Ty::obj("Inner")),
-            ),
+            crate::ir::IrField::new("inner".to_string(), Ty::nullable(Ty::obj("Inner"))),
             crate::ir::IrField::new("label".to_string(), class_ty("kotlin/String")),
         ];
         outer.ctor_param_count = 2;

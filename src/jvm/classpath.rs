@@ -545,6 +545,47 @@ impl Classpath {
         Some(kotlin_name_to_ty(&m.ret))
     }
 
+    /// Resolve a Kotlin BUILTIN member (`String.length`, `List.get`, `List.size`, …) to its concrete JVM
+    /// call: the receiver's JVM class (`kotlin/String` → `java/lang/String`, `kotlin/collections/List` →
+    /// `java/util/List`), the member's JVM method descriptor (derived from the `.kotlin_builtins` metadata
+    /// param/return types, a type parameter erased to `Object`), the (erased) return `Ty`, and whether the
+    /// owner is an interface (`invokeinterface` vs `invokevirtual`). A mapped builtin's JVM method name is
+    /// its Kotlin member name. Generic — driven by the builtins metadata + the kotlin↔JVM class map, with
+    /// no per-member hardcoding. `None` when no such builtin member exists (caller falls back).
+    pub fn builtin_member_call(
+        &self,
+        internal: &str,
+        name: &str,
+        n_args: usize,
+    ) -> Option<(String, String, Ty, bool)> {
+        let path = Self::builtins_path_for(internal);
+        let f = self.builtins_file(&path);
+        let m = f
+            .get(internal)?
+            .members
+            .iter()
+            .find(|m| m.name == name && m.params.len() == n_args)?;
+        // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
+        // parameter (`E`, `T` — no package) erases to `Object`.
+        let desc_of = |n: &str| -> String {
+            if n.contains('/') {
+                kotlin_name_to_ty(n).descriptor()
+            } else {
+                "Ljava/lang/Object;".to_string()
+            }
+        };
+        let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
+        let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
+        let ret_ty = if m.ret.contains('/') {
+            kotlin_name_to_ty(&m.ret)
+        } else {
+            Ty::obj("kotlin/Any")
+        };
+        let owner = crate::jvm::jvm_class_map::to_jvm_internal(internal).to_string();
+        let is_iface = self.find(&owner).is_some_and(|ci| ci.access & 0x0200 != 0);
+        Some((owner, descriptor, ret_ty, is_iface))
+    }
+
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
     /// — i.e. one whose read-only/mutable identity is known here. A platform `java/util/List` or a user
     /// class is NOT (the front end never produces the former for a Kotlin collection; both keep their
