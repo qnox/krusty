@@ -8,46 +8,13 @@
 //!
 //! Representation choices (primitive vs boxed, erasure, calling conventions) are **not** encoded
 //! here — they are decided by each backend's lowering of these nodes. Types are expressed in Kotlin
-//! terms (`IrType`), never JVM descriptors.
+//! terms (`Ty`), never JVM descriptors.
 //!
 //! Storage follows krusty's index-based invariant: nodes live in parallel `Vec` arenas keyed by
 //! `u32` ids (no `Box`/`Rc` graphs; bulk-freeable). Lowering (`ast → ir`) and the JVM backend
 //! consuming IR are the next phases; today this module defines the node set + a builder + a printer.
 
-/// A Kotlin-level type, backend-agnostic. A class is referenced by its **Kotlin FqName**
-/// (`kotlin/Int`, `kotlin/String`, a user `foo/Bar`); each backend maps it to a target
-/// representation (the JVM backend via the ported `JavaToKotlinClassMap`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IrType {
-    /// A class/interface by Kotlin FqName, with type arguments (erased or reified per backend).
-    Class {
-        fq_name: String,
-        type_args: Vec<IrType>,
-        nullable: bool,
-    },
-    /// A type-parameter reference (`T`) carrying its declared upper bound (`<T : CharSequence>` →
-    /// `bound = CharSequence`; an unbounded `<T>` → `bound = kotlin/Any`). The bound is source-level
-    /// metadata kept verbatim — JVM *erasure* (collapsing `T` to the bound's class, or to
-    /// `java/lang/Object` for an `Any` bound) happens only in `ir_emit`, never in the IR.
-    TypeParameter {
-        name: String,
-        bound: Box<IrType>,
-    },
-    /// `(P..) -> R` function type — kept structural so backends choose the representation
-    /// (JVM `FunctionN`, a JS closure, …).
-    Function {
-        params: Vec<IrType>,
-        ret: Box<IrType>,
-        /// A `suspend` function type — the JVM realizes it as `Function{n+1}` (a trailing
-        /// `kotlin/coroutines/Continuation` parameter, `Object`-erased result).
-        suspend: bool,
-    },
-    /// `kotlin.Unit` / `kotlin.Nothing` — special-cased so control flow needn't synthesize them.
-    Unit,
-    Nothing,
-    /// A dynamically-unknown type (lowering error recovery); backends must not emit it.
-    Error,
-}
+use crate::types::Ty;
 
 pub type ExprId = u32;
 pub type FunId = u32;
@@ -65,24 +32,24 @@ pub enum Callee {
     Local(FunId),
     External(String),
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
-    /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `IrType`s
+    /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
     /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
     /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
     CrossFile {
         facade: String,
         name: String,
-        params: Vec<IrType>,
-        ret: IrType,
+        params: Vec<Ty>,
+        ret: Ty,
     },
     /// An instance method (or property accessor) of a class defined in ANOTHER file of the same
     /// compilation — `invokevirtual`/`invokeinterface owner.name(params)ret` on the `dispatch_receiver`.
-    /// Like `Virtual` but carries `IrType`s (the JVM backend builds the descriptor), so `ir_lower` needs
+    /// Like `Virtual` but carries `Ty`s (the JVM backend builds the descriptor), so `ir_lower` needs
     /// no JVM descriptor for a sibling-file user class (resolved from its `ClassSig`).
     CrossFileVirtual {
         owner: String,
         name: String,
-        params: Vec<IrType>,
-        ret: IrType,
+        params: Vec<Ty>,
+        ret: Ty,
         interface: bool,
     },
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
@@ -176,7 +143,7 @@ pub enum IrExpr {
     TypeOp {
         op: IrTypeOp,
         arg: ExprId,
-        type_operand: IrType,
+        type_operand: Ty,
     },
     /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than
@@ -200,7 +167,7 @@ pub enum IrExpr {
     /// A local variable declaration (`IrVariable`), value optional (`lateinit`).
     Variable {
         index: u32,
-        ty: IrType,
+        ty: Ty,
         init: Option<ExprId>,
     },
     /// A built-in primitive binary operator (`+`/`-`/`<`/`==`/…) on numeric/boolean operands. One
@@ -245,7 +212,7 @@ pub enum IrExpr {
     New {
         class: ClassId,
         args: Vec<ExprId>,
-        ctor_params: Option<Vec<IrType>>,
+        ctor_params: Option<Vec<Ty>>,
     },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
@@ -312,7 +279,7 @@ pub enum IrExpr {
     InvokeFunction {
         func: ExprId,
         args: Vec<ExprId>,
-        ret: IrType,
+        ret: Ty,
     },
     /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
     /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
@@ -337,11 +304,11 @@ pub enum IrExpr {
     },
     /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
     /// invokespecial internal.<init>(params)V`. Like `NewExternal` but carries the ctor parameter types
-    /// as `IrType`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
+    /// as `Ty`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
     /// classpath one with a library-provided descriptor.
     NewCrossFile {
         internal: String,
-        params: Vec<IrType>,
+        params: Vec<Ty>,
         args: Vec<ExprId>,
     },
     /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a
@@ -349,18 +316,18 @@ pub enum IrExpr {
     /// the boxed value's type (selects the `Ref` subclass + the `element` field descriptor). Evaluates
     /// to the holder, so it's the initializer of the local that holds the box.
     RefNew {
-        elem: IrType,
+        elem: Ty,
         init: ExprId,
     },
     /// Read a boxed mutable local: `holder.element` (`getfield Ref$XxxRef.element`).
     RefGet {
         holder: ExprId,
-        elem: IrType,
+        elem: Ty,
     },
     /// Write a boxed mutable local: `holder.element = value` (`putfield`), evaluating to `value`.
     RefSet {
         holder: ExprId,
-        elem: IrType,
+        elem: Ty,
         value: ExprId,
     },
     /// `throw operand` — throws the (Throwable) value; control never falls through (`Nothing`).
@@ -370,14 +337,14 @@ pub enum IrExpr {
     /// A `vararg` argument at a call site (Kotlin IR's `IrVararg`): the spread/listed elements and
     /// their element type. The JVM backend packs them into an array; another backend may differ.
     Vararg {
-        element_type: IrType,
+        element_type: Ty,
         elements: Vec<ExprId>,
     },
     /// Allocate an uninitialized array of `size` elements (`anewarray` for a reference element,
     /// `newarray` for a primitive) — the sized constructor `Array<T>(n) { … }` / `arrayOfNulls<T>(n)`
     /// fills it afterwards. (`Vararg` is the *literal* form with a statically-known element list.)
     NewArray {
-        element_type: IrType,
+        element_type: Ty,
         size: ExprId,
     },
     /// `try { body } catch (e: E) { … } … [finally { f }]`. `result` is the value type (`Unit` when
@@ -388,7 +355,7 @@ pub enum IrExpr {
         body: ExprId,
         catches: Vec<IrCatch>,
         finally: Option<ExprId>,
-        result: IrType,
+        result: Ty,
     },
 }
 
@@ -450,8 +417,8 @@ pub enum IrTypeOp {
 #[derive(Clone, Debug)]
 pub struct IrFunction {
     pub name: String,
-    pub params: Vec<IrType>,
-    pub ret: IrType,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
     /// The body expression (typically an `IrBlock`), or `None` for abstract/external.
     pub body: Option<ExprId>,
     pub is_static: bool,
@@ -468,7 +435,7 @@ pub struct IrFunction {
 #[derive(Clone, Debug)]
 pub struct IrField {
     pub name: String,
-    pub ty: IrType,
+    pub ty: Ty,
     /// The source type-parameter NAME the field was declared with (`val x: T` → `Some("T")`), else
     /// `None`. Platform-neutral; lets the value-class pass pick the CORRECT bound for a generic
     /// underlying (vs guessing), independent of erasure dropping the name.
@@ -488,7 +455,7 @@ pub struct IrField {
 impl IrField {
     /// A plain backing field with Kotlin defaults: mutable-unknown (`is_final = false`), `private`, no
     /// generic-param name, no constant default. Synthesized classes build fields from this.
-    pub fn new(name: String, ty: IrType) -> IrField {
+    pub fn new(name: String, ty: Ty) -> IrField {
         IrField {
             name,
             ty,
@@ -511,13 +478,13 @@ pub struct IrClass {
     /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
-    pub type_param_bounds: Vec<(String, IrType)>,
+    pub type_param_bounds: Vec<(String, Ty)>,
     /// ALL declared generic type-parameter names in order (`class C<A, B>` → `["A","B"]`), including
     /// those with only the implicit `Any` bound (unlike [`type_param_bounds`], which lists only non-`Any`
     /// bounds). The serialization extension uses the count/order to shape a generic `$serializer`
     /// (one `KSerializer` constructor arg per type parameter). Empty for a non-generic class.
     pub type_params: Vec<String>,
-    pub supertypes: Vec<IrType>,
+    pub supertypes: Vec<Ty>,
     /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
     /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
     pub fields: Vec<IrField>,
@@ -547,7 +514,7 @@ pub struct IrClass {
     /// same relative order); `!is_field` ⇒ a plain parameter, an argument only, available as a local in
     /// `<init>` for property initializers / `init` blocks. Empty for synthesized/enum/object classes
     /// (then the constructor arity is `ctor_param_count`).
-    pub ctor_args: Vec<(IrType, bool)>,
+    pub ctor_args: Vec<(Ty, bool)>,
     /// Constructor body run after the parameter fields are stored: an effect `Block` (body-property
     /// initializers as `SetField`, `init { … }` blocks) lowered with `this` = value 0 and the
     /// constructor parameters as values `1..=ctor_param_count`. `None` when there's nothing to run.
@@ -577,7 +544,7 @@ pub struct IrClass {
     /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
     /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
     /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
-    pub enum_entry_of: Option<Vec<IrType>>,
+    pub enum_entry_of: Option<Vec<Ty>>,
     /// `Some(..)` marks this class as a synthesized property-reference singleton: a `final class
     /// extends kotlin/jvm/internal/PropertyReference1Impl` (the `superclass`) with a `public static
     /// final INSTANCE`, a constructor `super(owner.class, name, signature, 0)`, and a `get(Object)
@@ -650,8 +617,8 @@ pub struct FuncRef {
     /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
     /// (excluded from the method descriptor / signature). The emitter derives the JVM signature and
     /// call descriptor from these + `ret_ty`.
-    pub param_tys: Vec<IrType>,
-    pub ret_ty: IrType,
+    pub param_tys: Vec<Ty>,
+    pub ret_ty: Ty,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
@@ -662,7 +629,7 @@ pub struct PropRef {
     pub owner_internal: String,
     pub prop_name: String,
     pub getter_name: String,
-    pub prop_ty: IrType,
+    pub prop_ty: Ty,
     /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
     /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
     /// whose `get()` reads `this.receiver`).
@@ -674,7 +641,7 @@ pub struct PropRef {
 /// `1..=params.len()` in `delegate_args`/`body`.
 #[derive(Clone, Debug)]
 pub struct IrSecondaryCtor {
-    pub params: Vec<IrType>,
+    pub params: Vec<Ty>,
     pub delegate_args: Vec<ExprId>,
     pub body: Option<ExprId>,
     /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
@@ -686,7 +653,7 @@ pub struct IrSecondaryCtor {
 pub enum CtorDelegateTarget {
     /// `this(args)` → `invokespecial` an own `<init>(target_params)` (the primary, or a sibling
     /// secondary in a no-primary class). The class init body runs in the reached constructor, not here.
-    This { target_params: Vec<IrType> },
+    This { target_params: Vec<Ty> },
     /// `super(args)` (or implicit) in a class with NO primary constructor → `invokespecial` the
     /// superclass `<init>` (its signature is read live from the base class at emit time), then run the
     /// class init body (field initializers + `init {}`) before this constructor's own `body`.
@@ -697,10 +664,10 @@ pub enum CtorDelegateTarget {
 #[derive(Clone, Debug)]
 pub struct Bridge {
     pub name: String,
-    pub erased_params: Vec<IrType>,
-    pub erased_ret: IrType,
-    pub concrete_params: Vec<IrType>,
-    pub concrete_ret: IrType,
+    pub erased_params: Vec<Ty>,
+    pub erased_ret: Ty,
+    pub concrete_params: Vec<Ty>,
+    pub concrete_ret: Ty,
     /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
     /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
     /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
@@ -720,7 +687,7 @@ pub struct Bridge {
 #[derive(Clone, Debug)]
 pub struct IrStatic {
     pub name: String,
-    pub ty: IrType,
+    pub ty: Ty,
     /// The initializer expression (run in `<clinit>` in declaration order).
     pub init: ExprId,
     /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
@@ -774,7 +741,7 @@ pub struct IrFile {
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
     /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
     /// calls are caught by `suspend_funs`; this is the cross-unit complement.
-    pub suspend_calls: std::collections::HashMap<u32, IrType>,
+    pub suspend_calls: std::collections::HashMap<u32, Ty>,
     /// A `suspend` LAMBDA's `invokeSuspend` that contains MULTIPLE suspensions / control flow and needs
     /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
@@ -795,20 +762,20 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     pub field_signatures: std::collections::HashMap<String, Vec<(String, String)>>,
-    /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `IrType`) REFERENCED in
+    /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
     /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
     /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
     /// `UInt`/`ULong` keeps its existing dedicated handling).
-    pub external_value_classes: std::collections::HashMap<String, IrType>,
+    pub external_value_classes: std::collections::HashMap<String, Ty>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
 /// platform's equivalent needs). NO target descriptors here — each backend formats its own.
 #[derive(Clone, Debug)]
 pub struct IrGenericSig {
-    /// Each type parameter: its name and its upper bound as a Kotlin `IrType` (`kotlin/Any` when none).
-    pub type_params: Vec<(String, IrType)>,
+    /// Each type parameter: its name and its upper bound as a Kotlin `Ty` (`kotlin/Any` when none).
+    pub type_params: Vec<(String, Ty)>,
     /// Per value parameter: `Some(name)` when it is a bare type-parameter reference, else `None` (the
     /// backend uses the parameter's own erased type). Empty for a class signature.
     pub param_tparams: Vec<Option<String>>,
@@ -973,11 +940,7 @@ mod tests {
         let fun = f.add_fun(IrFunction {
             name: "answer".to_string(),
             params: vec![],
-            ret: IrType::Class {
-                fq_name: "kotlin/Int".to_string(),
-                type_args: vec![],
-                nullable: false,
-            },
+            ret: Ty::obj("kotlin/Int"),
             body: Some(body),
             is_static: true,
             dispatch_receiver: None,
@@ -985,9 +948,9 @@ mod tests {
         });
         assert_eq!(f.functions[fun as usize].name, "answer");
         // The return type is a Kotlin FqName, not a JVM descriptor — the backend maps it.
-        match &f.functions[fun as usize].ret {
-            IrType::Class { fq_name, .. } => assert_eq!(fq_name, "kotlin/Int"),
-            other => panic!("expected class type, got {other:?}"),
+        match f.functions[fun as usize].ret.obj_internal() {
+            Some(fq) => assert_eq!(fq, "kotlin/Int"),
+            None => panic!("expected class type"),
         }
         assert!(matches!(f.expr(body), IrExpr::Block { .. }));
     }

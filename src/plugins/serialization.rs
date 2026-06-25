@@ -16,7 +16,8 @@
 //!     published `kotlinx-serialization-core` runtime (`Encoder`/`Decoder`/`SerialDescriptor`); the
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
-use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrType, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
+use crate::types::Ty;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
@@ -106,16 +107,12 @@ fn serializer_fq(class_fq: &str) -> String {
     format!("{class_fq}$serializer")
 }
 
-fn unit() -> IrType {
-    IrType::Unit
+fn unit() -> Ty {
+    Ty::Unit
 }
 
-fn class_ty(fq: &str) -> IrType {
-    IrType::Class {
-        fq_name: fq.to_string(),
-        type_args: Vec::new(),
-        nullable: false,
-    }
+fn class_ty(fq: &str) -> Ty {
+    Ty::obj(fq)
 }
 
 /// The JVM getter name for a Kotlin property (`a` → `getA`).
@@ -145,12 +142,10 @@ fn boxed_descriptor(fq: &str) -> Option<&'static str> {
 /// The JVM descriptor for a property type (just what `serialize`'s getter calls need). A nullable
 /// primitive is carried as its boxed type (`Int?` → `Ljava/lang/Integer;`), matching the getter krusty
 /// emits for a nullable primitive property.
-fn ty_descriptor(ty: &IrType) -> String {
-    let (fq, nullable) = match ty {
-        IrType::Class {
-            fq_name, nullable, ..
-        } => (fq_name.as_str(), *nullable),
-        _ => ("kotlin/Any", false),
+fn ty_descriptor(ty: &Ty) -> String {
+    let (fq, nullable) = match ty.non_null().obj_internal() {
+        Some(fq_name) => (fq_name, ty.is_nullable()),
+        None => ("kotlin/Any", false),
     };
     if nullable {
         if let Some(boxed) = boxed_descriptor(fq) {
@@ -173,10 +168,10 @@ fn ty_descriptor(ty: &IrType) -> String {
 /// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; Long/Double are 2-slot and their field locals are sized via `slot_width`.
-fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
-    let fq = match ty {
-        IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => return None,
+fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    let fq = match ty.non_null().obj_internal() {
+        Some(fq_name) => fq_name,
+        None => return None,
     };
     Some(match fq {
         "kotlin/Int" => (
@@ -209,28 +204,22 @@ fn decode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
 
 /// JVM local-slot width of a field type. Long/Double take two slots — but a NULLABLE Long?/Double? is
 /// carried boxed (`java.lang.Long`/`Double`), a one-slot reference.
-fn slot_width(ty: &IrType) -> u32 {
+fn slot_width(ty: &Ty) -> u32 {
     match ty {
-        IrType::Class {
-            fq_name,
-            nullable: false,
-            ..
-        } if fq_name == "kotlin/Long" || fq_name == "kotlin/Double" => 2,
+        Ty::Obj(fq_name, _) if *fq_name == "kotlin/Long" || *fq_name == "kotlin/Double" => 2,
         _ => 1,
     }
 }
 
 /// The default value for a field's local before the decode loop fills it.
-fn default_const(ty: &IrType) -> IrConst {
-    match ty {
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Int" => IrConst::Int(0),
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Long" => IrConst::Long(0),
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Boolean" => IrConst::Boolean(false),
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Float" => IrConst::Float(0.0),
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/Double" => IrConst::Double(0.0),
-        IrType::Class { fq_name, .. } if fq_name == "kotlin/String" => {
-            IrConst::String(String::new())
-        }
+fn default_const(ty: &Ty) -> IrConst {
+    match ty.non_null().obj_internal() {
+        Some("kotlin/Int") => IrConst::Int(0),
+        Some("kotlin/Long") => IrConst::Long(0),
+        Some("kotlin/Boolean") => IrConst::Boolean(false),
+        Some("kotlin/Float") => IrConst::Float(0.0),
+        Some("kotlin/Double") => IrConst::Double(0.0),
+        Some("kotlin/String") => IrConst::String(String::new()),
         _ => IrConst::Null,
     }
 }
@@ -247,10 +236,10 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
-fn encode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
-    let fq = match ty {
-        IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => return None,
+fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
+    let fq = match ty.non_null().obj_internal() {
+        Some(fq_name) => fq_name,
+        None => return None,
     };
     let d = "Lkotlinx/serialization/descriptors/SerialDescriptor;";
     Some(match fq {
@@ -285,16 +274,12 @@ fn encode_element_method(ty: &IrType) -> Option<(&'static str, &'static str)> {
     })
 }
 
-fn kserializer_of(arg: IrType) -> IrType {
-    IrType::Class {
-        fq_name: KSERIALIZER_FQ.to_string(),
-        type_args: vec![arg],
-        nullable: false,
-    }
+fn kserializer_of(arg: Ty) -> Ty {
+    Ty::obj_args(KSERIALIZER_FQ, &[arg])
 }
 
-fn is_nullable(ty: &IrType) -> bool {
-    matches!(ty, IrType::Class { nullable: true, .. })
+fn is_nullable(ty: &Ty) -> bool {
+    ty.is_nullable()
 }
 
 /// An instance of an explicit element serializer `X` (from `@Serializable(with = X::class)` on a
@@ -347,19 +332,18 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
 /// - a directly-supported builtin (`String`/primitive/…) → its `…Serializer.INSTANCE`.
 ///
 /// Returns `None` for a type with no derivable serializer (the caller bails to a clean no-op).
-fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
-    let IrType::Class {
-        fq_name, type_args, ..
-    } = ty
-    else {
+fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
+    let nn = ty.non_null();
+    let Some(fq_name) = nn.obj_internal() else {
         return None;
     };
+    let type_args = nn.type_args();
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
     // generated `serializer()` accessor (i.e. the class IS `@Serializable`) — else a plain sealed type
     // would call a non-existent method.
     if ir.classes.iter().any(|c| {
-        &c.fq_name == fq_name
+        c.fq_name == fq_name
             && c.is_sealed
             && c.methods
                 .iter()
@@ -367,7 +351,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
     }) {
         return Some(ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFile {
-                facade: fq_name.clone(),
+                facade: fq_name.to_string(),
                 name: "serializer".to_string(),
                 params: vec![],
                 ret: kserializer_of(class_ty(fq_name)),
@@ -382,7 +366,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
         let n_tp = ir
             .classes
             .iter()
-            .find(|c| &c.fq_name == fq_name)
+            .find(|c| c.fq_name == fq_name)
             .map(|c| c.type_params.len())
             .unwrap_or(0);
         if n_tp == 0 {
@@ -396,7 +380,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
         // `PolymorphicSerializer` for a star-projection / erased `Any` argument (`Box<*>` with
         // `Box<T : E>` → `PolymorphicSerializer(E::class)`). `kotlin/Any` for an unbounded parameter.
         let bounds: Vec<String> = {
-            let base = ir.classes.iter().find(|c| &c.fq_name == fq_name);
+            let base = ir.classes.iter().find(|c| c.fq_name == fq_name);
             (0..n_tp)
                 .map(|i| {
                     base.and_then(|c| {
@@ -404,10 +388,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
                         c.type_param_bounds
                             .iter()
                             .find(|(n, _)| n == name)
-                            .and_then(|(_, bt)| match bt {
-                                IrType::Class { fq_name, .. } => Some(fq_name.clone()),
-                                _ => None,
-                            })
+                            .and_then(|(_, bt)| bt.non_null().obj_internal().map(|s| s.to_string()))
                     })
                     .unwrap_or_else(|| "kotlin/Any".to_string())
                 })
@@ -420,7 +401,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
         for (i, a) in type_args.iter().take(n_tp).enumerate() {
             if let Some(e) = element_serializer_expr(ir, a) {
                 arg_sers.push(e);
-            } else if matches!(a, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+            } else if a.non_null().obj_internal() == Some("kotlin/Any")
                 && bounds[i] != "kotlin/Any"
             {
                 // A star projection on a BOUNDED type parameter (`Box<*>` with `Box<T : E>`, the arg
@@ -437,7 +418,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
         let kser = kserializer_of(class_ty("kotlin/Any"));
         return Some(ir.add_expr(IrExpr::Call {
             callee: Callee::CrossFile {
-                facade: fq_name.clone(),
+                facade: fq_name.to_string(),
                 name: "serializer".to_string(),
                 params: vec![kser; n_tp],
                 ret: kserializer_of(class_ty(fq_name)),
@@ -484,17 +465,16 @@ fn build_polymorphic_serializer(ir: &mut IrFile, base_internal: &str) -> ExprId 
 /// Non-mutating mirror of [`element_serializer_expr`]: whether a property of type `ty` HAS a derivable
 /// element serializer (nested @Serializable generic/non-generic, or a builtin). `deserialize` gates on
 /// this so it stubs cleanly instead of emitting a `null` element serializer for an un-derivable type.
-fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
-    let IrType::Class {
-        fq_name, type_args, ..
-    } = ty
-    else {
+fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
+    let nn = ty.non_null();
+    let Some(fq_name) = nn.obj_internal() else {
         return false;
     };
+    let type_args = nn.type_args();
     // A sealed `@Serializable` class uses `Class.serializer()` (a runtime SealedClassSerializer) — only
     // when the generated `serializer()` accessor exists (the class IS `@Serializable`).
     if ir.classes.iter().any(|c| {
-        &c.fq_name == fq_name
+        c.fq_name == fq_name
             && c.is_sealed
             && c.methods
                 .iter()
@@ -510,13 +490,13 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
         let n_tp = ir
             .classes
             .iter()
-            .find(|c| &c.fq_name == fq_name)
+            .find(|c| c.fq_name == fq_name)
             .map(|c| c.type_params.len())
             .unwrap_or(0);
         if n_tp == 0 {
             return true;
         }
-        let base = ir.classes.iter().find(|c| &c.fq_name == fq_name);
+        let base = ir.classes.iter().find(|c| c.fq_name == fq_name);
         return type_args.len() >= n_tp
             && type_args.iter().take(n_tp).enumerate().all(|(i, a)| {
                 if can_derive_element_serializer(ir, a) {
@@ -524,12 +504,12 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
                 }
                 // An erased `Any` argument (star projection) on a BOUNDED type parameter becomes a
                 // `PolymorphicSerializer` (mirrors `element_serializer_expr`).
-                matches!(a, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+                a.non_null().obj_internal() == Some("kotlin/Any")
                     && base.is_some_and(|c| {
                         c.type_params.get(i).is_some_and(|name| {
                             c.type_param_bounds.iter().any(|(n, bt)| {
                                 n == name
-                                    && !matches!(bt, IrType::Class { fq_name, .. } if fq_name == "kotlin/Any")
+                                    && bt.non_null().obj_internal() != Some("kotlin/Any")
                             })
                         })
                     })
@@ -546,10 +526,10 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
 /// and field are the boxed type (`Int?` → `getX()Ljava/lang/Integer;`, verified what krusty emits), so
 /// the value reaching `encode/decodeNullableSerializableElement(…, Object)` is already a reference — no
 /// extra autoboxing. The serializer singleton itself serializes the unboxed primitive.
-fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
-    let fq = match ty {
-        IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => return None,
+fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
+    let fq = match ty.non_null().obj_internal() {
+        Some(fq_name) => fq_name,
+        None => return None,
     };
     // A nullable primitive is lowered to its BOXED fq name (`Int?` → `java/lang/Integer`), so match
     // both the Kotlin primitive name and the boxed name.
@@ -576,20 +556,20 @@ fn builtin_element_serializer(ty: &IrType) -> Option<&'static str> {
 /// krusty represents a value-class-typed field/value. Recurses through a value-class chain
 /// (`A(val b: B)`, `B(val i: Int)` → `Int`), depth-bounded against a malformed cycle. `None` for any
 /// type that isn't (transitively) a value class.
-fn value_class_underlying(ir: &IrFile, ty: &IrType) -> Option<IrType> {
-    fn rec(ir: &IrFile, ty: &IrType, depth: u32) -> Option<IrType> {
+fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
+    fn rec(ir: &IrFile, ty: &Ty, depth: u32) -> Option<Ty> {
         if depth > 32 {
             return None;
         }
-        let fq = match ty {
-            IrType::Class { fq_name, .. } => fq_name.as_str(),
-            _ => return None,
+        let fq = match ty.non_null().obj_internal() {
+            Some(fq_name) => fq_name,
+            None => return None,
         };
         let c = ir.classes.iter().find(|c| c.fq_name == fq)?;
         if !c.is_value {
             return None;
         }
-        let u = c.fields.first()?.ty.clone();
+        let u = c.fields.first()?.ty;
         // Unwrap a further value-class layer; else this layer's underlying IS the terminal type.
         Some(rec(ir, &u, depth + 1).unwrap_or(u))
     }
@@ -599,11 +579,11 @@ fn value_class_underlying(ir: &IrFile, ty: &IrType) -> Option<IrType> {
 /// Plain `Encoder.encode*` / `Decoder.decode*` for a value class's underlying type (`encodeInt` /
 /// `decodeInt`), as `(enc_name, enc_desc, dec_name, dec_desc)`. `None` for an unsupported underlying.
 fn inline_prim_methods(
-    ty: &IrType,
+    ty: &Ty,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    let fq = match ty {
-        IrType::Class { fq_name, .. } => fq_name.as_str(),
-        _ => return None,
+    let fq = match ty.non_null().obj_internal() {
+        Some(fq_name) => fq_name,
+        None => return None,
     };
     Some(match fq {
         "kotlin/Int" | "java/lang/Integer" => ("encodeInt", "(I)V", "decodeInt", "()I"),
@@ -817,8 +797,8 @@ impl SerializationPlugin {
         ir: &mut IrFile,
         owner_fq: &str,
         name: &str,
-        params: Vec<IrType>,
-        ret: IrType,
+        params: Vec<Ty>,
+        ret: Ty,
         body: Option<ExprId>,
     ) -> u32 {
         ir.add_fun(IrFunction {
@@ -897,15 +877,11 @@ impl IrPlugin for SerializationPlugin {
                 &ser_fq,
                 "childSerializers",
                 vec![],
-                IrType::Class {
-                    fq_name: "kotlin/Array".to_string(),
-                    type_args: vec![kserializer_of(class_ty("kotlin/Any"))],
-                    nullable: false,
-                },
+                Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
                 None,
             );
 
-            let foo_fields: Vec<(String, IrType)> = ir.classes[class_id as usize]
+            let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
                 .iter()
                 .map(|f| (f.name.clone(), f.ty.clone()))
@@ -1205,7 +1181,7 @@ impl IrPlugin for SerializationPlugin {
             // such a field AS its underlying type — encode/decode the primitive directly (same JSON as
             // kotlinc's inline serializer), not via the (boxed) `<Foo>$serializer` which would store a
             // `Foo` reference into the unboxed slot (VerifyError).
-            let fields: Vec<(String, IrType)> = ir.classes[class_id as usize]
+            let fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
                 .iter()
                 .map(|f| {
@@ -1215,7 +1191,7 @@ impl IrPlugin for SerializationPlugin {
                     )
                 })
                 .collect();
-            let field_types: Vec<IrType> = fields.iter().map(|(_, ty)| ty.clone()).collect();
+            let field_types: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
             // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
             // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
             let field_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
@@ -1241,15 +1217,15 @@ impl IrPlugin for SerializationPlugin {
             // `@Serializable` class krusty generated a serializer for (nested/composite), else None.
             let nested: Vec<Option<u32>> = fields
                 .iter()
-                .map(|(_, ty)| match ty {
-                    IrType::Class { fq_name, .. } => {
+                .map(|(_, ty)| match ty.non_null().obj_internal() {
+                    Some(fq_name) => {
                         let s = serializer_fq(fq_name);
                         ir.classes
                             .iter()
                             .position(|c| c.fq_name == s)
                             .map(|i| i as u32)
                     }
-                    _ => None,
+                    None => None,
                 })
                 .collect();
             // For each field: the `$serializer` field index (`1..=N`) holding its element serializer when
@@ -2026,9 +2002,8 @@ mod tests {
         // encode/decodeNullableSerializableElement with the builtin StringSerializer singleton, not
         // the plain encode/decodeStringElement path (which can't represent null).
         let (mut ir, ctx, id) = serializable_class("N", &["kotlin/Int", "kotlin/String"]);
-        if let IrType::Class { nullable, .. } = &mut ir.classes[id as usize].fields[1].ty {
-            *nullable = true;
-        }
+        ir.classes[id as usize].fields[1].ty =
+            Ty::nullable(ir.classes[id as usize].fields[1].ty);
         run(&mut ir, &ctx);
         assert!(
             calls_method(&ir, "encodeNullableSerializableElement"),
@@ -2055,11 +2030,7 @@ mod tests {
         // nullable). The plugin must still route it through encodeNullableSerializableElement with the
         // builtin IntSerializer singleton — this guards the boxed-name mapping.
         let (mut ir, ctx, id) = serializable_class("P", &["kotlin/Int"]);
-        ir.classes[id as usize].fields[0].ty = IrType::Class {
-            fq_name: "java/lang/Integer".to_string(),
-            type_args: vec![],
-            nullable: true,
-        };
+        ir.classes[id as usize].fields[0].ty = Ty::nullable(Ty::obj("java/lang/Integer"));
         run(&mut ir, &ctx);
         assert!(
             calls_method(&ir, "encodeNullableSerializableElement")
@@ -2086,11 +2057,7 @@ mod tests {
         outer.fields = vec![
             crate::ir::IrField::new(
                 "inner".to_string(),
-                IrType::Class {
-                    fq_name: "Inner".to_string(),
-                    type_args: vec![],
-                    nullable: true,
-                },
+                Ty::nullable(Ty::obj("Inner")),
             ),
             crate::ir::IrField::new("label".to_string(), class_ty("kotlin/String")),
         ];
@@ -2123,14 +2090,12 @@ mod tests {
         assert!(ser.is_object, "$serializer is a singleton object");
         assert_eq!(ser.interfaces, vec![GENERATED_SERIALIZER_FQ.to_string()]);
         // supertype is KSerializer<Foo> (parameterized by the serialized type).
-        match &ser.supertypes[0] {
-            IrType::Class {
-                fq_name, type_args, ..
-            } => {
+        match ser.supertypes[0].non_null().obj_internal() {
+            Some(fq_name) => {
                 assert_eq!(fq_name, KSERIALIZER_FQ);
-                assert_eq!(type_args, &vec![class_ty("demo/Foo")]);
+                assert_eq!(ser.supertypes[0].type_args(), &[class_ty("demo/Foo")]);
             }
-            other => panic!("expected KSerializer<Foo>, got {other:?}"),
+            None => panic!("expected KSerializer<Foo>, got {:?}", ser.supertypes[0]),
         }
         let names: Vec<&str> = ser
             .methods
@@ -2161,9 +2126,9 @@ mod tests {
             .expect("serializer() accessor synthesized");
         let acc = &ir.functions[acc_fid as usize];
         assert!(acc.is_static);
-        match &acc.ret {
-            IrType::Class { fq_name, .. } => assert_eq!(fq_name, KSERIALIZER_FQ),
-            other => panic!("expected KSerializer, got {other:?}"),
+        match acc.ret.non_null().obj_internal() {
+            Some(fq_name) => assert_eq!(fq_name, KSERIALIZER_FQ),
+            None => panic!("expected KSerializer, got {:?}", acc.ret),
         }
         // Its body returns the $serializer singleton (`return Foo$serializer.INSTANCE`).
         let ser_id = ir

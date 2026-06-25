@@ -27,9 +27,10 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction, IrType,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction,
     IrTypeOp,
 };
+use crate::types::Ty;
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
@@ -37,30 +38,18 @@ const I32_MIN: i32 = i32::MIN;
 type Branches = Vec<(Option<ExprId>, ExprId)>;
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
 /// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_call`.
-type Suspension = (Option<(u32, IrType)>, ExprId);
+type Suspension = (Option<(u32, Ty)>, ExprId);
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
-fn object_ty() -> IrType {
-    IrType::Class {
-        fq_name: "kotlin/Any".to_string(),
-        type_args: vec![],
-        nullable: true,
-    }
+fn object_ty() -> Ty {
+    Ty::nullable(Ty::obj("kotlin/Any"))
 }
-fn int_ty() -> IrType {
-    IrType::Class {
-        fq_name: "kotlin/Int".to_string(),
-        type_args: vec![],
-        nullable: false,
-    }
+fn int_ty() -> Ty {
+    Ty::obj("kotlin/Int")
 }
-fn continuation_ty() -> IrType {
-    IrType::Class {
-        fq_name: CONTINUATION.to_string(),
-        type_args: vec![],
-        nullable: false,
-    }
+fn continuation_ty() -> Ty {
+    Ty::obj(CONTINUATION)
 }
 
 /// Rewrite every `suspend fun` in `ir` to the JVM CPS ABI. `facade` is the file's facade class internal
@@ -71,7 +60,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
-    let orig_rets: Vec<IrType> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
     let fids = ir.suspend_funs.clone();
     for fid in fids {
         let body = ir.functions[fid as usize].body;
@@ -127,7 +116,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
 /// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
 /// (a fresh local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
 /// suspension point. Runs before the CPS rewrite, so `ret_ty` is the function's declared return type.
-fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &IrType) {
+fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
     };
@@ -166,7 +155,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
 /// suspension inside a conditional sub-expression (an `if`/`when`/elvis/loop) is left in place — those
 /// are handled structurally by the flattener (or skip the file if not yet modeled). Order of hoisted
 /// temps follows left-to-right evaluation.
-fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[IrType]) {
+fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[Ty]) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
     };
@@ -182,7 +171,7 @@ fn hoist_stmt(
     ir: &mut IrFile,
     stmt: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[IrType],
+    orig_rets: &[Ty],
     out: &mut Vec<ExprId>,
 ) {
     // Statements the flattener handles directly keep their suspension in place.
@@ -246,7 +235,7 @@ fn hoist_expr(
     ir: &mut IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
-    orig_rets: &[IrType],
+    orig_rets: &[Ty],
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
     if is_suspend_call(ir, e, suspend_set) {
@@ -406,7 +395,7 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             args.push(cont);
         }
         // A sibling-file suspend callee: its CPS signature appends a `Continuation` parameter and erases
-        // the return to `Object` (the JVM backend builds the descriptor from these `IrType`s).
+        // the return to `Object` (the JVM backend builds the descriptor from these `Ty`s).
         IrExpr::Call {
             args,
             callee: Callee::CrossFile { params, ret, .. },
@@ -515,7 +504,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
-    let real_params: Vec<IrType> = {
+    let real_params: Vec<Ty> = {
         let p = &ir.functions[fid as usize].params;
         p[..p.len().saturating_sub(1)].to_vec()
     };
@@ -524,18 +513,18 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
     // across a suspension is spilled like a local, but — being live on ENTRY — the loop-top restore on
     // the first iteration would clobber it with the (still-unset) field; so the continuation also
     // CAPTURES it at construction (see `build_get_or_create` / `build_continuation_class`).
-    let param_ty = |idx: u32| -> Option<IrType> {
+    let param_ty = |idx: u32| -> Option<Ty> {
         let hi = this_offset + real_params.len() as u32;
         (idx >= this_offset && idx < hi).then(|| real_params[(idx - this_offset) as usize].clone())
     };
-    let mut spilled: Vec<(u32, IrType)> = Vec::new();
+    let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
             spilled.push((idx, ty));
         }
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
-    let param_caps: Vec<(u32, IrType)> = spilled
+    let param_caps: Vec<(u32, Ty)> = spilled
         .iter()
         .filter(|(idx, _)| param_ty(*idx).is_some())
         .cloned()
@@ -543,11 +532,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
 
     let fname = ir.functions[fid as usize].name.clone();
     let cont_internal = format!("{facade}${fname}$1");
-    let cont_ty = IrType::Class {
-        fq_name: cont_internal.clone(),
-        type_args: vec![],
-        nullable: false,
-    };
+    let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
     let cont_v = base;
@@ -789,7 +774,7 @@ fn build_lambda_state_machine(
     }
     reads.sort_unstable();
     reads.dedup();
-    let mut spilled: Vec<(u32, IrType)> = Vec::new();
+    let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         // Capture/parameter locals (value-indices `2..2+field_base`) are reloaded from their fields in
         // the prologue at every entry, so they survive re-entry without being spilled — exclude them.
@@ -804,7 +789,7 @@ fn build_lambda_state_machine(
     // Append `result`, `label`, then one field per spilled local — after the captures/parameters.
     {
         let cls = &mut ir.classes[class_id as usize];
-        let mut push = |name: &str, ty: IrType| {
+        let mut push = |name: &str, ty: Ty| {
             // State-machine fields are mutable and non-private (read/written cross-class).
             cls.fields.push(crate::ir::IrField {
                 is_private: false,
@@ -1027,7 +1012,7 @@ struct Flat<'a> {
     /// function's dedicated continuation class puts them at `0..` (`field_base = 0`); a suspend LAMBDA
     /// reuses its own class, whose captures/parameters occupy the leading fields, so they start after.
     field_base: u32,
-    spilled: Vec<(u32, IrType)>,
+    spilled: Vec<(u32, Ty)>,
     states: Vec<Vec<ExprId>>,
     next_local: u32,
     failed: bool,
@@ -1132,7 +1117,7 @@ impl Flat<'_> {
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
     }
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
-    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &IrType) {
+    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty) {
         let rg = self.gv(self.r_v);
         let unb = unbox(self.ir, rg, ty);
         if self.is_spilled(local) {
@@ -1162,7 +1147,7 @@ impl Flat<'_> {
     }
     /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
     /// `(L, ty, branches)`. Sets `failed` if a branch hides a suspension the flattener can't lift.
-    fn stmt_cond_suspension(&mut self, stmt: ExprId) -> Option<(u32, IrType, Branches)> {
+    fn stmt_cond_suspension(&mut self, stmt: ExprId) -> Option<(u32, Ty, Branches)> {
         let IrExpr::Variable {
             index,
             ty,
@@ -1198,7 +1183,7 @@ impl Flat<'_> {
     fn emit_cond(
         &mut self,
         local: u32,
-        ty: &IrType,
+        ty: &Ty,
         branches: &[(Option<ExprId>, ExprId)],
         merge: usize,
     ) -> ExprId {
@@ -1422,7 +1407,7 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
 }
 
 /// The declared type of local `idx`, from its `Variable` declaration somewhere in `b`'s subtree.
-fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<IrType> {
+fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<Ty> {
     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[b as usize] {
         if *index == idx {
             return Some(ty.clone());
@@ -1443,7 +1428,7 @@ fn find_local_ty(ir: &IrFile, b: ExprId, idx: u32) -> Option<IrType> {
 fn build_get_or_create(
     ir: &mut IrFile,
     completion_idx: u32,
-    cont_ty: &IrType,
+    cont_ty: &Ty,
     cont_id: ClassId,
     receiver_this: Option<u32>,
     param_caps: &[u32],
@@ -1565,7 +1550,7 @@ fn build_get_or_create(
 /// A type-correct zero/`null` placeholder for `ty`, used as a value-parameter argument when
 /// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
 /// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
-fn zero_value(ir: &mut IrFile, ty: &IrType) -> ExprId {
+fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
     use crate::types::Ty;
     let c = match super::ir_emit::ir_ty_to_jvm(ty) {
         Ty::Boolean => IrConst::Boolean(false),
@@ -1585,10 +1570,10 @@ fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
     outer_fid: u32,
-    spilled: &[(u32, IrType)],
+    spilled: &[(u32, Ty)],
     receiver: Option<&str>,
-    params: &[IrType],
-    param_caps: &[(u32, IrType)],
+    params: &[Ty],
+    param_caps: &[(u32, Ty)],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
     // result(0), label(1), spilled(2..), and — for a member — the captured receiver `this$0` last.
@@ -1707,15 +1692,11 @@ fn build_continuation_class(
     // parameter, then the completion `Continuation`. Store the receiver to `this$0` and each captured
     // param to its `L$i` field, then `super(completion)`. A top-level fn with no live params is just
     // `<init>(Continuation)`.
-    let mut ctor_args: Vec<(IrType, bool)> = Vec::new();
+    let mut ctor_args: Vec<(Ty, bool)> = Vec::new();
     let mut ctor_stores: Vec<ExprId> = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
-        let recv_ty = IrType::Class {
-            fq_name: owner.to_string(),
-            type_args: vec![],
-            nullable: false,
-        };
+        let recv_ty = Ty::obj(owner);
         fields.push(crate::ir::IrField {
             is_final: true,
             is_private: false,
@@ -1808,7 +1789,7 @@ fn throw_on_failure(ir: &mut IrFile, result_v: u32) -> ExprId {
 }
 
 /// Coerce an `Object` value to `target` (unbox a primitive, or checkcast a reference).
-fn unbox(ir: &mut IrFile, value: ExprId, target: &IrType) -> ExprId {
+fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: value,

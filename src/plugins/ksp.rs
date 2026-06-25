@@ -269,9 +269,9 @@ pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext) -> Vec<KsClass> 
                 .map(|f| KsProp {
                     name: f.name.clone(),
                     ty: KsType {
-                        fq_name: match &f.ty {
-                            crate::ir::IrType::Class { fq_name, .. } => fq_name.clone(),
-                            _ => "kotlin/Any".to_string(),
+                        fq_name: match f.ty.non_null().obj_internal() {
+                            Some(fq) => fq.to_string(),
+                            None => "kotlin/Any".to_string(),
                         },
                     },
                 })
