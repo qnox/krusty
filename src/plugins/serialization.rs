@@ -369,11 +369,16 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     // Scope: matches only a FILE-DECLARED class in `ir.classes`. A stdlib collection interface
     // (`kotlin/collections/List`, …) is NOT an `ir.classes` entry, so it never lands here — it keeps its
     // builtin/None handling below (a `List` field has no element serializer yet → a clean `null`).
+    // An INTERFACE is open-polymorphic whether or not it is `sealed` here: a `@Serializable` SEALED
+    // interface was already claimed by the SealedClassSerializer branch above (which requires the
+    // `serializer()` accessor), so only a plain interface or a NON-`@Serializable` sealed interface
+    // reaches this — both serialize as `PolymorphicSerializer` (kind OPEN). An abstract CLASS still
+    // requires the `serializer()` accessor and must not be sealed (a sealed class took the branch above).
     if ir.classes.iter().any(|c| {
         c.fq_name == fq_name
-            && !c.is_sealed
             && (c.is_interface
                 || (c.is_abstract
+                    && !c.is_sealed
                     && c.methods
                         .iter()
                         .any(|&m| ir.functions[m as usize].name == "serializer")))
@@ -547,13 +552,13 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     }) {
         return true;
     }
-    // An interface / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
-    // `element_serializer_expr`).
+    // An interface (any) / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
+    // `element_serializer_expr`; a `@Serializable` sealed interface was claimed by the sealed branch above).
     if ir.classes.iter().any(|c| {
         c.fq_name == fq_name
-            && !c.is_sealed
             && (c.is_interface
                 || (c.is_abstract
+                    && !c.is_sealed
                     && c.methods
                         .iter()
                         .any(|&m| ir.functions[m as usize].name == "serializer")))
