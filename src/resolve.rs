@@ -2706,24 +2706,6 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
     base
 }
 
-/// The JVM wrapper internal name of a primitive (`Int` → `java/lang/Integer`). `None` for a
-/// non-wrappable primitive (unsigned/value types). The sole remaining caller is the `as`-cast box
-/// check, which needs the wrapper's *JVM name* to test assignability to a supertype target
-/// (`42 as Number`); the nullable *type* itself is now `Ty::Nullable`, built via [`Ty::nullable_boxed`].
-pub(crate) fn nullable_prim_wrapper(t: Ty) -> Option<&'static str> {
-    Some(match t {
-        Ty::Int => "java/lang/Integer",
-        Ty::Long => "java/lang/Long",
-        Ty::Double => "java/lang/Double",
-        Ty::Float => "java/lang/Float",
-        Ty::Boolean => "java/lang/Boolean",
-        Ty::Char => "java/lang/Character",
-        Ty::Byte => "java/lang/Byte",
-        Ty::Short => "java/lang/Short",
-        _ => return None,
-    })
-}
-
 /// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
@@ -4663,7 +4645,7 @@ impl<'a> Checker<'a> {
                     // `'a' as Char?` / `42 as Int?` — box to the operand's own nullable form …
                     && (tt.nullable_primitive() == Some(ot)
                         // … or `42 as Any` / `42 as Number` — box to a supertype of the JVM wrapper.
-                        || nullable_prim_wrapper(ot).is_some_and(|bw| {
+                        || crate::jvm::jvm_class_map::wrapper_internal(ot).is_some_and(|bw| {
                             tt.obj_internal().is_some_and(|t| {
                                 t == "kotlin/Any"
                                     || t == "java/lang/Object"

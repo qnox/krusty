@@ -1017,20 +1017,6 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
 
 /// The wrapper class internal name for a primitive (`Int` → `java/lang/Integer`), for casting an
 /// erased `Object` argument before unboxing.
-fn wrapper_internal(t: Ty) -> &'static str {
-    match t {
-        Ty::Int => "java/lang/Integer",
-        Ty::Long => "java/lang/Long",
-        Ty::Double => "java/lang/Double",
-        Ty::Float => "java/lang/Float",
-        Ty::Boolean => "java/lang/Boolean",
-        Ty::Char => "java/lang/Character",
-        Ty::Byte => "java/lang/Byte",
-        Ty::Short => "java/lang/Short",
-        _ => "java/lang/Object",
-    }
-}
-
 /// Emit a synthesized function-reference subclass (`<Owner>$ref$N extends FunctionReferenceImpl
 /// implements Function<arity>`): an UNBOUND ref gets a `public static final INSTANCE` + a no-arg ctor
 /// `super(arity, owner.class, name, sig, flags)`; a BOUND ref gets a `(Object)` ctor delegating to
@@ -1166,7 +1152,9 @@ fn emit_func_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
         inv.aload(1 + k as u16);
         let jt = ir_ty_to_jvm(pt);
         if jt.is_primitive() {
-            let wref = cw.class_ref(wrapper_internal(jt));
+            let wref = cw.class_ref(
+                crate::jvm::jvm_class_map::wrapper_internal(jt).unwrap_or("java/lang/Object"),
+            );
             inv.checkcast(wref);
             unbox_prim(&mut cw, &mut inv, jt);
         } else if let Some(internal) = checkcast_internal(jt) {
@@ -2992,9 +2980,9 @@ impl<'a> Emitter<'a> {
                         let at = self.value_ty(*arg);
                         let target = ir_ty_to_jvm(type_operand);
                         if at.is_primitive() && target.is_reference() {
-                            self.box_prim(at, code);
+                            box_prim_free(self.cw, code, at);
                         } else if at.is_reference() && target.is_primitive() {
-                            self.unbox_to(target, code);
+                            unbox_prim(self.cw, code, target);
                         } else if at.is_primitive() && target.is_primitive() && at != target {
                             emit_num_conv(at, target, code);
                         }
@@ -3140,14 +3128,14 @@ impl<'a> Emitter<'a> {
                 // method types; the captures parameterize the `invokedynamic` itself.
                 let n_cap = impl_params.len() - *arity as usize;
                 let (cap_tys, lam_tys) = impl_params.split_at(n_cap);
-                let impl_desc = jvm_descriptor(&impl_params, impl_ret);
+                let impl_desc = method_descriptor(&impl_params, impl_ret);
                 // For a Kotlin lambda the target is `FunctionN.invoke` (samMethodType erased to
                 // `(Object,…)Object`, instantiatedMethodType the boxed actuals); for a user SAM
                 // conversion the target is the interface's single method, whose descriptor is the
                 // lambda's concrete signature (no erasure/boxing).
                 let (iface, sam_method, sam_desc, inst_desc) = match sam {
                     Some((iface, method)) => {
-                        let d = jvm_descriptor(lam_tys, impl_ret);
+                        let d = method_descriptor(lam_tys, impl_ret);
                         (iface.clone(), method.clone(), d.clone(), d)
                     }
                     None => {
@@ -3396,7 +3384,7 @@ impl<'a> Emitter<'a> {
                     load(temps[0].1, temps[0].0, code);
                     for &(slot, t, _) in &temps[1..] {
                         load(t, slot, code);
-                        self.box_prim(t, code);
+                        box_prim_free(self.cw, code, t);
                     }
                     for &(_, _, key) in &temps {
                         self.slots.remove(&key);
@@ -3406,7 +3394,7 @@ impl<'a> Emitter<'a> {
                     for &arg in args {
                         self.emit_value(arg, code);
                         let at = self.value_ty(arg);
-                        self.box_prim(at, code); // box a primitive arg to its wrapper (an Object)
+                        box_prim_free(self.cw, code, at); // box a primitive arg to its wrapper (an Object)
                     }
                 }
                 let iface = format!("kotlin/jvm/functions/Function{n}");
@@ -3424,7 +3412,7 @@ impl<'a> Emitter<'a> {
                     | Ty::Boolean
                     | Ty::Char
                     | Ty::Byte
-                    | Ty::Short => self.unbox_to(rt, code),
+                    | Ty::Short => unbox_prim(self.cw, code, rt),
                     Ty::Unit | Ty::Nothing => code.pop(),
                     Ty::String => {
                         let ci = self.cw.class_ref("java/lang/String");
@@ -3567,7 +3555,7 @@ impl<'a> Emitter<'a> {
                 // A boxed primitive array (`Array<Int>` = `Integer[]`): `a[i]` is an unboxed `Int`, so
                 // unbox the loaded wrapper. (`value_ty` for this call reports the same primitive.)
                 if let Some(p) = boxed_prim_of(elem) {
-                    self.unbox_to(p, code);
+                    unbox_prim(self.cw, code, p);
                 }
             }
             "kotlin/Array.set" => {
@@ -4508,42 +4496,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Box a primitive value already on the stack to its wrapper (`Integer.valueOf`, …).
-    fn box_prim(&mut self, t: Ty, code: &mut CodeBuilder) {
-        let (cls, desc) = match t {
-            Ty::Int => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
-            Ty::Long => ("java/lang/Long", "(J)Ljava/lang/Long;"),
-            Ty::Double => ("java/lang/Double", "(D)Ljava/lang/Double;"),
-            Ty::Float => ("java/lang/Float", "(F)Ljava/lang/Float;"),
-            Ty::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
-            Ty::Char => ("java/lang/Character", "(C)Ljava/lang/Character;"),
-            Ty::Byte => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
-            Ty::Short => ("java/lang/Short", "(S)Ljava/lang/Short;"),
-            _ => return,
-        };
-        let m = self.cw.methodref(cls, "valueOf", desc);
-        code.invokestatic(m, slot_words(t) as i32, 1);
-    }
-
-    /// Unbox a wrapper on the stack to the primitive `t` (`checkcast` + `intValue`, …).
-    fn unbox_to(&mut self, t: Ty, code: &mut CodeBuilder) {
-        let (cls, meth, desc) = match t {
-            Ty::Int => ("java/lang/Integer", "intValue", "()I"),
-            Ty::Long => ("java/lang/Long", "longValue", "()J"),
-            Ty::Double => ("java/lang/Double", "doubleValue", "()D"),
-            Ty::Float => ("java/lang/Float", "floatValue", "()F"),
-            Ty::Boolean => ("java/lang/Boolean", "booleanValue", "()Z"),
-            Ty::Char => ("java/lang/Character", "charValue", "()C"),
-            Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
-            Ty::Short => ("java/lang/Short", "shortValue", "()S"),
-            _ => return,
-        };
-        let ci = self.cw.class_ref(cls);
-        code.checkcast(ci);
-        let m = self.cw.methodref(cls, meth, desc);
-        code.invokevirtual(m, 0, slot_words(t) as i32);
-    }
-
     /// The element `Ty` of an array-typed IR expression.
     fn array_elem(&self, e: u32) -> Ty {
         self.value_ty(e).array_elem().unwrap_or(Ty::Error)
@@ -4787,16 +4739,6 @@ Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/Meth
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
 /// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
-fn jvm_descriptor(params: &[Ty], ret: Ty) -> String {
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&p.descriptor());
-    }
-    s.push(')');
-    s.push_str(&ret.descriptor());
-    s
-}
-
 /// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
 fn sam_descriptor(arity: u8) -> String {
     let mut s = String::from("(");
@@ -4809,18 +4751,10 @@ fn sam_descriptor(arity: u8) -> String {
 
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
 fn boxed_descriptor(t: Ty) -> String {
-    match t {
-        Ty::Int => "Ljava/lang/Integer;",
-        Ty::Long => "Ljava/lang/Long;",
-        Ty::Double => "Ljava/lang/Double;",
-        Ty::Float => "Ljava/lang/Float;",
-        Ty::Boolean => "Ljava/lang/Boolean;",
-        Ty::Char => "Ljava/lang/Character;",
-        Ty::Byte => "Ljava/lang/Byte;",
-        Ty::Short => "Ljava/lang/Short;",
-        _ => return t.descriptor(),
+    match crate::jvm::jvm_class_map::wrapper_internal(t) {
+        Some(w) => format!("L{w};"),
+        None => t.descriptor(),
     }
-    .to_string()
 }
 
 /// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.
