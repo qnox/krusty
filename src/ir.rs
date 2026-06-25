@@ -521,10 +521,16 @@ pub struct IrClass {
     /// `<init>` for property initializers / `init` blocks. Empty for synthesized/enum/object classes
     /// (then the constructor arity is `ctor_param_count`).
     pub ctor_args: Vec<(Ty, bool)>,
-    /// Constructor body run after the parameter fields are stored: an effect `Block` (body-property
-    /// initializers as `SetField`, `init { … }` blocks) lowered with `this` = value 0 and the
-    /// constructor parameters as values `1..=ctor_param_count`. `None` when there's nothing to run.
+    /// Constructor body run after `super(…)`: an effect `Block` lowered with `this` = value 0 and the
+    /// constructor parameters as values `1..=N`. When [`explicit_param_stores`] is set it BEGINS with the
+    /// `val`/`var` param→field stores (the desugared primary-constructor sugar); it also carries body-
+    /// property initializers (`SetField`) and `init { … }` blocks. `None` when there's nothing to run.
     pub init_body: Option<ExprId>,
+    /// `true` when `init_body` already stores the primary-constructor `val`/`var` params (and inner
+    /// `this$0`) to their fields — the desugared form. The JVM backend then must NOT auto-store them (it
+    /// would double-store). `false` for synthesized classes that still rely on the backend's implicit
+    /// param→field store.
+    pub explicit_param_stores: bool,
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,

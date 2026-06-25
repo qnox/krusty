@@ -550,6 +550,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }))
                     .collect(),
                 init_body: None,
+                explicit_param_stores: false,
                 methods: vec![],
                 is_interface: c.is_interface(),
                 is_sealed: c.is_sealed,
@@ -902,6 +903,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     ctor_param_count: 0,
                     ctor_args: vec![],
                     init_body: None,
+                    explicit_param_stores: false,
                     methods: vec![],
                     is_interface: false,
 
@@ -1868,7 +1870,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .iter()
                     .any(|(_, d)| !c.props.iter().any(|p| p.is_property && &p.name == d))
                     || !c.delegation_exprs.is_empty();
-                if (!c.init_order.is_empty() || has_delegated || has_iface_synth_delegate)
+                // Run whenever there is ANY ctor body to lower OR any primary-constructor `val`/`var`
+                // param (or inner `this$0`) to store: the param→field stores are desugared explicitly
+                // into `init_body` here (no implicit auto-store in the backend).
+                if (!c.init_order.is_empty()
+                    || has_delegated
+                    || has_iface_synth_delegate
+                    || c.inner_of.is_some()
+                    || c.props.iter().any(|p| p.is_property))
                     && c.has_primary_ctor
                 {
                     let class_id = lo.classes[&internal].id;
@@ -1895,6 +1904,40 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         lo.scope.push((p.name.clone(), v, ty_of(file, &p.ty)));
                     }
                     let mut stmts = Vec::new();
+                    // Desugar the primary-constructor `val`/`var` sugar: store the inner `this$0` and each
+                    // property param to its backing field, right after `super(…)` and before the body
+                    // initializers/`init` blocks — exactly what kotlinc emits. This used to be an implicit
+                    // auto-store in `ir_emit`; carrying it as explicit `SetField`s keeps the IR sugar-free.
+                    //
+                    // A `@JvmInline value class` is EXCLUDED: its field store belongs only in the boxed
+                    // `<init>`, but the IR ctor body is ALSO reused for the UNBOXED `constructor-impl`
+                    // (where `this` is the bare underlying value — a `putfield` through it is invalid). The
+                    // backend's auto-store places the store in `<init>` only, so leave that path for them.
+                    if !c.is_value {
+                        let mut targets: Vec<(String, u32)> = Vec::new();
+                        let mut field_i = 0u32;
+                        if c.inner_of.is_some() {
+                            targets.push(("this$0".to_string(), field_i));
+                            field_i += 1;
+                        }
+                        for p in c.props.iter().filter(|p| p.is_property) {
+                            targets.push((p.name.clone(), field_i));
+                            field_i += 1;
+                        }
+                        for (name, idx) in targets {
+                            let (pv, _) = lo.lookup(&name)?;
+                            let recv = lo.ir.add_expr(IrExpr::GetValue(this_v));
+                            let val = lo.ir.add_expr(IrExpr::GetValue(pv));
+                            stmts.push(lo.ir.add_expr(IrExpr::SetField {
+                                receiver: recv,
+                                class: class_id,
+                                index: idx,
+                                value: val,
+                            }));
+                        }
+                        // These stores ARE the param→field stores — backend must not auto-store too.
+                        lo.ir.classes[class_id as usize].explicit_param_stores = true;
+                    }
                     // Interface-delegation `$$delegate_<i>` stores (`this.$$delegate_i = <delegate param>`),
                     // first in the ctor body (kotlinc stores them right after `super()`).
                     for (di, (_iface, dname)) in c.delegations.iter().enumerate() {
@@ -2323,6 +2366,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             ctor_param_count: 0,
                             ctor_args: vec![],
                             init_body: None,
+                            explicit_param_stores: false,
                             methods: vec![],
                             is_interface: false,
 
@@ -4249,6 +4293,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args,
             init_body,
+            explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
 
@@ -6109,6 +6154,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
 
@@ -6376,6 +6422,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
 

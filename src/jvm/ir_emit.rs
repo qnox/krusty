@@ -579,23 +579,27 @@ fn emit_class(
             // stored to its field (the property fields are `fields[0..]` in declaration order among params);
             // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
             // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
-            let mut slot = 1u16;
-            let mut field_i = 0usize;
-            let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-                vec![true; param_tys.len()]
-            } else {
-                c.ctor_args.iter().map(|(_, f)| *f).collect()
-            };
-            for (i, t) in param_tys.iter().enumerate() {
-                if is_field.get(i).copied().unwrap_or(true) {
-                    let name = &c.fields[field_i].name;
-                    ctor.aload(0);
-                    load(*t, slot, &mut ctor);
-                    let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
-                    ctor.putfield(fref, slot_words(*t) as i32);
-                    field_i += 1;
+            // SKIPPED when `explicit_param_stores` is set — a desugared class already stores them via
+            // explicit `SetField`s at the head of `init_body`; auto-storing too would double-store.
+            if !c.explicit_param_stores {
+                let mut slot = 1u16;
+                let mut field_i = 0usize;
+                let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                    vec![true; param_tys.len()]
+                } else {
+                    c.ctor_args.iter().map(|(_, f)| *f).collect()
+                };
+                for (i, t) in param_tys.iter().enumerate() {
+                    if is_field.get(i).copied().unwrap_or(true) {
+                        let name = &c.fields[field_i].name;
+                        ctor.aload(0);
+                        load(*t, slot, &mut ctor);
+                        let fref = e.cw.fieldref(&c.fq_name, name, &t.descriptor());
+                        ctor.putfield(fref, slot_words(*t) as i32);
+                        field_i += 1;
+                    }
+                    slot += slot_words(*t);
                 }
-                slot += slot_words(*t);
             }
             if let Some(init_body) = c.init_body {
                 e.emit(init_body, &mut ctor);
