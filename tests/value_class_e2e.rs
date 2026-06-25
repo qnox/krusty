@@ -1,9 +1,11 @@
 //! Value/inline-class member synthesis (phase 388). A `@JvmInline value class X(val v: U)` emits
 //! kotlinc's unboxed-support members on `X.class`: the `U` field + `<init>(U)` + `getV()` from the
 //! ordinary single-field class path, plus the synthesized `box-impl(U):X` / `constructor-impl(U):U`
-//! (static) and `unbox-impl():U` (instance). Use-site unboxing isn't wired yet, so the resolver still
-//! rejects value-class *files*; this test drives the library directly (ignoring that diagnostic) to
-//! verify only the synthesized class shape — the structural half of the differential-vs-kotlinc check.
+//! (static) and `unbox-impl():U` (instance). Use-site unboxing is wired (value-class params/fields/
+//! construction lower to the unboxed underlying type — see tests/session_subsystems_e2e.rs::
+//! value_class_unboxed_arith), so `check_file` accepts value-class files; this test drives the library
+//! directly to verify the synthesized class shape — the structural half of the differential-vs-kotlinc
+//! check.
 
 use krusty::diag::DiagSink;
 use krusty::ir_lower::lower_file;
@@ -25,11 +27,10 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     let files = vec![parse(src, &toks, &mut d)];
     assert!(!d.has_errors(), "unexpected parse errors");
 
-    // `check_file` rejects value classes (use-site unboxing is a later phase); ignore that
-    // diagnostic — this test exercises only the value-class member synthesis.
-    let mut d2 = DiagSink::new();
-    let syms = collect_signatures(&files, &mut d2);
-    let info = check_file(&files[0], &syms, &mut d2);
+    // `check_file` accepts value-class files (use-site unboxing is wired); the file resolves clean.
+    let syms = collect_signatures(&files, &mut d);
+    let info = check_file(&files[0], &syms, &mut d);
+    assert!(!d.has_errors(), "value-class file should check clean");
 
     let mut ir = lower_file(&files[0], &info, &syms).expect("value class should lower");
     // The value-class `-impl` members are synthesized by the JVM pass (not `ir_lower`).
