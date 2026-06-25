@@ -4072,6 +4072,28 @@ impl<'a> Parser<'a> {
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
         let mut pending_targs: Vec<TypeRef> = Vec::new();
         loop {
+            // A postfix chain may continue on a following line: Kotlin treats a newline before `.` or
+            // `?.` as part of the selector chain, not a statement terminator (`x\n  .foo()\n  .bar()`).
+            // Peek past the newline(s); if a member access follows, consume them and continue —
+            // otherwise stop (the expression ended). `::`/`{` deliberately do NOT continue across a
+            // newline (callable-ref / trailing-lambda are same-line only).
+            if self.at(TokenKind::Newline) {
+                let mut j = self.i;
+                while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
+                    j += 1;
+                }
+                let continues = match self.t.get(j).map(|t| t.kind) {
+                    Some(TokenKind::Dot) => true,
+                    Some(TokenKind::Question) => {
+                        self.t.get(j + 1).is_some_and(|t| t.kind == TokenKind::Dot)
+                    }
+                    _ => false,
+                };
+                if !continues {
+                    break;
+                }
+                self.skip_newlines();
+            }
             // `as T` / `as? T` cast — binds tighter than the binary operators (postfix level).
             if self.at(TokenKind::Ident) && self.text() == "as" {
                 let lspan = self.file.expr_spans[lhs.0 as usize];

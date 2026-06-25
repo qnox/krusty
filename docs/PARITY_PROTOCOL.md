@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1767 OK / 0 FAIL** (scanned 7351, Phase 457).
+  repo's `compiler/testData/codegen/box`). Current gate: **1763 OK / 0 FAIL** (scanned 7351, Phase 458).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 458 — postfix method chain continues across a newline (correctness; gate 1763, box-OK flat,
+  FAIL=0).** Kotlin treats a newline before `.` or `?.` as part of the selector chain, not a statement
+  terminator (`val s = x\n  .foo()\n  .bar()`). `parse_postfix` broke at the newline, so a leading-dot
+  continuation line failed to parse ("expected an expression" at the `.`). The loop now peeks past the
+  newline(s); a following `.`/`?.` consumes them and continues the chain, otherwise it stops. `::` and a
+  trailing `{` lambda deliberately do NOT continue across a newline (same-line only in Kotlin). Net box-OK
+  is flat — the unblocked files hit downstream feature gaps — but it removes a whole parse-error class and
+  regresses nothing. TDD: tests/newline_method_chain_e2e.rs.
 
 - **Phase 457 — sealed-object `when` value-match (gate 1766 → 1767, +1, FAIL=0).** A `when (s) { A -> … }`
   over a sealed subject `s: S` that matches a singleton object subclass (`object A : S()`) by *value*
