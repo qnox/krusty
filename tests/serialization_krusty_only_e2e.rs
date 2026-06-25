@@ -457,6 +457,37 @@ fun box(): String {
 }
 
 #[test]
+fn interface_field_polymorphic_serializer_in_krusty() {
+    // A property whose type is an INTERFACE serializes via open polymorphism —
+    // `PolymorphicSerializer(Animal::class)` (element descriptor serialName
+    // `kotlinx.serialization.Polymorphic<Animal>`) — kotlinx's default for an interface property, no
+    // `@Serializable` on the interface required. Covers both a non-null and a nullable interface field.
+    let src = r#"import kotlinx.serialization.*
+
+interface Animal
+
+@Serializable
+class Zoo(val a: Animal, val b: Animal?)
+
+fun box(): String {
+    val d = Zoo.serializer().descriptor
+    val s0 = d.getElementDescriptor(0).serialName
+    if (s0 != "kotlinx.serialization.Polymorphic<Animal>") return "s0=$s0"
+    return "OK"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerIfacePoly") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "interface-field polymorphic serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty interface-field polymorphic serializer OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
