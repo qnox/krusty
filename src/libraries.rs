@@ -359,7 +359,32 @@ pub enum LibConst {
 /// the JVM-emit extras the backend needs (mangled members, inline-body splice checks, companion
 /// constants, `@Metadata` queries). The federatable half is `SymbolSource`; these extras are consulted
 /// only by the JVM emitter, never across the source federation.
+/// A recognized `kotlin.coroutines` compiler intrinsic. These are `@InlineOnly` stdlib declarations the
+/// reference compiler replaces by name with dedicated codegen rather than calling/inlining (their stub
+/// bodies just `throw`). Platform-neutral language concept; the platform [`LibrarySet`] maps source names
+/// to it (the JVM FQ-name table + codegen live in `jvm::coroutine_intrinsics`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoroutineIntrinsic {
+    /// `COROUTINE_SUSPENDED` — the suspension sentinel (typed `Any`).
+    CoroutineSuspended,
+    /// `suspendCoroutineUninterceptedOrReturn { c -> … }` — inline the block with the enclosing
+    /// function's own continuation bound as the parameter; its `Any?` result becomes the result.
+    SuspendCoroutineUninterceptedOrReturn,
+    /// `startCoroutine` — start a coroutine with a completion continuation (extension on a suspend
+    /// function type).
+    StartCoroutine,
+    /// `createCoroutine` — build (but don't start) a coroutine, returning the initial continuation.
+    CreateCoroutine,
+}
+
 pub trait LibrarySet: SymbolSource {
+    /// Recognize an unqualified `kotlin.coroutines` intrinsic source name (`COROUTINE_SUSPENDED`,
+    /// `suspendCoroutineUninterceptedOrReturn`, `startCoroutine`, `createCoroutine`). The checker types
+    /// it from `@Metadata` and the backend emits its dedicated codegen; `None` for an ordinary name.
+    fn coroutine_intrinsic(&self, _name: &str) -> Option<CoroutineIntrinsic> {
+        None
+    }
+
     /// The compile-time value of a primitive companion constant (`Int.MAX_VALUE`, `Double.NaN`, …),
     /// read from the library (e.g. the JVM `IntCompanionObject.MAX_VALUE` `ConstantValue`). The
     /// front end inlines it at the use site, exactly as the reference compiler does. `None` if not a

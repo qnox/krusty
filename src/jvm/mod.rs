@@ -4,6 +4,7 @@ pub mod backend;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;
+pub mod coroutine_intrinsics;
 pub mod inline;
 pub mod inline_class;
 pub mod ir_emit;

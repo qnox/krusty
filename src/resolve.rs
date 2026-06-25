@@ -4980,6 +4980,13 @@ impl<'a> Checker<'a> {
                     }
                     if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                         ty // top-level property
+                    } else if self.syms.libraries.coroutine_intrinsic(&n)
+                        == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
+                    {
+                        // `COROUTINE_SUSPENDED` — the coroutine suspension sentinel (typed `Any`);
+                        // lowering reads `IntrinsicsKt.getCOROUTINE_SUSPENDED()`. A local of the same
+                        // name was resolved above and shadows it.
+                        Ty::obj("kotlin/Any")
                     } else if n == "Unit" {
                         // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
                         // Unit`) — the `kotlin/Unit` object, read as its `INSTANCE` in lowering. Only a
@@ -7475,6 +7482,26 @@ impl<'a> Checker<'a> {
                             return self.set(call, bt);
                         }
                     }
+                }
+                // `suspendCoroutineUninterceptedOrReturn { c -> … }` — a `kotlin.coroutines` inline
+                // intrinsic (recognized through the platform registry, not by name here). The lambda
+                // takes the current `Continuation<T>` and returns `Any?` (a resumed value, or
+                // `COROUTINE_SUSPENDED`); the call yields `T` — the enclosing suspend function's return
+                // type (`@Metadata` declares `<T>(block:(Continuation<T>)->Any?):T`; `T` binds from
+                // context). Lowering inlines the lambda body with the function's own continuation bound.
+                if args.len() == 1
+                    && self.lookup(&fname).is_none()
+                    && !self.module_declares(&fname)
+                    && matches!(self.file.expr(args[0]), Expr::Lambda { .. })
+                    && self.syms.libraries.coroutine_intrinsic(&fname)
+                        == Some(
+                            crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn,
+                        )
+                {
+                    let cont = Ty::obj("kotlin/coroutines/Continuation");
+                    self.check_lambda_with_types(args[0], &[cont]);
+                    let r = self.ret_ty;
+                    return self.set(call, r);
                 }
                 // SAM conversion `Pred { lambda }` — a (fun) interface with a single abstract method
                 // built from a lambda. Type the lambda from the SAM method's parameters; the result is
