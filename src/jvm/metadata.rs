@@ -359,6 +359,10 @@ struct ParsedFunction {
     /// Each SOURCE value parameter's type `class_name` id (`None` for a type-parameter/builtin param).
     /// The COUNT is the source arity (excludes synthetic descriptor params); resolved to names downstream.
     value_param_classes: Vec<Option<u64>>,
+    /// Each SOURCE value parameter's NAME (`ValueParameter.name = 2`, a string-table id) — parallel to
+    /// `value_param_classes`. Drives NAMED-ARGUMENT resolution for a classpath function call (the call
+    /// `foo(b = …, a = …)` maps each label to a position via these names). `0` when absent.
+    value_param_names: Vec<u64>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -372,6 +376,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut recv_class = None;
     let mut ret_nullable = false;
     let mut value_param_classes: Vec<Option<u64>> = Vec::new();
+    let mut value_param_names: Vec<u64> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -399,9 +404,11 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let vbody = pb.bytes(n)?;
                 let mut vp = Pb { b: vbody, i: 0 };
                 let mut tid = None;
+                let mut nid = 0u64;
                 while !vp.at_end() {
                     let vt = vp.varint()?;
                     match (vt >> 3, vt & 7) {
+                        (2, 0) => nid = vp.varint()?, // ValueParameter.name (string-table id)
                         (3, 2) => {
                             let tn = vp.varint()? as usize;
                             let tb = vp.bytes(tn)?;
@@ -411,6 +418,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                     }
                 }
                 value_param_classes.push(tid);
+                value_param_names.push(nid);
             }
             (100, 2) => {
                 // method_signature extension
@@ -431,6 +439,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         recv_class,
         ret_nullable,
         value_param_classes,
+        value_param_names,
     })
 }
 
@@ -508,6 +517,9 @@ pub struct MetaFn {
     /// EXCLUDES the synthetic params the JVM descriptor appends (`suspend` Continuation, `@Composable`
     /// Composer/int). The resolver matches a call against THIS signature; the descriptor drives emit.
     pub value_param_types: Vec<Option<String>>,
+    /// Each SOURCE value parameter's NAME (parallel to `value_param_types`), for NAMED-ARGUMENT resolution
+    /// of a classpath call. Empty string when metadata omits the name. LENGTH = source arity.
+    pub value_param_names: Vec<String>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -571,6 +583,12 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         .iter()
                         .map(|o| o.and_then(|id| resolve_class_name(&records, d2, id as usize)))
                         .collect();
+                    // Param names are plain string-table entries (like the JVM name/desc), NOT class names.
+                    let value_param_names: Vec<String> = pf
+                        .value_param_names
+                        .iter()
+                        .map(|&id| resolve_string(&records, d2, id as usize).unwrap_or_default())
+                        .collect();
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -582,6 +600,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         ret_class,
                         ret_nullable: pf.ret_nullable,
                         value_param_types,
+                        value_param_names,
                     });
                 }
             }
