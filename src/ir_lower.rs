@@ -3351,6 +3351,19 @@ impl<'a> Lower<'a> {
         }))
     }
 
+    /// Whether `internal` names a `@JvmInline value`/inline class (unboxed representation) — a file
+    /// class in this compilation or a classpath one.
+    fn is_value_class(&self, internal: &str) -> bool {
+        self.syms
+            .class_by_internal(internal)
+            .is_some_and(|cs| cs.value_field.is_some())
+            || self
+                .syms
+                .libraries
+                .resolve_type(internal)
+                .is_some_and(|t| t.value_underlying.is_some())
+    }
+
     /// Whether top-level function `fname` declares a bare type-parameter return (`fun <T> f(): T`).
     fn callee_returns_typaram(&self, fname: &str) -> bool {
         self.afile.decls.iter().any(|&d| {
@@ -11817,7 +11830,24 @@ impl<'a> Lower<'a> {
                         }));
                     }
                 }
-                let target = self.ty_ref(&ty)?;
+                // `x as Foo?` is a plain `checkcast Foo` (a reference target; `null` passes the
+                // checkcast). `ty_ref` rejects any nullable `TypeRef`, so resolve the NON-NULL form —
+                // the JVM cast target is the same class either way; only the null-throwing behaviour
+                // (selected below via `ty.nullable`) differs.
+                let non_null_ty = ast::TypeRef {
+                    nullable: false,
+                    ..ty.clone()
+                };
+                let target = self.ty_ref(&non_null_ty)?;
+                // A nullable VALUE-class cast (`as Str?`) keeps the boxed wrapper; the value-class pass
+                // would unbox a `null` (`Str.unbox-impl()` on null → NPE), so skip rather than miscompile.
+                if ty.nullable
+                    && target
+                        .obj_internal()
+                        .is_some_and(|i| self.is_value_class(i))
+                {
+                    return None;
+                }
                 let type_operand = ty_to_ir(target);
                 // `as T` to a non-null reference type throws on `null` (kotlinc null-checks before the
                 // `checkcast`); `as T?` and primitive casts are a plain `checkcast`/coercion.
