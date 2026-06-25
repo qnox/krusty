@@ -968,7 +968,7 @@ impl<'a> Parser<'a> {
                 if self.at(TokenKind::Lt) {
                     self.parse_type_args(); // type args on the receiver — erased
                 }
-                let nullable = self.eat(TokenKind::Question);
+                let nullable = self.eat_type_nullable();
                 self.expect(TokenKind::Dot, "'.'");
                 let recv = TypeRef {
                     name: first,
@@ -2444,6 +2444,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Eat a `?` nullable-type marker, but NOT the `?` of an `?:` elvis. A nullable type is never
+    /// validly followed by `:`, so a `?` immediately before `:` is the elvis operator (e.g.
+    /// `x as? T ?: y` — the cast type is `T`, then `?: y`), which `parse_type` must leave for the caller.
+    fn eat_type_nullable(&mut self) -> bool {
+        if self.at(TokenKind::Question)
+            && self
+                .t
+                .get(self.i + 1)
+                .is_none_or(|t| t.kind != TokenKind::Colon)
+        {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     fn parse_type(&mut self) -> TypeRef {
         // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
         // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
@@ -2494,7 +2511,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RParen, "')'");
             if self.eat(TokenKind::Arrow) {
                 let ret = self.parse_type();
-                let nullable = self.eat(TokenKind::Question);
+                let nullable = self.eat_type_nullable();
                 TypeRef {
                     name: "<fun>".to_string(),
                     nullable,
@@ -2562,7 +2579,7 @@ impl<'a> Parser<'a> {
                 targs = self.parse_type_args(); // `Box<Int>` → carry `[Int]` (erased in descriptors)
                 None
             };
-            let nullable = self.eat(TokenKind::Question); // `T?`
+            let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
                 name,
                 nullable,
@@ -2605,7 +2622,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen, "')'");
                 self.expect(TokenKind::Arrow, "'->'");
                 let ret = self.parse_type();
-                let fnull = self.eat(TokenKind::Question);
+                let fnull = self.eat_type_nullable();
                 return TypeRef {
                     name: "<fun>".to_string(),
                     nullable: fnull,
@@ -4031,7 +4048,7 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Ident) && self.text() == "as" {
                 let lspan = self.file.expr_spans[lhs.0 as usize];
                 self.bump(); // 'as'
-                let nullable = self.eat(TokenKind::Question);
+                let nullable = self.eat_type_nullable();
                 let ty = self.parse_type();
                 let end = self.t[self.i.saturating_sub(1)].span;
                 lhs = self.file.add_expr(
