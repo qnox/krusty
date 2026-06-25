@@ -889,6 +889,38 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             // companion methods as instance methods) + a `Companion` field on the outer class.
             if !c.companion_methods.is_empty() {
                 let comp_fq = format!("{internal}$Companion");
+                // The companion's declared supertypes (`companion object : Base, I`): make the synthesized
+                // companion implement its declared INTERFACES so it is genuinely an `I` at runtime. The
+                // base CLASS is left as `kotlin/Any` (as before this change ignored the whole list) — a real
+                // `super(args)` call isn't built in this registration pass; a companion that NEEDS its base
+                // type (e.g. the coroutine `EmptyContinuation`) simply isn't usable as that type yet.
+                // Only FILE interfaces are added, and only when no method needs a BRIDGE: the synthesized
+                // companion isn't run through interface-bridge generation, so a companion method overriding
+                // an interface method with a DIFFERENT erased descriptor (generic/covariant) would
+                // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
+                // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
+                let comp_super = "kotlin/Any".to_string();
+                let mut comp_ifaces = Vec::new();
+                let csig0 = syms.classes.get(&c.name)?;
+                for st in &c.companion_supertypes {
+                    let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
+                    if !is_file_iface {
+                        return None;
+                    }
+                    let iface_internal = class_internal(file, st);
+                    if let Some(isig) = syms.class_by_internal(&iface_internal) {
+                        for (mname, cm) in &csig0.static_methods {
+                            if let Some(im) = isig.methods.get(mname) {
+                                let ip: String = im.params.iter().map(|t| t.descriptor()).collect();
+                                let cp: String = cm.params.iter().map(|t| t.descriptor()).collect();
+                                if ip != cp || im.ret.descriptor() != cm.ret.descriptor() {
+                                    return None; // would need a bridge — skip, never miscompile
+                                }
+                            }
+                        }
+                    }
+                    comp_ifaces.push(iface_internal);
+                }
                 let comp_id = lo.ir.add_class(IrClass {
                     serial_names: Vec::new(),
                     custom_serializer: None,
@@ -909,7 +941,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 
                     is_sealed: false,
                     is_abstract: false,
-                    superclass: "kotlin/Any".to_string(),
+                    superclass: comp_super,
                     super_args: vec![],
                     enum_entries: vec![],
                     enum_entry_subclass: vec![],
@@ -917,7 +949,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     prop_ref: None,
                     func_ref: None,
                     bridges: vec![],
-                    interfaces: vec![],
+                    interfaces: comp_ifaces,
                     is_object: false,
                     ctor_param_checks: vec![],
                     is_companion: true,

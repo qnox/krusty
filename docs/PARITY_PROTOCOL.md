@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1773 OK / 0 FAIL** (scanned 7351, Phase 460).
+  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 461).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 461 — `companion object` with a declared supertype implements its interfaces (gate 1773 → 1777,
+  +4, FAIL=0).** The parser DISCARDED a companion's supertype list (parser.rs "tolerate and ignore") and
+  the synthesized `C$Companion` was hardcoded to extend `kotlin/Any` implementing nothing — so a
+  `companion object : I` was not actually an `I` at runtime. `parse_companion` now captures the companion's
+  base/super-args/interfaces (new `ClassDecl.companion_base`/`companion_base_args`/`companion_supertypes`),
+  and the companion `IrClass` implements its declared interfaces. A companion with a base CLASS
+  (`companion object : Base()`) still needs a `super(args)` call the registration pass doesn't build (and a
+  default-param base ctor like `EmptyContinuation()` needs default-fill) — that shape bails (skip), never
+  miscompiled. Next: companion-as-value (the companion modeled as a typed object) + companion-extends-class
+  unblock the coroutine `EmptyContinuation` completion (~123 files) — see [[coroutine-intrinsics-plan]].
+  TDD: tests/companion_supertype_e2e.rs.
 
 - **Phase 460 — coroutine-intrinsic registry: `COROUTINE_SUSPENDED` / `suspendCoroutineUninterceptedOrReturn`
   / `startCoroutine` resolve + lower (foundation; gate 1773, box-OK flat, FAIL=0).** These are `@InlineOnly`
