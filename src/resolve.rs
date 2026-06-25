@@ -6352,20 +6352,23 @@ impl<'a> Checker<'a> {
                                 fi.call_sig.required < fi.callable.params.len()
                                     && !fi.call_sig.param_names.is_empty()
                             });
-                    // A CLASSPATH instance member whose `@Metadata` records parameter names
-                    // (`g.greet(b = …, a = …)` against a method from a jar/dependency module).
+                    // A CLASSPATH instance MEMBER or EXTENSION whose `@Metadata` records parameter names
+                    // (`g.greet(b = …, a = …)` / `"s".tag(b = …, a = …)` against a jar/dependency function).
+                    // An extension receiver may be any type (`String`/primitive), not only `Ty::Obj`.
                     module_member
-                        || (matches!(rt, Ty::Obj(_, _))
-                            && self
-                                .syms
-                                .libraries
-                                .functions(name, Some(rt))
-                                .overloads
-                                .iter()
-                                .any(|o| {
-                                    o.kind == crate::libraries::FnKind::Member
-                                        && !o.call_sig.param_names.is_empty()
-                                }))
+                        || self
+                            .syms
+                            .libraries
+                            .functions(name, Some(rt))
+                            .overloads
+                            .iter()
+                            .any(|o| {
+                                matches!(
+                                    o.kind,
+                                    crate::libraries::FnKind::Member
+                                        | crate::libraries::FnKind::Extension
+                                ) && !o.call_sig.param_names.is_empty()
+                            })
                 }
                 _ => false,
             };
@@ -7117,6 +7120,47 @@ impl<'a> Checker<'a> {
                     .cloned()
                     .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                     .unwrap_or_default();
+                // NAMED arguments to a classpath EXTENSION (`"s".tag(count = …, name = …)`): the
+                // `@Metadata` names are the LOGICAL value parameters (the receiver is a separate
+                // `receiver_type`, not a label), so reorder the labelled arguments into parameter order
+                // before resolving — source-order type matching would otherwise fail to pair them.
+                if let Some(names) = self
+                    .file
+                    .call_arg_names
+                    .get(&call.0)
+                    .cloned()
+                    .filter(|ns| ns.iter().any(Option::is_some))
+                {
+                    let sets: Vec<Vec<String>> = self
+                        .syms
+                        .libraries
+                        .functions(&name, Some(rt))
+                        .overloads
+                        .into_iter()
+                        .filter(|o| {
+                            o.kind == crate::libraries::FnKind::Extension
+                                && !o.call_sig.param_names.is_empty()
+                        })
+                        .map(|o| o.call_sig.param_names)
+                        .collect();
+                    if let [pn] = sets.as_slice() {
+                        if let Ok(slots) = map_call_args(args, Some(&names), pn, pn.len(), &[]) {
+                            if let Some(sel) = slots.into_iter().collect::<Option<Vec<ExprId>>>() {
+                                let tys: Vec<Ty> =
+                                    sel.iter().map(|a| self.expr_types[a.0 as usize]).collect();
+                                if let Some(c) = self.syms.libraries.resolve_callable(
+                                    &name,
+                                    Some(rt),
+                                    &tys,
+                                    &call_targs,
+                                ) {
+                                    self.ext_calls.insert(call, (c.owner, c.name, c.descriptor));
+                                    return c.ret;
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(c) =
                     self.syms
                         .libraries

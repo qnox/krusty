@@ -5862,10 +5862,10 @@ impl<'a> Lower<'a> {
         self.reorder_by_param_names(call, args, param_names)
     }
 
-    /// Reorder a NAMED-argument call to a CLASSPATH instance MEMBER (`g.greet(b = …, a = …)`) into
-    /// declared-parameter order, from the member's `@Metadata` names (decoded into a single
-    /// `FnKind::Member` overload's `CallSig.param_names`). `rt` is the receiver type. `None` when not a
-    /// uniquely-resolvable classpath named member call (caller then leaves the args untouched).
+    /// Reorder a NAMED-argument call to a CLASSPATH instance MEMBER or EXTENSION (`g.greet(b = …, a = …)`
+    /// / `"s".tag(b = …, a = …)`) into declared-parameter order, from the callee's `@Metadata` names
+    /// (a single `Member`/`Extension` overload's `CallSig.param_names` — the LOGICAL params, receiver
+    /// excluded). `rt` is the receiver type. `None` when not a uniquely-resolvable classpath named call.
     fn reorder_classpath_named_member_args(
         &self,
         call: AstExprId,
@@ -5880,7 +5880,10 @@ impl<'a> Lower<'a> {
             .overloads
             .into_iter()
             .filter(|o| {
-                o.kind == crate::libraries::FnKind::Member && !o.call_sig.param_names.is_empty()
+                matches!(
+                    o.kind,
+                    crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
+                ) && !o.call_sig.param_names.is_empty()
             })
             .map(|o| o.call_sig.param_names)
             .collect();

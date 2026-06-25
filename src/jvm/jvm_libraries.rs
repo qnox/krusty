@@ -1087,13 +1087,28 @@ impl SymbolSource for JvmLibraries {
                     } else {
                         ret
                     };
+                    // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution. An
+                    // extension's `callable.params` PREPENDS the receiver, but `CallSig.param_names` is the
+                    // LOGICAL list (receiver excluded) — `metadata_param_names` returns exactly that (it
+                    // aligns past the receiver via the metadata `has_recv` offset), so the names are
+                    // `c.params.len() - 1` long. Defaults aren't recovered (named call supplies all).
+                    let call_sig = match self.cp.metadata_param_names(&c.owner, &c.name, &params) {
+                        Some(names) if names.len() + 1 == params.len() => {
+                            crate::libraries::CallSig {
+                                required: names.len(),
+                                param_names: names,
+                                ..Default::default()
+                            }
+                        }
+                        _ => crate::libraries::CallSig::default(),
+                    };
                     overloads.push(FunctionInfo {
                         kind: FnKind::Extension,
                         receiver: Some(receiver),
                         ret_nullable,
                         public,
                         receiver_rank: rank as u32,
-                        call_sig: crate::libraries::CallSig::default(),
+                        call_sig,
                         flags: FnFlags {
                             inline,
                             inline_only: inline && !c.public,
