@@ -663,6 +663,17 @@ erased-`Any` argument, GATED on a non-`Any` bound so an unbounded explicit `Box<
 mirrors the gate. **Corpus starProjections greens → 9/69; main box gate 1760 → 1761 (+1, 0 FAIL).** Test:
 `star_projection_polymorphic_serializer_in_krusty`. GREEN (9): + starProjections.
 
+#### Update (2026-06-25) — sealed-typed fields → main gate 1761 → 1763
+
+A field whose declared type is a sealed `@Serializable` base (`W(val b: Base)`) now derives `Base.serializer()`
+(a runtime `SealedClassSerializer`, via CrossFile invokestatic) as its element serializer — a sealed class has
+NO `$serializer`, so `element_serializer_expr` previously returned `None` → a null element serializer → NPE.
+The check is gated on the generated `serializer()` accessor existing (the class IS `@Serializable`), so a
+plain non-serializable sealed type isn't mis-called (reviewer-caught). `can_derive_element_serializer` mirrors
+it. **Main box gate 1761 → 1763 (+2, 0 FAIL)** — sealed-typed-field classes in the box corpus now serialize.
+Test: `sealed_typed_field_serializer_in_krusty`. No NEW ser-corpus green (starProjectionsSealed etc. need
+GENERIC sealed + star combined; `Class.serializer()` here is the no-arg non-generic-sealed form).
+
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,
 compiled AND run by krusty alone (commits 44712a6 + ab67425, test `serialization_krusty_only_e2e`). This

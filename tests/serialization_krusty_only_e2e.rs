@@ -331,6 +331,33 @@ fun box(): String {
 }
 
 #[test]
+fn sealed_typed_field_serializer_in_krusty() {
+    // A field whose type is a sealed `@Serializable` base uses `Base.serializer()` (a runtime
+    // `SealedClassSerializer`) as its element serializer — `W(val b: Base)` with `b = A(1)` encodes
+    // `{"b":{"type":"A","x":1}}` (a sealed class has no `$serializer`, so this was previously a null
+    // element serializer → NPE).
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+@Serializable sealed class Base
+@Serializable class A(val x: Int) : Base()
+@Serializable class W(val b: Base)
+fun box(): String {
+    val s = Json.encodeToString(W.serializer(), W(A(1)))
+    return if (s == "{\"b\":{\"type\":\"A\",\"x\":1}}") "OK" else s
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerSealedField") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "sealed-typed field serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty sealed-typed field serializer OK");
+}
+
+#[test]
 fn star_projection_polymorphic_serializer_in_krusty() {
     // A `Box<*>` field (star projection on `Box<T : E>`) derives `Box.serializer(PolymorphicSerializer(
     // E::class))` for its element — the descriptor of the `*` argument is `kotlinx.serialization.

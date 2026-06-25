@@ -354,6 +354,28 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &IrType) -> Option<ExprId> {
     else {
         return None;
     };
+    // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
+    // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
+    // generated `serializer()` accessor (i.e. the class IS `@Serializable`) — else a plain sealed type
+    // would call a non-existent method.
+    if ir.classes.iter().any(|c| {
+        &c.fq_name == fq_name
+            && c.is_sealed
+            && c.methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "serializer")
+    }) {
+        return Some(ir.add_expr(IrExpr::Call {
+            callee: Callee::CrossFile {
+                facade: fq_name.clone(),
+                name: "serializer".to_string(),
+                params: vec![],
+                ret: kserializer_of(class_ty(fq_name)),
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        }));
+    }
     let ser_fq = serializer_fq(fq_name);
     if let Some(sid) = ir.classes.iter().position(|c| c.fq_name == ser_fq) {
         // The declared type-parameter count comes from the BASE class (the `$serializer` is erased).
@@ -469,6 +491,17 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &IrType) -> bool {
     else {
         return false;
     };
+    // A sealed `@Serializable` class uses `Class.serializer()` (a runtime SealedClassSerializer) — only
+    // when the generated `serializer()` accessor exists (the class IS `@Serializable`).
+    if ir.classes.iter().any(|c| {
+        &c.fq_name == fq_name
+            && c.is_sealed
+            && c.methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "serializer")
+    }) {
+        return true;
+    }
     if ir
         .classes
         .iter()
