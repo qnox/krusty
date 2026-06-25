@@ -457,7 +457,10 @@ fn parse_type_nullable(body: &[u8]) -> bool {
 /// descriptor/`Signature` erase this to `java/util/List`). Only entries whose return type is a class are
 /// included. The `d2` string is the qualified name with `/` separators already.
 pub fn package_function_return_types(ci: &ClassInfo) -> std::collections::HashMap<String, String> {
-    package_function_types(ci, |f| f.ret_class)
+    package_functions(ci)
+        .into_iter()
+        .filter_map(|f| Some((f.kotlin_name, f.ret_class?)))
+        .collect()
 }
 
 /// Per top-level function name in a `Package`'s `@Metadata`: ALL the *Kotlin* class names of its
@@ -469,37 +472,11 @@ pub fn package_function_receivers(
     ci: &ClassInfo,
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, pkg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: pkg_body, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                if let Some(f) = parse_function(fbody) {
-                    if let (Some(name), Some(id)) = (d2.get(f.name_id as usize), f.recv_class) {
-                        if let Some(cn) = resolve_class_name(&records, d2, id as usize) {
-                            let v = out.entry(name.clone()).or_default();
-                            if !v.contains(&cn) {
-                                v.push(cn);
-                            }
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
+    for f in package_functions(ci) {
+        if let Some(cn) = f.receiver_class {
+            let v = out.entry(f.kotlin_name).or_default();
+            if !v.contains(&cn) {
+                v.push(cn);
             }
         }
     }
@@ -525,6 +502,10 @@ pub struct MetaFn {
     pub receiver_class: Option<String>,
     /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
     pub ret_class: Option<String>,
+    /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable`. The JVM descriptor/`Signature`
+    /// erase this; only `@Metadata` carries it. Drives the elvis null-check for a nullable-returning scope
+    /// fn (`takeIf`/`takeUnless` return `T?`).
+    pub ret_nullable: bool,
     /// Each SOURCE value parameter's Kotlin type internal name (`kotlin/Function0` for `remember`'s
     /// `calculation`); `None` for a type-parameter/unresolved param. The LENGTH is the SOURCE arity — it
     /// EXCLUDES the synthetic params the JVM descriptor appends (`suspend` Continuation, `@Composable`
@@ -602,6 +583,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         is_suspend: pf.is_suspend,
                         receiver_class,
                         ret_class,
+                        ret_nullable: pf.ret_nullable,
                         value_param_types,
                     });
                 }
@@ -787,79 +769,13 @@ pub fn package_lambda_return_overloads(
 /// overloaded, so this is exact for them).
 pub fn package_function_return_nullable(ci: &ClassInfo) -> std::collections::HashMap<String, bool> {
     let mut out = std::collections::HashMap::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, pkg_body) = split_d1(&bytes);
-    let _ = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: pkg_body, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                if let Some(f) = parse_function(fbody) {
-                    if let Some(name) = d2.get(f.name_id as usize) {
-                        let e = out.entry(name.clone()).or_insert(false);
-                        *e = *e || f.ret_nullable;
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
+    for f in package_functions(ci) {
+        let e = out.entry(f.kotlin_name).or_insert(false);
+        *e = *e || f.ret_nullable;
     }
     out
 }
 
-/// Walk the `Package`'s functions, mapping each Kotlin name to the resolved class name of its return
-/// type (`mutableListOf` → `kotlin/collections/MutableList`).
-fn package_function_types(
-    ci: &ClassInfo,
-    pick: impl Fn(&ParsedFunction) -> Option<u64>,
-) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, pkg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: pkg_body, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(fbody) = pb.bytes(len as usize) else {
-                    break;
-                };
-                if let Some(f) = parse_function(fbody) {
-                    if let (Some(name), Some(id)) = (d2.get(f.name_id as usize), pick(&f)) {
-                        if let Some(cn) = resolve_class_name(&records, d2, id as usize) {
-                            out.insert(name.clone(), cn);
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
 
 // === `.kotlin_builtins` supertype reader ==========================================================
 // A `.kotlin_builtins` resource (e.g. `kotlin/collections/collections.kotlin_builtins`) stores a
