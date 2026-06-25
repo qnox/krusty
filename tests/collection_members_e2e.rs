@@ -1,0 +1,38 @@
+//! Member + extension resolution on Kotlin MAPPED collection types (`kotlin.collections.List`/`Set`/…),
+//! which have no own `.class` — their *actual* platform type is a JVM interface (`java/util/List`), the
+//! `expect`/`actual` + `JavaToKotlinClassMap` device kotlinc uses. `resolve_type` now falls back to that
+//! mapped type (generic `to_jvm_internal`), so `for (x in list)`, `list[i]`, `list.size`,
+//! `list.iterator()`, and stdlib extensions (`forEach`/`contains`/`indexOf`) resolve. The iterator
+//! protocol is byte-identical to kotlinc (`java/util/List.iterator()` / `Iterator.hasNext()`/`next()`).
+//! Round-tripped on the JVM.
+
+mod common;
+
+fn run(src: &str) -> Option<String> {
+    let jh = common::java_home()?;
+    let sl = common::stdlib_jar()?;
+    let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
+    common::compile_and_run_box(src, "Main", &[sl], Some(&jdk))
+}
+
+#[test]
+fn for_over_list() {
+    const SRC: &str =
+        "fun box(): String { var s = \"\"; for (x in listOf(\"O\", \"K\")) s += x; return s }\n";
+    assert_eq!(run(SRC).expect("for-over-List compiles + runs"), "OK");
+}
+
+#[test]
+fn list_size_and_index() {
+    const SRC: &str = "fun box(): String { val l = listOf(\"O\", \"K\"); return if (l.size == 2) l[0] + l[1] else \"no\" }\n";
+    assert_eq!(run(SRC).expect("list size+index compiles + runs"), "OK");
+}
+
+#[test]
+fn list_extension_members() {
+    const SRC: &str = "fun box(): String {\n\
+    val l = listOf(\"O\", \"K\")\n\
+    return if (!l.isEmpty() && l.contains(\"O\") && l.indexOf(\"K\") == 1) \"OK\" else \"no\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("list members compile + run"), "OK");
+}

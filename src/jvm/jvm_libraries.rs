@@ -782,7 +782,22 @@ impl SymbolSource for JvmLibraries {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        let ci = self.cp.find(internal)?;
+        // A Kotlin MAPPED type (`kotlin.collections.List`, `kotlin.CharSequence`, …) has no own JVM
+        // `.class` — its *actual* platform declaration IS a JVM type (`java/util/List`), exactly the
+        // `expect`/`actual` + `JavaToKotlinClassMap` device kotlinc uses. When the classpath has no class
+        // for the Kotlin name, resolve members against that mapped (actual) type — the SAME generic
+        // mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
+        // byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
+        let ci = match self.cp.find(internal) {
+            Some(ci) => ci,
+            None => {
+                let mapped = super::jvm_class_map::to_jvm_internal(internal);
+                if mapped == internal {
+                    return None;
+                }
+                self.cp.find(mapped)?
+            }
+        };
         let mut constructors = Vec::new();
         let mut members = Vec::new();
         let mut companion = Vec::new();
