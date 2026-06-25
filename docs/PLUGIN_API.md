@@ -538,9 +538,24 @@ name (mirrors the library-getter rule). Example: `descriptor.elementDescriptors`
 useful (ANY classpath extension property, e.g. `List.indices`): **main box gate 1746 → 1748 (+2), 0 FAIL**.
 Test: `serialization_krusty_only_e2e::descriptor_element_names_extension_property_in_krusty`. This unblocks
 the FRONT END of the `elementDescriptors` corpus cluster (classSerializerAsObject, multipleGenericsPolymorphic,
-starProjections — starProjections now compiles + runs); each still needs a further feature (List `[]`
-indexing + generic collection element-type recovery; polymorphic type-parameter serializers), so no NEW
-serialization-corpus green yet — corpus stays 6/69.
+starProjections — starProjections now compiles + runs); each still needs a further feature (generic/
+polymorphic type-parameter serializers), so no NEW serialization-corpus green from this change alone.
+
+#### Correction (2026-06-25) — survey was UNDERCOUNTING: real corpus is 7/69, not 6/69
+
+`ser-survey.sh` omitted `$JAVA_HOME/lib/modules` from the compile classpath. The Kotlin builtin collection
+interfaces (`kotlin/collections/List`/`Map`/…) are SYNTHETIC — no `.class` in any jar — so their members
+resolve only via the mapped `java/util/*` types (`to_jvm_internal` already maps `kotlin/collections/List` →
+`java/util/List`), which requires the JDK modules on the classpath; likewise any file referencing a `java.*`
+type. Without the modules, krusty's front end couldn't resolve those, so the survey reported FALSE failures
+(like the earlier facade-capitalization bug). With `$JAVA_HOME/lib/modules` added to the survey cp,
+**externalSerialierJava also passes → 7/69** (it needs `java.net.URL`). krusty itself was always correct —
+only the ad-hoc survey was wrong. GREEN (7): constValInSerialName, contextualByDefault,
+customFixedNonSerializableArguments, externalSerialierJava, inlineClasses, polymorphic, serializerFactory.
+The remaining 40 single-file cases fail on deep features: generic/polymorphic type-parameter serializers
+(starProjections/intrinsicsStarProjections — a `Box<T>` field needs a per-type-param `KSerializer` ctor +
+`PolymorphicSerializer`), reflection (`typeOf`, `serializer(typeOf<T>())`, annotation instantiation),
+multi-field value classes, ctor default-args.
 
 #### MILESTONE — full `Json.encodeToString` round-trip compiles+runs ENTIRELY in krusty (no kotlinc)
 `Json.encodeToString(Foo.serializer(), Foo(1,"x"))` → `{"a":1,"b":"x"}` for a `@Serializable class Foo`,

@@ -11,7 +11,9 @@ GLIB="/opt/mise/installs/gradle/9.4.0/gradle-9.4.0/lib"
 CORE="$GLIB/kotlinx-serialization-core-jvm-1.9.0.jar"
 JSON="$GLIB/kotlinx-serialization-json-jvm-1.9.0.jar"
 JH="${JAVA_HOME:-/opt/mise/installs/java/zulu-25.34.17.0}"
-CP="$STDLIB:$KTEST:$CORE:$JSON"
+# JDK modules must be on the compile classpath: the Kotlin builtin collection interfaces
+# (kotlin/collections/List …) are synthetic, so their members resolve via the mapped java/util/* types.
+CP="$STDLIB:$KTEST:$CORE:$JSON:$JH/lib/modules"
 pass=0; fail=0; declare -A reasons
 TMP=$(mktemp -d)
 for f in "$CORPUS"/*.kt; do
