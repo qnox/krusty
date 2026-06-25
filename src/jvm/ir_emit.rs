@@ -216,6 +216,32 @@ fn collapse_locals(slots: &[VerifType]) -> Vec<VerifType> {
     out
 }
 
+/// The constant-pool index for a `const val`'s `ConstantValue` attribute when its initializer is a
+/// compile-time literal; `None` otherwise (then the field is initialized in `<clinit>` as before).
+fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -> Option<u16> {
+    use crate::ir::{IrConst, IrExpr};
+    match ir.expr(init) {
+        IrExpr::Const(c) => Some(match c {
+            IrConst::Boolean(b) => cw.const_int(*b as i32),
+            IrConst::Byte(v) => cw.const_int(*v as i32),
+            IrConst::Short(v) => cw.const_int(*v as i32),
+            IrConst::Int(v) => cw.const_int(*v),
+            IrConst::Char(c) => cw.const_int(*c as i32),
+            IrConst::Long(v) => cw.const_long(*v),
+            IrConst::Float(v) => cw.const_float(*v),
+            IrConst::Double(v) => cw.const_double(*v),
+            IrConst::String(s) => cw.const_string(s),
+            IrConst::Null => return None,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `init` is a `ConstantValue`-eligible literal (mirrors [`const_value_idx`] without interning).
+fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
+    matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
+}
+
 fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
     if ir.statics.is_empty() {
         return;
@@ -231,7 +257,16 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         } else {
             0x001A // PRIVATE | STATIC | FINAL
         };
-        cw.add_field(acc, &s.name, &ir_ty_to_jvm(&s.ty).descriptor());
+        let desc = ir_ty_to_jvm(&s.ty).descriptor();
+        // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
+        // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
+        if s.is_const {
+            if let Some(cv) = const_value_idx(ir, s.init, cw) {
+                cw.add_field_const(acc, &s.name, &desc, cv);
+                continue;
+            }
+        }
+        cw.add_field(acc, &s.name, &desc);
     }
     // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
     // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
@@ -290,11 +325,23 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         loop_stack: Vec::new(),
     };
     let mut code = CodeBuilder::new(0);
+    let mut any_init = false;
     for s in &ir.statics {
+        // A `const val` folded into a `ConstantValue` attribute (literal init) is initialized by the JVM
+        // — kotlinc emits no `<clinit>` store for it, so skip it here too (byte-identical).
+        if s.is_const && const_value_idx_peek(ir, s.init) {
+            continue;
+        }
+        any_init = true;
         e.emit_value(s.init, &mut code);
         let jt = ir_ty_to_jvm(&s.ty);
         let fref = e.cw.fieldref(facade, &s.name, &jt.descriptor());
         code.putstatic(fref, slot_words(jt) as i32);
+    }
+    // When every static is a `ConstantValue`-folded `const val`, there is nothing to initialize —
+    // kotlinc emits NO `<clinit>` at all (not an empty one), so skip it.
+    if !any_init {
+        return;
     }
     code.ret_void();
     code.ensure_locals(e.next_slot);
