@@ -360,17 +360,23 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             args: vec![],
         }));
     }
-    // An ABSTRACT (non-sealed) `@Serializable` class field serializes via open polymorphism — a property
-    // of type `Poly` / `Poly<*>` uses `PolymorphicSerializer(Poly::class)` (descriptor serialName
-    // `kotlinx.serialization.Polymorphic<Poly>`), not the generated `$serializer`. Requires the
-    // `serializer()` accessor (the class IS `@Serializable`).
+    // A field with OPEN-polymorphic dispatch serializes via `PolymorphicSerializer(<type>::class)`
+    // (descriptor serialName `kotlinx.serialization.Polymorphic<T>`), not a generated `$serializer`. Two
+    // cases (both non-sealed; a sealed type took the SealedClassSerializer branch above): (a) an INTERFACE
+    // type (`InterfaceMultiple<*,*>`) — kotlinx's default for an interface property, no `@Serializable`
+    // needed; (b) an ABSTRACT `@Serializable` class (`Poly`/`Poly<*>`) — gated on the generated
+    // `serializer()` accessor so a plain abstract base isn't mis-serialized.
+    // Scope: matches only a FILE-DECLARED class in `ir.classes`. A stdlib collection interface
+    // (`kotlin/collections/List`, …) is NOT an `ir.classes` entry, so it never lands here — it keeps its
+    // builtin/None handling below (a `List` field has no element serializer yet → a clean `null`).
     if ir.classes.iter().any(|c| {
         c.fq_name == fq_name
-            && c.is_abstract
             && !c.is_sealed
-            && c.methods
-                .iter()
-                .any(|&m| ir.functions[m as usize].name == "serializer")
+            && (c.is_interface
+                || (c.is_abstract
+                    && c.methods
+                        .iter()
+                        .any(|&m| ir.functions[m as usize].name == "serializer")))
     }) {
         return Some(build_polymorphic_serializer(ir, fq_name));
     }
@@ -541,14 +547,16 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     }) {
         return true;
     }
-    // An abstract `@Serializable` class field → `PolymorphicSerializer` (mirrors `element_serializer_expr`).
+    // An interface / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
+    // `element_serializer_expr`).
     if ir.classes.iter().any(|c| {
         c.fq_name == fq_name
-            && c.is_abstract
             && !c.is_sealed
-            && c.methods
-                .iter()
-                .any(|&m| ir.functions[m as usize].name == "serializer")
+            && (c.is_interface
+                || (c.is_abstract
+                    && c.methods
+                        .iter()
+                        .any(|&m| ir.functions[m as usize].name == "serializer")))
     }) {
         return true;
     }
