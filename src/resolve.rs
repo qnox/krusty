@@ -2493,6 +2493,27 @@ fn infer_lit_ty_p(
                 _ => Ty::Error,
             }
         }
+        // A top-level function reference `::foo` initializing a property (`val x = ::Test`). Its type is
+        // the function type `(params) -> ret` of the referenced function. Only a receiver-less,
+        // UNAMBIGUOUS (single top-level overload) classpath function resolves here through the federated
+        // source — enough for a property's signature; the full checker types same-module/local refs.
+        Expr::CallableRef {
+            receiver: None,
+            name,
+        } if name != "class" => {
+            let tl: Vec<_> = src
+                .functions(name, None)
+                .overloads
+                .into_iter()
+                .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                .collect();
+            match tl.as_slice() {
+                [o] if o.callable.vararg_elem.is_none() => {
+                    Ty::fun(o.callable.params.clone(), o.callable.ret)
+                }
+                _ => Ty::Error,
+            }
+        }
         _ => Ty::Error,
     }
 }
