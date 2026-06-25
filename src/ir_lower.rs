@@ -41,6 +41,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         fun_ids: HashMap::new(),
         ext_fun_ids: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
+        companion_consts: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
         classes: HashMap::new(),
         statics: HashMap::new(),
@@ -763,10 +764,35 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     super_internal,
                 },
             );
+            // A `companion object`'s `const val`s become `public static final` + `ConstantValue` fields
+            // on the OUTER class (kotlinc's layout) — emitted as owned statics here, read as `getstatic
+            // C.X`. (`companion_props_lowerable` guarantees they are all plain const at the gate.)
+            for cp in &c.companion_props {
+                if !cp.is_const {
+                    continue;
+                }
+                let cty = body_prop_ty(file, info, cp);
+                lo.cur_class = None;
+                lo.scope.clear();
+                lo.next_value = 0;
+                if let (Some(initx), false) = (cp.init, cty == Ty::Error) {
+                    if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
+                        lo.ir.statics.push(crate::ir::IrStatic {
+                            name: cp.name.clone(),
+                            ty: ty_to_ir(cty),
+                            init,
+                            is_var: false,
+                            is_const: true,
+                            owner: Some(internal.clone()),
+                        });
+                        lo.companion_consts
+                            .insert((internal.clone(), cp.name.clone()), cty);
+                    }
+                }
+            }
             // `companion object` with methods → a synthesized `C$Companion` class (private ctor, the
             // companion methods as instance methods) + a `Companion` field on the outer class.
-            // Companion properties aren't modeled yet (their backing fields live on the outer class).
-            if !c.companion_methods.is_empty() && c.companion_props.is_empty() {
+            if !c.companion_methods.is_empty() {
                 let comp_fq = format!("{internal}$Companion");
                 let comp_id = lo.ir.add_class(IrClass {
                     serial_names: Vec::new(),
@@ -2237,6 +2263,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         init,
                         is_var: p.is_var,
                         is_const: p.is_const,
+                        owner: None,
                     });
                 }
             }
@@ -2363,6 +2390,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
 /// A class is in the IR subset if: a primary constructor of only `val`/`var` properties, no base
 /// class/interfaces, no body properties, no companion/secondary/init, and methods (expr- or
 /// block-bodied) without an extension receiver.
+/// Whether a class's `companion object` properties are all lowerable: each a `const val` with a plain
+/// compile-time initializer (no getter/setter/delegate). Such a const becomes a `public static final` +
+/// `ConstantValue` field on the OUTER class (kotlinc's layout). An empty list is trivially lowerable.
+fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
+    c.companion_props.iter().all(|p| {
+        p.is_const
+            && !p.is_var
+            && p.init.is_some()
+            && p.getter.is_none()
+            && p.setter.is_none()
+            && p.delegate.is_none()
+    })
+}
+
 fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // A `data class` is structurally a simple class; its equals/hashCode/toString/componentN are
     // synthesized as ordinary IR methods (see `synth_data_members`). `value`/inline classes need
@@ -2375,9 +2416,11 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
     // concrete methods normally. A `@JvmInline value class` is structurally a single-field class; its
     // unboxed-support members are synthesized (see `synth_value_members`). Use-site unboxing isn't done
     // yet, so the resolver still rejects value-class *files* — admission here is for member synthesis.
-    // A `companion object` with only methods is supported (synthesized `C$Companion` class); a
-    // companion with properties (`val`/`const val`) is not yet.
-    !c.is_object() && !c.is_enum() && !c.is_interface() && c.companion_props.is_empty()
+    // A `companion object` with only methods is supported (synthesized `C$Companion` class). A companion
+    // `const val` (compile-time literal) is supported too — emitted as a `public static final` +
+    // `ConstantValue` field on the OUTER class (kotlinc's layout). A NON-const companion property (needs
+    // the `access$getX$cp` accessor + `Companion.getX()`) is not yet modeled.
+    !c.is_object() && !c.is_enum() && !c.is_interface() && companion_props_lowerable(c)
         // Secondary constructors: in a class WITH a primary ctor each must delegate to it (`this(…)`);
         // a class with NO primary ctor admits `this(…)` (to a sibling), `super(…)`, or implicit
         // delegation — each becomes its own `<init>` (see the secondary-ctor lowering).
@@ -2659,6 +2702,9 @@ pub(crate) struct Lower<'a> {
     /// `(receiver descriptor, name)` → the synthesized static getter (`getName(Recv): T`) / setter
     /// (`setName(Recv, T)`) FunId.
     ext_prop_get_ids: HashMap<(String, String), u32>,
+    /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
+    /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
+    companion_consts: HashMap<(String, String), Ty>,
     ext_prop_set_ids: HashMap<(String, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
@@ -2960,6 +3006,7 @@ impl<'a> Lower<'a> {
         let idx_d = self.ir.statics.len() as u32;
         self.ir.statics.push(crate::ir::IrStatic {
             name: format!("{}$delegate", p.name),
+            owner: None,
             ty: delegate_ir,
             init: init_d,
             is_var: false,
@@ -2985,6 +3032,7 @@ impl<'a> Lower<'a> {
         let idx_p = self.ir.statics.len() as u32;
         self.ir.statics.push(crate::ir::IrStatic {
             name: format!("{}$kprop", p.name),
+            owner: None,
             ty: kprop_ty,
             init: propref,
             is_var: false,
@@ -10540,6 +10588,16 @@ impl<'a> Lower<'a> {
                                 index: idx as u32,
                             }));
                         }
+                    }
+                    // `C.X` where `X` is a companion `const val` → `getstatic C.X` (the field lives on the
+                    // outer class C; the JVM initializes it from its `ConstantValue` attribute).
+                    if let Some(cty) = self.companion_consts.get(&(internal.clone(), name.clone()))
+                    {
+                        return Some(self.ir.add_expr(IrExpr::ExternalStaticField {
+                            owner: internal,
+                            name: name.clone(),
+                            descriptor: cty.descriptor(),
+                        }));
                     }
                 }
                 let rt = self.recv_ty(receiver);

@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 450).
+  repo's `compiler/testData/codegen/box`). Current gate: **1750 OK / 0 FAIL** (scanned 7351, Phase 451).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase P74 — companion-object `const val` (gate 1750 → 1750, +0 corpus, FAIL=0).** A `companion
+  object` with ANY property previously bailed the whole file. Now a `const val` (compile-time literal) in
+  a companion is emitted as a `public static final` + `ConstantValue` field on the OUTER class — kotlinc's
+  layout, reusing P73's `ConstantValue` infra — and a `C.X` read lowers to `getstatic C.X`. Pieces:
+  `IrStatic` gains `owner: Option<String>` (None=facade), the lowerability gate accepts a companion whose
+  props are all plain `const val` (`companion_props_lowerable`), ir_lower emits each as an owned static +
+  records `companion_consts[(C, X)]` so reads resolve, the facade `emit_statics` skips owned statics, and
+  `emit_class` emits them on their class. A companion with BOTH const vals AND methods works (consts on C,
+  methods on `C$Companion`). Sound boundaries: a NON-const companion property (needs the `access$getX$cp`
+  accessor + `Companion.getX()`) still skips; a const-only companion does not yet emit the (empty)
+  `C$Companion` + `Companion` field kotlinc also produces, and reads are `getstatic` not inlined `ldc` —
+  byte-parity follow-ups, gate-correct today. TDD: tests/companion_const_e2e.rs (read, int+string,
+  const+method).
 
 - **Phase P73 — `const val` byte-parity: `ConstantValue` attribute + no `<clinit>` (gate 1750 → 1750,
   +0 corpus, byte-equality FIX, FAIL=0).** krusty was NOT byte-equal to kotlinc for ANY `const val`: it
