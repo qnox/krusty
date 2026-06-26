@@ -206,6 +206,34 @@ fun box(): String {
 }
 
 #[test]
+fn reified_decode_via_wildcard_import_types_target_in_krusty() {
+    // `Json.decodeFromString<Dto>(s)` where `Json` arrives via a WILDCARD import
+    // (`import kotlinx.serialization.json.*`) resolves through the general member-call path,
+    // not the ClassName-static path. The reified `<Dto>` must still type the result as `Dto`
+    // (not the erased `Any`) so a member read (`d.n`) on the decoded value resolves — the corpus
+    // files all use wildcard imports, so this is the form that matters for conformance.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+@Serializable
+class Dto(val n: Int, val s: String)
+fun box(): String {
+    val j = Json.encodeToString(Dto(7, "z"))
+    val d = Json.decodeFromString<Dto>(j)
+    return d.s + d.n.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerReifiedWildcard") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "z7",
+        "wildcard-import reified decode wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty wildcard-import reified decode OK");
+}
+
+#[test]
 fn custom_serializer_with_clause_entirely_in_krusty() {
     // `@Serializable(with = X::class)`: `serializer()` returns an instance of the explicit serializer X
     // (`new X(C::class)`) instead of a generated `$serializer`, so its descriptor carries X's SerialKind.

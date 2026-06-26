@@ -7133,6 +7133,13 @@ impl<'a> Checker<'a> {
                             .libraries
                             .member_return(rt, &name, &arg_tys)
                             .unwrap_or(m.ret);
+                        // A reified member whose return erased to `Any` (`Json.decodeFromString<Dto>(s): T`)
+                        // recovers the explicit type argument (`Dto`) — mirrors the companion-static arm.
+                        if ret == Ty::obj("kotlin/Any") {
+                            if let Some(t) = self.reified_type_arg(call) {
+                                return t;
+                            }
+                        }
                         return ret;
                     }
                 }
