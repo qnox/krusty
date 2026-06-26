@@ -488,6 +488,24 @@ impl IrField {
     }
 }
 
+/// One primary-constructor parameter of an [`IrClass`], in declaration order. Folds what were the
+/// index-parallel `ctor_args` tuple and `ctor_param_checks` vec, so a parameter's type / `is_field`
+/// flag / null-check name can't desync.
+#[derive(Clone, Debug)]
+pub struct IrCtorArg {
+    /// The parameter type (carries declared nullability — a nullable value-class param erases like its
+    /// field).
+    pub ty: Ty,
+    /// `true` ⇒ a `val`/`var` property whose arg is stored to a field (the property fields are
+    /// `fields[0..]` in the same relative order); `false` ⇒ a plain parameter, an argument only,
+    /// available as a local in `<init>` for property initializers / `init` blocks.
+    pub is_field: bool,
+    /// `Some(name)` when the backend should guard this parameter with a non-null assertion
+    /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a
+    /// primitive, nullable, or class-type-parameter param, and for the synthetic inner `this$0`.
+    pub check: Option<String>,
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -531,12 +549,10 @@ pub struct IrClass {
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
     pub ctor_param_count: u32,
-    /// ALL primary-constructor parameters in declaration order: `(type, is_field)`. `is_field` ⇒ a
-    /// `val`/`var` property whose arg is stored to a field (the property fields are `fields[0..]` in the
-    /// same relative order); `!is_field` ⇒ a plain parameter, an argument only, available as a local in
-    /// `<init>` for property initializers / `init` blocks. Empty for synthesized/enum/object classes
-    /// (then the constructor arity is `ctor_param_count`).
-    pub ctor_args: Vec<(Ty, bool)>,
+    /// ALL primary-constructor parameters in declaration order (each an [`IrCtorArg`] with type,
+    /// `is_field`, and optional null-check name). Empty for synthesized/enum/object classes (then the
+    /// constructor arity is `ctor_param_count`).
+    pub ctor_args: Vec<IrCtorArg>,
     /// Constructor body run after `super(…)`: an effect `Block` lowered with `this` = value 0 and the
     /// constructor parameters as values `1..=N`. When [`explicit_param_stores`] is set it BEGINS with the
     /// `val`/`var` param→field stores (the desugared primary-constructor sugar); it also carries body-
@@ -604,10 +620,6 @@ pub struct IrClass {
     /// `object Foo` — a singleton: a `public static final Foo INSTANCE` field, a private no-arg
     /// constructor, and a `<clinit>` that constructs the instance.
     pub is_object: bool,
-    /// Per-primary-constructor-parameter `Some(name)` when the backend should guard it with a non-null
-    /// assertion (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param.
-    /// Parallel to the first `ctor_param_count` `fields`. Empty for synthesized/enum/object classes.
-    pub ctor_param_checks: Vec<Option<String>>,
     /// `true` for a synthesized `C$Companion` class: a private no-arg constructor and no own singleton
     /// field (the `Companion` instance is held by the outer class).
     pub is_companion: bool,

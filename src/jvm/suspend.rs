@@ -27,8 +27,8 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 use crate::ir::{
-    for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrFile, IrFunction,
-    IrTypeOp,
+    for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile,
+    IrFunction, IrTypeOp,
 };
 use crate::types::Ty;
 use std::collections::HashSet;
@@ -1692,7 +1692,7 @@ fn build_continuation_class(
     // parameter, then the completion `Continuation`. Store the receiver to `this$0` and each captured
     // param to its `L$i` field, then `super(completion)`. A top-level fn with no live params is just
     // `<init>(Continuation)`.
-    let mut ctor_args: Vec<(Ty, bool)> = Vec::new();
+    let mut ctor_args: Vec<IrCtorArg> = Vec::new();
     let mut ctor_stores: Vec<ExprId> = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
@@ -1710,7 +1710,11 @@ fn build_continuation_class(
             index: recv_field_idx,
             value: recv_v,
         }));
-        ctor_args.push((recv_ty, false));
+        ctor_args.push(IrCtorArg {
+            ty: recv_ty,
+            is_field: false,
+            check: None,
+        });
         arg_idx += 1;
     }
     for (v, ty) in param_caps {
@@ -1723,10 +1727,18 @@ fn build_continuation_class(
             index: field,
             value: val,
         }));
-        ctor_args.push((ty.clone(), false));
+        ctor_args.push(IrCtorArg {
+            ty: ty.clone(),
+            is_field: false,
+            check: None,
+        });
         arg_idx += 1;
     }
-    ctor_args.push((continuation_ty(), false));
+    ctor_args.push(IrCtorArg {
+        ty: continuation_ty(),
+        is_field: false,
+        check: None,
+    });
     let super_completion_idx = arg_idx;
     let init_body = (!ctor_stores.is_empty()).then(|| {
         ir.add_expr(IrExpr::Block {
@@ -1766,7 +1778,6 @@ fn build_continuation_class(
         bridges: vec![],
         interfaces: vec![],
         is_object: false,
-        ctor_param_checks: vec![],
         is_companion: false,
         companion_class: None,
         secondary_ctors: vec![],

@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrEnumEntry, IrExpr, IrField, IrFile,
-    IrFunction, IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField,
+    IrFile, IrFunction, IrTypeOp,
 };
 use crate::resolve::{CtorDefaultValue, SymbolTable, TypeInfo};
 use crate::types::Ty;
@@ -238,27 +238,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
             }
             let ctor_param_count = ctor_fields.len() as u32;
-            // Non-null reference constructor parameters get an `Intrinsics.checkNotNullParameter` guard
-            // (kotlinc does); primitives, nullable params, and class type-parameters are skipped.
-            // Parallel to ALL ctor params (declaration order, `ctor_args`) — a non-null reference plain
-            // parameter is guarded too (it's still a constructor argument kotlinc null-checks).
-            let mut ctor_param_checks: Vec<Option<String>> = c
-                .props
-                .iter()
-                .map(|p| {
-                    let ty = ty_of(file, &p.ty);
-                    let is_type_param = c.type_params.contains(&p.ty.name);
-                    if !p.ty.nullable && !is_type_param && ty.is_reference() {
-                        Some(p.name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            // The synthetic `this$0` is not null-checked (kotlinc doesn't guard it).
-            if inner_outer.is_some() {
-                ctor_param_checks.insert(0, None);
-            }
             // Computed body properties (custom getter, no backing field) become `getX()` methods, not
             // fields — exclude them here.
             let body_fields: Vec<(String, Ty)> = c
@@ -540,17 +519,37 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 fields: ir_fields,
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
-                // An inner class's synthetic `this$0` (the outer instance) is the first field param.
+                // An inner class's synthetic `this$0` (the outer instance) is the first field param —
+                // never null-checked (kotlinc doesn't guard it).
                 ctor_args: inner_outer
                     .iter()
-                    .map(|o| (ty_to_ir(Ty::obj(o)), true))
+                    .map(|o| IrCtorArg {
+                        ty: ty_to_ir(Ty::obj(o)),
+                        is_field: true,
+                        check: None,
+                    })
                     .chain(c.props.iter().map(|p| {
                         // Carry a declared `?` into the ctor-param IrType (like the field), so a nullable
                         // value-class parameter erases to the boxed `X` consistently with its getter/field.
                         // Use `field_ty` so a classpath-typed param matches the field/getter (not erased `Any`).
                         let t = ty_to_ir(lo.field_ty(file, &p.ty));
                         let t = if p.ty.nullable { mark_nullable(t) } else { t };
-                        (t, p.is_property)
+                        // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
+                        // `<init>` entry (kotlinc does); primitives, nullable, and class type-params skip it.
+                        let is_type_param = c.type_params.contains(&p.ty.name);
+                        let check = if !p.ty.nullable
+                            && !is_type_param
+                            && ty_of(file, &p.ty).is_reference()
+                        {
+                            Some(p.name.clone())
+                        } else {
+                            None
+                        };
+                        IrCtorArg {
+                            ty: t,
+                            is_field: p.is_property,
+                            check,
+                        }
                     }))
                     .collect(),
                 init_body: None,
@@ -579,7 +578,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 bridges: Vec::new(),
                 interfaces: iface_internals,
                 is_object: c.is_object(),
-                ctor_param_checks,
                 is_companion: false,
                 companion_class: None,
                 secondary_ctors: vec![],
@@ -1056,7 +1054,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     bridges: vec![],
                     interfaces: comp_ifaces,
                     is_object: false,
-                    ctor_param_checks: vec![],
                     is_companion: true,
                     companion_class: None,
                     secondary_ctors: vec![],
@@ -1984,7 +1981,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if sup.ctor_args.is_empty() {
                             sup.fields[..n].iter().map(|f| f.ty).collect()
                         } else {
-                            sup.ctor_args[..n].iter().map(|(t, _)| *t).collect()
+                            sup.ctor_args[..n].iter().map(|a| a.ty).collect()
                         }
                     };
                     // Defaults are file-independent (`CtorDefaultValue`) — built directly into the
@@ -2027,7 +2024,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 let n = sup.ctor_param_count as usize;
                                 sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
                             } else {
-                                sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                                sup.ctor_args.iter().map(|a| a.ty).collect()
                             }
                         })
                         .unwrap_or_default();
@@ -2583,7 +2580,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             bridges: vec![],
                             interfaces: vec![],
                             is_object: false,
-                            ctor_param_checks: vec![],
                             is_companion: false,
                             companion_class: None,
                             secondary_ctors: vec![],
@@ -2841,7 +2837,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             for f in &c.fields {
                 note(&f.ty, &mut referenced);
             }
-            for (t, _) in &c.ctor_args {
+            for a in &c.ctor_args {
+                let t = &a.ty;
                 note(t, &mut referenced);
             }
         }
@@ -3378,7 +3375,7 @@ impl<'a> Lower<'a> {
                     let n = sup.ctor_param_count as usize;
                     sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
                 } else {
-                    sup.ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                    sup.ctor_args.iter().map(|a| a.ty).collect()
                 }
             })
             .unwrap_or_default()
@@ -4484,10 +4481,18 @@ impl<'a> Lower<'a> {
         // suspension inline machine a `label` field is appended below (`label_idx`); the general
         // (multi-suspension) machine has its `result`/`label`/spilled fields added by the coroutine pass.
         let label_idx = n_cap + arity as u32;
-        let ctor_args: Vec<(Ty, bool)> = captures
+        let ctor_args: Vec<IrCtorArg> = captures
             .iter()
-            .map(|(_, _, ty)| (ty_to_ir(*ty), false))
-            .chain(std::iter::once((cont_ir.clone(), false)))
+            .map(|(_, _, ty)| IrCtorArg {
+                ty: ty_to_ir(*ty),
+                is_field: false,
+                check: None,
+            })
+            .chain(std::iter::once(IrCtorArg {
+                ty: cont_ir.clone(),
+                is_field: false,
+                check: None,
+            }))
             .collect();
         let init_stores: Vec<u32> = (0..n_cap)
             .map(|i| {
@@ -4553,7 +4558,6 @@ impl<'a> Lower<'a> {
             bridges: vec![],
             interfaces: vec![format!("kotlin/jvm/functions/Function{jvm_arity}")],
             is_object: false,
-            ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
             secondary_ctors: vec![],
@@ -5502,7 +5506,11 @@ impl<'a> Lower<'a> {
                 // `copy`'s parameters are the primary-ctor properties, so they take the SAME
                 // `checkNotNullParameter` guards kotlinc emits at the constructor — a non-null reference
                 // parameter is null-checked at `copy` entry. Reuse the class's precomputed ctor checks.
-                let mut checks = self.ir.classes[class_id as usize].ctor_param_checks.clone();
+                let mut checks: Vec<Option<String>> = self.ir.classes[class_id as usize]
+                    .ctor_args
+                    .iter()
+                    .map(|a| a.check.clone())
+                    .collect();
                 checks.resize(fields.len(), None);
                 self.ir.functions[copy_fid as usize].param_checks = checks;
                 // Each `copy` parameter defaults to the corresponding property of the receiver (the JVM
@@ -6574,7 +6582,6 @@ impl<'a> Lower<'a> {
             bridges: vec![],
             interfaces: vec![],
             is_object: false,
-            ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
             secondary_ctors: vec![],
@@ -6677,7 +6684,6 @@ impl<'a> Lower<'a> {
             bridges: vec![],
             interfaces: vec![],
             is_object: false,
-            ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
             secondary_ctors: vec![],
@@ -6943,7 +6949,6 @@ impl<'a> Lower<'a> {
             bridges: vec![],
             interfaces: vec![],
             is_object: false,
-            ctor_param_checks: vec![],
             is_companion: false,
             companion_class: None,
             secondary_ctors: vec![],
@@ -11496,7 +11501,7 @@ impl<'a> Lower<'a> {
                             .map(|f| f.ty.clone())
                             .collect()
                     } else {
-                        ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                        ctor_args.iter().map(|a| a.ty).collect()
                     };
                     if field_tys.len() != arity {
                         return None;
@@ -14108,7 +14113,7 @@ impl<'a> Lower<'a> {
                                 .map(|f| f.ty.clone())
                                 .collect()
                         } else {
-                            ctor_args.iter().map(|(t, _)| t.clone()).collect()
+                            ctor_args.iter().map(|a| a.ty).collect()
                         };
                         // Generic constructor with a primitive type argument (`Box<Long>(-1)`): a
                         // type-parameter field gets its argument coerced to the type-argument primitive
@@ -14423,7 +14428,7 @@ impl<'a> Lower<'a> {
                         let field_tys: Vec<Ty> = self.ir.classes[class_id as usize]
                             .ctor_args
                             .iter()
-                            .map(|(t, _)| t.clone())
+                            .map(|a| a.ty)
                             .collect();
                         if field_tys.len() == args.len() + 1 {
                             let recv = self.expr(receiver)?;

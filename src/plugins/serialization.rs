@@ -16,7 +16,7 @@
 //!     published `kotlinx-serialization-core` runtime (`Encoder`/`Decoder`/`SerialDescriptor`); the
 //!     PoC keeps them as `return` so the surface — not the runtime — is what is under test.
 
-use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
 use crate::types::Ty;
 
@@ -1073,7 +1073,14 @@ impl IrPlugin for SerializationPlugin {
             ser.ctor_param_count = n_tp as u32;
             // The N constructor params ARE the type-param serializers (`is_field=false`: stored manually in
             // <init> to fields `1..=N`, NOT auto-stored — field 0 is the descriptor, built in <init>).
-            ser.ctor_args = vec![(kserializer_of(class_ty("kotlin/Any")), false); n_tp];
+            ser.ctor_args = vec![
+                IrCtorArg {
+                    ty: kserializer_of(class_ty("kotlin/Any")),
+                    is_field: false,
+                    check: None,
+                };
+                n_tp
+            ];
             ser.methods = vec![descriptor, serialize, deserialize, child];
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
