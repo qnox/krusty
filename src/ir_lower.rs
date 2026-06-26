@@ -6306,6 +6306,36 @@ impl<'a> Lower<'a> {
         // the shifts take an `Int` count (no numeric promotion). Recognized here so both the plain `.`
         // call and an (unnecessary) safe `?.` call on a non-null primitive share one lowering.
         let lt = self.info.ty(recv);
+        // `a.compareTo(b)` on numeric primitives → `{Integer,Long,Float,Double}.compare(a, b)` (−1/0/1)
+        // after promoting both operands to their common type (`1.compareTo(1.1)` → `Double.compare`).
+        // `Byte`/`Short`/`Char` compare in the `int` category. Shared so `a?.compareTo(b)` on a non-null
+        // primitive lowers identically; a user `operator compareTo` has a reference receiver, handled
+        // elsewhere.
+        if name == "compareTo" && lt.is_primitive() {
+            let at = self.info.ty(arg);
+            if let Some(p) = Ty::promote(lt, at).filter(|p| p.is_primitive() && *p != Ty::Boolean) {
+                let pir = ty_to_ir(p);
+                let l = self.lower_arg(recv, &pir)?;
+                let r = self.lower_arg(arg, &pir)?;
+                let (owner, prim) = match p {
+                    Ty::Long => ("java/lang/Long", "J"),
+                    Ty::Float => ("java/lang/Float", "F"),
+                    Ty::Double => ("java/lang/Double", "D"),
+                    _ => ("java/lang/Integer", "I"), // Int/Byte/Short/Char compare as int
+                };
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: owner.to_string(),
+                        name: "compare".to_string(),
+                        descriptor: format!("({prim}{prim})I"),
+                        inline: false,
+                        must_inline: false,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![l, r],
+                }));
+            }
+        }
         if matches!(lt, Ty::Int | Ty::Long) {
             let shift = matches!(name, "shl" | "shr" | "ushr");
             let bop = match name {
@@ -14851,41 +14881,8 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `a.compareTo(b)` on numeric primitives → `{Integer,Long,Float,Double}.compare(a, b)`
-                    // (returns -1/0/1), after promoting both operands to their common type — so a mixed
-                    // comparison like `1.compareTo(1.1)` becomes `Double.compare(1.0, 1.1)`. `Byte`/`Short`/
-                    // `Char` compare in the `int` category (`Integer.compare`). A user `operator compareTo`
-                    // has a reference receiver and is handled elsewhere; this is the builtin intrinsic.
-                    {
-                        let rty = self.info.ty(receiver);
-                        if name == "compareTo" && args.len() == 1 && rty.is_primitive() {
-                            let at = self.info.ty(args[0]);
-                            if let Some(p) = Ty::promote(rty, at)
-                                .filter(|p| p.is_primitive() && *p != Ty::Boolean)
-                            {
-                                let pir = ty_to_ir(p);
-                                let l = self.lower_arg(receiver, &pir)?;
-                                let r = self.lower_arg(args[0], &pir)?;
-                                let (owner, prim) = match p {
-                                    Ty::Long => ("java/lang/Long", "J"),
-                                    Ty::Float => ("java/lang/Float", "F"),
-                                    Ty::Double => ("java/lang/Double", "D"),
-                                    _ => ("java/lang/Integer", "I"), // Int/Byte/Short/Char compare as int
-                                };
-                                return Some(self.ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Static {
-                                        owner: owner.to_string(),
-                                        name: "compare".to_string(),
-                                        descriptor: format!("({prim}{prim})I"),
-                                        inline: false,
-                                        must_inline: false,
-                                    },
-                                    dispatch_receiver: None,
-                                    args: vec![l, r],
-                                }));
-                            }
-                        }
-                    }
+                    // (`a.compareTo(b)` on a primitive is handled by the shared `lower_prim_op_method`
+                    // above — one lowering for the plain `.` and the safe `?.` call.)
                     // `Int`/`Long.inv()` — the bitwise complement intrinsic (`x xor -1`). The binary
                     // bitwise/shift members (`and`/`or`/`xor`/`shl`/`shr`/`ushr`) are handled by the
                     // shared `lower_prim_op_method` above (one lowering for the plain `.` and safe `?.`
