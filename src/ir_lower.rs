@@ -15,6 +15,7 @@ use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField,
     IrFile, IrFunction, IrTypeOp,
 };
+use crate::libraries::InlineKind;
 use crate::resolve::{CtorDefaultValue, SymbolTable, TypeInfo};
 use crate::types::Ty;
 
@@ -4022,8 +4023,7 @@ impl<'a> Lower<'a> {
                 owner: "java/util/Arrays".to_string(),
                 name: "copyOf".to_string(),
                 descriptor: copyof_desc,
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             },
             dispatch_receiver: None,
             args: vec![a0, size],
@@ -4141,8 +4141,7 @@ impl<'a> Lower<'a> {
                         owner: c.owner,
                         name: c.name,
                         descriptor: c.descriptor,
-                        inline: c.is_inline,
-                        must_inline: false,
+                        inline: c.inline,
                     },
                     dispatch_receiver: None,
                     args: vec![recv],
@@ -4580,8 +4579,7 @@ impl<'a> Lower<'a> {
                     owner: "kotlin/ResultKt".to_string(),
                     name: "throwOnFailure".to_string(),
                     descriptor: "(Ljava/lang/Object;)V".to_string(),
-                    inline: false,
-                    must_inline: false,
+                    inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
                 args: vec![v],
@@ -4739,8 +4737,7 @@ impl<'a> Lower<'a> {
                         owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
                         name: "getCOROUTINE_SUSPENDED".to_string(),
                         descriptor: "()Ljava/lang/Object;".to_string(),
-                        inline: false,
-                        must_inline: false,
+                        inline: InlineKind::None,
                     },
                     dispatch_receiver: None,
                     args: vec![],
@@ -5304,8 +5301,7 @@ impl<'a> Lower<'a> {
                 owner: owner.to_string(),
                 name: "box-impl".to_string(),
                 descriptor: format!("({prim})L{owner};"),
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             },
             dispatch_receiver: None,
             args: vec![val],
@@ -5348,8 +5344,7 @@ impl<'a> Lower<'a> {
                 owner: owner.to_string(),
                 name: "toUnsignedString".to_string(),
                 descriptor: format!("({prim})Ljava/lang/String;"),
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             },
             dispatch_receiver: None,
             args: vec![val],
@@ -5564,8 +5559,7 @@ impl<'a> Lower<'a> {
                             owner: "java/util/Arrays".to_string(),
                             name: "toString".to_string(),
                             descriptor: format!("({param})Ljava/lang/String;"),
-                            inline: false,
-                            must_inline: false,
+                            inline: InlineKind::None,
                         },
                         dispatch_receiver: None,
                         args: vec![fv],
@@ -5773,7 +5767,7 @@ impl<'a> Lower<'a> {
             .syms
             .libraries
             .resolve_scope_inline(name, rty, &[self.info.ty(lam_arg)])?;
-        if !c.is_inline {
+        if !c.inline.can_inline() {
             return None;
         }
         // The platform must be able to splice this body (branchless, single lambda-invoke, single exit) —
@@ -5807,17 +5801,15 @@ impl<'a> Lower<'a> {
         }
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
-        let must_inline = c.must_inline;
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: c.owner,
                 name: c.name,
                 descriptor: c.descriptor,
-                inline: true,
-                // A non-public `@InlineOnly` scope fn (`let`/`also`/…) has no callable method — a failed
-                // splice must SKIP the file, never an `invokestatic` on the private method. A PUBLIC host
-                // (`map`/`fold`/`forEach`) can fall back to a real call, so `must_inline` is false for it.
-                must_inline,
+                // A non-public `@InlineOnly` scope fn (`let`/`also`/…) is `MustInline`: no callable method,
+                // so a failed splice must SKIP the file, never an `invokestatic` on the private method. A
+                // PUBLIC host (`map`/`fold`/`forEach`) is `CanInline` and may fall back to a real call.
+                inline: c.inline,
             },
             dispatch_receiver: None,
             args: vec![recv, lam],
@@ -6336,8 +6328,7 @@ impl<'a> Lower<'a> {
                         owner: owner.to_string(),
                         name: "compare".to_string(),
                         descriptor: format!("({prim}{prim})I"),
-                        inline: false,
-                        must_inline: false,
+                        inline: InlineKind::None,
                     },
                     dispatch_receiver: None,
                     args: vec![l, r],
@@ -6398,8 +6389,7 @@ impl<'a> Lower<'a> {
                     owner: owner.to_string(),
                     name: mname.to_string(),
                     descriptor: format!("({prim}{prim}){prim}"),
-                    inline: false,
-                    must_inline: false,
+                    inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
                 args: vec![l, r],
@@ -7205,8 +7195,7 @@ impl<'a> Lower<'a> {
                     owner: owner.to_string(),
                     name: "compareUnsigned".to_string(),
                     descriptor: format!("({prim}{prim})I"),
-                    inline: false,
-                    must_inline: false,
+                    inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
                 args: vec![gi, gn],
@@ -7403,8 +7392,7 @@ impl<'a> Lower<'a> {
                         owner: owner.to_string(),
                         name: "compareUnsigned".to_string(),
                         descriptor: format!("({prim}{prim})I"),
-                        inline: false,
-                        must_inline: false,
+                        inline: InlineKind::None,
                     },
                     dispatch_receiver: None,
                     args: vec![la, lb],
@@ -7593,8 +7581,7 @@ impl<'a> Lower<'a> {
                 owner: iter_owner,
                 name: "iterator".to_string(),
                 descriptor: iter_desc,
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             }
         } else {
             Callee::Virtual {
@@ -8106,7 +8093,7 @@ impl<'a> Lower<'a> {
                     .libraries
                     .resolve_scope_inline(name, rt, &arg_tys)
                     .filter(|c| {
-                        c.is_inline
+                        c.inline.can_inline()
                             && self
                                 .syms
                                 .libraries
@@ -8133,8 +8120,10 @@ impl<'a> Lower<'a> {
                 owner: c.owner,
                 name: c.name,
                 descriptor: c.descriptor,
-                inline: c.is_inline,
-                must_inline: false,
+                // `c` is either a public extension (`resolve_ext_lit_widened` → `None`/`CanInline`, emit
+                // its real inline-ness) or a `@InlineOnly` scope-inline match the `can_inline_call` filter
+                // already dry-ran (`CanInline`/`MustInline`, spliceable) — so pass `c.inline` through.
+                inline: c.inline,
             },
             dispatch_receiver: None,
             args: a,
@@ -8877,8 +8866,7 @@ impl<'a> Lower<'a> {
                     owner: c.owner,
                     name: c.name,
                     descriptor: c.descriptor,
-                    inline: true,
-                    must_inline: false,
+                    inline: InlineKind::CanInline,
                 },
                 dispatch_receiver: None,
                 args: vec![r, a],
@@ -9890,8 +9878,7 @@ impl<'a> Lower<'a> {
                             owner: owner.to_string(),
                             name: "compareUnsigned".to_string(),
                             descriptor: format!("({prim}{prim})I"),
-                            inline: false,
-                            must_inline: false,
+                            inline: InlineKind::None,
                         },
                         dispatch_receiver: None,
                         args: vec![gi, ge],
@@ -11630,8 +11617,7 @@ impl<'a> Lower<'a> {
                             owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
                             name: "getCOROUTINE_SUSPENDED".to_string(),
                             descriptor: "()Ljava/lang/Object;".to_string(),
-                            inline: false,
-                            must_inline: false,
+                            inline: InlineKind::None,
                         },
                         dispatch_receiver: None,
                         args: vec![],
@@ -12032,8 +12018,7 @@ impl<'a> Lower<'a> {
                             owner,
                             name: method,
                             descriptor,
-                            inline: false,
-                            must_inline: false,
+                            inline: InlineKind::None,
                         },
                         dispatch_receiver: None,
                         args: vec![a],
@@ -12294,8 +12279,7 @@ impl<'a> Lower<'a> {
                                 owner: owner.to_string(),
                                 name: name.to_string(),
                                 descriptor: desc,
-                                inline: false,
-                                must_inline: false,
+                                inline: InlineKind::None,
                             },
                             dispatch_receiver: None,
                             args,
@@ -12420,8 +12404,7 @@ impl<'a> Lower<'a> {
                                         owner: c.owner,
                                         name: c.name,
                                         descriptor: c.descriptor,
-                                        inline: c.is_inline,
-                                        must_inline: false,
+                                        inline: c.inline,
                                     },
                                     dispatch_receiver: None,
                                     args: vec![l, r],
@@ -12813,8 +12796,7 @@ impl<'a> Lower<'a> {
                                 owner: owner.to_string(),
                                 name: "compareUnsigned".to_string(),
                                 descriptor: format!("({prim}{prim})I"),
-                                inline: false,
-                                must_inline: false,
+                                inline: InlineKind::None,
                             },
                             dispatch_receiver: None,
                             args: vec![la, lb],
@@ -12922,8 +12904,7 @@ impl<'a> Lower<'a> {
                                 owner: "kotlin/ranges/RangesKt".to_string(),
                                 name: "until".to_string(),
                                 descriptor,
-                                inline: false,
-                                must_inline: false,
+                                inline: InlineKind::None,
                             },
                             dispatch_receiver: None,
                             args: vec![lo_v, hi_v],
@@ -13470,8 +13451,7 @@ impl<'a> Lower<'a> {
                         owner: cf.companion_internal.clone(),
                         name: cf.jvm_name.clone(),
                         descriptor: cf.descriptor.clone(),
-                        inline: true,
-                        must_inline: true,
+                        inline: InlineKind::MustInline,
                     },
                     dispatch_receiver: Some(recv),
                     args: ir_args,
@@ -13891,7 +13871,7 @@ impl<'a> Lower<'a> {
                         // ERASED `Object` (a generic `R`); coerce it to the logical type so a primitive
                         // result unboxes instead of landing boxed in a primitive slot.
                         let (call_inline, call_log, call_phys) =
-                            (c.is_inline, c.ret, c.physical_ret);
+                            (c.inline.can_inline(), c.ret, c.physical_ret);
                         // Is the callee a `suspend fun`? Ask the resolver (the flag flows uniformly from
                         // the AST for a module/sibling-file fn and from `@Metadata` for a classpath one).
                         // A suspend call is recorded by `ExprId` so the coroutine pass threads the
@@ -14012,8 +13992,7 @@ impl<'a> Lower<'a> {
                                 owner: c.owner,
                                 name: c.name,
                                 descriptor: c.descriptor,
-                                inline: c.is_inline,
-                                must_inline: c.must_inline,
+                                inline: c.inline,
                             },
                             dispatch_receiver: None,
                             args: a,
@@ -14308,8 +14287,7 @@ impl<'a> Lower<'a> {
                                 descriptor:
                                     "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V"
                                         .to_string(),
-                                inline: false,
-                                must_inline: false,
+                                inline: InlineKind::None,
                             },
                             dispatch_receiver: None,
                             args: vec![recv_v, comp_v],
@@ -14835,8 +14813,7 @@ impl<'a> Lower<'a> {
                                             owner: "java/lang/Integer".to_string(),
                                             name: "toUnsignedLong".to_string(),
                                             descriptor: "(I)J".to_string(),
-                                            inline: false,
-                                            must_inline: false,
+                                            inline: InlineKind::None,
                                         },
                                         dispatch_receiver: None,
                                         args: vec![r],
@@ -15282,8 +15259,7 @@ impl<'a> Lower<'a> {
                                 owner: c.owner,
                                 name: c.name,
                                 descriptor: c.descriptor,
-                                inline: c.is_inline,
-                                must_inline: false,
+                                inline: c.inline,
                             },
                             dispatch_receiver: None,
                             args: a,
@@ -15355,8 +15331,7 @@ impl<'a> Lower<'a> {
                                     owner: c.owner,
                                     name: c.name,
                                     descriptor: c.descriptor,
-                                    inline: true,
-                                    must_inline: c.must_inline,
+                                    inline: c.inline,
                                 },
                                 dispatch_receiver: None,
                                 args: a,
@@ -15380,7 +15355,7 @@ impl<'a> Lower<'a> {
                                 // `is_inline=false`. A PRIVATE (`must_inline`) extension has no callable
                                 // method regardless, so it MUST be spliced — gate on `can_inline_call`
                                 // (a real splice dry-run), which is the actual correctness condition.
-                                (c.is_inline || c.must_inline)
+                                c.inline.can_inline()
                                     && self.syms.libraries.can_inline_call(
                                         &c.owner,
                                         &c.name,
@@ -15397,14 +15372,12 @@ impl<'a> Lower<'a> {
                                 None => a.push(self.expr(arg)?),
                             }
                         }
-                        let must_inline = c.must_inline;
                         let call = self.ir.add_expr(IrExpr::Call {
                             callee: Callee::Static {
                                 owner: c.owner,
                                 name: c.name,
                                 descriptor: c.descriptor,
-                                inline: true,
-                                must_inline,
+                                inline: c.inline,
                             },
                             dispatch_receiver: None,
                             args: a,

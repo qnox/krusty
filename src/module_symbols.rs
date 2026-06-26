@@ -8,8 +8,8 @@
 //! so the lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::libraries::{
-    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember,
-    LibrarySeed, LibraryType, Origin,
+    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable,
+    LibraryMember, LibrarySeed, LibraryType, Origin,
 };
 use crate::resolve::{ClassSig, Signature, SymbolTable};
 use crate::symbol_source::SymbolSource;
@@ -133,8 +133,7 @@ fn fn_info(
             vararg: sig.vararg,
         },
         flags: FnFlags {
-            inline: sig.is_inline,
-            inline_only: false,
+            inline: InlineKind::from_flags(sig.is_inline, false),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend,
@@ -146,10 +145,9 @@ fn fn_info(
             params,
             ret: sig.ret,
             physical_ret: sig.ret,
-            is_inline: sig.is_inline,
+            inline: InlineKind::from_flags(sig.is_inline, false),
             default_call: false,
             vararg_elem: None,
-            must_inline: false,
             signature: None,
             origin,
         },

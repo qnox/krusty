@@ -30,6 +30,7 @@ use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile,
     IrFunction, IrTypeOp,
 };
+use crate::libraries::InlineKind;
 use crate::types::Ty;
 use std::collections::HashSet;
 
@@ -609,8 +610,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId) -> bo
                 owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
                 name: "getCOROUTINE_SUSPENDED".to_string(),
                 descriptor: "()Ljava/lang/Object;".to_string(),
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             },
             dispatch_receiver: None,
             args: vec![],
@@ -857,8 +857,7 @@ fn build_lambda_state_machine(
                 owner: "kotlin/coroutines/intrinsics/IntrinsicsKt".to_string(),
                 name: "getCOROUTINE_SUSPENDED".to_string(),
                 descriptor: "()Ljava/lang/Object;".to_string(),
-                inline: false,
-                must_inline: false,
+                inline: InlineKind::None,
             },
             dispatch_receiver: None,
             args: vec![],
@@ -1794,8 +1793,7 @@ fn throw_on_failure(ir: &mut IrFile, result_v: u32) -> ExprId {
             owner: "kotlin/ResultKt".to_string(),
             name: "throwOnFailure".to_string(),
             descriptor: "(Ljava/lang/Object;)V".to_string(),
-            inline: false,
-            must_inline: false,
+            inline: InlineKind::None,
         },
         dispatch_receiver: None,
         args: vec![r],

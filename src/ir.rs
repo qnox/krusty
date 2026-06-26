@@ -14,6 +14,7 @@
 //! `u32` ids (no `Box`/`Rc` graphs; bulk-freeable). Lowering (`ast → ir`) and the JVM backend
 //! consuming IR are the next phases; today this module defines the node set + a builder + a printer.
 
+use crate::libraries::InlineKind;
 use crate::types::Ty;
 
 pub type ExprId = u32;
@@ -55,17 +56,17 @@ pub enum Callee {
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
-    /// `inline` => the callee is a Kotlin `inline` function (set from the resolved signature's metadata);
-    /// the JVM backend may splice its compiled body here instead of emitting the `invokestatic`.
+    /// `inline` carries the callee's inline-ness in one field (was `inline` + `must_inline`):
+    /// [`InlineKind::CanInline`] => a Kotlin `inline` function whose compiled body the JVM backend may
+    /// splice here instead of emitting the `invokestatic`; [`InlineKind::MustInline`] => a NON-PUBLIC
+    /// `@InlineOnly` callee (`require`/`check`/`error`) with no legal `invokestatic` fallback, so the
+    /// backend MUST splice the body (a body it can't splice — e.g. branchy on a non-empty operand stack —
+    /// skips the whole file, never miscompiled).
     Static {
         owner: String,
         name: String,
         descriptor: String,
-        inline: bool,
-        /// True when the callee is a NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`): there
-        /// is no legal `invokestatic` fallback, so the backend MUST splice the body. If it can't (a
-        /// branchy body on a non-empty operand stack), the whole file is skipped — never miscompiled.
-        must_inline: bool,
+        inline: InlineKind,
     },
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.

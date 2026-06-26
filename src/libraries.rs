@@ -81,10 +81,11 @@ pub struct LibraryCallable {
     /// type parameter). The backend inserts the unbox/checkcast bridging `physical_ret` → `ret`.
     pub physical_ret: Ty,
     pub descriptor: String,
-    /// True when the callee is a Kotlin `inline` function (per its `@Metadata`, decoded with the
-    /// signature). The JVM backend may splice the callee's compiled body at the call site (the bytecode
-    /// inliner) instead of emitting an `invokestatic`. `false` for a non-inline callable.
-    pub is_inline: bool,
+    /// The callee's inline-ness in one field (was `is_inline` + `must_inline`): [`InlineKind::CanInline`]
+    /// for a Kotlin `inline` function the backend MAY splice instead of emitting an `invokestatic`,
+    /// [`InlineKind::MustInline`] for a non-public `@InlineOnly` callee the backend MUST splice (no legal
+    /// call site), [`InlineKind::None`] otherwise.
+    pub inline: InlineKind,
     /// True when this resolves a `name$default` synthetic (a callable with defaulted parameters called
     /// with fewer arguments): `params` are the real parameters, and the backend appends zero/`null`
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
@@ -96,11 +97,6 @@ pub struct LibraryCallable {
     /// element to that type before boxing (an integer literal in `listOf<Long>(3)` becomes a boxed
     /// `Long`, not `Integer`), since the JVM array element is erased to `Object`.
     pub vararg_elem: Option<Ty>,
-    /// True when the callee is NON-PUBLIC (an `@InlineOnly` precondition like `require`/`check`/`error`):
-    /// kotlinc emits no callable method, so the backend MUST splice its body — there is no legal
-    /// `invokestatic` fallback. If the emitter can't splice such a call (e.g. a branchy body on a
-    /// non-empty operand stack), it skips the whole file (never a miscompile / `IllegalAccessError`).
-    pub must_inline: bool,
     /// The callee's generic `Signature` (an opaque backend token), kept so an arg-binding SELECTOR can
     /// recover the substituted return (`fold`'s `R` from the initial value, `let`'s `R` from the lambda)
     /// when picking this overload out of a [`FunctionSet`]. `None` when the callable has no generic
@@ -172,12 +168,53 @@ pub struct FunctionInfo {
     pub call_sig: CallSig,
 }
 
+/// How a callable relates to bytecode inlining — the single state that replaces the old
+/// `inline` + `inline_only`/`must_inline` boolean pairs (one per layer: [`FnFlags`],
+/// [`LibraryCallable`], and `ir::Callee::Static`). Ordered weakest→strongest; the splice obligation
+/// strengthens as you go down.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum InlineKind {
+    /// Not an `inline` function — emit an ordinary call (`invokestatic`/`invokevirtual`).
+    #[default]
+    None,
+    /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
+    /// at the call site, but a real call is a legal fallback (the callee is a public method).
+    CanInline,
+    /// A NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`/`let`/…): there is no callable
+    /// method to invoke, so the backend MUST splice the body — a failed splice skips the whole file
+    /// (never an `invokestatic` on the private method → never an `IllegalAccessError`).
+    MustInline,
+}
+
+impl InlineKind {
+    /// Build from the legacy `(inline, must_inline)` boolean pair. `must_inline` is the stronger
+    /// signal (no callable fallback), so it wins regardless of the `inline` bit — which the `@Metadata`
+    /// `inline` flag can read back as `false` for a `@JvmName`-mangled private callee even though it
+    /// must still be spliced.
+    pub fn from_flags(inline: bool, must_inline: bool) -> InlineKind {
+        if must_inline {
+            InlineKind::MustInline
+        } else if inline {
+            InlineKind::CanInline
+        } else {
+            InlineKind::None
+        }
+    }
+    /// True when the backend may attempt to splice the body (`inline` OR `@InlineOnly`).
+    pub fn can_inline(self) -> bool {
+        self != InlineKind::None
+    }
+    /// True when splicing is mandatory — the callee has no legal call site to fall back to.
+    pub fn must_inline(self) -> bool {
+        self == InlineKind::MustInline
+    }
+}
+
 /// Function metadata flags, decoded once from `@Metadata`.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FnFlags {
-    pub inline: bool,
-    /// Non-public `@InlineOnly` — has no callable method; the emitter MUST splice its body.
-    pub inline_only: bool,
+    /// `inline` / non-public `@InlineOnly` inline-ness, in one field (was `inline` + `inline_only`).
+    pub inline: InlineKind,
     /// `suspend` — decoded from `@Metadata` (the `IS_SUSPEND` function flag). A call to a suspend
     /// function is a coroutine suspension point (the JVM lowering threads a `Continuation`).
     pub suspend: bool,
@@ -571,3 +608,35 @@ pub struct EmptyLibrarySet;
 
 impl SymbolSource for EmptyLibrarySet {}
 impl LibrarySet for EmptyLibrarySet {}
+
+#[cfg(test)]
+mod tests {
+    use super::InlineKind;
+
+    #[test]
+    fn inline_kind_from_flags_collapses_the_pair() {
+        // (inline, must_inline) → the single ordered state.
+        assert_eq!(InlineKind::from_flags(false, false), InlineKind::None);
+        assert_eq!(InlineKind::from_flags(true, false), InlineKind::CanInline);
+        assert_eq!(InlineKind::from_flags(true, true), InlineKind::MustInline);
+        // `must_inline` wins even when the metadata `inline` bit read back false (a `@JvmName`-mangled
+        // private `@InlineOnly` callee): it must still be spliced.
+        assert_eq!(InlineKind::from_flags(false, true), InlineKind::MustInline);
+    }
+
+    #[test]
+    fn inline_kind_accessors_match_the_old_bools() {
+        // `can_inline()` == old `inline || must_inline`; `must_inline()` == old `must_inline`.
+        assert!(!InlineKind::None.can_inline());
+        assert!(!InlineKind::None.must_inline());
+        assert!(InlineKind::CanInline.can_inline());
+        assert!(!InlineKind::CanInline.must_inline());
+        assert!(InlineKind::MustInline.can_inline());
+        assert!(InlineKind::MustInline.must_inline());
+    }
+
+    #[test]
+    fn inline_kind_default_is_none() {
+        assert_eq!(InlineKind::default(), InlineKind::None);
+    }
+}

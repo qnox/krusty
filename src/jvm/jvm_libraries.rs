@@ -9,8 +9,8 @@ use super::jvm_class_map::{
 };
 use crate::call_resolver::{arg_fits, function_input_types, gsig_to_ty, unify_gsig, GSig};
 use crate::libraries::{
-    FnFlags, FnKind, FunctionInfo, FunctionSet, LibraryCallable, LibraryMember, LibrarySeed,
-    LibrarySet, LibraryType,
+    FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
+    LibrarySeed, LibrarySet, LibraryType,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -312,12 +312,15 @@ impl JvmLibraries {
                 ret: ret_ty,
                 physical_ret: ret,
                 descriptor: c.descriptor.clone(),
-                is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
+                // skip the file (never an `IllegalAccessError`) → `MustInline`; a PUBLIC one can fall back
+                // to a real call.
+                inline: InlineKind::from_flags(
+                    self.cp.is_inline_method(&c.owner, &c.name),
+                    !o.public,
+                ),
                 default_call: false,
                 vararg_elem: None,
-                // A NON-public (`@InlineOnly`) extension has no callable method, so a failed splice must
-                // skip the file (never an `IllegalAccessError`); a PUBLIC one can fall back to a real call.
-                must_inline: !o.public,
                 signature: c.signature.clone(),
                 origin: crate::libraries::Origin::Library,
             });
@@ -971,8 +974,7 @@ impl SymbolSource for JvmLibraries {
                                 receiver_rank: u32::MAX,
                                 call_sig: crate::libraries::CallSig::default(),
                                 flags: FnFlags {
-                                    inline: true,
-                                    inline_only: !c.public,
+                                    inline: InlineKind::from_flags(true, !c.public),
                                     suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                                 },
                                 callable: LibraryCallable {
@@ -982,11 +984,10 @@ impl SymbolSource for JvmLibraries {
                                     ret,
                                     physical_ret: pret,
                                     descriptor: c.descriptor.clone(),
-                                    is_inline: true,
+                                    // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
+                                    inline: InlineKind::from_flags(true, !c.public),
                                     default_call: false,
                                     vararg_elem: None,
-                                    // Package-private `@InlineOnly` — splice or skip, never `invokestatic`.
-                                    must_inline: !c.public,
                                     signature: c.signature.clone(),
                                     origin: crate::libraries::Origin::Library,
                                 },
@@ -1105,8 +1106,7 @@ impl SymbolSource for JvmLibraries {
                         receiver_rank: rank as u32,
                         call_sig,
                         flags: FnFlags {
-                            inline,
-                            inline_only: inline && !c.public,
+                            inline: InlineKind::from_flags(inline, inline && !c.public),
                             suspend: self.cp.is_suspend_method(&c.owner, &c.name),
                         },
                         callable: LibraryCallable {
@@ -1116,10 +1116,9 @@ impl SymbolSource for JvmLibraries {
                             ret,
                             physical_ret: pret,
                             descriptor: c.descriptor.clone(),
-                            is_inline: inline,
+                            inline: InlineKind::from_flags(inline, inline && !c.public),
                             default_call: false,
                             vararg_elem: None,
-                            must_inline: inline && !c.public,
                             signature: c.signature.clone(),
                             origin: crate::libraries::Origin::Library,
                         },
@@ -1175,8 +1174,10 @@ impl SymbolSource for JvmLibraries {
                                         receiver_rank: 0,
                                         call_sig: crate::libraries::CallSig::default(),
                                         flags: FnFlags {
-                                            inline: mf.is_inline,
-                                            inline_only: mf.is_inline && !c.public,
+                                            inline: InlineKind::from_flags(
+                                                mf.is_inline,
+                                                mf.is_inline && !c.public,
+                                            ),
                                             suspend: mf.is_suspend,
                                         },
                                         callable: LibraryCallable {
@@ -1186,10 +1187,12 @@ impl SymbolSource for JvmLibraries {
                                             ret,
                                             physical_ret: pret,
                                             descriptor: c.descriptor.clone(),
-                                            is_inline: mf.is_inline,
+                                            inline: InlineKind::from_flags(
+                                                mf.is_inline,
+                                                mf.is_inline && !c.public,
+                                            ),
                                             default_call: false,
                                             vararg_elem: None,
-                                            must_inline: mf.is_inline && !c.public,
                                             signature: c.signature.clone(),
                                             origin: crate::libraries::Origin::Library,
                                         },
@@ -1250,10 +1253,9 @@ impl SymbolSource for JvmLibraries {
                                     ret: m.ret,
                                     physical_ret: m.ret,
                                     descriptor: m.descriptor.clone(),
-                                    is_inline: false,
+                                    inline: InlineKind::None,
                                     default_call: false,
                                     vararg_elem: None,
-                                    must_inline: false,
                                     signature: None,
                                     origin: crate::libraries::Origin::Library,
                                 },
@@ -1335,8 +1337,7 @@ impl SymbolSource for JvmLibraries {
                     receiver_rank: 0,
                     call_sig,
                     flags: FnFlags {
-                        inline,
-                        inline_only: inline && !c.public,
+                        inline: InlineKind::from_flags(inline, inline && !c.public),
                         suspend,
                     },
                     callable: LibraryCallable {
@@ -1346,10 +1347,9 @@ impl SymbolSource for JvmLibraries {
                         ret,
                         physical_ret,
                         descriptor,
-                        is_inline: inline,
+                        inline: InlineKind::from_flags(inline, inline && !c.public),
                         default_call: false,
                         vararg_elem: None,
-                        must_inline: inline && !c.public,
                         signature: c.signature.clone(),
                         origin: crate::libraries::Origin::Library,
                     },
@@ -1924,10 +1924,12 @@ impl LibrarySet for JvmLibraries {
                         ret: ret_ty,
                         physical_ret: ret,
                         descriptor: c.descriptor.clone(),
-                        is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                        inline: InlineKind::from_flags(
+                            self.cp.is_inline_method(&c.owner, &c.name),
+                            false,
+                        ),
                         default_call: true,
                         vararg_elem: None,
-                        must_inline: false,
                         signature: c.signature.clone(),
                         origin: crate::libraries::Origin::Library,
                     });
@@ -1986,10 +1988,9 @@ impl LibrarySet for JvmLibraries {
                         ret: logical_ret,
                         physical_ret: ret,
                         descriptor: c.descriptor.clone(),
-                        is_inline: true,
+                        inline: InlineKind::MustInline,
                         default_call: false,
                         vararg_elem: None,
-                        must_inline: true,
                         signature: c.signature.clone(),
                         origin: crate::libraries::Origin::Library,
                     });
@@ -2057,10 +2058,9 @@ impl LibrarySet for JvmLibraries {
                 ret: ret_ty,
                 physical_ret: *ret,
                 descriptor: c.descriptor.clone(),
-                is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                inline: InlineKind::from_flags(self.cp.is_inline_method(&c.owner, &c.name), false),
                 default_call: false,
                 vararg_elem,
-                must_inline: false,
                 signature: c.signature.clone(),
                 origin: crate::libraries::Origin::Library,
             });
@@ -2148,10 +2148,12 @@ impl LibrarySet for JvmLibraries {
                     ret: ret_ty,
                     physical_ret: ret,
                     descriptor: c.descriptor.clone(),
-                    is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                    inline: InlineKind::from_flags(
+                        self.cp.is_inline_method(&c.owner, &c.name),
+                        false,
+                    ),
                     default_call: true,
                     vararg_elem: None,
-                    must_inline: false,
                     signature: c.signature.clone(),
                     origin: crate::libraries::Origin::Library,
                 });
