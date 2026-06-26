@@ -3053,8 +3053,10 @@ pub struct TypeInfo {
     /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
     pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     /// Inferred return types for expression-body functions that lacked an explicit return annotation.
-    /// Codegen overrides the pre-collected `Ty::Unit` default with this when present.
-    pub fun_ret_overrides: HashMap<String, Ty>,
+    /// Codegen overrides the pre-collected `Ty::Unit` default with this when present. Keyed by
+    /// `(name, parameter types)` so overloads (`fun f(x: Int) = …` vs `fun f(s: String) = …`) don't
+    /// clobber each other — a name-only key mis-typed one overload's calls as the other's return.
+    pub fun_ret_overrides: HashMap<(String, Vec<Ty>), Ty>,
     /// Extension / static method calls resolved from the classpath:
     /// `call_expr_id → (owner_internal, jvm_method_name, jvm_descriptor)`.
     /// Emitter emits `invokestatic owner.name descriptor` (receiver is the first arg).
@@ -3690,7 +3692,7 @@ struct Checker<'a> {
     obj_value_refs: HashMap<ExprId, String>,
     ext_prop_calls: HashMap<ExprId, (String, String, String)>,
     companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
-    fun_ret_overrides: HashMap<String, Ty>,
+    fun_ret_overrides: HashMap<(String, Vec<Ty>), Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
     bridges: HashMap<String, Vec<BridgeSpec>>,
     boxed_vars: std::collections::HashSet<String>,
@@ -4354,9 +4356,11 @@ impl<'a> Checker<'a> {
         self.pop_scope();
         self.push_local_funs();
         self.push_scope();
+        let mut ptys: Vec<Ty> = Vec::with_capacity(f.params.len());
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
             let ty = if p.is_vararg { Ty::array(ty) } else { ty };
+            ptys.push(ty);
             self.declare(&p.name, ty, false);
         }
         if infer_ret {
@@ -4364,7 +4368,9 @@ impl<'a> Checker<'a> {
                 let inferred = self.expr(*e);
                 if inferred != Ty::Unit && inferred != Ty::Error {
                     self.ret_ty = inferred;
-                    self.fun_ret_overrides.insert(f.name.clone(), inferred);
+                    // Key by (name, parameter types) so overloads don't clobber each other's return.
+                    self.fun_ret_overrides
+                        .insert((f.name.clone(), ptys.clone()), inferred);
                 }
             }
         } else {
@@ -8617,8 +8623,11 @@ impl<'a> Checker<'a> {
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
                     let mut ret_ty = fi.callable.ret;
-                    // Inferred return (signature defaulted to Unit) from the inference pass.
-                    if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
+                    // Inferred return (signature defaulted to Unit) from the inference pass — keyed by
+                    // (name, the RESOLVED overload's parameter types) so the right overload is read.
+                    if let Some(&inferred) =
+                        self.fun_ret_overrides.get(&(fname.clone(), params.clone()))
+                    {
                         ret_ty = inferred;
                     }
                     // A user generic call whose return is a type parameter: bind from all arguments.
