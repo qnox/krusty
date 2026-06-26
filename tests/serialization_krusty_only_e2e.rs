@@ -551,6 +551,42 @@ fun box(): String {
 }
 
 #[test]
+fn user_extension_on_classpath_type_in_krusty() {
+    // A user top-level EXTENSION FUNCTION on a CLASSPATH type (`fun SerialDescriptor.kindAt(...)`) lowers
+    // (receiver resolved via the classpath-aware fallback), and an unqualified call to a classpath
+    // TOP-LEVEL function inside an extension body resolves as top-level — NOT as an implicit-receiver
+    // call that would prepend `this`. The latter relies on the ext index classifying a top-level generic
+    // (Object-erased first param) via `@Metadata` (`is_extension`) rather than its first JVM parameter,
+    // while keeping genuine type-parameter-receiver extensions (`takeIf`) indexed. Mirrors the
+    // `sealedInterfaces` boxIr `checkKind` helper.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+
+@Serializable
+sealed interface SI
+
+@Serializable
+class H(val si: SI)
+
+fun SerialDescriptor.kindAt(i: Int): String = getElementDescriptor(i).kind.toString()
+
+fun box(): String {
+    val k = H.serializer().descriptor.kindAt(0)
+    return if (k == "SEALED") "OK" else k
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerUserExt") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "user extension on classpath type wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty user extension function on a classpath type OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath

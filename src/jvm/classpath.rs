@@ -1014,6 +1014,19 @@ impl Classpath {
         // Pass 2: index the public static methods reachable from each PUBLIC class — its own and those
         // inherited through its superclass chain (the multifile parts) — with owner = the public class
         // (the facade), which is what an `invokestatic` resolves through, like kotlinc.
+        // Global `(name)` sets: declared as a genuine top-level function vs as an extension anywhere on the
+        // classpath. A name that is ever an extension is NEVER excluded from the ext index; a name that is
+        // ONLY ever top-level is excluded (its first parameter is a real value parameter, not a receiver).
+        // Built across ALL classes so a multifile facade's bridge statics match the function metadata that
+        // lives in its (separate) part classes.
+        let global_toplevel: std::collections::HashSet<&str> = all
+            .values()
+            .flat_map(|c| c.toplevel_names.iter().map(|s| s.as_str()))
+            .collect();
+        let global_ext: std::collections::HashSet<&str> = all
+            .values()
+            .flat_map(|c| c.ext_names.iter().map(|s| s.as_str()))
+            .collect();
         let mut idx = ExtIndex::default();
         for (name, lite) in &all {
             if !lite.is_public {
@@ -1038,14 +1051,20 @@ impl Classpath {
                         signature: msig.clone(),
                         public: *public,
                     };
-                    // A receiver-less top-level function (no first param) is by_name-only.
+                    // A receiver-less top-level function (no first param, OR `@Metadata` marks the name as a
+                    // genuine top-level fn that is NEVER an extension) is by_name-only — never keyed by its
+                    // first parameter (which is a value parameter, not a receiver).
                     if let Some(first_param) = first_descriptor_param(mdesc) {
-                        idx.by_recv
-                            .entry(first_param)
-                            .or_default()
-                            .entry(mname.clone())
-                            .or_default()
-                            .push(cand.clone());
+                        let only_toplevel = global_toplevel.contains(mname.as_str())
+                            && !global_ext.contains(mname.as_str());
+                        if !only_toplevel {
+                            idx.by_recv
+                                .entry(first_param)
+                                .or_default()
+                                .entry(mname.clone())
+                                .or_default()
+                                .push(cand.clone());
+                        }
                     }
                     idx.by_name.entry(mname.clone()).or_default().push(cand);
                 }
@@ -1074,6 +1093,15 @@ struct ClassLite {
     /// `(name, descriptor, generic-signature, is_public)` of each static method (excl `<init>`/`<clinit>`).
     /// Non-public ones (`@InlineOnly`) are kept for the inliner; the flag gates normal resolution.
     statics: Vec<(String, String, Option<String>, bool)>,
+    /// JVM names of functions `@Metadata` marks as genuine TOP-LEVEL (NO extension receiver). A top-level
+    /// generic whose first parameter erases to `Object` (`assertEquals<T>(T, T, String)`) is otherwise
+    /// indistinguishable in bytecode from an extension, so a name that is ONLY ever top-level must NOT be
+    /// keyed by its first parameter in `by_recv`. Name-keyed (not name+desc): `@Metadata` often omits the
+    /// method descriptor (`jvm_desc=None`).
+    toplevel_names: std::collections::HashSet<String>,
+    /// JVM names `@Metadata` marks as EXTENSIONS (receiver of any kind — class OR type parameter). A name
+    /// that is an extension anywhere is NEVER excluded from `by_recv` (so `takeIf`/`uppercase` stay indexed).
+    ext_names: std::collections::HashSet<String>,
 }
 
 fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
@@ -1091,12 +1119,29 @@ fn collect_class_bytes(bytes: &[u8], all: &mut HashMap<String, ClassLite>) {
             )
         })
         .collect();
+    // `@Metadata`-declared functions of this facade/part, split by whether they have an extension receiver
+    // (of any kind — class or type parameter). Lets the ext index keep a genuine top-level generic out of
+    // `by_recv` (its first JVM param looks like a receiver) without excluding a real extension.
+    let mut toplevel_names = std::collections::HashSet::new();
+    let mut ext_names = std::collections::HashSet::new();
+    for mf in super::metadata::package_functions(&ci)
+        .into_iter()
+        .chain(super::metadata::class_functions(&ci))
+    {
+        if mf.is_extension {
+            ext_names.insert(mf.jvm_name);
+        } else {
+            toplevel_names.insert(mf.jvm_name);
+        }
+    }
     all.insert(
         ci.this_class.clone(),
         ClassLite {
             is_public: ci.is_public(),
             super_class: ci.super_class,
             statics,
+            toplevel_names,
+            ext_names,
         },
     );
 }
