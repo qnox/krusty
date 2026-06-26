@@ -572,7 +572,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 prop_ref: None,
                 func_ref: None,
                 bridges: Vec::new(),
-                interfaces: iface_internals,
+                interfaces: iface_internals.clone(),
                 is_object: c.is_object(),
                 ctor_param_checks,
                 is_companion: false,
@@ -632,8 +632,28 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
-                let ty = body_prop_ty(file, info, p);
                 let gname = getter_name(&p.name);
+                let mut ty = body_prop_ty(file, info, p);
+                // An OVERRIDE computed property with no explicit type takes the OVERRIDDEN interface
+                // member's declared return type, not the (possibly narrower) inferred body type:
+                // `override val descriptor get() = PrimitiveSerialDescriptor(...)` is `SerialDescriptor`
+                // (the `KSerializer.descriptor` getter's type), not the concrete factory class the body
+                // infers — otherwise the getter's JVM return type mismatches the value it returns
+                // (VerifyError "Bad return type").
+                if p.ty.is_none() {
+                    for itf in &iface_internals {
+                        if let Some(m) = lo
+                            .syms
+                            .libraries
+                            .abstract_methods(itf)
+                            .into_iter()
+                            .find(|m| m.name == gname)
+                        {
+                            ty = m.ret;
+                            break;
+                        }
+                    }
+                }
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
                     name: gname.clone(),

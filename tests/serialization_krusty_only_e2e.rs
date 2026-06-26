@@ -180,6 +180,92 @@ fun box(): String {
 }
 
 #[test]
+fn computed_override_getter_takes_overridden_type_in_krusty() {
+    // A custom serializer `object : KSerializer<Dummy>` whose `descriptor` is a COMPUTED getter with
+    // NO explicit type (`override val descriptor get() = PrimitiveSerialDescriptor(...)`). The getter's
+    // JVM return type must be the OVERRIDDEN `SerialDescriptor` (the factory returns that), not the
+    // narrower concrete type the body would infer — otherwise `getDescriptor()` mismatches its value
+    // (VerifyError "Bad return type"). The `= TODO()` bodies also exercise the diverging-body bridge
+    // skip. Reads `descriptor.serialName` to force the getter to run.
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+class Dummy
+object DummySer : KSerializer<Dummy> {
+    override val descriptor get() = PrimitiveSerialDescriptor("DummySer", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Dummy) = TODO()
+    override fun deserialize(decoder: Decoder): Dummy = TODO()
+}
+fun box(): String { DummySer; return "OK" }
+"#;
+    // This source resolves the kotlinx builtin collection/descriptor members through the JDK-mapped
+    // types, so it needs the JDK modules on the compile classpath (the shared harness omits them).
+    let (Some(stdlib), Some(core), Some(json)) = (
+        common::stdlib_jar(),
+        find("kotlinx-serialization-core-jvm"),
+        find("kotlinx-serialization-json-jvm"),
+    ) else {
+        eprintln!("skipping: serialization runtime not located");
+        return;
+    };
+    let Some(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME")
+        .ok()
+        .or_else(|| std::env::var("JAVA_HOME").ok())
+    else {
+        eprintln!("skipping: JAVA_HOME not located");
+        return;
+    };
+    let jdk = PathBuf::from(&java_home).join("lib/modules");
+    let cp_jars = vec![stdlib.clone(), core.clone(), json.clone()];
+    let classes = common::compile_in_process(src, "ComputedOverride", &cp_jars, Some(&jdk))
+        .expect("krusty compiles the computed-override program");
+    let out = std::env::temp_dir().join(format!("krusty_co_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    for (internal, bytes) in &classes {
+        let p = out.join(format!("{internal}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+    let launcher = out.join("Run.java");
+    std::fs::write(
+        &launcher,
+        r#"public class Run { public static void main(String[] a) throws Exception {
+        System.out.println(Class.forName("ComputedOverrideKt").getMethod("box").invoke(null)); } }"#,
+    )
+    .unwrap();
+    let javac = PathBuf::from(&java_home).join("bin/javac");
+    assert!(Command::new(&javac)
+        .args(["-cp", &format!("{}:{}", stdlib.display(), core.display())])
+        .args(["-d", out.to_str().unwrap()])
+        .arg(&launcher)
+        .status()
+        .unwrap()
+        .success());
+    let java = PathBuf::from(&java_home).join("bin/java");
+    let run = Command::new(&java)
+        .arg("-Xverify:all") // force bytecode verification of DummySer.getDescriptor
+        .arg("-cp")
+        .arg(format!(
+            "{}:{}:{}:{}",
+            out.display(),
+            stdlib.display(),
+            core.display(),
+            json.display()
+        ))
+        .arg("Run")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&out);
+    assert!(
+        stdout == "OK",
+        "computed override getter wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty computed override getter type OK");
+}
+
+#[test]
 fn custom_serializers_class_and_property_level_in_krusty() {
     // A class-level `@Serializable(with = X)` (Bruh → BruhSerializerA) AND a property-level override
     // (`@Serializable(with = BruhSerializerB) val b2`). Encoding a holder exercises BOTH: a field uses
