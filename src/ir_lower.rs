@@ -7341,6 +7341,57 @@ impl<'a> Lower<'a> {
         self.coerce_erased(read, lt, pty)
     }
 
+    /// Read a backing-field property `recv.name` on an in-file class, given the ALREADY-LOWERED receiver
+    /// and the receiver's internal name. A read from OUTSIDE the declaring class goes through the public
+    /// `getX()` accessor (the backing field is private, matching kotlinc); inside, the field is read
+    /// directly. A generic field's erased read is coerced to the concrete member type (`checkcast`/unbox).
+    /// `recv_slot_ty` is the receiver's declared SLOT type (when it is a simple `Name`); for a DIRECT
+    /// field read whose slot is wider than the owning class (an erased generic / `Any?` narrowed by `is`),
+    /// the receiver is `checkcast`'d to the owner so `getfield` verifies. `None` when `name` isn't a
+    /// backing field. Shared by the `.` (Expr::Member) and `?.` (Expr::SafeCall) member-read paths so they
+    /// don't re-implement the resolve→getter/GetField→coerce sequence independently.
+    fn lower_field_read_on(
+        &mut self,
+        recv: u32,
+        recv_internal: &str,
+        name: &str,
+        e: AstExprId,
+        recv_slot_ty: Option<Ty>,
+    ) -> Option<u32> {
+        let (class, idx, pty) = self.resolve_field(recv_internal, name)?;
+        let owner_internal = self.ir.classes[class as usize].fq_name.clone();
+        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+            if let Some((mclass, mindex, _, _)) =
+                self.resolve_method(recv_internal, &getter_name(name))
+            {
+                let read = self.ir.add_expr(IrExpr::MethodCall {
+                    class: mclass,
+                    index: mindex,
+                    receiver: recv,
+                    args: vec![],
+                });
+                return Some(self.coerce_generic_read(read, e, pty));
+            }
+        }
+        // Smartcast: if the receiver's slot type isn't the owning class, checkcast it so `getfield` is
+        // valid (an erased generic / `Any?` local narrowed by `is`).
+        let recv = if recv_slot_ty.is_some_and(|t| t != Ty::obj(&owner_internal)) {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: recv,
+                type_operand: ty_to_ir(Ty::obj(&owner_internal)),
+            })
+        } else {
+            recv
+        };
+        let read = self.ir.add_expr(IrExpr::GetField {
+            receiver: recv,
+            class,
+            index: idx,
+        });
+        Some(self.coerce_generic_read(read, e, pty))
+    }
+
     /// Lower a zero-arg member READ `recv.name` on a builtin/library/another-file receiver — the shared
     /// path behind a qualified `recv.name` and a receiver-lambda's implicit `this.name`. The member is
     /// resolved generically through the library/stdlib classpath reader by its own name, its `getX()`
@@ -10579,34 +10630,10 @@ impl<'a> Lower<'a> {
                             }
                         }
                         None => {
-                            if let Some((fclass, idx, _)) = self.resolve_field(&internal, &name) {
-                                let owner_internal =
-                                    self.ir.classes[fclass as usize].fq_name.clone();
-                                // External read → `getX()` (the backing field is private); internal → field.
-                                if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                                    if let Some((mclass, mindex, _, _)) =
-                                        self.resolve_method(&internal, &getter_name(&name))
-                                    {
-                                        self.ir.add_expr(IrExpr::MethodCall {
-                                            class: mclass,
-                                            index: mindex,
-                                            receiver: recv2,
-                                            args: vec![],
-                                        })
-                                    } else {
-                                        self.ir.add_expr(IrExpr::GetField {
-                                            receiver: recv2,
-                                            class: fclass,
-                                            index: idx,
-                                        })
-                                    }
-                                } else {
-                                    self.ir.add_expr(IrExpr::GetField {
-                                        receiver: recv2,
-                                        class: fclass,
-                                        index: idx,
-                                    })
-                                }
+                            if let Some(read) =
+                                self.lower_field_read_on(recv2, &internal, &name, e, None)
+                            {
+                                read
                             } else if internal == "java/lang/String" && name == "length" {
                                 self.ir.add_expr(IrExpr::Call {
                                     callee: Callee::External("kotlin/String.length".to_string()),
@@ -11433,50 +11460,21 @@ impl<'a> Lower<'a> {
                     // Resolve the field through the superclass chain — it may be declared on a base
                     // class (`b.baseField`). `class` is the *owning* class (whose fieldref we emit).
                     let recv_internal = rci.internal.clone();
-                    if let Some((class, idx, pty)) = self.resolve_field(&recv_internal, &name) {
-                        let owner_internal = self.ir.classes[class as usize].fq_name.clone();
-                        // The backing field is private; access from outside the declaring class goes
-                        // through the public `getX()` accessor (matching kotlinc). Inside the class,
-                        // read the field directly.
-                        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
-                            if let Some((mclass, mindex, _, _)) =
-                                self.resolve_method(&recv_internal, &getter_name(&name))
-                            {
-                                let recv = self.expr(receiver)?;
-                                let read = self.ir.add_expr(IrExpr::MethodCall {
-                                    class: mclass,
-                                    index: mindex,
-                                    receiver: recv,
-                                    args: vec![],
-                                });
-                                return Some(self.coerce_generic_read(read, e, pty));
-                            }
-                        }
-                        let recv = self.expr(receiver)?;
-                        // Smartcast: if the receiver's *slot* type isn't the owning class (e.g. an erased
-                        // generic / `Any?` local narrowed by `is`), checkcast it so `getfield` is valid.
-                        let needs_cast = matches!(self.afile.expr(receiver), Expr::Name(n)
-                            if self.lookup(n).map_or(false, |(_, t)| t != Ty::obj(&owner_internal)));
-                        let recv = if needs_cast {
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::Cast,
-                                arg: recv,
-                                type_operand: ty_to_ir(Ty::obj(&owner_internal)),
-                            })
-                        } else {
-                            recv
-                        };
-                        let read = self.ir.add_expr(IrExpr::GetField {
-                            receiver: recv,
-                            class,
-                            index: idx,
-                        });
-                        self.coerce_generic_read(read, e, pty)
+                    let recv = self.expr(receiver)?;
+                    // The receiver's declared slot type (when it is a simple `Name`) drives the
+                    // smartcast `checkcast` inside the shared field-read helper.
+                    let slot_ty = match self.afile.expr(receiver) {
+                        Expr::Name(n) => self.lookup(n).map(|(_, t)| t),
+                        _ => None,
+                    };
+                    if let Some(read) =
+                        self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)
+                    {
+                        read
                     } else if let Some((class, index, _, _)) =
                         self.resolve_method(&recv_internal, &getter_name(&name))
                     {
                         // A computed property → `recv.getX()`.
-                        let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
