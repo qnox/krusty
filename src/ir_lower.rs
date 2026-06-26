@@ -15,7 +15,7 @@ use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction,
     IrTypeOp,
 };
-use crate::resolve::{SymbolTable, TypeInfo};
+use crate::resolve::{CtorDefaultValue, SymbolTable, TypeInfo};
 use crate::types::Ty;
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
@@ -982,7 +982,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // a no-arg base → `super()`; an all-defaulted base → fill the base's default exprs into
                 // `super(…)` (mirrors the regular-class super-default-fill). The plan is computed as owned
                 // data first so the `syms` borrow is dropped before lowering. Any other shape → keep `Any`.
-                let comp_base_plan: Option<(String, Vec<(AstExprId, Ty)>)> = match &c.companion_base
+                let comp_base_plan: Option<(String, Vec<CtorDefaultValue>)> = match &c
+                    .companion_base
                 {
                     Some(base) if c.companion_base_args.is_empty() => {
                         let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface()));
@@ -997,8 +998,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         } else if bsig.ctor_defaults.len() >= n
                             && bsig.ctor_defaults[..n].iter().all(|d| d.is_some())
                         {
-                            let plan = (0..n)
-                                .map(|i| (bsig.ctor_defaults[i].unwrap(), bsig.ctor_params[i]))
+                            let plan: Vec<CtorDefaultValue> = bsig.ctor_defaults[..n]
+                                .iter()
+                                .map(|d| d.clone().expect("checked all Some"))
                                 .collect();
                             Some((base_internal, plan))
                         } else {
@@ -1010,16 +1012,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 };
                 let (comp_super, comp_super_args) =
                     if let Some((base_internal, plan)) = comp_base_plan {
-                        lo.scope.clear();
-                        lo.next_value = 0;
-                        lo.cur_class = Some(comp_fq.clone());
-                        let this_v = lo.fresh_value();
-                        lo.scope
-                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
-                        let mut sargs = Vec::new();
-                        for (d, pt) in &plan {
-                            sargs.push(lo.lower_arg(*d, &ty_to_ir(*pt))?);
-                        }
+                        // The defaults are file-independent (`CtorDefaultValue`), so a companion extending a
+                        // base in this file fills them with no cross-file `ExprId` deref.
+                        let sargs = plan
+                            .iter()
+                            .map(|dv| ctor_default_to_ir(&mut lo.ir, dv))
+                            .collect();
                         (base_internal, sargs)
                     } else {
                         ("kotlin/Any".to_string(), Vec::new())
@@ -1989,22 +1987,18 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             sup.ctor_args[..n].iter().map(|(t, _)| *t).collect()
                         }
                     };
-                    let defaults: Vec<AstExprId> =
+                    // Defaults are file-independent (`CtorDefaultValue`) — built directly into the
+                    // `super(…)` args, so a base defined in ANOTHER file fills with no cross-file deref.
+                    let defaults: Vec<CtorDefaultValue> =
                         lo.syms.class_by_internal(&sup_internal)?.ctor_defaults
                             [..super_field_tys.len()]
                             .iter()
-                            .map(|d| d.expect("super_default_fill checked all Some"))
+                            .map(|d| d.clone().expect("super_default_fill checked all Some"))
                             .collect();
-                    lo.scope.clear();
-                    lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
-                    let this_v = lo.fresh_value();
-                    lo.scope
-                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    let mut sargs = Vec::new();
-                    for (d, ft) in defaults.iter().zip(&super_field_tys) {
-                        sargs.push(lo.lower_arg(*d, ft)?);
-                    }
+                    let sargs = defaults
+                        .iter()
+                        .map(|dv| ctor_default_to_ir(&mut lo.ir, dv))
+                        .collect();
                     lo.ir.classes[class_id as usize].super_args = sargs;
                 }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
@@ -15386,6 +15380,28 @@ fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
 /// (const-folded). Empty when none — the serialization extension reads this to name descriptor elements.
+/// Build the IR for a primary-constructor default value (file-independent — no AST `ExprId`, so it works
+/// when a subclass/companion in a DIFFERENT file fills a base's default). A literal → a `Const`; an
+/// object singleton → `getstatic <internal>.INSTANCE`.
+fn ctor_default_to_ir(ir: &mut IrFile, dv: &CtorDefaultValue) -> ExprId {
+    let e = match dv {
+        CtorDefaultValue::Int(v) => IrExpr::Const(IrConst::Int(*v as i32)),
+        CtorDefaultValue::Long(v) => IrExpr::Const(IrConst::Long(*v)),
+        CtorDefaultValue::Double(v) => IrExpr::Const(IrConst::Double(*v)),
+        CtorDefaultValue::Float(v) => IrExpr::Const(IrConst::Float(*v)),
+        CtorDefaultValue::Bool(v) => IrExpr::Const(IrConst::Boolean(*v)),
+        CtorDefaultValue::Char(v) => IrExpr::Const(IrConst::Char(*v)),
+        CtorDefaultValue::Str(s) => IrExpr::Const(IrConst::String(s.clone())),
+        CtorDefaultValue::Null => IrExpr::Const(IrConst::Null),
+        CtorDefaultValue::Object(internal) => IrExpr::ExternalStaticField {
+            owner: internal.clone(),
+            name: "INSTANCE".to_string(),
+            descriptor: format!("L{internal};"),
+        },
+    };
+    ir.add_expr(e)
+}
+
 /// Const-fold a primary-constructor default-value expression to an [`IrConst`] for the serialization
 /// extension's `isOptional` element handling. Only obvious compile-time literals (the common
 /// `= null`/`= 5`/`= "x"`/`= true` defaults); `None` for any non-literal default (the field is then

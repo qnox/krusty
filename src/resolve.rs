@@ -46,6 +46,60 @@ pub struct Signature {
     pub is_suspend: bool,
 }
 
+/// A primary-constructor parameter's default value, captured in a FILE-INDEPENDENT form — NOT an
+/// `ExprId` (which indexes only the defining file's `expr_arena`, so a *different* file filling the
+/// default — a subclass/companion in another file, or a multi-file `// WITH_COROUTINES` test — would
+/// dereference it against the wrong arena and panic). Only the shapes the default-fill lowering can emit
+/// directly are represented; any other default is `None` (the parameter is treated as required, so the
+/// call/file skips — never a miscompile).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CtorDefaultValue {
+    Int(i64),
+    Long(i64),
+    Double(f64),
+    Float(f32),
+    Bool(bool),
+    Char(char),
+    Str(String),
+    Null,
+    /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.
+    Object(String),
+}
+
+/// Capture a primary-constructor parameter default in the file-independent [`CtorDefaultValue`] form, or
+/// `None` for an unmodeled default (a non-literal/non-object — kept conservative so behavior matches the
+/// previous literal-only handling). Resolves an object-singleton `Name` (`= EmptyCoroutineContext`) to its
+/// internal via the type universe, so the default lowers cross-file as `getstatic …INSTANCE`.
+fn extract_ctor_default(
+    file: &File,
+    dx: ExprId,
+    class_names: &ClassNames,
+    libraries: &dyn LibrarySet,
+) -> Option<CtorDefaultValue> {
+    Some(match file.expr(dx) {
+        Expr::IntLit(v) => CtorDefaultValue::Int(*v),
+        Expr::LongLit(v) => CtorDefaultValue::Long(*v),
+        Expr::DoubleLit(v) => CtorDefaultValue::Double(*v),
+        Expr::FloatLit(v) => CtorDefaultValue::Float(*v),
+        Expr::BoolLit(v) => CtorDefaultValue::Bool(*v),
+        Expr::CharLit(v) => CtorDefaultValue::Char(*v),
+        Expr::StringLit(s) => CtorDefaultValue::Str(s.clone()),
+        Expr::NullLit => CtorDefaultValue::Null,
+        Expr::Name(n) => {
+            let internal = class_names.get(n)?;
+            if libraries
+                .resolve_type(internal)
+                .is_some_and(|t| t.is_object())
+            {
+                CtorDefaultValue::Object(internal.clone())
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
 /// primary-constructor properties (in order), and its member-function signatures.
 #[derive(Clone, Debug)]
@@ -75,10 +129,10 @@ pub struct ClassSig {
     pub super_internal: Option<String>,
     /// `annotation class` — emitted as an interface; instantiation builds a synthetic impl class.
     pub is_annotation: bool,
-    /// Default-value expression for each primary-constructor parameter (`None` = required). Used to
-    /// fill omitted trailing arguments at a constructor call site (box tests are single-file, so the
-    /// `ExprId`s are valid where the constructor is called).
-    pub ctor_defaults: Vec<Option<ExprId>>,
+    /// Each primary-constructor parameter's default, captured FILE-INDEPENDENTLY (see
+    /// [`CtorDefaultValue`]) so a different file can fill it without dereferencing a cross-file `ExprId`.
+    /// `None` = required (or an unmodeled default → treated as required → skip).
+    pub ctor_defaults: Vec<Option<CtorDefaultValue>>,
     /// Secondary-constructor parameter-type lists (`constructor(p…) : this(…)`) — a construction call
     /// resolves to one of these when its arguments don't match the primary.
     pub secondary_ctors: Vec<Vec<Ty>>,
@@ -926,8 +980,15 @@ pub fn collect_signatures_with_cp(
                         .iter()
                         .map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags))
                         .collect();
-                    let ctor_defaults: Vec<Option<ExprId>> =
-                        c.props.iter().map(|p| p.default).collect();
+                    let ctor_defaults: Vec<Option<CtorDefaultValue>> = c
+                        .props
+                        .iter()
+                        .map(|p| {
+                            p.default.and_then(|dx| {
+                                extract_ctor_default(file, dx, &class_names, &*libraries)
+                            })
+                        })
+                        .collect();
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = c
                         .props
@@ -7914,22 +7975,26 @@ impl<'a> Checker<'a> {
                         let got = arg_tys.len();
                         let ok_arity = got <= ctor_params.len()
                             && (got..ctor_params.len()).all(|i| {
-                                match cls.ctor_defaults.get(i).copied().flatten() {
-                                    Some(dx) => {
+                                // Match on the file-independent default value (no cross-file `ExprId`
+                                // deref). A direct call-site fill emits only an exact-type literal (an
+                                // object-singleton default is filled only by the `super(…)` path); keep
+                                // that conservative behavior — `Object` here stays unmodeled (`false`).
+                                match cls.ctor_defaults.get(i).and_then(|o| o.as_ref()) {
+                                    Some(dv) => {
                                         let pt = ctor_params[i];
-                                        match self.file.expr(dx) {
-                                            Expr::IntLit(_) => matches!(
+                                        match dv {
+                                            CtorDefaultValue::Int(_) => matches!(
                                                 pt,
                                                 Ty::Int | Ty::Byte | Ty::Short | Ty::Char
                                             ),
-                                            Expr::LongLit(_) => pt == Ty::Long,
-                                            Expr::DoubleLit(_) => pt == Ty::Double,
-                                            Expr::FloatLit(_) => pt == Ty::Float,
-                                            Expr::BoolLit(_) => pt == Ty::Boolean,
-                                            Expr::CharLit(_) => pt == Ty::Char,
-                                            Expr::StringLit(_) => pt == Ty::String,
-                                            Expr::NullLit => pt.is_reference(),
-                                            _ => false,
+                                            CtorDefaultValue::Long(_) => pt == Ty::Long,
+                                            CtorDefaultValue::Double(_) => pt == Ty::Double,
+                                            CtorDefaultValue::Float(_) => pt == Ty::Float,
+                                            CtorDefaultValue::Bool(_) => pt == Ty::Boolean,
+                                            CtorDefaultValue::Char(_) => pt == Ty::Char,
+                                            CtorDefaultValue::Str(_) => pt == Ty::String,
+                                            CtorDefaultValue::Null => pt.is_reference(),
+                                            CtorDefaultValue::Object(_) => false,
                                         }
                                     }
                                     None => false,
