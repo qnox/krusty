@@ -6211,9 +6211,11 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
-    /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
-    /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
-    /// resolve. Falls back to the raw class type when there are no explicit type arguments.
+    /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with its type
+    /// arguments — taken from an EXPLICIT list (`ArrayList<Int>()`) or, failing that, INFERRED from the
+    /// value arguments (`Box("hi")` → `Box<String>`, matching each constructor parameter typed as a bare
+    /// type parameter against the supplied argument). Member/element types then resolve on the result.
+    /// Falls back to the raw class type when neither is available.
     fn ctor_result(&mut self, call: ExprId, internal: &str) -> Ty {
         if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
             let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
@@ -6221,7 +6223,60 @@ impl<'a> Checker<'a> {
                 return Ty::obj_args(internal, &args);
             }
         }
-        Ty::obj(internal)
+        self.infer_ctor_type_args(call, internal)
+            .unwrap_or_else(|| Ty::obj(internal))
+    }
+
+    /// Infer a generic class's type arguments from a constructor call's VALUE arguments: for
+    /// `class Box<T>(val v: T)`, `Box("hi")` binds `T = String` (the result is `Box<String>`), so a later
+    /// `.v`/`.get()` resolves to `String`. Binds each constructor parameter typed as a bare type
+    /// parameter against the corresponding argument's type, then fills the class's parameter list in
+    /// declared order (an unbound parameter stays `Any`). `None` when the class is non-generic or nothing
+    /// binds — the caller then keeps the raw type. A `@JvmInline value class` argument is NOT inferred:
+    /// it would need generic interface bridges krusty doesn't emit (see [`Self::subst_member_ret`]).
+    fn infer_ctor_type_args(&self, call: ExprId, internal: &str) -> Option<Ty> {
+        let (cparams, tnames) = {
+            let cs = self.syms.class_by_internal(internal)?;
+            if cs.tparam_names.is_empty() {
+                return None;
+            }
+            // Only the PRIMARY constructor's parameters are matched here. A secondary constructor may
+            // order/type its parameters differently, so a secondary call could bind a type parameter
+            // from the wrong argument — decline inference (keep the raw type) when any secondary exists.
+            if !cs.secondary_ctors.is_empty() {
+                return None;
+            }
+            (cs.ctor_params.clone(), cs.tparam_names.clone())
+        };
+        let Expr::Call { args, .. } = self.file.expr(call).clone() else {
+            return None;
+        };
+        let mut binds: std::collections::HashMap<&str, Ty> = std::collections::HashMap::new();
+        for (p, a) in cparams.iter().zip(args.iter()) {
+            if let Some(pname) = p.ty_param_name() {
+                let at = self
+                    .expr_types
+                    .get(a.0 as usize)
+                    .copied()
+                    .unwrap_or(Ty::Error);
+                if at != Ty::Error && !self.ty_is_value_class(at) {
+                    binds.entry(pname).or_insert(at);
+                }
+            }
+        }
+        if binds.is_empty() {
+            return None;
+        }
+        let targs: Vec<Ty> = tnames
+            .iter()
+            .map(|n| {
+                binds
+                    .get(n.as_str())
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+            })
+            .collect();
+        Some(Ty::obj_args(internal, &targs))
     }
 
     fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
