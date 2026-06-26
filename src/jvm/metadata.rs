@@ -329,6 +329,76 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
     class_name
 }
 
+/// For a function-type `Type` (`kotlin/FunctionN`), recover whether it is a RECEIVER function type
+/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_id, first_argument_class_id)`,
+/// where `annotation_id` is the `Type.annotation` (field 100) `Annotation.id` (which a caller checks
+/// resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1) carries the
+/// receiver type. Either is `None` when absent.
+fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut anno_id = None;
+    let mut arg0_class = None;
+    let mut seen_arg = false;
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 2) => {
+                // Type.argument (repeated) — the FIRST argument is the receiver. `Argument.type` = 2.
+                let Some(n) = pb.varint() else { break };
+                let Some(abody) = pb.bytes(n as usize) else {
+                    break;
+                };
+                if !seen_arg {
+                    seen_arg = true;
+                    let mut ap = Pb { b: abody, i: 0 };
+                    while !ap.at_end() {
+                        let Some(at) = ap.varint() else { break };
+                        match (at >> 3, at & 7) {
+                            (2, 2) => {
+                                if let Some(tn) = ap.varint() {
+                                    if let Some(tb) = ap.bytes(tn as usize) {
+                                        arg0_class = parse_type_class_name(tb);
+                                    }
+                                }
+                            }
+                            (_, w) => {
+                                if ap.skip(w).is_none() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            (100, 2) => {
+                // Type.annotation (extension) — `Annotation.id` = 1 (the annotation class id).
+                let Some(n) = pb.varint() else { break };
+                let Some(abody) = pb.bytes(n as usize) else {
+                    break;
+                };
+                let mut ap = Pb { b: abody, i: 0 };
+                while !ap.at_end() {
+                    let Some(at) = ap.varint() else { break };
+                    match (at >> 3, at & 7) {
+                        (1, 0) => anno_id = ap.varint(),
+                        (_, w) => {
+                            if ap.skip(w).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    (anno_id, arg0_class)
+}
+
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
 const IS_SUSPEND_BIT: u64 = 1 << 13;
 
@@ -373,6 +443,11 @@ struct ParsedFunction {
     /// parallel to `value_param_classes`. Lets a classpath CALL omit a defaulted argument (resolved via
     /// the count of NON-defaulted params; the omitted call lowers to the `<name>$default` synthetic).
     value_param_has_default: Vec<bool>,
+    /// Per SOURCE value parameter: `(type_annotation_id, first_type_argument_class_id)` — for a RECEIVER
+    /// function-type param (`Recv.() -> R`), the `@ExtensionFunctionType` annotation id and the receiver
+    /// class id. Resolved downstream: when the annotation is `kotlin/ExtensionFunctionType`, the param is
+    /// a receiver-lambda param whose `this` is the first type argument. Parallel to `value_param_classes`.
+    value_param_recv_ids: Vec<(Option<u64>, Option<u64>)>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -389,6 +464,8 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut value_param_classes: Vec<Option<u64>> = Vec::new();
     let mut value_param_names: Vec<u64> = Vec::new();
     let mut value_param_has_default: Vec<bool> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut value_param_recv_ids: Vec<(Option<u64>, Option<u64>)> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -420,6 +497,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut tid = None;
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
+                let mut recv_ids = (None, None);
                 while !vp.at_end() {
                     let vt = vp.varint()?;
                     match (vt >> 3, vt & 7) {
@@ -429,12 +507,16 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                             let tn = vp.varint()? as usize;
                             let tb = vp.bytes(tn)?;
                             tid = parse_type_class_name(tb);
+                            // A RECEIVER function-type param (`Recv.() -> R`) carries the
+                            // `@ExtensionFunctionType` type annotation + the receiver as its first arg.
+                            recv_ids = parse_type_recv_fun(tb);
                         }
                         (_, w) => vp.skip(w)?,
                     }
                 }
                 value_param_classes.push(tid);
                 value_param_names.push(nid);
+                value_param_recv_ids.push(recv_ids);
                 // `DECLARES_DEFAULT_VALUE` is bit 1 of the ValueParameter flags (HAS_ANNOTATIONS is bit 0).
                 value_param_has_default.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
             }
@@ -460,6 +542,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         value_param_classes,
         value_param_names,
         value_param_has_default,
+        value_param_recv_ids,
     })
 }
 
@@ -549,6 +632,10 @@ pub struct MetaFn {
     /// A classpath call may omit a trailing run of these; the resolver counts the NON-defaulted params as
     /// the required arity, and the omitted call lowers to the `<name>$default` synthetic.
     pub value_param_has_default: Vec<bool>,
+    /// Per SOURCE value parameter: `Some(receiver_internal)` when it is a RECEIVER function-type param
+    /// (`Recv.() -> R`, carrying `@ExtensionFunctionType`). A lambda passed to it binds `this` to that
+    /// receiver. Parallel to `value_param_types`; `None` for an ordinary parameter.
+    pub value_param_recv_funs: Vec<Option<String>>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -618,6 +705,23 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         .iter()
                         .map(|&id| resolve_string(&records, d2, id as usize).unwrap_or_default())
                         .collect();
+                    // A RECEIVER function-type param: the type annotation must resolve to
+                    // `kotlin/ExtensionFunctionType`; then the receiver is the first type argument's class.
+                    let value_param_recv_funs: Vec<Option<String>> = pf
+                        .value_param_recv_ids
+                        .iter()
+                        .map(|(anno_id, arg0)| {
+                            let is_ext_fun = anno_id
+                                .and_then(|id| resolve_class_name(&records, d2, id as usize))
+                                .as_deref()
+                                == Some("kotlin/ExtensionFunctionType");
+                            if is_ext_fun {
+                                arg0.and_then(|id| resolve_class_name(&records, d2, id as usize))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -632,6 +736,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         value_param_types,
                         value_param_names,
                         value_param_has_default: pf.value_param_has_default,
+                        value_param_recv_funs,
                     });
                 }
             }

@@ -78,6 +78,7 @@ fn package_value_param_defaults_round_trip() {
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
         receiver: None,
+        param_fun_recvs: Vec::new(),
         param_defaults: vec![false, true],
         suspend: false,
         jvm_desc: None,
@@ -110,6 +111,7 @@ fn package_extension_receiver_round_trips() {
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
         receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
+        param_fun_recvs: Vec::new(),
         param_defaults: Vec::new(),
         suspend: false,
         jvm_desc: None,
@@ -134,5 +136,36 @@ fn package_extension_receiver_round_trips() {
         f.value_param_types.len(),
         1,
         "only the logical value param `route` is recorded — the receiver is NOT a value parameter"
+    );
+}
+
+#[test]
+fn package_receiver_function_type_param_round_trips() {
+    use krusty::jvm::metadata::package_functions;
+    use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
+    // `fun NavHost(builder: NGB.() -> Unit)` — the `builder` param is a RECEIVER function type. Its
+    // metadata Type must carry @ExtensionFunctionType + the receiver as the first type argument, so a
+    // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
+    let funcs = vec![PkgFnMeta {
+        name: "NavHost".to_string(),
+        params: vec![("builder".to_string(), Ty::obj("kotlin/Function1"))],
+        ret: Ty::Unit,
+        receiver: None,
+        param_fun_recvs: vec![Some(Ty::obj("androidx/navigation/NavGraphBuilder"))],
+        param_defaults: Vec::new(),
+        suspend: false,
+        jvm_desc: None,
+    }];
+    let (d1, d2) = build_package(&funcs, &[]);
+    let ci = class_info("com/example/NavHostKt", d1, d2);
+
+    let f = package_functions(&ci)
+        .into_iter()
+        .find(|f| f.kotlin_name == "NavHost")
+        .expect("the decoded package metadata must list `NavHost`");
+    assert_eq!(
+        f.value_param_recv_funs,
+        vec![Some("androidx/navigation/NavGraphBuilder".to_string())],
+        "the receiver-function-type param's @ExtensionFunctionType + receiver class must round-trip"
     );
 }
