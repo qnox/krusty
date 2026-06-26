@@ -14274,20 +14274,12 @@ impl<'a> Lower<'a> {
                             dispatch_receiver: Some(recv),
                             args: a,
                         })
-                    } else if name == "toString" && args.is_empty() {
-                        // `x.toString()` → stdlib intrinsic, `String`.
+                    } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {
+                        // `x.toString()`/`x.hashCode()` → the `kotlin/Any` virtual (dispatches to any
+                        // override), not a by-index member — so it needs no class-side method-table entry.
                         let recv = self.expr(receiver)?;
                         self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External("kotlin/Any.toString".to_string()),
-                            dispatch_receiver: Some(recv),
-                            args: vec![],
-                        })
-                    } else if name == "hashCode" && args.is_empty() {
-                        // `x.hashCode()` → the `Any.hashCode` virtual (dispatches to any override),
-                        // not a by-index member — so it needs no class-side method table entry.
-                        let recv = self.expr(receiver)?;
-                        self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::External("kotlin/Any.hashCode".to_string()),
+                            callee: Callee::External(format!("kotlin/Any.{name}")),
                             dispatch_receiver: Some(recv),
                             args: vec![],
                         })
