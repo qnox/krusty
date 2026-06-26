@@ -4366,6 +4366,10 @@ impl<'a> Parser<'a> {
                         names.push(None);
                         self.file.call_arg_names.insert(lhs.0, names);
                     }
+                    // Mark this call as having a SYNTACTIC trailing lambda so default-omission lowering
+                    // binds it to the callee's LAST parameter (preceding gaps take defaults).
+                    self.file.call_has_trailing_lambda.remove(&old.0);
+                    self.file.call_has_trailing_lambda.insert(lhs.0);
                     // Carry explicit type arguments onto the rebuilt call — both the `f<T>(args){…}` form
                     // (already consumed into `old`'s entry by the paren branch) and the `f<T>{…}` form
                     // (no parens — `pending_targs` is still unconsumed). Without this, a trailing lambda

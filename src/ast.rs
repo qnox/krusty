@@ -689,6 +689,12 @@ pub struct File {
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
     pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
+    /// `f { … }`). A trailing lambda always binds to the callee's LAST parameter — preceding parameters
+    /// without a positional argument take their defaults — so default-omission lowering must place it in
+    /// the last slot, not the next free positional one (`f("x") { }` on `f(a, m = d, builder)` ⇒ `m`
+    /// defaults, the lambda fills `builder`).
+    pub call_has_trailing_lambda: std::collections::HashSet<u32>,
     /// Explicit type arguments on a call (`Foo<Int>()`, `listOf<String>(…)`), keyed by the call's
     /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
