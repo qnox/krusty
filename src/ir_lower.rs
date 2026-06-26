@@ -1814,19 +1814,33 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                 }
                 // A superclass whose constructor needs more arguments than are supplied (`object : A()`
-                // where `A(val x = …)` has defaulted parameters) — krusty doesn't fill super default
-                // arguments, so the `super(…)` call shape wouldn't match. Bail rather than miscompile.
-                if let Some(sup) = lo.classes[&internal]
-                    .super_internal
-                    .clone()
-                    .and_then(|s| lo.classes.get(&s))
-                {
-                    let sup_params = lo.ir.classes[sup.id as usize].ctor_param_count as usize;
+                // where `A(val x = …)` has defaulted parameters). krusty fills the base's defaults into the
+                // `super(…)` call when NO explicit base args are written and EVERY base param has a default
+                // (the common `: A()` shape) — handled by `super_default_fill` below. Any other arity
+                // mismatch (some explicit + some defaulted, or a required param missing) still bails.
+                let mut super_default_fill = false;
+                if let Some(s) = lo.classes[&internal].super_internal.clone() {
+                    let sup_params = lo
+                        .classes
+                        .get(&s)
+                        .map(|sup| lo.ir.classes[sup.id as usize].ctor_param_count as usize)
+                        .unwrap_or(0);
                     // For a class with NO primary constructor the base arguments are supplied by each
                     // secondary ctor's `super(…)` (validated in the secondary-ctor lowering), not by a
                     // supertype-list `: Base(args)` — so this `base_args` arity check doesn't apply.
                     if sup_params > c.base_args.len() && c.has_primary_ctor {
-                        return None;
+                        // `: A()` (no explicit args) where every base param has a default (read from the
+                        // base's resolve `ClassSig`) → fill them.
+                        let defaults_ok = c.base_args.is_empty()
+                            && lo.syms.class_by_internal(&s).is_some_and(|cs| {
+                                cs.ctor_defaults.len() >= sup_params
+                                    && cs.ctor_defaults[..sup_params].iter().all(|d| d.is_some())
+                            });
+                        if defaults_ok {
+                            super_default_fill = true;
+                        } else {
+                            return None;
+                        }
                     }
                     // An anonymous object extending a *parameterized* base class can reference the
                     // enclosing instance's (private) members, which Kotlin binds by capture — not by
@@ -1837,6 +1851,42 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     if internal.contains("$anon$") && sup_params > 0 {
                         return None;
                     }
+                }
+                // `: A()` where every base param has a default — fill the base ctor's default-value exprs
+                // into `super(…)` (the same defaults a `new A()` construction fills at the call site, since
+                // krusty has no synthetic `$default` ctor). The defaults are evaluated with only `this` in
+                // scope (no explicit args reference the subclass params); a default referencing a base param
+                // would fail to resolve and bail via `lower_arg`'s `?`.
+                if super_default_fill {
+                    let class_id = lo.classes[&internal].id;
+                    let sup_internal = lo.classes[&internal].super_internal.clone()?;
+                    let sup_id = lo.classes.get(&sup_internal).map(|s| s.id)?;
+                    let super_field_tys: Vec<Ty> = {
+                        let sup = &lo.ir.classes[sup_id as usize];
+                        let n = sup.ctor_param_count as usize;
+                        if sup.ctor_args.is_empty() {
+                            sup.fields[..n].iter().map(|f| f.ty).collect()
+                        } else {
+                            sup.ctor_args[..n].iter().map(|(t, _)| *t).collect()
+                        }
+                    };
+                    let defaults: Vec<AstExprId> =
+                        lo.syms.class_by_internal(&sup_internal)?.ctor_defaults
+                            [..super_field_tys.len()]
+                            .iter()
+                            .map(|d| d.expect("super_default_fill checked all Some"))
+                            .collect();
+                    lo.scope.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(internal.clone());
+                    let this_v = lo.fresh_value();
+                    lo.scope
+                        .push(("this".to_string(), this_v, Ty::obj(&internal)));
+                    let mut sargs = Vec::new();
+                    for (d, ft) in defaults.iter().zip(&super_field_tys) {
+                        sargs.push(lo.lower_arg(*d, ft)?);
+                    }
+                    lo.ir.classes[class_id as usize].super_args = sargs;
                 }
                 // Base-class constructor arguments (`: A(args)`), evaluated with the primary-ctor
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
