@@ -801,7 +801,10 @@ pub fn collect_signatures_with_cp(
             if let Decl::Fun(f) = file.decl(d) {
                 if f.receiver.is_none() {
                     if let Some(r) = &f.ret {
-                        let tp = TParams::from_decl(&f.type_params, &f.type_param_bounds);
+                        let tp =
+                            TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
+                                class_names.get(n).cloned()
+                            });
                         fun_rets.insert(f.name.clone(), ty_of_ref(r, &class_names, &tp, diags));
                     }
                 }
@@ -815,7 +818,9 @@ pub fn collect_signatures_with_cp(
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
-                    let tp = TParams::from_decl(&f.type_params, &f.type_param_bounds);
+                    let tp = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
+                        class_names.get(n).cloned()
+                    });
                     // A `vararg` parameter's runtime type is `Array<elem>`.
                     let params: Vec<Ty> = f
                         .params
@@ -1208,7 +1213,11 @@ pub fn collect_signatures_with_cp(
                         let bctp = TParams::erased(&bc.type_params);
                         for m in &bc.methods {
                             if let Some(r) = &m.ret {
-                                let mtp = bctp.extended(&m.type_params, &m.type_param_bounds);
+                                let mtp = bctp.extended_with(
+                                    &m.type_params,
+                                    &m.type_param_bounds,
+                                    &|n| class_names.get(n).cloned(),
+                                );
                                 local_rets.insert(
                                     m.name.clone(),
                                     ty_of_ref(r, &class_names, &mtp, diags),
@@ -1219,7 +1228,10 @@ pub fn collect_signatures_with_cp(
                     }
                     for m in &c.methods {
                         if let Some(r) = &m.ret {
-                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
+                            let mtp =
+                                ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
+                                    class_names.get(n).cloned()
+                                });
                             local_rets
                                 .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
                         }
@@ -1228,7 +1240,10 @@ pub fn collect_signatures_with_cp(
                         .methods
                         .iter()
                         .map(|m| {
-                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
+                            let mtp =
+                                ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
+                                    class_names.get(n).cloned()
+                                });
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
@@ -1441,7 +1456,10 @@ pub fn collect_signatures_with_cp(
                         .companion_methods
                         .iter()
                         .map(|m| {
-                            let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
+                            let mtp =
+                                ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
+                                    class_names.get(n).cloned()
+                                });
                             let params: Vec<Ty> = m
                                 .params
                                 .iter()
@@ -2779,37 +2797,60 @@ impl TParams {
         TParams { erasure }
     }
 
-    /// Build from declared names + their non-`Any` upper bounds (`fun <T: Int>` → bounds `[("T", Int)]`).
+    /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
+    /// type so member access on `T` resolves and the descriptor erases to the bound (`<T: CharSequence>`
+    /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
+    /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
+    /// primitive bounds are recovered — a reference bound stays `Any`.
     pub fn from_decl(names: &[String], bounds: &[(String, TypeRef)]) -> Self {
-        let mut erasure = std::collections::HashMap::new();
-        for n in names {
-            let mut e = Ty::obj("kotlin/Any");
-            if let Some((_, b)) = bounds.iter().find(|(bn, _)| bn == n) {
-                if !b.nullable {
-                    if let Some(prim) = Ty::from_name(&b.name) {
-                        if prim.is_specializable_bound() {
-                            e = prim;
-                        }
-                    }
-                }
-            }
-            erasure.insert(n.clone(), e);
-        }
+        TParams::from_decl_with(names, bounds, &|_| None)
+    }
+
+    pub fn from_decl_with(
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
+        let erasure = names
+            .iter()
+            .map(|n| {
+                let b = bounds.iter().find(|(bn, _)| bn == n).map(|(_, b)| b);
+                (n.clone(), tparam_bound_erasure(b, resolve))
+            })
+            .collect();
         TParams { erasure }
     }
 
     /// Extend with another scope's parameters (a method inside a generic class sees both).
     pub fn extended(&self, names: &[String], bounds: &[(String, TypeRef)]) -> Self {
+        self.extended_with(names, bounds, &|_| None)
+    }
+
+    pub fn extended_with(
+        &self,
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
         let mut out = self.clone();
-        let more = TParams::from_decl(names, bounds);
-        out.erasure.extend(more.erasure);
+        out.erasure
+            .extend(TParams::from_decl_with(names, bounds, resolve).erasure);
         out
     }
 
     /// Insert a scope's parameters (with their erasures), returning the names that were NEWLY added
     /// (so the caller can `remove` exactly those on scope exit). Mirrors the old `HashSet::insert`-filter.
     pub fn insert_decl(&mut self, names: &[String], bounds: &[(String, TypeRef)]) -> Vec<String> {
-        let scoped = TParams::from_decl(names, bounds);
+        self.insert_decl_with(names, bounds, &|_| None)
+    }
+
+    pub fn insert_decl_with(
+        &mut self,
+        names: &[String],
+        bounds: &[(String, TypeRef)],
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<String> {
+        let scoped = TParams::from_decl_with(names, bounds, resolve);
         let mut added = Vec::new();
         for (n, e) in scoped.erasure {
             if !self.erasure.contains_key(&n) {
@@ -2858,6 +2899,48 @@ fn unify_ref(r: &TypeRef, actual: Ty, tparams: &[String], binds: &mut HashMap<St
                 unify_ref(a, *t, tparams, binds);
             }
         }
+    }
+}
+
+/// A bound-name → JVM-internal resolver over a `SymbolTable`: a user-declared class by simple name, else
+/// the merged class-name map (which already carries the Kotlin built-in → JVM mapping, `CharSequence`
+/// → `java/lang/CharSequence`). Borrows only the (copied) `&SymbolTable`, so a caller can hold it while
+/// mutating `self.tparams`.
+fn class_internal_resolver(syms: &SymbolTable) -> impl Fn(&str) -> Option<String> + '_ {
+    move |n: &str| {
+        syms.classes
+            .get(n)
+            .map(|c| c.internal.clone())
+            .or_else(|| syms.class_names.get(n).cloned())
+    }
+}
+
+/// The JVM erasure of a type parameter from its declared upper bound. kotlinc erases a bounded `T` to
+/// its bound's type — a specializable integral primitive bound (`<T: Int>`) to that primitive, any other
+/// reference bound (`<T: CharSequence>`, `<T: Comparable<T>>`, a user class) to the bound's class — so a
+/// value of type `T` accesses the bound's members and the descriptor uses the bound, not `Object`.
+/// `Any` when there's no bound, a nullable bound, an unresolved bound, or a non-specializable primitive
+/// (`Double`/unsigned/value — those bounds stay rejected on use).
+fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<String>) -> Ty {
+    let any = Ty::obj("kotlin/Any");
+    let Some(b) = b else { return any };
+    // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
+    // erases to `Comparable` (type args drop on erasure). A nullable bound keeps `Any` (conservative).
+    if b.nullable {
+        return any;
+    }
+    if let Some(prim) = Ty::from_name(&b.name) {
+        // Integral primitive bound specializes; `String`/`Any` reference bounds erase to themselves;
+        // other primitives (`Double`, unsigned, value) are not specialized → `Any`.
+        return if prim.is_specializable_bound() || prim.is_reference() {
+            prim
+        } else {
+            any
+        };
+    }
+    match resolve(&b.name) {
+        Some(internal) => Ty::obj(&internal),
+        None => any,
     }
 }
 
@@ -3104,7 +3187,8 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
-                c.tparams = TParams::from_decl(&f.type_params, &f.type_param_bounds);
+                let resolve = class_internal_resolver(c.syms);
+                c.tparams = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
                 c.check_fun(f);
                 c.tparams.clear();
             }
@@ -4315,9 +4399,10 @@ impl<'a> Checker<'a> {
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
             collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
         }
+        let resolve = class_internal_resolver(self.syms);
         let added = self
             .tparams
-            .insert_decl(&f.type_params, &f.type_param_bounds);
+            .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
         self.ret_ty = f
             .ret
             .as_ref()
@@ -6736,6 +6821,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // A Kotlin built-in PROPERTY over a JVM-mapped receiver (`CharSequence.length`) — declared in
+        // `.kotlin_builtins` (keyed on the Kotlin name), not a method on the mapped JVM `.class`.
+        if let Some(internal) = rt.obj_internal() {
+            if let Some(kotlin) =
+                crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+            {
+                if let Some(t) = self.syms.libraries.builtin_member_ret(kotlin, name, &[]) {
+                    if !matches!(t, Ty::Unit | Ty::Error) {
+                        return t;
+                    }
+                }
+            }
+        }
         self.diags.error(
             span,
             format!("unresolved member '{name}' on '{}'", rt.name()),
@@ -7541,6 +7639,20 @@ impl<'a> Checker<'a> {
                             .member_return(rt, &name, &arg_tys)
                             .unwrap_or(m.ret);
                         return ret;
+                    }
+                    // A Kotlin built-in member over a JVM-mapped receiver (`CharSequence.get`,
+                    // `Number.toInt`) — declared in `.kotlin_builtins` (keyed on the Kotlin name), not on
+                    // the mapped JVM `.class`. The backend emits it via `builtin_member_call`.
+                    if let Some(kotlin) =
+                        crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+                    {
+                        if let Some(ret) = self
+                            .syms
+                            .libraries
+                            .builtin_member_ret(kotlin, &name, &arg_tys)
+                        {
+                            return ret;
+                        }
                     }
                 }
                 // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
@@ -9413,10 +9525,11 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Add the local function's own type parameters (a primitive bound specializes, else Object).
-        let added_tparams = self
-            .tparams
-            .insert_decl(&f.type_params, &f.type_param_bounds);
+        // Add the local function's own type parameters (a primitive/reference bound carries through).
+        let resolve = class_internal_resolver(self.syms);
+        let added_tparams =
+            self.tparams
+                .insert_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
 
         // Resolve parameter types.
         let params: Vec<Ty> = f

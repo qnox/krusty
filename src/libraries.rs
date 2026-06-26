@@ -447,17 +447,19 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
-    /// Resolve a BUILTIN member (`String.length`, `List.get`/`size`, …) to its concrete JVM call —
-    /// `(owner_internal, method_descriptor, return_ty, is_interface)` — derived from the type's builtins
-    /// metadata + the kotlin↔JVM class map (no per-member hardcode). Lets a backend emit a member that
-    /// the classpath's `resolve_instance` can't (a Kotlin builtin property/method over a mapped JVM type).
-    /// `None` if `internal.name(n_args)` isn't a declared builtin member.
+    /// Resolve a BUILTIN member (`String.length`, `List.get`/`size`, `CharSequence.get`, …) to its
+    /// concrete JVM call — `(owner_internal, jvm_method_name, method_descriptor, return_ty, is_interface)`
+    /// — derived from the type's builtins metadata + the kotlin↔JVM class map (no per-member hardcode).
+    /// `jvm_method_name` differs from the Kotlin name where kotlinc renames it (`get` → `charAt`,
+    /// `toInt` → `intValue`). Lets a backend emit a member that the classpath's `resolve_instance` can't
+    /// (a Kotlin builtin property/method over a mapped JVM type). `None` if `internal.name(n_args)` isn't a
+    /// declared builtin member.
     fn builtin_member_call(
         &self,
         _internal: &str,
         _name: &str,
         _n_args: usize,
-    ) -> Option<(String, String, Ty, bool)> {
+    ) -> Option<(String, String, String, Ty, bool)> {
         None
     }
 

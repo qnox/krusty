@@ -98,6 +98,33 @@ pub fn kotlin_builtin_to_internal(simple: &str) -> Option<&'static str> {
     })
 }
 
+/// Map a JVM-mapped built-in type back to the Kotlin built-in whose `.kotlin_builtins` metadata declares
+/// the Kotlin-only members it carries (`java/lang/CharSequence` → `kotlin/CharSequence` for `get`/`length`,
+/// `java/lang/Number` → `kotlin/Number` for `toInt`/…, `java/lang/Comparable` → `kotlin/Comparable` for
+/// `compareTo`). These are the mapped types whose Kotlin API differs from the JVM class's own methods;
+/// `String`/`Any`/`Throwable` members resolve on the JVM class directly, and the collection types keep
+/// their `kotlin/collections/…` identity in the front end. `None` for anything else.
+pub fn jvm_to_kotlin_builtin_with_members(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "java/lang/CharSequence" => "kotlin/CharSequence",
+        "java/lang/Number" => "kotlin/Number",
+        "java/lang/Comparable" => "kotlin/Comparable",
+        _ => return None,
+    })
+}
+
+/// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
+/// `invokeinterface`, not `invokevirtual`). A reliable answer for the curated mapped types — matching
+/// kotlinc's `JavaToKotlinClassMap` — for when the classpath `.class` reader can't be consulted (e.g. a
+/// JDK whose jimage format krusty doesn't decode). `None` for any other type (consult the classpath).
+pub fn jvm_mapped_builtin_is_interface(jvm_internal: &str) -> Option<bool> {
+    Some(match jvm_internal {
+        "java/lang/CharSequence" | "java/lang/Comparable" | "java/lang/Iterable" => true,
+        "java/lang/Number" | "java/lang/Object" | "java/lang/String" | "java/lang/Enum" => false,
+        _ => return None,
+    })
+}
+
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
 /// the JDK naming convention (`…Exception`/`…Error`, or `java/lang/Throwable` itself). Used only to
 /// admit the no-arg / single-`String` constructor shapes every JDK throwable provides — the type

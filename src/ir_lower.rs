@@ -3856,13 +3856,30 @@ impl<'a> Lower<'a> {
     /// verifies (`asSeq<String>(x).length`); the wrapper is unboxed to a primitive only at a use site
     /// that needs it, by the normal coercion path — never eagerly here (an `Int?` consumer keeps it
     /// boxed, and `null` must not be unboxed).
-    fn coerce_erased_call_result(&mut self, e: AstExprId, call: u32, ret: &Ty) -> u32 {
-        let erased = ret.non_null().obj_internal() == Some("kotlin/Any");
-        if !erased {
+    fn coerce_erased_call_result(
+        &mut self,
+        e: AstExprId,
+        call: u32,
+        ret: &Ty,
+        ret_is_tparam: bool,
+    ) -> u32 {
+        // The erased return is a type parameter — `Object` when unbounded, or a concrete bound
+        // (`CharSequence` for `<T : CharSequence>`). Only then does the checker's substituted static
+        // type refine it; a concrete reference return (a value class, a bridge result) must NOT be cast,
+        // or codegen inserts a spurious `checkcast` that breaks verification.
+        let phys = ret.non_null();
+        if !(ret_is_tparam || phys.obj_internal() == Some("kotlin/Any")) {
             return call;
         }
+        // When the substituted static type is a strictly more specific reference than the erased return
+        // (`asSeq<String>(x): String` physically `CharSequence`), insert the `checkcast` kotlinc emits so
+        // a member access on the result verifies.
         let st = self.info.ty(e);
-        if st.is_reference() && st != Ty::obj("kotlin/Any") && st != Ty::Null {
+        if st.is_reference()
+            && st != Ty::obj("kotlin/Any")
+            && st != Ty::Null
+            && st.non_null() != phys
+        {
             return self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
                 arg: call,
@@ -7936,14 +7953,18 @@ impl<'a> Lower<'a> {
             return Some(self.coerce_generic_read(read, e, m.ret));
         }
         // A Kotlin BUILTIN member the classpath `resolve_instance` can't surface — e.g. `String.length`
-        // (a property over `java.lang.String.length()`), `List.size`. Resolved generically from the
-        // builtins metadata + the kotlin↔JVM class map (owner/descriptor/interface), NOT a hardcode.
+        // (a property over `java.lang.String.length()`), `List.size`, `CharSequence.length`. Resolved
+        // generically from the builtins metadata + the kotlin↔JVM class map (owner/jvm-name/descriptor/
+        // interface), NOT a hardcode. A JVM-mapped receiver (`java/lang/CharSequence`) maps back to its
+        // Kotlin builtin (`kotlin/CharSequence`) whose `.kotlin_builtins` declares the member.
         let kotlin_internal = match rt {
             Ty::String => "kotlin/String".to_string(),
-            Ty::Obj(i, _) => i.to_string(),
+            Ty::Obj(i, _) => crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(i)
+                .unwrap_or(i)
+                .to_string(),
             _ => return None,
         };
-        if let Some((owner, descriptor, ret_ty, is_iface)) = self
+        if let Some((owner, jvm_name, descriptor, ret_ty, is_iface)) = self
             .syms
             .libraries
             .builtin_member_call(&kotlin_internal, name, 0)
@@ -7951,7 +7972,7 @@ impl<'a> Lower<'a> {
             let read = self.ir.add_expr(IrExpr::Call {
                 callee: Callee::Virtual {
                     owner,
-                    name: name.to_string(),
+                    name: jvm_name,
                     descriptor,
                     interface: is_iface,
                 },
@@ -13713,7 +13734,16 @@ impl<'a> Lower<'a> {
                             args: a,
                         });
                         let ret = self.ir.functions[fid as usize].ret.clone();
-                        self.coerce_erased_call_result(e, call, &ret)
+                        // Whether the callee's DECLARED return is a bare type parameter (`fun <T> f(): T`)
+                        // — only then is the erased return refined by the call-site static type.
+                        let ret_is_tparam = self.top_fun_decl(&fname).is_some_and(|f| {
+                            f.ret.as_ref().is_some_and(|r| {
+                                r.targs.is_empty()
+                                    && r.fun_params.is_empty()
+                                    && f.type_params.iter().any(|tp| tp == &r.name)
+                            })
+                        });
+                        self.coerce_erased_call_result(e, call, &ret, ret_is_tparam)
                     } else if let Some(facade) = self.syms.fn_facades.get(&fname).cloned() {
                         // A top-level function defined in ANOTHER file of this multi-file compilation →
                         // a cross-facade `invokestatic`. Only the simple exact-arity case (no vararg /
@@ -15143,6 +15173,43 @@ impl<'a> Lower<'a> {
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_generic_read(call, e, mret)
+                    } else if let Some((owner, jvm_name, descriptor, ret_ty, is_iface)) = {
+                        // A Kotlin built-in member over a JVM-mapped receiver whose JVM method is RENAMED
+                        // (`CharSequence.get` → `charAt`, `Number.toInt` → `intValue`) — declared in
+                        // `.kotlin_builtins`, reachable under its Kotlin name only here. A same-named member
+                        // (`Comparable.compareTo`, `CharSequence.length`) is left to the classpath
+                        // `resolve_instance` above, which dispatches it correctly (incl. value-class
+                        // receivers); only the rename needs this path.
+                        rt.obj_internal()
+                            .and_then(crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members)
+                            .and_then(|kotlin| {
+                                self.syms
+                                    .libraries
+                                    .builtin_member_call(kotlin, &name, args.len())
+                            })
+                            .filter(|(_, jvm_name, ..)| *jvm_name != name)
+                    } {
+                        let recv = self.expr(receiver)?;
+                        let (param_tys, _) =
+                            crate::jvm::jvm_libraries::parse_method_desc(&descriptor);
+                        let mut a = Vec::new();
+                        for (i, &arg) in args.iter().enumerate() {
+                            match param_tys.get(i) {
+                                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                None => a.push(self.expr(arg)?),
+                            }
+                        }
+                        let call = self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner,
+                                name: jvm_name,
+                                descriptor,
+                                interface: is_iface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: a,
+                        });
+                        self.coerce_generic_read(call, e, ret_ty)
                     } else if let Some(c) = {
                         // A library-resolved extension `recv.name(args)` → `invokestatic
                         // facade.name(recv, args)`. Owner + descriptor come from the library

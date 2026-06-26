@@ -51,6 +51,26 @@ fn meta_param_ty(name: Option<&str>) -> Ty {
     kotlin_name_to_ty(n)
 }
 
+/// The JVM method name of a Kotlin built-in member whose erased JVM method is named differently than its
+/// Kotlin declaration — kotlinc's `BuiltInMethodsWithDifferentJvmName`: `CharSequence.get` dispatches to
+/// `java.lang.CharSequence.charAt`, and `Number.toInt`/`toLong`/… to `intValue`/`longValue`/…. `None`
+/// when the Kotlin and JVM names coincide (`CharSequence.length`, `Comparable.compareTo`).
+fn jvm_builtin_method_name(internal: &str, kotlin_name: &str) -> Option<String> {
+    Some(
+        match (internal, kotlin_name) {
+            ("kotlin/CharSequence", "get") => "charAt",
+            ("kotlin/Number", "toByte") => "byteValue",
+            ("kotlin/Number", "toShort") => "shortValue",
+            ("kotlin/Number", "toInt") => "intValue",
+            ("kotlin/Number", "toLong") => "longValue",
+            ("kotlin/Number", "toFloat") => "floatValue",
+            ("kotlin/Number", "toDouble") => "doubleValue",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 /// Whether `meta` (a `@Metadata` source value param `Ty`) aligns with `desc` (a JVM-descriptor param
 /// `Ty`) when matching an overload structurally. Exact when equal; a generic/erased param (`kotlin/Any`
 /// or its erased `java/lang/Object`) on either side matches any reference type; otherwise the class
@@ -692,7 +712,7 @@ impl Classpath {
         internal: &str,
         name: &str,
         n_args: usize,
-    ) -> Option<(String, String, Ty, bool)> {
+    ) -> Option<(String, String, String, Ty, bool)> {
         let path = Self::builtins_path_for(internal);
         let f = self.builtins_file(&path);
         let m = f
@@ -716,9 +736,32 @@ impl Classpath {
         } else {
             Ty::obj("kotlin/Any")
         };
-        let owner = crate::jvm::jvm_class_map::to_jvm_internal(internal).to_string();
-        let is_iface = self.find(&owner).is_some_and(|ci| ci.access & 0x0200 != 0);
-        Some((owner, descriptor, ret_ty, is_iface))
+        // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
+        // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
+        // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
+        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+        let owner = if mapped != internal {
+            mapped.to_string()
+        } else if let Some(j) = internal
+            .strip_prefix("kotlin/")
+            .filter(|s| !s.contains('/'))
+            .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+        {
+            j.to_string()
+        } else {
+            internal.to_string()
+        };
+        // The JVM method name: a Kotlin builtin member whose JVM method has a different name
+        // (`CharSequence.get` → `charAt`, `Number.toInt` → `intValue`), else the Kotlin name as-is.
+        let jvm_name = jvm_builtin_method_name(internal, name).unwrap_or_else(|| name.to_string());
+        // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
+        // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
+        let is_iface = self
+            .find(&owner)
+            .map(|ci| ci.is_interface())
+            .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(&owner))
+            .unwrap_or(false);
+        Some((owner, jvm_name, descriptor, ret_ty, is_iface))
     }
 
     /// Whether `internal` names a type in the Kotlin collection hierarchy (`collections.kotlin_builtins`)
