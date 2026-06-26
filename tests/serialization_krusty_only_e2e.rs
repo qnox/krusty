@@ -172,6 +172,34 @@ fun box(): String {
 }
 
 #[test]
+fn json_instance_decode_infers_type_in_krusty() {
+    // Decode through a `Json` INSTANCE (from `Json { }`), not the companion object:
+    // `j.decodeFromString(Foo.serializer(), s)` must infer `T` = `Foo` from the deserializer argument so
+    // `back.a`/`back.b` resolve (the erased member return is `Any`). This is the `singleFileInheritanceJs`
+    // shape — decode on a configured `Json` value rather than `Json.decodeFromString`.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val j = Json { encodeDefaults = true }
+    val s = j.encodeToString(Foo.serializer(), Foo(7, "hi"))
+    val back = j.decodeFromString(Foo.serializer(), s)
+    return back.b + back.a.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "JsonInstanceDecode") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "hi7",
+        "Json instance decode type inference wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty Json instance decode OK: {stdout}");
+}
+
+#[test]
 fn serial_name_overrides_json_key_entirely_in_krusty() {
     // `@SerialName("…")` on a constructor property renames its descriptor element (and thus its JSON
     // key) — including a const-folded value (`@SerialName("$prefix.bar")` with `const val prefix`).

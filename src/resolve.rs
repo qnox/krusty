@@ -7271,10 +7271,17 @@ impl<'a> Checker<'a> {
                             .libraries
                             .member_return(rt, &name, &arg_tys)
                             .unwrap_or(m.ret);
-                        // A reified member whose return erased to `Any` (`Json.decodeFromString<Dto>(s): T`)
-                        // recovers the explicit type argument (`Dto`) — mirrors the companion-static arm.
+                        // A generic member/extension whose return erased to `Any`
+                        // (`json.decodeFromString(KSerializer<Foo>, String): T` on a `Json` INSTANCE)
+                        // recovers its substituted return: an explicit type argument
+                        // (`decodeFromString<Dto>`), else `T` inferred from the arguments (the
+                        // `DeserializationStrategy<Foo>` parameter) — mirrors the companion-static arm.
                         if ret == Ty::obj("kotlin/Any") {
-                            if let Some(t) = self.reified_type_arg(call) {
+                            if let Some(t) = self.reified_type_arg(call).or_else(|| {
+                                self.syms
+                                    .libraries
+                                    .instance_call_return(rt, &name, &arg_tys)
+                            }) {
                                 return t;
                             }
                         }
