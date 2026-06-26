@@ -1635,7 +1635,7 @@ pub fn collect_signatures_with_cp(
                             ctor_params,
                             methods,
                             is_interface: c.is_interface(),
-                            is_sealed: c.is_sealed,
+                            is_sealed: c.is_sealed(),
                             inner_of,
                             static_methods,
                             static_props,

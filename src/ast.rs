@@ -484,13 +484,10 @@ pub struct ClassDecl {
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
     /// convertible to it.
     pub is_fun_interface: bool,
-    /// `open`/`abstract` — the class is not `final` (may be subclassed); `abstract` also adds
-    /// `ACC_ABSTRACT`.
-    pub is_open: bool,
-    pub is_abstract: bool,
-    /// `sealed` — abstract + open, and its subclasses are all known in this module (enabling
-    /// exhaustive `when` without `else`).
-    pub is_sealed: bool,
+    /// Inheritance modality (`final` / `open` / `abstract` / `sealed`). Replaces the old
+    /// `is_open` + `is_abstract` + `is_sealed` booleans; read via the `is_open()` / `is_abstract()` /
+    /// `is_sealed()` accessors (which preserve the prior bool semantics, incl. `sealed ⟹ abstract+open`).
+    pub modality: Modality,
     /// `inner class` — captures the enclosing instance: emitted with a synthetic `this$0` field of the
     /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
     pub inner_of: Option<String>,
@@ -533,7 +530,51 @@ pub enum ClassKind {
     Annotation,
 }
 
+/// A class's inheritance modality. One field instead of parallel `is_open`/`is_abstract`/`is_sealed`
+/// booleans (which encoded `sealed ⟹ abstract` and `sealed ⟹ open` only by convention). Read through
+/// the accessor methods, which reproduce the old boolean values exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Modality {
+    /// `final` (the Kotlin default) — cannot be subclassed.
+    #[default]
+    Final,
+    /// `open` — may be subclassed, but is not `abstract`.
+    Open,
+    /// `abstract` — not `final`; carries `ACC_ABSTRACT`.
+    Abstract,
+    /// `sealed` — abstract, open, and its subclasses are all known in this module.
+    Sealed,
+}
+
+impl Modality {
+    /// `abstract` OR `sealed` — both carry `ACC_ABSTRACT` (matches the old `is_abstract` bool).
+    pub fn is_abstract(self) -> bool {
+        matches!(self, Modality::Abstract | Modality::Sealed)
+    }
+    /// `open` OR `sealed` — subclassable without `abstract` (matches the old `is_open` bool, which the
+    /// parser set as `sealed || open` and NOT for a bare `abstract`).
+    pub fn is_open(self) -> bool {
+        matches!(self, Modality::Open | Modality::Sealed)
+    }
+    /// Specifically `sealed`.
+    pub fn is_sealed(self) -> bool {
+        matches!(self, Modality::Sealed)
+    }
+}
+
 impl ClassDecl {
+    /// `abstract` or `sealed` (both carry `ACC_ABSTRACT`).
+    pub fn is_abstract(&self) -> bool {
+        self.modality.is_abstract()
+    }
+    /// `open` or `sealed` (subclassable without `abstract`).
+    pub fn is_open(&self) -> bool {
+        self.modality.is_open()
+    }
+    /// Specifically `sealed`.
+    pub fn is_sealed(&self) -> bool {
+        self.modality.is_sealed()
+    }
     pub fn is_interface(&self) -> bool {
         self.kind == ClassKind::Interface
     }
