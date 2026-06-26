@@ -1177,7 +1177,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .collect();
                 let ret = ty_to_ir(
                     info.fun_ret_overrides
-                        .get(&f.name)
+                        .get(&(f.name.clone(), sig.params.clone()))
                         .copied()
                         .unwrap_or(sig.ret),
                 );
