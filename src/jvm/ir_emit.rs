@@ -4257,14 +4257,20 @@ impl<'a> Emitter<'a> {
 
     /// Append a value already on the operand stack (of type `ty`) to a `StringBuilder` beneath it.
     fn append_top(&mut self, ty: Ty, code: &mut CodeBuilder) {
+        // A `String` value reaches here either as `Ty::String` or as `Ty::Obj("java/lang/String")` —
+        // the latter when its type was parsed from a method-return descriptor (e.g. a classpath call
+        // or the data-class `Arrays.toString(field)` wrapper). Both must pick the `append(String)`
+        // overload kotlinc uses, not the less-specific `append(Object)`.
+        let is_string = matches!(ty, Ty::String)
+            || matches!(ty, Ty::Obj(n, _) if n == "java/lang/String" || n == "kotlin/String");
         let desc = match ty {
+            _ if is_string => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
             Ty::Int | Ty::Short | Ty::Byte => "(I)Ljava/lang/StringBuilder;",
             Ty::Long => "(J)Ljava/lang/StringBuilder;",
             Ty::Boolean => "(Z)Ljava/lang/StringBuilder;",
             Ty::Char => "(C)Ljava/lang/StringBuilder;",
             Ty::Double => "(D)Ljava/lang/StringBuilder;",
             Ty::Float => "(F)Ljava/lang/StringBuilder;",
-            Ty::String => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
             _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
         };
         let m = self.cw.methodref("java/lang/StringBuilder", "append", desc);
