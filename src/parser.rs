@@ -1936,6 +1936,21 @@ impl<'a> Parser<'a> {
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
                     }
+                    // A nested NAMED `object Inner { … }` → hoist to the file top level as `Outer.Inner`
+                    // (internal `Outer$Inner`), accessed as the singleton via `Outer.Inner` — same as a
+                    // nested class. (A nested interface/enum/annotation/sealed-interface still drops.)
+                    TokenKind::Ident
+                        if self.text() == "object"
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| t.kind == TokenKind::Ident) =>
+                    {
+                        let mut nested = self.parse_object();
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
                             || (matches!(self.text(), "enum" | "annotation")

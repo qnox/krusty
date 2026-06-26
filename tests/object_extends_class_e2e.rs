@@ -61,3 +61,19 @@ fun box(): String { val i: I = O; return if (i.d == 42 && i.e == \"x\") \"OK\" e
         "OK"
     );
 }
+
+#[test]
+fn nested_object_accessed_via_outer() {
+    // A NESTED `object Inner` inside a class is hoisted to `Outer$Inner` and accessed as the singleton
+    // via `Outer.Inner` (resolver + `getstatic Outer$Inner.INSTANCE` lowering). Previously a nested
+    // object was silently dropped (not emitted) and `Outer.Inner` was an unresolved reference.
+    const SRC: &str = "class Outer { object Inner { val x = 5; fun greet() = \"hi\" } }\n\
+fun box(): String {\n\
+if (Outer.Inner.x != 5) return \"x\"\n\
+return if (Outer.Inner.greet() == \"hi\") \"OK\" else \"g\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("nested object access compiles + runs"),
+        "OK"
+    );
+}

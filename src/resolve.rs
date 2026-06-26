@@ -5286,6 +5286,17 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ty);
                             }
                         }
+                        // `Outer.Inner` — a USER nested singleton `object` (hoisted as the class
+                        // `Outer.Inner`, internal `Outer$Inner`). The value is the singleton; lowering
+                        // reads its `INSTANCE` field (via `obj_value_refs`, like a classpath nested object).
+                        let qualified = format!("{en}.{name}");
+                        if self.syms.objects.contains(&qualified) {
+                            if let Some(cs) = self.syms.classes.get(&qualified) {
+                                let internal = cs.internal.clone();
+                                self.obj_value_refs.insert(e, internal.clone());
+                                return self.set(e, Ty::obj(&internal));
+                            }
+                        }
                         // `ClasspathClass.NestedObject` — a nested singleton object on the classpath
                         // (`PrimitiveKind.STRING` → `getstatic PrimitiveKind$STRING.INSTANCE`). The value
                         // type is the nested object's type; lowering reads its `INSTANCE`.
