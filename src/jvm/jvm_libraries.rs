@@ -1586,7 +1586,19 @@ impl LibrarySet for JvmLibraries {
     }
 
     fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
-        self.cp.builtin_member_ret(internal, name, args)
+        self.cp
+            .builtin_member_ret(internal, name, args)
+            .or_else(|| {
+                // A Kotlin built-in member over a JVM-mapped receiver (`CharSequence.length`, `Number.toInt`)
+                // is declared in `.kotlin_builtins` under the KOTLIN name, while the receiver here may carry
+                // the mapped JVM name — retry under the Kotlin built-in identity.
+                crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+                    .and_then(|kotlin| self.cp.builtin_member_ret(kotlin, name, args))
+            })
+    }
+
+    fn canonical_internal<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed(crate::jvm::jvm_class_map::to_jvm_internal(internal))
     }
 
     fn builtin_member_call(

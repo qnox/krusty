@@ -4535,16 +4535,19 @@ impl<'a> Checker<'a> {
     /// Is `sub` a subtype of `sup`? Reflexive, through implemented interfaces, and up the base-class
     /// chain.
     fn obj_is_subtype(&self, sub: &str, sup: &str) -> bool {
+        // Cheap exact-match before folding (covers the common same-name case without a map lookup).
         if sub == sup {
             return true;
         }
-        // The Kotlin collection interfaces all erase to one JVM interface; compare on the erased names so
-        // `MutableList`/`List` (and a `kotlin/collections/List` vs a platform `java/util/List`) are
-        // mutually assignable — the read-only/mutable distinction is enforced only at the `+=` operator,
-        // not in general assignability. Also lets a `kotlin/collections/MutableList` reach
-        // `java/util/Collection` via the JVM hierarchy walk below.
-        let sub = crate::jvm::jvm_class_map::to_jvm_internal(sub);
-        let sup = crate::jvm::jvm_class_map::to_jvm_internal(sup);
+        // The Kotlin collection interfaces all map to one platform interface; compare on the canonical
+        // names so `MutableList`/`List` (and a `kotlin/collections/List` vs a platform `java/util/List`)
+        // are mutually assignable — the read-only/mutable distinction is enforced only at the `+=`
+        // operator, not in general assignability. Also lets a `kotlin/collections/MutableList` reach
+        // `java/util/Collection` via the hierarchy walk below. The platform name map is the backend's
+        // (`LibrarySet::canonical_internal`), so the checker stays in Kotlin terms.
+        let sub = self.syms.libraries.canonical_internal(sub);
+        let sup = self.syms.libraries.canonical_internal(sup);
+        let (sub, sup) = (sub.as_ref(), sup.as_ref());
         if sub == sup {
             return true;
         }
@@ -5068,14 +5071,12 @@ impl<'a> Checker<'a> {
                     && !self.tparams.contains(&ty.name)
                     // `'a' as Char?` / `42 as Int?` — box to the operand's own nullable form …
                     && (tt.nullable_primitive() == Some(ot)
-                        // … or `42 as Any` / `42 as Number` — box to a supertype of the JVM wrapper.
-                        || crate::jvm::jvm_class_map::wrapper_internal(ot).is_some_and(|bw| {
-                            tt.obj_internal().is_some_and(|t| {
-                                t == "kotlin/Any"
-                                    || t == "java/lang/Object"
-                                    || t == bw
-                                    || self.obj_is_subtype(bw, t)
-                            })
+                        // … or `42 as Any` / `42 as Number` — box to a supertype of the operand's boxed
+                        // class (`Int` → `kotlin/Int`). Subtyping resolves the JVM wrapper hierarchy
+                        // (`kotlin/Int` <: `Number` <: `Any`); the wrapper realization is the backend's.
+                        || ot.boxed_ref().and_then(|b| b.obj_internal()).is_some_and(|bw| {
+                            tt.obj_internal()
+                                .is_some_and(|t| self.obj_is_subtype(bw, t))
                         }));
                 if !(tt.is_reference() || prim_unbox)
                     || (!ot.is_reference() && !prim_box && ot != Ty::Error)
@@ -6878,15 +6879,11 @@ impl<'a> Checker<'a> {
             }
         }
         // A Kotlin built-in PROPERTY over a JVM-mapped receiver (`CharSequence.length`) — declared in
-        // `.kotlin_builtins` (keyed on the Kotlin name), not a method on the mapped JVM `.class`.
+        // `.kotlin_builtins` (the backend's `builtin_member_ret` retries the mapped Kotlin identity).
         if let Some(internal) = rt.obj_internal() {
-            if let Some(kotlin) =
-                crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
-            {
-                if let Some(t) = self.syms.libraries.builtin_member_ret(kotlin, name, &[]) {
-                    if !matches!(t, Ty::Unit | Ty::Error) {
-                        return t;
-                    }
+            if let Some(t) = self.syms.libraries.builtin_member_ret(internal, name, &[]) {
+                if !matches!(t, Ty::Unit | Ty::Error) {
+                    return t;
                 }
             }
         }
@@ -7697,18 +7694,14 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                     // A Kotlin built-in member over a JVM-mapped receiver (`CharSequence.get`,
-                    // `Number.toInt`) — declared in `.kotlin_builtins` (keyed on the Kotlin name), not on
-                    // the mapped JVM `.class`. The backend emits it via `builtin_member_call`.
-                    if let Some(kotlin) =
-                        crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
+                    // `Number.toInt`) — declared in `.kotlin_builtins` (the backend's `builtin_member_ret`
+                    // retries the mapped Kotlin identity). The backend emits it via `builtin_member_call`.
+                    if let Some(ret) = self
+                        .syms
+                        .libraries
+                        .builtin_member_ret(internal, &name, &arg_tys)
                     {
-                        if let Some(ret) = self
-                            .syms
-                            .libraries
-                            .builtin_member_ret(kotlin, &name, &arg_tys)
-                        {
-                            return ret;
-                        }
+                        return ret;
                     }
                 }
                 // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
