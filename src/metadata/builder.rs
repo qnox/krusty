@@ -16,6 +16,11 @@ pub struct FnMeta {
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
     pub receiver: Option<Ty>,
+    /// Per-parameter: `Some(receiver_ty)` when the parameter is a RECEIVER function type `Recv.(…) -> R`
+    /// (its `Ty` erases to `kotlin/FunctionN`). Emits the `@kotlin.ExtensionFunctionType` type-annotation
+    /// plus the receiver as the function type's first type ARGUMENT, so a reader recognizes a lambda
+    /// passed to this parameter binds `this` to `receiver_ty`. Parallel to `params`; empty = none.
+    pub param_fun_recvs: Vec<Option<Ty>>,
     /// Per-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `params`; empty = none default). Sets
     /// `ValueParameter.flags` bit 1 so a cross-module caller may OMIT a defaulted argument (the reader's
     /// `metadata_param_defaults` recovers it). A short/empty vec leaves the remaining params required.
@@ -111,6 +116,25 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     p
 }
 
+/// A `Type` for a RECEIVER function-type parameter (`Recv.(…) -> R`, erased to `fun_class` =
+/// `kotlin/FunctionN`): records `recv` as the function type's FIRST type ARGUMENT (`Type.argument` = 1,
+/// each `Argument.type` = 2) and tags it with the `@kotlin.ExtensionFunctionType` type annotation
+/// (`Type.annotation` = 100, a registered extension; `Annotation.id` = 1 → the annotation class). A reader
+/// recovers the receiver from argument[0] and the receiver-ness from the annotation, exactly as kotlinc
+/// emits for a `Recv.() -> R` parameter.
+fn type_pb_recv_fun(st: &mut StringTable, fun_class: Ty, recv: Ty) -> Pb {
+    let mut p = type_pb(st, fun_class); // Type.class_name = kotlin/FunctionN
+    let recv_ty = type_pb(st, recv);
+    let mut arg = Pb::new();
+    arg.field_message(2, &recv_ty); // Argument.type = 2 (projection INV omitted)
+    p.repeated_message(1, &arg); // Type.argument = 1
+    let ext_id = st.class_id_from_desc("Lkotlin/ExtensionFunctionType;");
+    let mut anno = Pb::new();
+    anno.field_varint(1, ext_id as u64); // Annotation.id = 1
+    p.field_message(100, &anno); // Type.annotation = 100 (extension)
+    p
+}
+
 fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-zero (a `suspend fun` sets IS_SUSPEND). kotlinc orders
@@ -136,7 +160,10 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             vp.field_varint(1, DECLARES_DEFAULT_VALUE_BIT);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-        let ty = type_pb(st, *pty);
+        let ty = match f.param_fun_recvs.get(i).and_then(|o| *o) {
+            Some(recv) => type_pb_recv_fun(st, *pty, recv),
+            None => type_pb(st, *pty),
+        };
         vp.field_message(3, &ty); // ValueParameter.type = 3
         p.repeated_message(6, &vp); // Function.value_parameter = 6
     }
@@ -244,6 +271,7 @@ mod tests {
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
                 receiver: None,
+                param_fun_recvs: Vec::new(),
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
@@ -263,6 +291,7 @@ mod tests {
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
                 receiver: None,
+                param_fun_recvs: Vec::new(),
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,

@@ -105,6 +105,7 @@ impl Backend for JvmBackend {
                     params,
                     ret: sig.ret,
                     receiver: None,
+                    param_fun_recvs: Vec::new(),
                     param_defaults: Vec::new(),
                     suspend: true,
                     jvm_desc: Some(jvm_desc),
