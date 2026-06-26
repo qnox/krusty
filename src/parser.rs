@@ -1279,16 +1279,13 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        let mut entries = Vec::new();
-        let mut entry_args: Vec<Vec<ExprId>> = Vec::new();
-        let mut entry_bodies: Vec<Vec<FunDecl>> = Vec::new();
-        let mut entry_props: Vec<Vec<PropDecl>> = Vec::new();
+        let mut entries: Vec<AstEnumEntry> = Vec::new();
         let mut methods = Vec::new();
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
             while self.at(TokenKind::Ident) {
-                entries.push(self.text().to_string());
+                let entry_name = self.text().to_string();
                 self.bump();
                 // Optional constructor arguments: `RED(0xFF0000)`.
                 let mut args = Vec::new();
@@ -1347,9 +1344,12 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(TokenKind::RBrace, "'}'");
                 }
-                entry_bodies.push(body);
-                entry_props.push(bprops);
-                entry_args.push(args);
+                entries.push(AstEnumEntry {
+                    name: entry_name,
+                    args,
+                    methods: body,
+                    props: bprops,
+                });
                 self.skip_newlines();
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -1440,9 +1440,6 @@ impl<'a> Parser<'a> {
             is_value: false,
             kind: ClassKind::Enum,
             enum_entries: entries,
-            enum_entry_args: entry_args,
-            enum_entry_bodies: entry_bodies,
-            enum_entry_props: entry_props,
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
             inner_of: None,
@@ -2039,9 +2036,6 @@ impl<'a> Parser<'a> {
             is_value: false,
             kind: ClassKind::Class,
             enum_entries: Vec::new(),
-            enum_entry_args: Vec::new(),
-            enum_entry_bodies: Vec::new(),
-            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
             inner_of: None,
@@ -2249,9 +2243,6 @@ impl<'a> Parser<'a> {
             is_value: false,
             kind: ClassKind::Interface,
             enum_entries: Vec::new(),
-            enum_entry_args: Vec::new(),
-            enum_entry_bodies: Vec::new(),
-            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
             inner_of: None,
@@ -2377,9 +2368,6 @@ impl<'a> Parser<'a> {
             is_value: false,
             kind: ClassKind::Class,
             enum_entries: Vec::new(),
-            enum_entry_args: Vec::new(),
-            enum_entry_bodies: Vec::new(),
-            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
             inner_of: None,
@@ -2510,9 +2498,6 @@ impl<'a> Parser<'a> {
             is_value: false,
             kind: ClassKind::Object,
             enum_entries: Vec::new(),
-            enum_entry_args: Vec::new(),
-            enum_entry_bodies: Vec::new(),
-            enum_entry_props: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
             inner_of: None,

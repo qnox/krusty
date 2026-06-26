@@ -567,7 +567,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 enum_entries: c
                     .enum_entries
                     .iter()
-                    .map(|n| (n.clone(), Vec::new()))
+                    .map(|e| (e.name.clone(), Vec::new()))
                     .collect(),
                 enum_entry_subclass: vec![None; c.enum_entries.len()],
                 enum_entry_of: None,
@@ -2475,9 +2475,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 .iter()
                                 .any(|em| em.name == m && !matches!(em.body, FunBody::None));
                             let all_entries_override = !c.enum_entries.is_empty()
-                                && c.enum_entry_bodies
+                                && c.enum_entries
                                     .iter()
-                                    .all(|b| b.iter().any(|bm| bm.name == m));
+                                    .all(|e| e.methods.iter().any(|bm| bm.name == m));
                             if !enum_has && !all_entries_override {
                                 return None; // unsatisfied abstract interface member — skip
                             }
@@ -2496,12 +2496,12 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         .iter()
                         .map(|f| f.ty.clone())
                         .collect();
-                    for (ei, args) in c.enum_entry_args.iter().enumerate() {
+                    for (ei, entry) in c.enum_entries.iter().enumerate() {
                         lo.scope.clear();
                         lo.next_value = 0;
                         lo.cur_class = None;
                         let mut lowered = Vec::new();
-                        for (arg, ft) in args.iter().zip(&field_tys) {
+                        for (arg, ft) in entry.args.iter().zip(&field_tys) {
                             // Branchy entry args (`X(1 == 1)`) are handled by the `<clinit>` spill.
                             lowered.push(lo.lower_arg(*arg, ft)?);
                         }
@@ -2515,18 +2515,19 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // bodied entry (`Enum$ENTRY extends Enum`) whose overrides are lowered with the
                     // enum's field/`this` scope (so a read of a constructor `val` becomes a getfield on
                     // the enum). The entry is then constructed as `new Enum$ENTRY(...)`.
-                    for (ei, body) in c.enum_entry_bodies.iter().enumerate() {
-                        let eprops = c.enum_entry_props.get(ei).cloned().unwrap_or_default();
+                    for (ei, entry) in c.enum_entries.iter().enumerate() {
+                        let body = &entry.methods;
+                        let eprops = &entry.props;
                         if body.is_empty() && eprops.is_empty() {
                             continue;
                         }
-                        let entry_name = &c.enum_entries[ei];
+                        let entry_name = &entry.name;
                         let sub_fq = format!("{internal}${entry_name}");
                         // Entry-body PROPERTIES become backing fields (+ getters + ctor init) on the
                         // subclass. Only a plainly-initialized `val`/`var` is modeled; a getter/setter/
                         // delegate/lateinit prop bails (skip, never miscompile).
                         let mut prop_fields: Vec<(String, Ty)> = Vec::new();
-                        for p in &eprops {
+                        for p in eprops {
                             if p.init.is_none()
                                 || p.getter.is_some()
                                 || p.setter.is_some()
@@ -2999,13 +3000,13 @@ fn is_simple_enum(c: &ast::ClassDecl) -> bool {
         && c.body_props.iter().all(|p| is_plain_body_prop(p) && !p.is_abstract)
         && c.methods.iter().all(|m| m.receiver.is_none())
         // Entry-body overrides: concrete, non-extension methods only.
-        && c.enum_entry_bodies.iter().all(|b| b.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None)))
+        && c.enum_entries.iter().all(|e| e.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None)))
         // Every entry must override EVERY abstract member: a bodyless entry would instantiate the
         // abstract enum, and an entry that overrides only some members would leave its synthesized
         // subclass with an unimplemented abstract method (AbstractMethodError). kotlinc requires full
         // coverage; if any entry's overrides don't cover all abstract members, skip (never miscompile).
-        && (abstract_names.is_empty() || c.enum_entry_bodies.iter().all(|b| {
-            let overridden: std::collections::HashSet<&str> = b.iter().map(|m| m.name.as_str()).collect();
+        && (abstract_names.is_empty() || c.enum_entries.iter().all(|e| {
+            let overridden: std::collections::HashSet<&str> = e.methods.iter().map(|m| m.name.as_str()).collect();
             abstract_names.iter().all(|n| overridden.contains(n))
         }))
 }

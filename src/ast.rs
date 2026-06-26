@@ -424,6 +424,23 @@ pub struct PropParam {
     pub annotation_args: Vec<Vec<ExprId>>,
 }
 
+/// One entry of an `enum class` (`RED(0xFF0000) { override fun m() = … }`). Groups what were parallel
+/// `Vec`s keyed by entry index (name / constructor args / per-entry-body methods / per-entry-body
+/// properties), so an entry's four facets can't desync.
+#[derive(Clone, Debug)]
+pub struct AstEnumEntry {
+    /// Entry name (`RED`).
+    pub name: String,
+    /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
+    pub args: Vec<ExprId>,
+    /// Per-entry class-body method overrides (`RED { override fun m() = … }`) — the anonymous subclass
+    /// kotlinc emits as `Enum$RED`. Empty when the entry has no body.
+    pub methods: Vec<FunDecl>,
+    /// Per-entry class-body properties (`RED { val y = … }`) — backing fields + getters on the
+    /// `Enum$RED` subclass. Empty when the entry has none.
+    pub props: Vec<PropDecl>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
@@ -469,18 +486,9 @@ pub struct ClassDecl {
     /// `@JvmInline value class` — an inline class. krusty currently compiles it as a regular final
     /// single-field class (self-consistent, box-OK) rather than kotlinc's unboxed `-impl` form.
     pub is_value: bool,
-    /// `enum class Name { A, B }` — `enum_entries` lists the entry names (extends `java/lang/Enum`).
-    pub enum_entries: Vec<String>,
-    /// Constructor arguments per enum entry (parallel to `enum_entries`; empty for `A` with no args).
-    /// The enum's primary-constructor parameters are in `props`.
-    pub enum_entry_args: Vec<Vec<ExprId>>,
-    /// Per-entry class body (`ENTRY { override fun m() = … }`) — the overriding methods of the
-    /// anonymous subclass kotlinc emits as `Enum$ENTRY`. Parallel to `enum_entries`; an empty `Vec`
-    /// means the entry has no body.
-    pub enum_entry_bodies: Vec<Vec<FunDecl>>,
-    /// Per-entry class-body PROPERTIES (`ENTRY { val y = … ; override fun m() = y }`) — backing fields +
-    /// getters on the `Enum$ENTRY` subclass. Parallel to `enum_entries`; empty `Vec` for none.
-    pub enum_entry_props: Vec<Vec<PropDecl>>,
+    /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
+    /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
+    pub enum_entries: Vec<AstEnumEntry>,
     /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
     /// convertible to it.
     pub is_fun_interface: bool,
@@ -889,7 +897,7 @@ impl File {
             Decl::Class(c) if c.is_enum() => {
                 out.push_str(&format!("(enum {}", c.name));
                 for e in &c.enum_entries {
-                    out.push_str(&format!(" {e}"));
+                    out.push_str(&format!(" {}", e.name));
                 }
                 out.push(')');
             }
