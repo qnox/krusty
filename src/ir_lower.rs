@@ -6029,7 +6029,22 @@ impl<'a> Lower<'a> {
                 Some(arg) => a.push(self.lower_arg(arg, pt)?),
                 None => {
                     let def = param_meta.get(k).and_then(|(_, d)| *d)?;
-                    if !is_const_literal(self.afile, def) {
+                    // A constant-literal default emits directly; a lambda default
+                    // (`block: () -> Unit = {}`) emits the lambda object via `lower_arg`, which returns
+                    // `None` — skipping the file, never a miscompile — when it can't emit the lambda
+                    // (e.g. inside a class-method context where it could capture `this`/fields).
+                    let is_lambda = matches!(self.afile.expr(def), Expr::Lambda { .. });
+                    // A value-class (mangled) parameter anywhere in the call needs the direct emitter's
+                    // unboxing-aware default handling; the IR path doesn't replicate it, so a lambda
+                    // default alongside one would miscompile the boxing — bail (fall back to direct).
+                    if is_lambda
+                        && ir_params
+                            .iter()
+                            .any(|p| self.value_class_underlying(*p).is_some())
+                    {
+                        return None;
+                    }
+                    if !is_const_literal(self.afile, def) && !is_lambda {
                         return None;
                     }
                     a.push(self.lower_arg(def, pt)?);

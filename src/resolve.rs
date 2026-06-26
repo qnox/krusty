@@ -7889,6 +7889,11 @@ impl<'a> Checker<'a> {
                                             Expr::CharLit(_) => pt == Ty::Char,
                                             Expr::StringLit(_) => pt == Ty::String,
                                             Expr::NullLit => pt.is_reference(),
+                                            // A lambda default (`block: () -> Unit = {}`) for a
+                                            // function-typed parameter: the call site emits the lambda
+                                            // object directly. Lowering bails (skips the file, never
+                                            // miscompiles) when it can't emit the lambda.
+                                            Expr::Lambda { .. } => matches!(pt, Ty::Fun(_)),
                                             _ => false,
                                         }
                                     }
