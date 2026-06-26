@@ -3699,7 +3699,9 @@ impl<'a> Lower<'a> {
             .classes
             .get(internal)
             .and_then(|c| c.value_field.as_ref())
-            .map(|(_, u)| *u)
+            // A generic value class's underlying type (`inline class IC<T>(val v: T)`) erases to its
+            // bound at the emit boundary — the unboxed representation is the bound's JVM type.
+            .map(|(_, u)| u.erase_ty_param())
     }
 
     fn append_body_stmts(&mut self, body: AstExprId, out: &mut Vec<u32>) -> Option<()> {
@@ -7296,6 +7298,11 @@ impl<'a> Lower<'a> {
     }
 
     fn coerce_erased(&mut self, read: u32, logical: Ty, physical: Ty) -> u32 {
+        // Erase carried type parameters at this emit boundary: a generic delegate's `getValue(): T` has
+        // physical type `T` (its erased `Object` slot), and the read coerces to the concrete property
+        // type. The branches below key on `Object`, so peel `T`→bound first.
+        let logical = logical.erase_ty_param();
+        let physical = physical.erase_ty_param();
         if logical == physical {
             return read;
         }
@@ -7812,7 +7819,9 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_body(&mut self, body: &FunBody, ret_ty: &Ty, fid: u32) -> Option<()> {
-        self.cur_ret_ty = ret_ty.clone();
+        // Erase a type-parameter return (`T`) to its bound here at the emit boundary: `cur_ret_ty` drives
+        // the `checkcast`/box coercion of `return` values to the method's JVM return descriptor.
+        self.cur_ret_ty = ret_ty.erase_ty_param();
         // A named/local function returning `Unit` is a `void` JVM method (only a `() -> Unit` lambda's
         // closure method returns the `Unit` reference) — reset so a nested fun doesn't inherit it.
         self.cur_method_returns_unit_ref = false;
@@ -7899,7 +7908,8 @@ impl<'a> Lower<'a> {
         param_vals: Vec<u32>,
         param_tys: Vec<Ty>,
     ) -> Option<()> {
-        self.cur_ret_ty = ret_ty.clone();
+        // Type-parameter return erases to its bound at this emit boundary (see `lower_body`).
+        self.cur_ret_ty = ret_ty.erase_ty_param();
         self.cur_method_returns_unit_ref = false;
         self.try_finally_stack.clear();
         self.local_delegated.clear();

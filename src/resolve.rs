@@ -740,7 +740,9 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             let t = ty_of_ref(&p.ty, &class_names, &tp, diags);
                             if p.is_vararg {
-                                Ty::array(t)
+                                // A vararg element is a nested (array-element) position — erase a type
+                                // parameter to its bound there, like any other type argument.
+                                Ty::array(t.erase_ty_param())
                             } else {
                                 t
                             }
@@ -1133,6 +1135,45 @@ pub fn collect_signatures_with_cp(
                                 .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
                         }
                     }
+                    // A value class's members can call each other (`override fun foo() = privateFun()`);
+                    // pre-seed inferred (no-explicit-return) member types so a dependent member doesn't
+                    // fall back to `Unit`. Two passes settle a one-step chain. Scoped to value classes —
+                    // ordinary classes resolve such chains through the existing per-method inference below,
+                    // and eager seeding there perturbs private-method dispatch in interface defaults.
+                    if c.is_value {
+                        for _ in 0..2 {
+                            for m in &c.methods {
+                                if m.ret.is_some() {
+                                    continue;
+                                }
+                                let FunBody::Expr(e) = &m.body else { continue };
+                                let mtp = ctp.extended(&m.type_params, &m.type_param_bounds);
+                                let mut scope: Vec<(String, Ty, bool)> = m
+                                    .params
+                                    .iter()
+                                    .map(|p| {
+                                        (
+                                            p.name.clone(),
+                                            ty_of_ref(&p.ty, &class_names, &mtp, diags),
+                                            false,
+                                        )
+                                    })
+                                    .collect();
+                                scope.extend(props.iter().cloned());
+                                let t = infer_lit_ty_p(
+                                    file,
+                                    *e,
+                                    &class_names,
+                                    &local_rets,
+                                    &scope,
+                                    &*libraries,
+                                );
+                                if t != Ty::Error {
+                                    local_rets.insert(m.name.clone(), t);
+                                }
+                            }
+                        }
+                    }
                     let mut methods: HashMap<String, Signature> = c
                         .methods
                         .iter()
@@ -1189,6 +1230,17 @@ pub fn collect_signatures_with_cp(
                                         _ => Ty::Unit,
                                     }
                                 });
+                            // `toString()` is contractually `String` (Kotlin) for any class, even when its
+                            // expression body infers the erased `Object` (e.g. `override fun toString() =
+                            // privateFun()` over a generic value class). Force it (only when unannotated) so
+                            // the descriptor matches `Any.toString` and it is recognized as the override
+                            // (not a stray `()Object`).
+                            let ret =
+                                if m.ret.is_none() && m.name == "toString" && m.params.is_empty() {
+                                    Ty::String
+                                } else {
+                                    ret
+                                };
                             (m.name.clone(), {
                                 let lambda_param_types: Vec<Vec<Ty>> = m
                                     .params
@@ -2622,15 +2674,20 @@ impl TParams {
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
     // Function type: `(A, B) -> R` — parsed with `fun_params` non-empty.
     if !r.fun_params.is_empty() || r.name == "<fun>" {
+        // A type parameter in a NESTED position — a function-type parameter/return or (below) a generic
+        // type argument — erases to its bound: those slots are part of a type's structural identity and
+        // the JVM erases them everywhere (the reified machinery the value-class repr deliberately avoids).
+        // Only the OUTERMOST value type carries `Ty::TyParam` semantically (so a bare `T` return resolves
+        // its members and substitutes at the call site); emit erases that one.
         let params: Vec<Ty> = r
             .fun_params
             .iter()
-            .map(|p| ty_of_ref(p, classes, tparams, diags))
+            .map(|p| ty_of_ref(p, classes, tparams, diags).erase_ty_param())
             .collect();
         let ret = r
             .arg
             .as_ref()
-            .map(|a| ty_of_ref(a, classes, tparams, diags))
+            .map(|a| ty_of_ref(a, classes, tparams, diags).erase_ty_param())
             .unwrap_or(Ty::Unit);
         return if r.fun_suspend {
             Ty::fun_suspend(params, ret)
@@ -2645,7 +2702,7 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
     } else if r.name == "Array" {
         match &r.arg {
             Some(a) => {
-                let e = ty_of_ref(a, classes, tparams, diags);
+                let e = ty_of_ref(a, classes, tparams, diags).erase_ty_param();
                 if e.is_reference() {
                     Ty::array(e)
                 } else if let Some(boxed) = e.boxed_ref() {
@@ -2673,7 +2730,11 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
         // `X::class` lowers to here). Enough for class-literal storage/identity, not full reflection.
         Ty::obj("java/lang/Class")
     } else if tparams.contains(&r.name) {
-        tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
+        // Carry the type parameter semantically (`T` → `Ty::TyParam("T", bound)`). Erasure to the bound
+        // happens ONLY at JVM emit (`ir_ty_to_jvm`/`descriptor`); member/dispatch lookup in the resolver
+        // peels to the bound through the `Ty` accessors (`obj_internal`/`type_args`), not by erasing the
+        // value's type. A primitive-specialized bound (`<T: Int>`) is carried as that primitive bound.
+        Ty::ty_param(&r.name, tparams.erase(&r.name))
     } else if let Some(internal) = classes.get(&r.name) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
@@ -2685,7 +2746,7 @@ fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut D
             let args: Vec<Ty> = r
                 .targs
                 .iter()
-                .map(|a| ty_of_ref(a, classes, tparams, diags))
+                .map(|a| ty_of_ref(a, classes, tparams, diags).erase_ty_param())
                 .collect();
             Ty::obj_args(internal, &args)
         }
@@ -2781,8 +2842,12 @@ pub struct BridgeSpec {
 }
 
 impl TypeInfo {
+    /// The static type of an expression, as the IR-lowering / emit layer sees it: a carried type
+    /// parameter (`T`) erases to its bound here, at the boundary into codegen. The checker reasons with
+    /// the semantic `Ty::TyParam` (assignability, generic-return substitution); erasure to the JVM
+    /// representation happens ONLY at this emit boundary, never during resolution.
     pub fn ty(&self, e: ExprId) -> Ty {
-        self.expr_types[e.0 as usize]
+        self.expr_types[e.0 as usize].erase_ty_param()
     }
     /// If call `e` was resolved to a local function, return its mangled name and signature.
     pub fn local_fun_for_call(&self, e: ExprId) -> Option<(&str, &Signature)> {
@@ -3628,7 +3693,7 @@ impl<'a> Checker<'a> {
             // codegen krusty can't emit (VerifyError / AbstractMethodError). Skip rather than miscompile.
             if ssig.ret.descriptor() != impl_sig.ret.descriptor()
                 && self.ty_is_value_class(ssig.ret)
-                && impl_sig.ret == obj
+                && impl_sig.ret.erase_ty_param() == obj
             {
                 self.diags.error(span, format!("krusty: method '{name}' needs a value-class unbox bridge from an erased generic return (unsupported)"));
                 return;
@@ -3645,7 +3710,7 @@ impl<'a> Checker<'a> {
                     .params
                     .iter()
                     .zip(&impl_sig.params)
-                    .all(|(e, c)| e == c || *e == obj);
+                    .all(|(e, c)| e == c || e.erase_ty_param() == obj);
             if (params_differ || ret_differs) && params_bridgeable {
                 // Record a synthetic bridge `name(erased)` that downcasts its args and delegates to
                 // the concrete `name(impl)`. (Primitive params would need (un)boxing in the bridge —
@@ -4006,7 +4071,11 @@ impl<'a> Checker<'a> {
         self.push_scope();
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
-            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
+            let ty = if p.is_vararg {
+                Ty::array(ty.erase_ty_param())
+            } else {
+                ty
+            };
             self.declare(&p.name, ty, false);
         }
         if infer_ret {
@@ -4088,7 +4157,11 @@ impl<'a> Checker<'a> {
         self.push_scope(); // parameter scope
         for p in &f.params {
             let ty = self.resolve_ty(&p.ty);
-            let ty = if p.is_vararg { Ty::array(ty) } else { ty };
+            let ty = if p.is_vararg {
+                Ty::array(ty.erase_ty_param())
+            } else {
+                ty
+            };
             self.declare(&p.name, ty, false);
         }
         self.check_fun_body(f);
@@ -4250,6 +4323,9 @@ impl<'a> Checker<'a> {
                     || a == Ty::Error
                     || a == Ty::Nothing
                     || (a == Ty::Null && p.is_reference())
+                    // A type-parameter constructor parameter (`constructor(value: T)`) accepts any
+                    // argument — it binds `T` (the secondary ctor for a generic class/value class).
+                    || p.is_ty_param()
                     || p == Ty::obj("kotlin/Any")
                     || a == Ty::obj("kotlin/Any")
                     || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_is_subtype(x, e))
@@ -4266,6 +4342,14 @@ impl<'a> Checker<'a> {
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
         if expected == Ty::Error || actual == Ty::Error {
+            return;
+        }
+        // Type-parameter assignability is unconstrained at this altitude (NOT erasure — the value's type
+        // still carries `T` to emit, the only place it collapses to a descriptor): a call argument binds
+        // a type-parameter parameter slot (`fun <T> f(x: T)` accepts any `x`, inferring `T`), and an
+        // as-yet-unsubstituted `T` value flows wherever it is used. Call-site substitution supplies the
+        // concrete type where it is known; precision lives there, not in a bound check here.
+        if expected.is_ty_param() || actual.is_ty_param() {
             return;
         }
         // `Nothing` (a `throw`) is the bottom type: assignable to anything.
@@ -5576,6 +5660,12 @@ impl<'a> Checker<'a> {
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
         }
+        // An operator on a type-parameter value applies as on its bound (an unbounded `T` is `Any`, so
+        // `t == x` is reference equality) — peel here (NOT erasure of a flowing type; this is the operand
+        // type for one operator check). `Box<Int>().value` whose property erases to `T` compares like the
+        // pre-`TyParam` erased `Any` did.
+        let lt = lt.erase_ty_param();
+        let rt = rt.erase_ty_param();
         // Unsigned arithmetic: both operands the same unsigned type (`UInt`/`ULong`). `+`/`-`/`*`/`/`/`%`
         // keep the type; comparisons/equality yield `Boolean`. Mixed signed/unsigned is a type error in
         // Kotlin (explicit conversion required), so it falls through to `bin_err`.
@@ -6020,7 +6110,6 @@ impl<'a> Checker<'a> {
                 Decl::Fun(f)
                     if f.name == fname
                         && f.receiver.is_none()
-                        && f.is_inline
                         && !f.type_params.is_empty()
                         && f.params.len() == arg_tys.len() =>
                 {
@@ -6034,8 +6123,15 @@ impl<'a> Checker<'a> {
         for (i, p) in f.params.iter().enumerate() {
             let at = &arg_tys[i];
             if p.ty.fun_params.is_empty() {
-                // A plain value parameter typed as a bare type parameter (`x: T`).
-                if tparams.contains(p.ty.name.as_str()) {
+                // A plain value parameter typed as a bare type parameter (`x: T`). A NULLABLE parameter
+                // (`x: T?`) is skipped: its argument may be `null`/`Nothing` or a wider nullable type that
+                // would mis-bind `T` (e.g. `select(x: T?, y: T)` must bind `T` from `y`, not the nullable
+                // `x`). An argument that is itself `null`/`Nothing`/erroneous carries no usable type either.
+                if tparams.contains(p.ty.name.as_str())
+                    && !p.ty.nullable
+                    && !p.is_vararg
+                    && !matches!(*at, Ty::Null | Ty::Nothing | Ty::Error)
+                {
                     binds.entry(p.ty.name.as_str()).or_insert(*at);
                 }
             } else if let Ty::Fun(fsig) = at {
@@ -6053,9 +6149,27 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        f.ret
-            .as_ref()
-            .and_then(|r| binds.get(r.name.as_str()).copied())
+        let ret_ref = f.ret.as_ref()?;
+        let bound = binds.get(ret_ref.name.as_str()).copied()?;
+        // A primitive-specialized bound (`fun <T : Int> …`) makes the function's JVM signature use the
+        // primitive directly (`(I)I`, see `TParams::from_decl`), so the result is that primitive — NOT the
+        // boxed `Object` slot. Return it unboxed so a primitive `==` against the result is value equality.
+        let ret_specialized = f
+            .type_param_bounds
+            .iter()
+            .find(|(n, _)| n == &ret_ref.name)
+            .and_then(|(_, b)| (!b.nullable).then(|| Ty::from_name(&b.name)).flatten())
+            .is_some_and(|p| p.is_specializable_bound());
+        // An `inline` function splices its body with concrete types, so the bound type flows literally
+        // (a primitive stays a primitive). A NON-inline generic function returns the erased `Object`
+        // slot — a primitive result is physically its boxed wrapper, so refine to the boxed form
+        // (`Int` → `Int?`/`Integer`); the use site unboxes only where it needs the primitive, and
+        // codegen inserts the `checkcast` for a more-specific reference (`id("x").length`).
+        if f.is_inline || ret_specialized || bound.is_reference() {
+            Some(bound)
+        } else {
+            bound.nullable_boxed()
+        }
     }
 
     /// A user top-level generic function called with an EXPLICIT type argument (`asSeq<String>(x)`)
@@ -6808,7 +6922,10 @@ impl<'a> Checker<'a> {
                             .map(|v| {
                                 v.iter()
                                     .map(|t| {
-                                        if recv_tp.is_some() && *t == any {
+                                        // The lambda parameter that IS the receiver type parameter (`T` in
+                                        // `T.applyIt(f: (T) -> Int)`) maps to the actual receiver type, so
+                                        // the lambda's `it` types as `rt` (`String`) not the erased bound.
+                                        if recv_tp.is_some() && (*t == any || t.is_ty_param()) {
                                             rt
                                         } else {
                                             *t
@@ -7857,11 +7974,11 @@ impl<'a> Checker<'a> {
                     if let Some(&inferred) = self.fun_ret_overrides.get(&fname) {
                         ret_ty = inferred;
                     }
-                    // A user generic call whose return is a type parameter: bind from all arguments.
-                    if user_generic.is_some() {
-                        if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
-                            ret_ty = r;
-                        }
+                    // A user generic call whose return is a type parameter: bind from all arguments
+                    // (inline OR non-inline — a non-inline result is the erased `Object` slot that the
+                    // call site `checkcast`s to the inferred type, exactly as for an explicit type arg).
+                    if let Some(r) = self.user_generic_return(&fname, &arg_tys) {
+                        ret_ty = r;
                     }
                     // An EXPLICIT type argument (`asSeq<String>(x)`) on a generic call whose return is a
                     // bare type parameter takes precedence — the result type is the supplied argument.

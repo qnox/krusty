@@ -210,6 +210,23 @@ impl Ty {
         }
     }
 
+    /// Erase a top-level type parameter to its bound (`T` → its upper bound, `Object`/the bound
+    /// class); a no-op for everything else, and for a nullable type parameter it preserves the
+    /// nullability around the erased bound (`T?` → `Bound?`). Use at the resolver entry points that
+    /// pattern-match `Ty::Obj` directly so a carried `TyParam` resolves like its erased bound, exactly
+    /// as before the resolver began carrying type parameters semantically.
+    pub fn erase_ty_param(self) -> Ty {
+        match self {
+            Ty::TyParam(_, b) => *b,
+            Ty::Nullable(inner) if inner.is_ty_param() => match inner.ty_param_bound() {
+                Some(b) if b.is_reference() => Ty::nullable(b),
+                Some(b) => b,
+                None => self,
+            },
+            _ => self,
+        }
+    }
+
     /// The unboxed primitive of a nullable primitive (`Int?` → `Int`), else `None`. Replaces the old
     /// "is this a boxed-wrapper `Obj`?" probe (`t.obj_internal().and_then(prim_of_wrapper)`).
     pub fn nullable_primitive(self) -> Option<Ty> {
