@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 463).
+  repo's `compiler/testData/codegen/box`). Current gate: **1781 OK / 0 FAIL** (scanned 7351, Phase 464).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 464 — `super(…)` default-fill for a class/object extending an all-defaulted base (gate 1777 →
+  1781, +4, FAIL=0).** `class B : A()` / `object O : A()` where `A(val x = …)` has all-defaulted ctor
+  params and no explicit base args were written — krusty bailed ("not supported by the IR backend": the
+  `super()` arity didn't match A's primary ctor). It now fills A's default-value exprs into the `super(…)`
+  call (the same defaults a `new A()` construction fills at the call site — krusty has no synthetic
+  `$default` ctor). Gated to the clean shape (no explicit base args + every base param has a default, read
+  from the base's resolve `ClassSig.ctor_defaults`); the defaults lower with only `this` in scope, so a
+  default referencing a base parameter fails to resolve and bails (skip, never miscompile). Also a step
+  toward the coroutine `EmptyContinuation` companion completion. TDD: tests/super_default_args_e2e.rs
+  (class + object extending an all-default base; round-tripped). See [[coroutine-intrinsics-plan]].
 
 - **Phase 463 — `startCoroutine` + suspend-lambda `create()` + Unit-lambda return + classpath body-property
   type (a full coroutine runs end-to-end; gate 1777, box-OK flat, FAIL=0).** Four pieces, completing the
