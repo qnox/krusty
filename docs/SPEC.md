@@ -403,9 +403,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/cases`/box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
   The bitwise/shift members on `Int`/`Long` (`a.and(b)`/`a or b`, `a.shl(n)`/`a shr n`/`a ushr n`,
   `a.xor(b)`) lower to the `iand`/`ior`/`ixor`/`ishl`/… intrinsic; shifts take an `Int` count, the
-  others the receiver's own type. They share `lower_prim_op_method` with the arithmetic members, so an
-  (unnecessary) safe call on a non-null primitive — `a?.and(b)` — compiles identically to `a.and(b)`
-  (`tests/safe_call_prim_intrinsic_e2e.rs`). `inv()` (zero-arg) stays a dedicated arm.
+  others the receiver's own type. `compareTo` and the arithmetic/bitwise/shift members all share
+  `lower_prim_op_method`, so an (unnecessary) safe call on a non-null primitive — `a?.and(b)`,
+  `a?.compareTo(b)` — compiles identically to the plain `.` form (`tests/safe_call_prim_intrinsic_e2e.rs`).
+  `inv()` (zero-arg) stays a dedicated arm.
 - Safe call `a?.b` / `a?.m(args)`: evaluates the receiver once into a temp, then yields the member
   access (property `GetField` / method `MethodCall`) when the temp is non-`null`, else `null` — i.e.
   `{ val t = a; if (t != null) t.b else null }`. Lowered in the front-end so every backend shares it;

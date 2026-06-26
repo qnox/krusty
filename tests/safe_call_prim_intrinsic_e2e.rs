@@ -31,6 +31,38 @@ fn dot_path_bitwise_regression() {
 }
 
 #[test]
+fn dot_path_compareto_regression() {
+    const SRC: &str = "fun box(): String {\n\
+    val a = 5; val b = 3\n\
+    if (a.compareTo(b) <= 0) return \"gt\"\n\
+    if (b.compareTo(a) >= 0) return \"lt\"\n\
+    if (a.compareTo(a) != 0) return \"eq\"\n\
+    if (1.compareTo(1.1) >= 0) return \"mixed\"\n\
+    val l = 5L\n\
+    if (l.compareTo(2L) <= 0) return \"long\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("dot-path compareTo compiles + runs"), "OK");
+}
+
+#[test]
+fn safe_call_compareto_on_nonnull_primitive() {
+    const SRC: &str = "fun box(): String {\n\
+    val a = 5; val b = 3\n\
+    if (a?.compareTo(b) <= 0) return \"gt\"\n\
+    if (b?.compareTo(a) >= 0) return \"lt\"\n\
+    if (1?.compareTo(1.1) >= 0) return \"mixed\"\n\
+    val l = 5L\n\
+    if (l?.compareTo(2L) <= 0) return \"long\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("safe-call compareTo on a non-null primitive compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn safe_call_bitwise_on_nonnull_primitive() {
     const SRC: &str = "fun box(): String {\n\
     val a = 6; val b = 3\n\
