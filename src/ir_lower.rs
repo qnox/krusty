@@ -7610,6 +7610,18 @@ impl<'a> Lower<'a> {
         Some(self.ir.add_expr(IrExpr::Block { stmts, value: None }))
     }
 
+    /// Lower a positional argument list against parallel parameter types, coercing each argument to its
+    /// parameter (numeric widening, boxing, lambda → `FunctionN`, …) via [`Self::lower_arg`]. `None` if
+    /// any argument fails to lower (the whole call then declines). Folds the `let mut a = Vec::new(); for
+    /// … { a.push(self.lower_arg(…)?) }` loop the call paths otherwise re-implement at each dispatch arm.
+    fn lower_args(&mut self, args: &[AstExprId], targets: &[Ty]) -> Option<Vec<u32>> {
+        let mut a = Vec::with_capacity(args.len());
+        for (arg, t) in args.iter().zip(targets) {
+            a.push(self.lower_arg(*arg, t)?);
+        }
+        Some(a)
+    }
+
     pub(crate) fn lower_arg(&mut self, arg: AstExprId, target: &Ty) -> Option<u32> {
         // A value flowing into a `suspend` function-type parameter. A LAMBDA literal becomes a concrete
         // `SuspendLambda` subclass (`lower_suspend_lambda`); any other value (a suspend function value
@@ -8048,10 +8060,7 @@ impl<'a> Lower<'a> {
                 let params = self.ir.functions[mfid as usize].params.clone();
                 if args.len() == params.len() {
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
-                    let mut a = Vec::new();
-                    for (arg, pt) in args.iter().zip(&params) {
-                        a.push(self.lower_arg(*arg, pt)?);
-                    }
+                    let a = self.lower_args(args, &params)?;
                     return Some(self.ir.add_expr(IrExpr::MethodCall {
                         class,
                         index,
@@ -11064,10 +11073,7 @@ impl<'a> Lower<'a> {
                                 if args.len() != params.len() {
                                     return None;
                                 }
-                                let mut a = Vec::new();
-                                for (arg, pt) in args.iter().zip(&params) {
-                                    a.push(self.lower_arg(*arg, pt)?);
-                                }
+                                let a = self.lower_args(&args, &params)?;
                                 self.ir.add_expr(IrExpr::MethodCall {
                                     class,
                                     index,
@@ -13919,10 +13925,7 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let this = self.ir.add_expr(IrExpr::GetValue(0));
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&params) {
-                            a.push(self.lower_arg(*arg, pt)?);
-                        }
+                        let a = self.lower_args(&args, &params)?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
@@ -13943,10 +13946,7 @@ impl<'a> Lower<'a> {
                             class: cur_id,
                             index: 0,
                         });
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&params) {
-                            a.push(self.lower_arg(*arg, pt)?);
-                        }
+                        let a = self.lower_args(&args, &params)?;
                         self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
@@ -14885,10 +14885,7 @@ impl<'a> Lower<'a> {
                                     ty: comp_id,
                                     field: "Companion",
                                 });
-                                let mut a = Vec::new();
-                                for (arg, pt) in args.iter().zip(&params) {
-                                    a.push(self.lower_arg(*arg, pt)?);
-                                }
+                                let a = self.lower_args(&args, &params)?;
                                 return Some(self.ir.add_expr(IrExpr::MethodCall {
                                     class,
                                     index,
@@ -14977,10 +14974,7 @@ impl<'a> Lower<'a> {
                         }
                         let recv = self.expr(receiver)?;
                         // Coerce each argument to its parameter type (numeric widening, boxing, …).
-                        let mut a = Vec::new();
-                        for (arg, pt) in args.iter().zip(&params) {
-                            a.push(self.lower_arg(*arg, pt)?);
-                        }
+                        let a = self.lower_args(&args, &params)?;
                         let call = self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
