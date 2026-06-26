@@ -1,33 +1,21 @@
 # Differential testing vs the real kotlinc
 
-`tests/diff_kotlinc.rs` / `tests/diff_class_kotlinc.rs` compile the same source with **krusty** and the
-real **kotlinc**, then assert the public ABI (javap signatures) and execution output match. Gated on
-env vars; skipped if unset.
-
-## Reference kotlinc from local jars (no assembled dist)
-
-No `kotlinc/lib` dist was available, so build a launcher from cached jars. kotlinc 2.0.21 needs **JDK
-≤ 21** (it rejects JDK 25's version string). Classpath: `kotlin-compiler-embeddable` + `kotlin-stdlib`
-+ `kotlin-reflect` + `kotlin-script-runtime` + `kotlinx-coroutines-core-jvm` + `trove4j` +
-`org.jetbrains:annotations`. Pass `-classpath <stdlib>` so compilation sees the stdlib API.
-
-```sh
-#!/bin/sh
-exec <JDK21>/bin/java -cp "<all jars above, ':'-joined>" \
-  org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -classpath "<kotlin-stdlib.jar>" "$@"
-```
+The differential oracle is the **box-corpus conformance gate** (`tests/kotlin_box_ir_jvm_conformance.rs`):
+it compiles each corpus source with **krusty** and runs `box()` on the JVM, grading against the real
+**kotlinc**'s expectations. The reference kotlinc and the box corpus are **self-provisioned** (downloaded
++ cached under `target/cache/`) at the version pinned by the `kotlin-versions` manifest — currently
+**2.4.0**. No assembled dist or env wrangling is needed.
 
 ## Run
 
 ```sh
-export JAVA_HOME=<modern JDK to run javac/java for krusty output>
-export KRUSTY_REF_JAVA_HOME=<JDK21>            # runs kotlinc
-export KRUSTY_KOTLINC=/path/to/kotlinc-wrap.sh
-export KRUSTY_KOTLIN_STDLIB=<kotlin-stdlib.jar>  # on the runtime cp for kotlinc output
-cargo test --test diff_kotlinc --test diff_class_kotlinc -- --nocapture
+just conformance          # prints "<pct> <passed> <scanned>"; self-provisions kotlinc + corpus
+just test                 # full suite (the gate + all e2e), the pre-push GATE
+./harness/run-diff.sh     # thin wrapper around `just conformance`
 ```
 
-Result (this session): both pass — krusty ABI + execution match kotlinc on the supported subset.
+`KRUSTY_KOTLINC` / `KRUSTY_KOTLIN_BOX_DIR` are honored if already exported, else `just` fills them in
+from `just kotlinc` / `just box-corpus`. A modern `JAVA_HOME` (≥ 21) runs krusty's output and `javap`.
 
 ## Normalized bytecode diff (`src/bin/bytediff.rs`)
 
