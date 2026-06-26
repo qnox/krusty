@@ -1876,7 +1876,7 @@ fn emit_enum_class(
         .methods
         .iter()
         .any(|&fid| ir.functions[fid as usize].body.is_none());
-    let has_subclass = c.enum_entry_subclass.iter().any(|s| s.is_some());
+    let has_subclass = c.enum_entries.iter().any(|e| e.subclass.is_some());
     let mut access = 0x0001 | 0x0020 | ACC_ENUM; // PUBLIC | SUPER | ENUM
     if has_abstract {
         access |= 0x0400;
@@ -1910,8 +1910,8 @@ fn emit_enum_class(
         cw.add_field(0x0001, &f.name, &t.descriptor());
     }
     // One static-final constant per entry, plus the private `$VALUES` array.
-    for (entry, _) in &c.enum_entries {
-        cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, entry, &self_desc);
+    for entry in &c.enum_entries {
+        cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, &entry.name, &self_desc);
     }
     cw.add_field(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
@@ -1988,7 +1988,8 @@ fn emit_enum_class(
             loop_stack: Vec::new(),
         };
         let mut clinit = CodeBuilder::new(0);
-        for (i, (entry, args)) in c.enum_entries.iter().enumerate() {
+        for (i, entry) in c.enum_entries.iter().enumerate() {
+            let args = &entry.args;
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
             let spill = args.iter().any(|&a| e.records_frame(a));
@@ -1999,15 +2000,11 @@ fn emit_enum_class(
             };
             // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
             // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
-            let new_class = c
-                .enum_entry_subclass
-                .get(i)
-                .and_then(|s| s.clone())
-                .unwrap_or_else(|| fq.clone());
+            let new_class = entry.subclass.clone().unwrap_or_else(|| fq.clone());
             let cls = e.cw.class_ref(&new_class);
             clinit.new_obj(cls);
             clinit.dup();
-            clinit.push_string(entry, e.cw);
+            clinit.push_string(&entry.name, e.cw);
             clinit.push_int(i as i32, e.cw);
             if spill {
                 for &(slot, t, _) in &temps {
@@ -2023,7 +2020,7 @@ fn emit_enum_class(
             }
             let ctor_ref = e.cw.methodref(&new_class, "<init>", &ctor_desc);
             clinit.invokespecial(ctor_ref, ctor_argw, 0);
-            let fref = e.cw.fieldref(&fq, entry, &self_desc);
+            let fref = e.cw.fieldref(&fq, &entry.name, &self_desc);
             clinit.putstatic(fref, 1);
         }
         // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
@@ -2126,10 +2123,10 @@ fn emit_enum_class(
     let acls = cw.class_ref(&fq);
     vbuild.anewarray(acls);
     vbuild.astore(0);
-    for (i, (entry, _)) in c.enum_entries.iter().enumerate() {
+    for (i, entry) in c.enum_entries.iter().enumerate() {
         vbuild.aload(0);
         vbuild.push_int(i as i32, &mut cw);
-        let fref = cw.fieldref(&fq, entry, &self_desc);
+        let fref = cw.fieldref(&fq, &entry.name, &self_desc);
         vbuild.getstatic(fref, 1);
         vbuild.array_store(0x53, 1); // aastore
     }
@@ -3628,7 +3625,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::EnumEntry { class, index } => {
                 let c = &self.ir.classes[*class as usize];
-                let (entry, _) = c.enum_entries[*index as usize].clone();
+                let entry = c.enum_entries[*index as usize].name.clone();
                 let desc = format!("L{};", c.fq_name);
                 let f = self.cw.fieldref(&c.fq_name.clone(), &entry, &desc);
                 code.getstatic(f, 1);

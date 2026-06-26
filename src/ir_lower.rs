@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction,
-    IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrEnumEntry, IrExpr, IrField, IrFile,
+    IrFunction, IrTypeOp,
 };
 use crate::resolve::{CtorDefaultValue, SymbolTable, TypeInfo};
 use crate::types::Ty;
@@ -563,13 +563,16 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 is_abstract: c.is_abstract(),
                 superclass,
                 super_args: Vec::new(),
-                // Entry names now; constructor-arg value-ids are lowered in pass 2.
+                // Entry names + subclass markers now; constructor-arg value-ids are lowered in pass 2.
                 enum_entries: c
                     .enum_entries
                     .iter()
-                    .map(|e| (e.name.clone(), Vec::new()))
+                    .map(|e| IrEnumEntry {
+                        name: e.name.clone(),
+                        args: Vec::new(),
+                        subclass: None,
+                    })
                     .collect(),
-                enum_entry_subclass: vec![None; c.enum_entries.len()],
                 enum_entry_of: None,
                 prop_ref: None,
                 func_ref: None,
@@ -1047,7 +1050,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     superclass: comp_super,
                     super_args: comp_super_args,
                     enum_entries: vec![],
-                    enum_entry_subclass: vec![],
                     enum_entry_of: None,
                     prop_ref: None,
                     func_ref: None,
@@ -2507,7 +2509,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         if lowered.len() != ctor_count {
                             return None;
                         }
-                        lo.ir.classes[class_id as usize].enum_entries[ei].1 = lowered;
+                        lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
                     }
                     // Entry bodies (`ENTRY { override fun m() = … }`) → a synthesized subclass per
                     // bodied entry (`Enum$ENTRY extends Enum`) whose overrides are lowered with the
@@ -2575,7 +2577,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             superclass: internal.clone(),
                             super_args: vec![],
                             enum_entries: vec![],
-                            enum_entry_subclass: vec![],
                             enum_entry_of: Some(field_tys.clone()),
                             prop_ref: None,
                             func_ref: None,
@@ -2700,7 +2701,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                 true,
                             );
                         }
-                        lo.ir.classes[class_id as usize].enum_entry_subclass[ei] = Some(sub_fq);
+                        lo.ir.classes[class_id as usize].enum_entries[ei].subclass = Some(sub_fq);
                     }
                 }
             }
@@ -4546,7 +4547,6 @@ impl<'a> Lower<'a> {
             superclass: "kotlin/coroutines/jvm/internal/SuspendLambda".to_string(),
             super_args: vec![arity_const, completion_get],
             enum_entries: vec![],
-            enum_entry_subclass: vec![],
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
@@ -6560,7 +6560,6 @@ impl<'a> Lower<'a> {
             superclass: superclass.to_string(),
             super_args: vec![],
             enum_entries: vec![],
-            enum_entry_subclass: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
@@ -6664,7 +6663,6 @@ impl<'a> Lower<'a> {
             superclass: superclass.to_string(),
             super_args: vec![],
             enum_entries: vec![],
-            enum_entry_subclass: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
                 owner_internal: owner,
@@ -6927,7 +6925,6 @@ impl<'a> Lower<'a> {
             superclass: "kotlin/jvm/internal/FunctionReferenceImpl".to_string(),
             super_args: vec![],
             enum_entries: vec![],
-            enum_entry_subclass: vec![],
             enum_entry_of: None,
             prop_ref: None,
             func_ref: Some(crate::ir::FuncRef {
@@ -12110,7 +12107,7 @@ impl<'a> Lower<'a> {
                         if let Some(idx) = self.ir.classes[cls as usize]
                             .enum_entries
                             .iter()
-                            .position(|(n, _)| *n == name)
+                            .position(|e| e.name == name)
                         {
                             return Some(self.ir.add_expr(IrExpr::EnumEntry {
                                 class: cls,

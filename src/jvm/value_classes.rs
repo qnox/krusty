@@ -530,8 +530,8 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
                 s4_bodies.push((a, body_slot_map(&ir.exprs, a, params), None));
             }
         }
-        for (_, args) in &c.enum_entries {
-            for &a in args {
+        for entry in &c.enum_entries {
+            for &a in &entry.args {
                 s4_bodies.push((a, HashMap::new(), None));
             }
         }

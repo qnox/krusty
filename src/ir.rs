@@ -430,6 +430,22 @@ pub struct IrFunction {
     pub param_checks: Vec<Option<String>>,
 }
 
+/// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index
+/// (the `(name, args)` tuple plus the separate `subclass` vec), so an entry's name / constructor args /
+/// synthesized-subclass marker can't desync.
+#[derive(Clone, Debug)]
+pub struct IrEnumEntry {
+    /// Entry name (`RED`).
+    pub name: String,
+    /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
+    /// later lowering pass — built empty when the entry list is first created.
+    pub args: Vec<ExprId>,
+    /// `Some(subclass_fq)` when the entry has a body and is constructed as an instance of a synthesized
+    /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
+    /// itself.
+    pub subclass: Option<String>,
+}
+
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
 /// field's type / generic-param name / constant default / finality / visibility can't desync.
 #[derive(Clone, Debug)]
@@ -559,14 +575,11 @@ pub struct IrClass {
     /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty
     /// unless `superclass` is a user base class.
     pub super_args: Vec<ExprId>,
-    /// Enum entries in declaration order: `(entry_name, constructor_arg_value_ids)`. Non-empty only
-    /// for an `enum class`; the backend emits a static field per entry, a `$VALUES` array, a
-    /// `<clinit>` that constructs them, and `values()`/`valueOf(String)`.
-    pub enum_entries: Vec<(String, Vec<ExprId>)>,
-    /// Parallel to `enum_entries`: `Some(subclass_fq)` when that entry has a body and is constructed
-    /// as an instance of a synthesized anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`),
-    /// else `None` (constructed as the enum itself). Non-empty only on an `enum class` with bodies.
-    pub enum_entry_subclass: Vec<Option<String>>,
+    /// Enum entries in declaration order. Non-empty only for an `enum class`; the backend emits a static
+    /// field per entry, a `$VALUES` array, a `<clinit>` that constructs them, and `values()`/
+    /// `valueOf(String)`. Each [`IrEnumEntry`] carries its name, lowered constructor args, and optional
+    /// synthesized-subclass fq name.
+    pub enum_entries: Vec<IrEnumEntry>,
     /// `Some(user_field_types)` marks this class as a synthesized enum-entry subclass: it extends the
     /// enum (`superclass`), has no own fields, and its constructor is `(String name, int ordinal,
     /// <user_field_types>)V` delegating to the enum's `(String,int,<user>)V` constructor.
