@@ -140,12 +140,19 @@ fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::s
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// One jimage resource: `(file offset, ON-DISK byte size, zlib-compressed?)`. The size is the stored
+/// (compressed) length when the resource uses the "zip" decompressor, else the raw class length; the
+/// flag is set ONLY for the "zip" decompressor (authoritatively, from the strings table) so the reader
+/// never inflates a resource compressed by some other scheme.
+type JimageEntry = (u64, usize, bool);
+type JimageIndex = HashMap<String, JimageEntry>;
+
 /// Process-global jimage index (name → file offset/size), keyed by the jimage path. The jimage is
 /// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
-fn global_jimage_cache(
-) -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>> {
+fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>
+{
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>>>,
+        std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -266,10 +273,10 @@ pub struct Classpath {
     archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
     ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
-    /// Lazily-built index of the JDK jimage: internal class name → `(file offset, uncompressed size)`,
-    /// so JDK class bytes can be seek-read on demand (the jimage stores classes uncompressed). Shared
-    /// via `Arc` from a process-global cache so the 146 MB parse happens once.
-    jimage: RefCell<Option<(PathBuf, std::sync::Arc<HashMap<String, (u64, usize)>>)>>,
+    /// Lazily-built index of the JDK jimage: internal class name → [`JimageEntry`], so JDK class bytes
+    /// can be seek-read (and inflated, for a compressed image) on demand. Shared via `Arc` from a
+    /// process-global cache so the 146 MB parse happens once.
+    jimage: RefCell<Option<(PathBuf, std::sync::Arc<JimageIndex>)>>,
     /// Cache of lazily-read method bodies (`(internal, name, descriptor) → MethodCode`), so the inline
     /// expander reads each inline function's body once even when it's called many times.
     bodies: RefCell<HashMap<(String, String, String), Option<MethodCode>>>,
@@ -835,17 +842,33 @@ impl Classpath {
         idx
     }
 
-    /// Seek-read a class's bytes from the JDK jimage (uncompressed entry), via the lazily-built index.
+    /// Seek-read a class's bytes from the JDK jimage via the lazily-built index. A "zip"-compressed
+    /// resource (the JetBrains Runtime, or any `jlink --compress` image) is wrapped in a 29-byte
+    /// `CompressedResourceHeader` (little-endian: magic `0xCAFEFAFA`, then `size`/`uncompressed_size`
+    /// i64s, decompressor name/config offsets, an `is_terminal` byte) before a zlib Deflate stream;
+    /// inflate it. The `compressed` flag is set by the indexer ONLY when the decompressor is exactly
+    /// "zip", so a resource compressed by another scheme is left as-is (and fails to parse → unresolved)
+    /// rather than blindly inflated.
     fn jimage_bytes(&self, internal: &str) -> Option<Vec<u8>> {
         self.ensure_jimage_index();
         let guard = self.jimage.borrow();
         let (path, index) = guard.as_ref()?;
-        let &(offset, size) = index.get(internal)?;
+        let &(offset, size, compressed) = index.get(internal)?;
         use std::io::{Read, Seek, SeekFrom};
         let mut f = File::open(path).ok()?;
         f.seek(SeekFrom::Start(offset)).ok()?;
         let mut buf = vec![0u8; size];
         f.read_exact(&mut buf).ok()?;
+        if compressed && buf.len() >= 29 {
+            let unc = u64::from_le_bytes(buf[12..20].try_into().ok()?) as usize;
+            // The jimage is a trusted local JDK file, but cap the pre-allocation hint anyway — a real
+            // `.class` is far under this, and `read_to_end` grows past it if ever needed.
+            let mut out = Vec::with_capacity(unc.min(16 * 1024 * 1024));
+            flate2::read::ZlibDecoder::new(&buf[29..])
+                .read_to_end(&mut out)
+                .ok()?;
+            return Some(out);
+        }
         Some(buf)
     }
 
@@ -1515,9 +1538,10 @@ fn scan_types_jar(
 /// jimage location table directly — the bootclasspath equivalent of a jar's central directory.
 /// Format reference (little-endian header): jdk.internal.jimage.BasicImageReader / ImageHeader /
 /// ImageLocation. Inner classes (`A$B`) and ambiguous simple names are dropped, like any entry.
-/// Build the jimage class index: internal name → `(absolute file offset, uncompressed size)` for each
-/// uncompressed `.class` resource. Mirrors `scan_types_jimage`'s navigation but keeps content offsets.
-fn build_jimage_index(path: &Path) -> Option<HashMap<String, (u64, usize)>> {
+/// Build the jimage class index: internal name → [`JimageEntry`] for each `.class` resource (storing
+/// the on-disk size + whether it is "zip"-compressed). Mirrors `scan_types_jimage`'s navigation but
+/// keeps content offsets.
+fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
     let b = std::fs::read(path).ok()?;
     if b.len() < 28 {
         return None;
@@ -1590,10 +1614,17 @@ fn build_jimage_index(path: &Path) -> Option<HashMap<String, (u64, usize)>> {
         }
         let internal = format!("{parent}/{}", read_str(a[3]));
         let (off, comp, unc) = (a[5], a[6], a[7]);
-        if comp != 0 {
-            continue; // compressed jimage entry — not handled (this JDK stores classes uncompressed)
-        }
-        idx.entry(internal).or_insert(((content + off) as u64, unc));
+        let abs = content + off;
+        // Store the ON-DISK byte count: the compressed size for a compressed resource (a JetBrains
+        // Runtime / `jlink --compress` image), else the uncompressed size. Mark `is_zip` ONLY when the
+        // resource's `CompressedResourceHeader` (magic `0xCAFEFAFA`) names the "zip" decompressor —
+        // resolved against the strings table here — so `jimage_bytes` never inflates another scheme.
+        let is_zip = comp != 0
+            && abs + 24 <= b.len()
+            && b[abs..abs + 4] == [0xFA, 0xFA, 0xFE, 0xCA]
+            && read_str(u32le(abs + 20) as usize) == "zip";
+        let stored = if comp != 0 { comp } else { unc };
+        idx.entry(internal).or_insert((abs as u64, stored, is_zip));
     }
     Some(idx)
 }

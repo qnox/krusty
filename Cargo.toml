@@ -7,6 +7,8 @@ description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline
 [dependencies]
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
+flate2 = "1"
 
 [dev-dependencies]
 rayon = "1"
