@@ -8125,10 +8125,12 @@ impl<'a> Checker<'a> {
                             .toplevel_lambda_param_types(&fname, partial)
                     })
                     .or_else(|| user_generic.clone());
-                // Per-param RECEIVER function-type flags for a classpath top-level HOF (`NavHost(builder:
-                // NGB.()->Unit){…}`) — a lambda to a `true` param binds its implicit `this` to the receiver
-                // (`pts[i][0]`). From `@Metadata`'s `@ExtensionFunctionType`; `None` for a user fn.
-                let toplevel_lambda_recvs: Option<Vec<bool>> = toplevel_partial
+                // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
+                // NGB.()->Unit){…}`) — a lambda to such a param binds its implicit `this` to the receiver.
+                // From `@Metadata`'s `@ExtensionFunctionType` (no JVM `Signature` needed, so this also
+                // drives a krusty-emitted module's HOF whose `Signature` attribute is absent). `None` for a
+                // user fn.
+                let toplevel_lambda_recvs: Option<Vec<Option<Ty>>> = toplevel_partial
                     .as_ref()
                     .filter(|_| known_sig.is_none())
                     .and_then(|partial| self.syms.libraries.toplevel_lambda_recvs(&fname, partial));
@@ -8148,6 +8150,12 @@ impl<'a> Checker<'a> {
                         if array_init_lambda && i == 1 {
                             return self.check_lambda_with_types(a, &[Ty::Int]);
                         }
+                        // The receiver type for a RECEIVER function-type param (from `@Metadata`), if any.
+                        let recv_i = toplevel_lambda_recvs
+                            .as_ref()
+                            .and_then(|r| r.get(i))
+                            .copied()
+                            .flatten();
                         if let Some(ref pts) = toplevel_lambda_pts {
                             if matches!(self.file.expr(a), Expr::Lambda { .. })
                                 && i < pts.len()
@@ -8158,19 +8166,23 @@ impl<'a> Checker<'a> {
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
                                     self.resolver().toplevel_is_inline(&fname);
-                                // A RECEIVER function-type param: bind `pts[i][0]` as the lambda's `this`.
-                                let is_recv = toplevel_lambda_recvs
-                                    .as_ref()
-                                    .and_then(|r| r.get(i))
-                                    .copied()
-                                    .unwrap_or(false);
-                                let t = if is_recv {
+                                // A RECEIVER function-type param: bind `pts[i][0]` (the Signature-derived
+                                // receiver) as the lambda's `this`; the rest are value params.
+                                let t = if recv_i.is_some() {
                                     self.check_lambda_with_receiver(a, pts[i][0], &pts[i][1..])
                                 } else {
                                     self.check_lambda_with_types(a, &pts[i])
                                 };
                                 self.allow_lambda_mutation = prev;
                                 return t;
+                            }
+                        }
+                        // No JVM `Signature` for this callee (a krusty-emitted module) — but `@Metadata`
+                        // marks this param a RECEIVER function type, so bind `this` to the receiver from
+                        // `@Metadata` (a `Recv.() -> R` param has no value params).
+                        if let Some(recv) = recv_i {
+                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                return self.check_lambda_with_receiver(a, recv, &[]);
                             }
                         }
                         // A zero-arg lambda to a NON-public (`@InlineOnly`) inline fn (`require(c){m}`):

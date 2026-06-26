@@ -504,11 +504,17 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
-    /// Parallel to [`toplevel_lambda_param_types`](Self::toplevel_lambda_param_types): per parameter,
-    /// `true` when it is a RECEIVER function type `Recv.(…) -> R` (decoded from the param Type's
-    /// `@ExtensionFunctionType` annotation in `@Metadata`). A lambda passed to such a param binds its
-    /// implicit `this` to the receiver (`pts[i][0]`). `None`/all-`false` when no receiver-lambda params.
-    fn toplevel_lambda_recvs(&self, _name: &str, _arg_tys: &[Option<Ty>]) -> Option<Vec<bool>> {
+    /// Per parameter, `Some(receiver_ty)` when it is a RECEIVER function type `Recv.(…) -> R` (decoded
+    /// from the param Type's `@ExtensionFunctionType` annotation + first type argument in `@Metadata`). A
+    /// lambda passed to such a param binds its implicit `this` to that receiver. Unlike
+    /// [`toplevel_lambda_param_types`](Self::toplevel_lambda_param_types) this needs no JVM `Signature`
+    /// attribute (a krusty-emitted module omits it), so it drives the receiver binding on its own. `None`
+    /// when no receiver-lambda params.
+    fn toplevel_lambda_recvs(
+        &self,
+        _name: &str,
+        _arg_tys: &[Option<Ty>],
+    ) -> Option<Vec<Option<Ty>>> {
         None
     }
 
