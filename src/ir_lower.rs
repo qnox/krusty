@@ -14226,12 +14226,17 @@ impl<'a> Lower<'a> {
                         let recv = self.expr(receiver)?;
                         // Coerce each argument to its parameter type (numeric widening, boxing, …).
                         let a = self.lower_args(&args, &params)?;
-                        self.ir.add_expr(IrExpr::MethodCall {
+                        let ret = self.ir.functions[fid as usize].ret;
+                        let call = self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
                             receiver: recv,
                             args: a.into_iter().map(Some).collect(),
-                        })
+                        });
+                        // A generic method return (`fun get(): T`) erases to its bound on the JVM; when the
+                        // checker substituted a concrete instantiation type (`Box<String>.get()` → `String`)
+                        // the erased result needs the same checkcast/unbox the property-read path inserts.
+                        self.coerce_generic_read(call, e, ret)
                     } else if let Some((owner, sig_params, sig_ret, interface)) = match &rt {
                         // An instance method on a class defined in ANOTHER file → `CrossFileVirtual`
                         // (own methods only; inherited/defaulted/vararg cross-file calls bail).

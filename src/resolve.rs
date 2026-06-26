@@ -6023,6 +6023,45 @@ impl<'a> Checker<'a> {
         Some(lam_pts)
     }
 
+    /// Substitute a member's type-parameter return against the receiver's type arguments: a method
+    /// `fun get(): T` on `class Box<T>` called on a `Box<String>` value returns `String`, not the bare
+    /// `T`. Mirrors the property-read substitution (`generic_props`): map the return's type-parameter
+    /// name to the class's declared position, then read the receiver's argument there. A no-op when the
+    /// return isn't a type parameter, the receiver carries no arguments, or the name isn't one of the
+    /// class's parameters (the bare `TyParam` then flows on, erasing to its bound at JVM emit).
+    ///
+    /// LIMITATION: a method type parameter that SHADOWS a class one (`class Box<T> { fun <T> m(): T }`)
+    /// is indistinguishable here — `Ty::TyParam` carries only the name — so it would wrongly bind to the
+    /// receiver's argument. Kotlin warns on such shadowing and it is absent from the corpus; a real guard
+    /// needs the method's own `type_params` plumbed onto the callable. Tracked as a follow-up.
+    fn subst_member_ret(&self, receiver: Ty, ret: Ty) -> Ty {
+        let Some(pname) = ret.ty_param_name() else {
+            return ret;
+        };
+        let Ty::Obj(internal, targs) = receiver else {
+            return ret;
+        };
+        if targs.is_empty() {
+            return ret;
+        }
+        if let Some(cs) = self.syms.class_by_internal(internal) {
+            if let Some(i) = cs.tparam_names.iter().position(|t| t == pname) {
+                if let Some(&arg) = targs.get(i) {
+                    // A `@JvmInline value class` argument flows through a generic member as its boxed form
+                    // and needs box/unbox interface bridges (`f(Object)Object` → `f(A)A`) that krusty does
+                    // not emit yet. Substituting here would make such a call type-check and then miscompile
+                    // (the bridge is missing → `AbstractMethodError`); leave the return erased so the case
+                    // declines instead. Remove this guard once value-class generic bridging lands.
+                    if self.ty_is_value_class(arg) {
+                        return ret;
+                    }
+                    return arg;
+                }
+            }
+        }
+        ret
+    }
+
     /// The specialized return type of a user generic inline HOF, inferred from the FULL argument
     /// types — value args AND lambda args (their parameter and **return** types). For
     /// `applyFn<T, R>(x: T, f: (T) -> R): R`, `applyFn("ab") { it.length }` binds `T=String` from the
@@ -6999,7 +7038,7 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return fi.callable.ret;
+                            return self.subst_member_ret(rt, fi.callable.ret);
                         }
                         if params.len() != arg_tys.len() {
                             self.diags.error(
@@ -7015,7 +7054,7 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        return fi.callable.ret;
+                        return self.subst_member_ret(rt, fi.callable.ret);
                     }
                     // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
                     // parameter positions via the member's `@Metadata` names, then check each against its
