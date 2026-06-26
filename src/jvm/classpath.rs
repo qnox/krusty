@@ -203,6 +203,10 @@ pub struct TypeIndex {
 /// `metadata_kept_params` all PROJECT over it instead of each re-decoding and re-merging.
 type MetaFnsCache = RefCell<HashMap<String, std::rc::Rc<ClassMeta>>>;
 
+/// One overload's source signature shape, in declaration order: `(JVM name, has-extension-receiver,
+/// source value-param `Ty`s, source value-param NAMES, source value-param DECLARES-DEFAULT flags)`.
+type OverloadParam = (String, bool, Vec<Ty>, Vec<String>, Vec<bool>);
+
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
 /// (facade parts merged). Computed once per class in [`Classpath::class_meta`]; the public
 /// `metadata_*` methods just index these maps.
@@ -214,10 +218,10 @@ struct ClassMeta {
     receivers: HashMap<String, Vec<String>>,
     /// function name → whether its Kotlin return type is nullable (`takeIf`/`takeUnless` → `T?`).
     return_nullable: HashMap<String, bool>,
-    /// per OVERLOAD (a name repeats), in declaration order: `(JVM name, has-extension-receiver, source
-    /// value-param `Ty`s, source value-param NAMES)` — the `Vec<Ty>`/`Vec<String>` length is the source
-    /// arity (synthetic trailing params excluded). Names drive classpath named-argument resolution.
-    overload_params: Vec<(String, bool, Vec<Ty>, Vec<String>)>,
+    /// per OVERLOAD (a name repeats), in declaration order — see [`OverloadParam`]. The parallel `Vec`s'
+    /// length is the source arity (synthetic trailing params excluded). Names drive classpath
+    /// named-argument resolution; the default flags drive classpath default-argument OMISSION.
+    overload_params: Vec<OverloadParam>,
 }
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
 /// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
@@ -366,6 +370,7 @@ impl Classpath {
                     f.receiver_class.is_some(),
                     tys,
                     f.value_param_names.clone(),
+                    f.value_param_has_default.clone(),
                 )
             })
             .collect();
@@ -427,7 +432,7 @@ impl Classpath {
         // alignment (the most-specific overload) when several fit; `None` if none align (truncate is then
         // skipped — a normal function whose arity already equals the descriptor's).
         all.iter()
-            .filter_map(|(n, has_recv, vp, _)| {
+            .filter_map(|(n, has_recv, vp, _, _)| {
                 if n != fn_name {
                     return None;
                 }
@@ -453,7 +458,7 @@ impl Classpath {
         let meta = self.class_meta(internal);
         meta.overload_params
             .iter()
-            .filter_map(|(n, has_recv, vp, names)| {
+            .filter_map(|(n, has_recv, vp, names, _)| {
                 if n != fn_name || names.is_empty() || names.iter().any(String::is_empty) {
                     return None;
                 }
@@ -464,6 +469,33 @@ impl Classpath {
             })
             .max_by_key(|(end, _)| *end)
             .map(|(_, names)| names)
+    }
+
+    /// Per-LOGICAL-param `DECLARES_DEFAULT_VALUE` flags of the `internal.fn_name` overload whose source
+    /// value params prefix-match `desc_params` (same alignment as [`metadata_param_names`]). A classpath
+    /// call may OMIT a trailing run of `true` params (filled by the `<name>$default` synthetic); the
+    /// required arity is the count of `false`. `None` when no overload aligns or none of its params declare
+    /// a default (nothing to omit — the existing all-required path applies).
+    pub fn metadata_param_defaults(
+        &self,
+        internal: &str,
+        fn_name: &str,
+        desc_params: &[Ty],
+    ) -> Option<Vec<bool>> {
+        let meta = self.class_meta(internal);
+        meta.overload_params
+            .iter()
+            .filter_map(|(n, has_recv, vp, _, defs)| {
+                if n != fn_name || !defs.iter().any(|d| *d) {
+                    return None;
+                }
+                let off = *has_recv as usize;
+                let end = off + vp.len();
+                (end <= desc_params.len() && compat_prefix(vp, &desc_params[off..end]))
+                    .then_some((end, defs.clone()))
+            })
+            .max_by_key(|(end, _)| *end)
+            .map(|(_, defs)| defs)
     }
 
     /// Source parameter NAMES of the class instance MEMBER `internal.jvm_name` of source arity `arity`,

@@ -332,6 +332,9 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
 const IS_SUSPEND_BIT: u64 = 1 << 13;
 
+/// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
+const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
+
 /// `Visibility` enum value from a Function/Class `flags` word: `hasAnnotations` is bit 0, then
 /// `Visibility` occupies the next 3 bits (kotlin metadata `Flags.VISIBILITY`). Enum order:
 /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5.
@@ -366,6 +369,10 @@ struct ParsedFunction {
     /// `value_param_classes`. Drives NAMED-ARGUMENT resolution for a classpath function call (the call
     /// `foo(b = …, a = …)` maps each label to a position via these names). `0` when absent.
     value_param_names: Vec<u64>,
+    /// Whether each SOURCE value parameter `DECLARES_DEFAULT_VALUE` (`ValueParameter.flags = 1`, bit 1) —
+    /// parallel to `value_param_classes`. Lets a classpath CALL omit a defaulted argument (resolved via
+    /// the count of NON-defaulted params; the omitted call lowers to the `<name>$default` synthetic).
+    value_param_has_default: Vec<bool>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -381,6 +388,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut ret_nullable = false;
     let mut value_param_classes: Vec<Option<u64>> = Vec::new();
     let mut value_param_names: Vec<u64> = Vec::new();
+    let mut value_param_has_default: Vec<bool> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -411,10 +419,12 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut vp = Pb { b: vbody, i: 0 };
                 let mut tid = None;
                 let mut nid = 0u64;
+                let mut vflags = 0u64;
                 while !vp.at_end() {
                     let vt = vp.varint()?;
                     match (vt >> 3, vt & 7) {
-                        (2, 0) => nid = vp.varint()?, // ValueParameter.name (string-table id)
+                        (1, 0) => vflags = vp.varint()?, // ValueParameter.flags
+                        (2, 0) => nid = vp.varint()?,    // ValueParameter.name (string-table id)
                         (3, 2) => {
                             let tn = vp.varint()? as usize;
                             let tb = vp.bytes(tn)?;
@@ -425,6 +435,8 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 }
                 value_param_classes.push(tid);
                 value_param_names.push(nid);
+                // `DECLARES_DEFAULT_VALUE` is bit 1 of the ValueParameter flags (HAS_ANNOTATIONS is bit 0).
+                value_param_has_default.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
             }
             (100, 2) => {
                 // method_signature extension
@@ -447,6 +459,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         ret_nullable,
         value_param_classes,
         value_param_names,
+        value_param_has_default,
     })
 }
 
@@ -532,6 +545,10 @@ pub struct MetaFn {
     /// Each SOURCE value parameter's NAME (parallel to `value_param_types`), for NAMED-ARGUMENT resolution
     /// of a classpath call. Empty string when metadata omits the name. LENGTH = source arity.
     pub value_param_names: Vec<String>,
+    /// Whether each SOURCE value parameter declares a default value (parallel to `value_param_types`).
+    /// A classpath call may omit a trailing run of these; the resolver counts the NON-defaulted params as
+    /// the required arity, and the omitted call lowers to the `<name>$default` synthetic.
+    pub value_param_has_default: Vec<bool>,
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -614,6 +631,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         ret_nullable: pf.ret_nullable,
                         value_param_types,
                         value_param_names,
+                        value_param_has_default: pf.value_param_has_default,
                     });
                 }
             }
