@@ -2077,14 +2077,46 @@ fn bc_complex_s(file: &File, s: StmtId, forbidden: bool) -> bool {
 }
 
 fn expr_refs_param(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+    expr_refs_param_inner(file, e, names, false)
+}
+
+/// `into_lambdas`: when true, recurse into a NESTED lambda's body to detect a TRANSITIVE capture
+/// (`f { g { use(outer) } }` — `outer` is captured by both `f` and `g`). A nested lambda's own bound
+/// names (its explicit params, or `it`) shadow the outer ones, so they are removed before recursing.
+fn expr_refs_param_inner(
+    file: &File,
+    e: ExprId,
+    names: &std::collections::HashSet<&str>,
+    into_lambdas: bool,
+) -> bool {
     match file.expr(e) {
         Expr::Name(n) => names.contains(n.as_str()),
+        Expr::Lambda { params, body } if into_lambdas => {
+            let body = *body;
+            let mut shadowed: std::collections::HashSet<&str> =
+                params.iter().map(String::as_str).collect();
+            if params.is_empty() {
+                shadowed.insert("it");
+            }
+            let remaining: std::collections::HashSet<&str> =
+                names.difference(&shadowed).copied().collect();
+            !remaining.is_empty() && expr_refs_param_inner(file, body, &remaining, true)
+        }
         // A lambda introduces a new `it` scope — stop (its captures are handled elsewhere).
         Expr::Lambda { .. } => false,
-        _ => file.any_child_expr(e, &mut |c| expr_refs_param(file, c, names), &mut |s| {
-            stmt_refs_param(file, s, names)
-        }),
+        _ => file.any_child_expr(
+            e,
+            &mut |c| expr_refs_param_inner(file, c, names, into_lambdas),
+            &mut |s| stmt_refs_param(file, s, names),
+        ),
     }
+}
+
+/// Whether `e`'s subtree uses `name`, recursing THROUGH nested lambdas — for CLOSURE-capture detection,
+/// where a name used in a nested lambda is also captured by the enclosing one.
+pub fn expr_uses_name_deep(file: &File, e: ExprId, name: &str) -> bool {
+    let set: std::collections::HashSet<&str> = std::iter::once(name).collect();
+    expr_refs_param_inner(file, e, &set, true)
 }
 
 /// Returns true if the expression subtree (or any statement within it) references a name from
@@ -3090,6 +3122,11 @@ pub struct TypeInfo {
     /// the CALL), this lambda lowers to a real `FunctionN` closure whose FIRST parameter IS the receiver;
     /// the backend binds that param as `this` so bare member/extension calls inside dispatch against it.
     pub recv_lambda_tys: HashMap<ExprId, Ty>,
+    /// Lambda literal `ExprId`s checked in an INLINE-splice context (passed to an `inline fun`): the
+    /// backend splices their body, accessing enclosing variables DIRECTLY, so their captures must NOT be
+    /// inflated by names used only in NESTED lambdas (which would break the splice). The lowering uses
+    /// deep (through-nested-lambda) capture detection for every OTHER (closure) lambda.
+    pub inline_lambdas: std::collections::HashSet<ExprId>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`TypeInfo::receiver_lambdas`]).
@@ -3160,6 +3197,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         plus_assign: std::collections::HashSet::new(),
         receiver_lambdas: HashMap::new(),
         recv_lambda_tys: HashMap::new(),
+        inline_lambdas: std::collections::HashSet::new(),
         local_fun_captures: std::collections::HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
@@ -3660,6 +3698,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         plus_assign: c.plus_assign,
         receiver_lambdas: c.receiver_lambdas,
         recv_lambda_tys: c.recv_lambda_tys,
+        inline_lambdas: c.inline_lambdas,
     }
 }
 
@@ -3699,6 +3738,7 @@ struct Checker<'a> {
     plus_assign: std::collections::HashSet<StmtId>,
     receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
     recv_lambda_tys: HashMap<ExprId, Ty>,
+    inline_lambdas: std::collections::HashSet<ExprId>,
     local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
@@ -6528,6 +6568,9 @@ impl<'a> Checker<'a> {
     /// first parameter as `this`. Returns the lambda's `Fun` type (the receiver folded back in as the
     /// leading parameter, matching how `lambda_param_types` was built).
     fn check_lambda_with_receiver(&mut self, e: ExprId, recv: Ty, value_types: &[Ty]) -> Ty {
+        if self.allow_lambda_mutation {
+            self.inline_lambdas.insert(e);
+        }
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
@@ -6572,6 +6615,9 @@ impl<'a> Checker<'a> {
     }
 
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
+        if self.allow_lambda_mutation {
+            self.inline_lambdas.insert(e);
+        }
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()

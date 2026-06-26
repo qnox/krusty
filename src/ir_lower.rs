@@ -4276,13 +4276,18 @@ impl<'a> Lower<'a> {
         // Captured free variables: enclosing locals/parameters the body reads but the lambda doesn't
         // bind. Each is passed into the impl method as a leading parameter and bound into the closure
         // at the `invokedynamic` call site (kotlinc's capture convention). Dedup by name, keeping the
-        // innermost binding (the last in the scope stack).
+        // innermost binding (the last in the scope stack). A real CLOSURE also captures a name used in a
+        // NESTED lambda (`f { g { use(outer) } }`); an INLINE-spliced lambda accesses it directly, so its
+        // captures must NOT be inflated by nested uses (the splice's stack frames would break).
+        let deep = !self.info.inline_lambdas.contains(&e);
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
-            if !bind_names.contains(name)
-                && !captures.iter().any(|(n, _, _)| n == name)
-                && crate::resolve::expr_uses_name_pub(self.afile, body, name)
-            {
+            let used = if deep {
+                crate::resolve::expr_uses_name_deep(self.afile, body, name)
+            } else {
+                crate::resolve::expr_uses_name_pub(self.afile, body, name)
+            };
+            if !bind_names.contains(name) && !captures.iter().any(|(n, _, _)| n == name) && used {
                 captures.push((name.clone(), *v, *ty));
             }
         }
