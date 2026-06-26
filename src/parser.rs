@@ -84,7 +84,6 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         targs: Vec::new(),
         span,
         fun_params: Vec::new(),
-        fun_has_receiver: false,
         fun_suspend: false,
     }
 }
@@ -546,9 +545,8 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
+            // A `sealed` class is implicitly abstract (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
-            let is_open = is_sealed || mods.iter().any(|m| m == "open");
             let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
             match self.kind() {
                 TokenKind::Eof => break,
@@ -586,8 +584,7 @@ impl<'a> Parser<'a> {
                     }) =>
                 {
                     self.bump(); // 'fun'
-                    let mut d = self.parse_interface();
-                    d.is_fun_interface = true;
+                    let d = self.parse_interface();
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -605,7 +602,6 @@ impl<'a> Parser<'a> {
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
                     let mut d = self.parse_class();
-                    d.is_open = is_open;
                     d.is_abstract = is_abstract;
                     d.is_sealed = is_sealed;
                     d.is_value = is_value;
@@ -993,7 +989,6 @@ impl<'a> Parser<'a> {
                     targs: vec![],
                     span,
                     fun_params: vec![],
-                    fun_has_receiver: false,
                     fun_suspend: false,
                 };
                 (Some(recv), self.ident_or_error("property name"))
@@ -1413,8 +1408,6 @@ impl<'a> Parser<'a> {
             enum_entry_args: entry_args,
             enum_entry_bodies: entry_bodies,
             enum_entry_props: entry_props,
-            is_fun_interface: false,
-            is_open: false,
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
@@ -1569,7 +1562,6 @@ impl<'a> Parser<'a> {
                     targs: vec![],
                     span,
                     fun_params: vec![],
-                    fun_has_receiver: false,
                     fun_suspend: false,
                 };
                 let fun_name = if self.at(TokenKind::Ident) {
@@ -1988,8 +1980,6 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_fun_interface: false,
-            is_open: false,
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
@@ -2197,8 +2187,6 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_fun_interface: false,
-            is_open: false,
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
@@ -2324,8 +2312,6 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_fun_interface: false,
-            is_open: false,
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
@@ -2456,8 +2442,6 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_fun_interface: false,
-            is_open: false,
             is_abstract: false,
             is_sealed: false,
             inner_of: None,
@@ -2547,7 +2531,6 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
-                    fun_has_receiver: false,
                     fun_suspend,
                 }
             } else {
@@ -2560,7 +2543,6 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
-                    fun_has_receiver: false,
                     fun_suspend: false,
                 }
             }
@@ -2595,7 +2577,6 @@ impl<'a> Parser<'a> {
                         targs: Vec::new(),
                         span,
                         fun_params: Vec::new(),
-                        fun_has_receiver: false,
                         fun_suspend: false,
                     }
                 } else {
@@ -2615,7 +2596,6 @@ impl<'a> Parser<'a> {
                 targs,
                 span,
                 fun_params: Vec::new(),
-                fun_has_receiver: false,
                 fun_suspend: false,
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
@@ -2658,7 +2638,6 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
-                    fun_has_receiver: true,
                     fun_suspend,
                 };
             }
@@ -2672,7 +2651,6 @@ impl<'a> Parser<'a> {
                 targs: Vec::new(),
                 span,
                 fun_params: Vec::new(),
-                fun_has_receiver: false,
                 fun_suspend: false,
             }
         }
@@ -2706,7 +2684,6 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
-                    fun_has_receiver: false,
                     fun_suspend: false,
                 });
             } else {
@@ -3186,10 +3163,8 @@ impl<'a> Parser<'a> {
             _ if self.looks_like_local_type_decl() => {
                 let mods = self.skip_decl_prefix();
                 let is_sealed = mods.iter().any(|m| m == "sealed");
-                let is_open = is_sealed || mods.iter().any(|m| m == "open");
                 let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
                 let mut d = self.parse_nested_type_decl();
-                d.is_open = is_open;
                 d.is_abstract = is_abstract;
                 self.finish_stmt(Stmt::LocalClass(d), start)
             }

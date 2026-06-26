@@ -1943,79 +1943,8 @@ fn local_fun_body_uses_any(
     check_e(file, e, outer)
 }
 
-/// Returns `true` if an expression subtree contains a `Stmt::Assign` (or `+=`-style via
-/// `AssignMember` on a Name) whose target is a `Name` that appears in `outer_names`.
-/// Used to detect mutable captures in non-inlined lambda bodies.
-fn lambda_body_writes_outer(
-    file: &File,
-    e: ExprId,
-    outer_names: &std::collections::HashSet<String>,
-) -> bool {
-    fn check_e(file: &File, e: ExprId, outer_names: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer_names);
-        let rs = |x: StmtId| check_s(file, x, outer_names);
-        match file.expr(e) {
-            Expr::Block { stmts, trailing } => {
-                stmts.iter().any(|&s| rs(s)) || trailing.map_or(false, |t| r(t))
-            }
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => r(*cond) || r(*then_branch) || else_branch.map_or(false, |x| r(x)),
-            Expr::Try {
-                body,
-                catches,
-                finally,
-            } => r(*body) || catches.iter().any(|c| r(c.body)) || finally.map_or(false, |f| r(f)),
-            Expr::When { subject, arms } => {
-                subject.map_or(false, |s| r(s))
-                    || arms
-                        .iter()
-                        .any(|a| a.conditions.iter().any(|&c| r(c)) || r(a.body))
-            }
-            // Don't recurse into nested lambdas — they have their own scope.
-            Expr::Lambda { .. } => false,
-            _ => false,
-        }
-    }
-    fn check_s(file: &File, s: StmtId, outer_names: &std::collections::HashSet<String>) -> bool {
-        let r = |x: ExprId| check_e(file, x, outer_names);
-        match file.stmt(s) {
-            Stmt::IncDec { name, .. } => outer_names.contains(name),
-            Stmt::Assign { name, value } => {
-                // `x = expr` or `x += expr` — check if target is an outer var.
-                outer_names.contains(name) || r(*value)
-            }
-            Stmt::Local { init, .. } => r(*init),
-            Stmt::LocalDelegate { delegate, .. } => r(*delegate),
-            Stmt::Destructure { init, .. } => r(*init),
-            Stmt::AssignMember {
-                receiver, value, ..
-            } => r(*receiver) || r(*value),
-            Stmt::AssignIndex {
-                array,
-                index,
-                value,
-            } => r(*array) || r(*index) || r(*value),
-            Stmt::Return(Some(e), _) => r(*e),
-            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => false,
-            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
-                r(*cond) || r(*body)
-            }
-            Stmt::For { range, body, .. } => r(range.start) || r(range.end) || r(*body),
-            Stmt::ForEach { iterable, body, .. } => r(*iterable) || r(*body),
-            Stmt::Expr(e) => r(*e),
-            Stmt::LocalFun(_) => false,
-            Stmt::LocalClass(_) => false,
-        }
-    }
-    check_e(file, e, outer_names)
-}
-
 /// Collect the outer-variable names a lambda body writes (assigns / `++`/`--`), so the lowerer can box
-/// them. Mirrors [`lambda_body_writes_outer`] but accumulates the names instead of returning a bool;
-/// like it, does not descend into nested lambdas (their writes are recorded when they're checked).
+/// them. Does not descend into nested lambdas (their writes are recorded when they're checked).
 fn collect_lambda_outer_writes(
     file: &File,
     e: ExprId,

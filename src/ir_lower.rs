@@ -15204,13 +15204,6 @@ fn ir_arg_assignable(arg: &Ty, param: &Ty) -> bool {
     arg == param || (ir_type_is_object(param) && ir_type_is_reference(arg))
 }
 
-/// Whether `e` contains a `return` (always exits the function), or a `break`/`continue` that targets a
-/// loop *outside* `e` (i.e. at loop-depth 0 here) — control transfers that would skip an enclosing
-/// `finally`. Does not descend into lambdas (their control flow is separate).
-fn body_has_nonlocal_exit(file: &ast::File, e: AstExprId) -> bool {
-    body_has_exit(file, e, true)
-}
-
 /// Whether `e` declares a local `val`/`var` (a `Stmt::Local`/`Destructure`), not descending into a
 /// nested lambda. A `finally` that declares locals can't be inlined on the several exit paths krusty's
 /// `emit_try` needs without the duplicated locals' slots clashing across copies — so such a `try` skips.

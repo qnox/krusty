@@ -324,11 +324,6 @@ pub struct TypeRef {
     /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
     /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
     pub fun_params: Vec<TypeRef>,
-    /// For a receiver function type `Recv.(A) -> R`: `true`, and `fun_params[0]` is the receiver
-    /// `Recv`. The receiver folds in as the first `FunctionN` parameter (matching Kotlin's lowering),
-    /// but the front end keeps this marker so a lambda passed to such a param binds `fun_params[0]`
-    /// as the implicit `this` receiver (member access, and an arity-short `f()` supplies it).
-    pub fun_has_receiver: bool,
     /// For a `suspend` function type `suspend (A) -> R`: `true`. Lowers to `Function{n+1}` with a
     /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result (kotlinc's
     /// suspend-lambda ABI), distinct from the plain `Function{n}` of a non-suspend function type.
@@ -474,12 +469,7 @@ pub struct ClassDecl {
     /// Per-entry class-body PROPERTIES (`ENTRY { val y = … ; override fun m() = y }`) — backing fields +
     /// getters on the `Enum$ENTRY` subclass. Parallel to `enum_entries`; empty `Vec` for none.
     pub enum_entry_props: Vec<Vec<PropDecl>>,
-    /// `fun interface Name { fun m(…): R }` — a SAM (single-abstract-method) interface; a lambda is
-    /// convertible to it.
-    pub is_fun_interface: bool,
-    /// `open`/`abstract` — the class is not `final` (may be subclassed); `abstract` also adds
-    /// `ACC_ABSTRACT`.
-    pub is_open: bool,
+    /// `abstract` — the class is not `final` (may be subclassed) and adds `ACC_ABSTRACT`.
     pub is_abstract: bool,
     /// `sealed` — abstract + open, and its subclasses are all known in this module (enabling
     /// exhaustive `when` without `else`).
@@ -510,7 +500,7 @@ pub struct ClassDecl {
 }
 
 /// What a declaration *is*. Mutually exclusive at the source level (`data`/`value` are modifiers on a
-/// `Class`, `fun interface` is `Interface` + `is_fun_interface`). An `annotation class` compiles to a
+/// `Class`, `fun interface` is just an `Interface`). An `annotation class` compiles to a
 /// JVM interface, but the front end keeps it distinct from `Interface` — `is_interface()` is `false`
 /// for it (matching the parser, which never set `is_interface` on annotations).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
