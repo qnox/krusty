@@ -476,6 +476,37 @@ impl Classpath {
     /// call may OMIT a trailing run of `true` params (filled by the `<name>$default` synthetic); the
     /// required arity is the count of `false`. `None` when no overload aligns or none of its params declare
     /// a default (nothing to omit — the existing all-required path applies).
+    /// Per SOURCE value parameter of the top-level `fn_name` on facade `internal`: `Some(receiver_internal)`
+    /// when it is a RECEIVER function-type param (`Recv.() -> R`, decoded from the param Type's
+    /// `@ExtensionFunctionType` annotation). Drives classpath receiver-lambda binding: a lambda passed to
+    /// such a param binds `this` to the receiver. `None` if the facade/function isn't found; an empty/all-
+    /// `None` vec means no receiver-lambda params.
+    pub fn metadata_param_recv_funs(&self, internal: &str, fn_name: &str) -> Vec<Option<String>> {
+        let mut fns = self
+            .find(internal)
+            .map(|ci| super::metadata::package_functions(&ci));
+        if fns
+            .as_ref()
+            .is_some_and(|v| v.iter().all(|f| f.kotlin_name != fn_name))
+        {
+            // A multifile FACADE lists its PART classes in `d1`; the functions live there — merge them.
+            if let Some(ci) = self.find(internal) {
+                let mut merged = Vec::new();
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        merged.extend(super::metadata::package_functions(&pci));
+                    }
+                }
+                if !merged.is_empty() {
+                    fns = Some(merged);
+                }
+            }
+        }
+        fns.and_then(|v| v.into_iter().find(|f| f.kotlin_name == fn_name))
+            .map(|f| f.value_param_recv_funs)
+            .unwrap_or_default()
+    }
+
     pub fn metadata_param_defaults(
         &self,
         internal: &str,

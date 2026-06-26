@@ -342,8 +342,8 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
-            (1, 2) => {
-                // Type.argument (repeated) — the FIRST argument is the receiver. `Argument.type` = 2.
+            (2, 2) => {
+                // Type.argument (repeated, field 2) — the FIRST argument is the receiver. `Argument.type` = 2.
                 let Some(n) = pb.varint() else { break };
                 let Some(abody) = pb.bytes(n as usize) else {
                     break;
