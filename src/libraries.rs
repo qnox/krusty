@@ -484,6 +484,17 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
+    /// Canonicalize a type's internal name for identity/subtype comparison: collapse the platform-mapped
+    /// aliases (a Kotlin built-in and the JVM class it maps to, the read-only/mutable collection pairs)
+    /// to one representative so two names for the same runtime type compare equal. The default is
+    /// identity; the JVM backend folds via its `JavaToKotlinClassMap`. Keeps the checker's subtyping in
+    /// Kotlin terms without it naming the backend's name map. The identity default means a non-JVM /
+    /// empty `LibrarySet` does not fold these aliases — only classpath-backed checking relies on it
+    /// (alias subtyping arises solely from stdlib/classpath symbols).
+    fn canonical_internal<'a>(&self, internal: &'a str) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed(internal)
+    }
+
     /// Resolve a BUILTIN member (`String.length`, `List.get`/`size`, `CharSequence.get`, …) to its
     /// concrete JVM call — `(owner_internal, jvm_method_name, method_descriptor, return_ty, is_interface)`
     /// — derived from the type's builtins metadata + the kotlin↔JVM class map (no per-member hardcode).
