@@ -2426,6 +2426,90 @@ fn infer_lit_ty_p(
             }
             Ty::Error
         }
+        // A safe call `recv?.prop` / `recv?.method(args)` — the receiver is non-null INSIDE, the whole
+        // expression is NULLABLE. Infer the inner type against the non-null receiver, then wrap nullable.
+        // A lambda argument flows in as a `Ty::Fun` carrying its inferred body type, so a generic HOF's
+        // return variable binds STRUCTURALLY from the lambda body (`abc?.let { "$it…" }` → `String?`) —
+        // no stdlib function name is matched.
+        Expr::SafeCall {
+            receiver,
+            name,
+            args,
+        } => {
+            let base =
+                infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src).non_null();
+            if base == Ty::Error {
+                return Ty::Error;
+            }
+            let inner = match args {
+                Some(a) => {
+                    let mut arg_tys = Vec::with_capacity(a.len());
+                    let mut ok = true;
+                    for &ax in a {
+                        let t = match file.expr(ax) {
+                            Expr::Lambda { body, .. } => {
+                                let bt =
+                                    infer_lit_ty_p(file, *body, class_names, fun_rets, props, src);
+                                if bt == Ty::Error {
+                                    ok = false;
+                                }
+                                Ty::fun(vec![], bt)
+                            }
+                            _ => infer_lit_ty_p(file, ax, class_names, fun_rets, props, src),
+                        };
+                        arg_tys.push(t);
+                    }
+                    if ok {
+                        src.instance_call_return(base, name, &arg_tys)
+                            .or_else(|| src.extension_call_return(base, name, &arg_tys))
+                            .unwrap_or(Ty::Error)
+                    } else {
+                        Ty::Error
+                    }
+                }
+                None => {
+                    let mut t = Ty::Error;
+                    if base == Ty::String {
+                        if let Some(m) = src.builtin_member_ret("kotlin/String", name, &[]) {
+                            if !matches!(m, Ty::Unit | Ty::Error) {
+                                t = m;
+                            }
+                        }
+                    }
+                    if t == Ty::Error {
+                        if let Some(internal) = base.obj_internal() {
+                            if let Some(m) = src.builtin_member_ret(internal, name, &[]) {
+                                if !matches!(m, Ty::Unit | Ty::Error) {
+                                    t = m;
+                                }
+                            }
+                            if t == Ty::Error {
+                                let getter = property_getter_name(name);
+                                for cand in [name.to_string(), getter] {
+                                    if let Some(m) = crate::call_resolver::resolve_instance(
+                                        src,
+                                        internal,
+                                        &cand,
+                                        &[],
+                                    ) {
+                                        if !matches!(m.ret, Ty::Unit | Ty::Error) {
+                                            t = m.ret;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    t
+                }
+            };
+            if inner == Ty::Error {
+                Ty::Error
+            } else {
+                Ty::nullable(inner)
+            }
+        }
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
             UnOp::Neg | UnOp::Plus => {

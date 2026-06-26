@@ -1625,6 +1625,46 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
+    fn extension_call_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
+        // Find an extension `name` on `recv` (or a supertype) whose value-parameter arity matches `args`,
+        // bind its type variables by unifying its generic signature (`psigs[0]` = the receiver, the rest =
+        // value parameters) against the receiver and arguments, then substitute the generic return. A
+        // lambda argument flows in as a `Ty::Fun`, so `unify_gsig` binds a function parameter's return
+        // variable from the lambda body type — `s.let { "$it" }` substitutes the return to `String`. Public
+        // then non-public (the scope-fn family is `@InlineOnly`); purely structural, no name is matched.
+        for allow_non_public in [false, true] {
+            for recv_desc in supertype_descriptors(&self.cp, recv) {
+                for c in self.cp.find_extensions(&recv_desc, name) {
+                    if !c.public && !allow_non_public {
+                        continue;
+                    }
+                    let Some(sig) = c.signature.as_deref() else {
+                        continue;
+                    };
+                    if !c.public
+                        && recv_desc == "Ljava/lang/Object;"
+                        && !nonpublic_ext_receiver_is_typevar(Some(sig))
+                    {
+                        continue;
+                    }
+                    let Some((_, psigs, rsig)) = parse_method_gsig(sig) else {
+                        continue;
+                    };
+                    if psigs.len() != args.len() + 1 {
+                        continue; // psigs[0] is the receiver; the rest must match the value args
+                    }
+                    let mut binds = std::collections::HashMap::new();
+                    unify_gsig(&psigs[0], recv, &mut binds);
+                    for (ps, a) in psigs[1..].iter().zip(args) {
+                        unify_gsig(ps, *a, &mut binds);
+                    }
+                    return Some(gsig_to_ty(&rsig, &binds));
+                }
+            }
+        }
+        None
+    }
+
     fn builtin_member_ret(&self, internal: &str, name: &str, args: &[Ty]) -> Option<Ty> {
         self.cp.builtin_member_ret(internal, name, args)
     }

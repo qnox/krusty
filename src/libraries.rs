@@ -440,6 +440,16 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
+    /// Like [`instance_call_return`] but for an EXTENSION function `name` on `recv` (`<T, R> T.let((T) ->
+    /// R): R`): bind the type variables from the receiver and the (value) argument types — a lambda
+    /// argument as a `Ty::Fun` binds the function-type parameter's return variable from its body type — and
+    /// substitute the generic return. `args` are the VALUE arguments (the receiver is implicit). `None`
+    /// when no generic extension of that name resolves on `recv` (the caller falls back). No stdlib name is
+    /// matched — the binding is purely structural over the generic signature.
+    fn extension_call_return(&self, _recv: Ty, _name: &str, _args: &[Ty]) -> Option<Ty> {
+        None
+    }
+
     /// The return `Ty` of a BUILTIN type's class member (`internal` e.g. `kotlin/String`), by name +
     /// argument types, read from the type's builtins declarations rather than a hardcoded table. `None`
     /// if the name isn't a declared member there (e.g. a `StringsKt` extension on `String`).

@@ -6046,6 +6046,45 @@ impl<'a> Lower<'a> {
             return None;
         }
         let fmt = self.info.ty(receiver).obj_internal()?.to_string();
+        // `json.decodeFromJsonElement<C>(element)` → the 2-arg member with a synthesized `C.serializer()`.
+        // Gated structurally on that member existing (a `Json`-like format), no hardcoded subtype — mirrors
+        // `is_string_format`. (A separate format family from the `StringFormat` round-trip below.)
+        if name == "decodeFromJsonElement"
+            && crate::call_resolver::resolve_instance(
+                &*self.syms.libraries,
+                &fmt,
+                "decodeFromJsonElement",
+                &[
+                    Ty::obj("kotlinx/serialization/DeserializationStrategy"),
+                    Ty::obj("kotlinx/serialization/json/JsonElement"),
+                ],
+            )
+            .is_some()
+        {
+            let targ = self
+                .afile
+                .call_type_args
+                .get(&call.0)
+                .and_then(|ts| ts.first())
+                .and_then(|tr| self.ty_ref(tr))?;
+            let c = self.serializable_internal(targ)?;
+            let recv = self.expr(receiver)?;
+            let ser = self.serializer_crossfile(&c);
+            let elem = self.expr(args[0])?;
+            let decoded = self.ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: fmt,
+                    name: "decodeFromJsonElement".to_string(),
+                    descriptor:
+                        "(Lkotlinx/serialization/DeserializationStrategy;Lkotlinx/serialization/json/JsonElement;)Ljava/lang/Object;"
+                            .to_string(),
+                    interface: false,
+                },
+                dispatch_receiver: Some(recv),
+                args: vec![ser, elem],
+            });
+            return Some(self.coerce_erased(decoded, Ty::obj(&c), Ty::obj("kotlin/Any")));
+        }
         if !self.is_string_format(&fmt) {
             return None;
         }

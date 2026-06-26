@@ -58,6 +58,17 @@ fn find(prefix: &str) -> Option<PathBuf> {
 /// against the kotlinx-serialization runtime, and return the trimmed stdout — or `None` if any runtime
 /// dependency is absent (test self-skips). Shared by the encode and the round-trip tests.
 fn run_box_in_krusty(src: &str, stem: &str) -> Option<(String, String)> {
+    run_box_impl(src, stem, false)
+}
+
+/// Like [`run_box_in_krusty`] but also puts the JDK `lib/modules` jimage on the COMPILE classpath — needed
+/// for stdlib/serialization APIs whose member resolution walks the mapped `java/*` types (e.g.
+/// `Json.decodeFromJsonElement`). The runtime classpath is unchanged (the JVM supplies the JDK).
+fn run_box_in_krusty_jdk(src: &str, stem: &str) -> Option<(String, String)> {
+    run_box_impl(src, stem, true)
+}
+
+fn run_box_impl(src: &str, stem: &str, with_jdk: bool) -> Option<(String, String)> {
     let stdlib = common::stdlib_jar()?;
     let (Some(core), Some(json)) = (
         find("kotlinx-serialization-core-jvm"),
@@ -70,8 +81,9 @@ fn run_box_in_krusty(src: &str, stem: &str) -> Option<(String, String)> {
         .or_else(|| std::env::var("JAVA_HOME").ok())?;
     let java = PathBuf::from(&java_home).join("bin/java");
     let cp_jars = vec![stdlib.clone(), core.clone(), json.clone()];
+    let jdk_modules = with_jdk.then(|| PathBuf::from(&java_home).join("lib/modules"));
 
-    let classes = common::compile_in_process(src, stem, &cp_jars, None)
+    let classes = common::compile_in_process(src, stem, &cp_jars, jdk_modules.as_deref())
         .unwrap_or_else(|| panic!("krusty failed to compile the pure-krusty program ({stem})"));
 
     let out = std::env::temp_dir().join(format!("krusty_ser_{stem}_{}", std::process::id()));
@@ -197,6 +209,58 @@ fun box(): String {
         "Json instance decode type inference wrong.\nstdout: {stdout}\nstderr: {stderr}"
     );
     eprintln!("pure-krusty Json instance decode OK: {stdout}");
+}
+
+#[test]
+fn safe_call_body_property_serializes_in_krusty() {
+    // A `@Serializable` class with a body property whose initializer is a SAFE CALL
+    // (`val xyz = abc?.let { … }`): the property's type is inferred (the lightweight inferrer resolves the
+    // generic `let` return structurally — no stdlib name match) AND its constructor codegen is valid (the
+    // branchy initializer doesn't leave `this` on the stack across the null branch). Then it serializes.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class M(val abc: String?) {
+    val xyz = abc?.let { x -> "$x!" }
+}
+fun box(): String = Json.encodeToString(M.serializer(), M("hi"))
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SafeCallProp") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "{\"abc\":\"hi\",\"xyz\":\"hi!\"}",
+        "safe-call body property serialization wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty safe-call body property OK: {stdout}");
+}
+
+#[test]
+fn reified_decode_from_json_element_in_krusty() {
+    // The REIFIED `Json.decodeFromJsonElement<Foo>(element)` — krusty desugars it (the reified inline form
+    // can't be called directly) into the 2-arg member with a synthesized `Foo.serializer()`, then checkcasts
+    // the erased result to `Foo`. Uses the JDK jimage on the compile classpath (the member's resolution
+    // walks the mapped `java/*` types).
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.*
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val e = Json.parseToJsonElement("{\"a\":7,\"b\":\"hi\"}")
+    val f = Json.decodeFromJsonElement<Foo>(e)
+    return f.b + f.a.toString()
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty_jdk(src, "ReifiedDecodeElement") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "hi7",
+        "reified decodeFromJsonElement wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty reified decodeFromJsonElement OK: {stdout}");
 }
 
 #[test]
