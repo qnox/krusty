@@ -7151,7 +7151,14 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return fi.callable.ret;
+                            // Recover the generic-signature substitution (`List<Int>.getOrElse` → `Int`)
+                            // for a parameterized receiver, like the positional path below; else the
+                            // erased return.
+                            return self
+                                .syms
+                                .libraries
+                                .member_return(rt, &name, &arg_tys)
+                                .unwrap_or(fi.callable.ret);
                         }
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
