@@ -678,7 +678,7 @@ fn strip_continuation_param(desc: &str) -> String {
     desc.to_string()
 }
 
-fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
+pub(crate) fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
     let close = desc.find(')').unwrap_or(0);
     let mut rest = &desc[1..close];
     let mut params = Vec::new();
@@ -1609,7 +1609,7 @@ impl LibrarySet for JvmLibraries {
         internal: &str,
         name: &str,
         n_args: usize,
-    ) -> Option<(String, String, Ty, bool)> {
+    ) -> Option<(String, String, String, Ty, bool)> {
         self.cp.builtin_member_call(internal, name, n_args)
     }
 

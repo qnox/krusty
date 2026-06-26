@@ -754,6 +754,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gap), so byte-parity for generics is not yet achieved; runtime (box) is correct. Tests:
   `tests/primitive_bound_generic_e2e.rs`.
 
+- **Reference-bounded type parameters erase to the bound (not `Object`).** kotlinc erases a bounded `T`
+  to its bound's JVM type — `fun <T : CharSequence> f(x: T): T` has descriptor
+  `(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;`, not `(Object)Object`. krusty resolves the
+  declared bound in `TParams::from_decl_with` (a class-name → JVM-internal resolver, `resolve.rs`) and
+  stores it as the FUNCTION type parameter's erasure, so member/operator resolution on a `T`-typed value
+  peels to the real bound and the descriptor uses it (`String`/user-class/Kotlin-builtin bounds; an
+  unbounded `T` stays `Object`, a primitive bound still specializes). CLASS type parameters keep the
+  erased (`Object`) model — the value-class pass owns class-bound handling. The generic `Signature`
+  attribute is still omitted (same gap as above). The bound is also visible to the JVM **mapped-builtin**
+  member tables below, so `x.get(i)`/`x.toInt()`/`x.length` on a `<T : CharSequence>`/`<T : Number>`
+  resolve. NOT supported: a `<T : Comparable<T>>` bound whose body uses the `<`/`>` operator AND is called
+  with a primitive (`maxOf2(3, 5)`) — that needs the type argument inferred (`T = Int`) and the primitive
+  BOXED into the `Comparable`-erased parameter slot, which krusty's emit does not do (a raw `int` reaching
+  a `Comparable` parameter is a VerifyError), so such a call is DECLINED (the file skips), never
+  miscompiled. Tests: `tests/bounded_type_param_e2e.rs`.
+
+- **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
+  Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM
+  class's methods — `CharSequence.get(i)` dispatches to `charAt`, `Number.toInt()` to `intValue`, and the
+  `length`/`get` members live in `.kotlin_builtins`, not on the `.class`. krusty resolves such a member
+  from the builtins metadata keyed on the Kotlin name (`jvm_to_kotlin_builtin_with_members` maps
+  `java/lang/CharSequence` → `kotlin/CharSequence`) when the classpath `resolve_instance` can't, and the
+  backend emits the call via `Classpath::builtin_member_call` — which maps the owner to its JVM class,
+  carries the renamed JVM method name (`get` → `charAt`, `toInt` → `intValue`; the rename table mirrors
+  kotlinc's `BuiltInMethodsWithDifferentJvmName`), and reports interface-ness for the correct
+  `invokeinterface`/`invokevirtual`. The codegen path fires ONLY for a RENAMED member; a same-named member
+  (`compareTo`, `length`) is left to `resolve_instance` so a real (e.g. value-class) receiver dispatches
+  correctly. Tests: `tests/bounded_type_param_e2e.rs`.
+
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
   upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
   CharSequence>` (a `checkcast`). A non-null bound (`<T : Any>`, `<T : Foo>`) null-checks first
