@@ -949,6 +949,18 @@ pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
         IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
         _ => {}
     }
+    // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but its
+    // `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering (captures +
+    // params) — recursing into it would corrupt those internal slots with this enclosing threshold/delta.
+    // So for a `Lambda`, shift only the captures (the impl method's body is a separate function, already
+    // untouched here).
+    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
+        let caps = captures.clone();
+        for c in caps {
+            shift_value_indices(ir, c, threshold, by);
+        }
+        return;
+    }
     let mut kids = Vec::new();
     for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
     for c in kids {
@@ -986,5 +998,40 @@ mod tests {
             None => panic!("expected class type"),
         }
         assert!(matches!(f.expr(body), IrExpr::Block { .. }));
+    }
+
+    #[test]
+    fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
+        // A `Lambda` whose CAPTURE references the enclosing slot 1 and whose `inline_body` references the
+        // lambda's OWN slot 1. Shifting the enclosing scope (threshold 1, +2) must shift the capture
+        // (1 → 3) but leave the lambda-internal `inline_body` reference (1) untouched.
+        let mut f = IrFile::default();
+        let cap = f.add_expr(IrExpr::GetValue(1)); // capture of enclosing value 1
+        let inner = f.add_expr(IrExpr::GetValue(1)); // the lambda's OWN value 1
+        let lam = f.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: vec![cap],
+            sam: None,
+            inline_body: Some(inner),
+        });
+        let outer = f.add_expr(IrExpr::GetValue(1)); // an enclosing value 1, sibling of the lambda
+        let block = f.add_expr(IrExpr::Block {
+            stmts: vec![lam],
+            value: Some(outer),
+        });
+        shift_value_indices(&mut f, block, 1, 2);
+        assert!(
+            matches!(f.exprs[cap as usize], IrExpr::GetValue(3)),
+            "capture must shift 1 -> 3"
+        );
+        assert!(
+            matches!(f.exprs[outer as usize], IrExpr::GetValue(3)),
+            "enclosing ref must shift 1 -> 3"
+        );
+        assert!(
+            matches!(f.exprs[inner as usize], IrExpr::GetValue(1)),
+            "lambda-internal inline_body ref must NOT shift"
+        );
     }
 }
