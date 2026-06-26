@@ -12,6 +12,10 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
+    /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
+    /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
+    pub receiver: Option<Ty>,
     /// Per-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `params`; empty = none default). Sets
     /// `ValueParameter.flags` bit 1 so a cross-module caller may OMIT a defaulted argument (the reader's
     /// `metadata_param_defaults` recovers it). A short/empty vec leaves the remaining params required.
@@ -118,6 +122,12 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
     let ret = type_pb(st, f.ret);
     p.field_message(3, &ret); // Function.return_type = 3
+                              // Function.receiver_type = 5 (extension functions only) — between return_type and value_parameter,
+                              // matching kotlinc's ascending field order. Its presence marks the function an extension.
+    if let Some(recv) = f.receiver {
+        let rt = type_pb(st, recv);
+        p.field_message(5, &rt);
+    }
     for (i, (pname, pty)) in f.params.iter().enumerate() {
         let mut vp = Pb::new();
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): bit 1 =
@@ -233,6 +243,7 @@ mod tests {
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
+                receiver: None,
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
@@ -251,6 +262,7 @@ mod tests {
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
+                receiver: None,
                 param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,

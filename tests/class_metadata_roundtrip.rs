@@ -77,6 +77,7 @@ fn package_value_param_defaults_round_trip() {
         name: "host".to_string(),
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
+        receiver: None,
         param_defaults: vec![false, true],
         suspend: false,
         jvm_desc: None,
@@ -93,5 +94,45 @@ fn package_value_param_defaults_round_trip() {
         host.value_param_has_default,
         vec![false, true],
         "build_package → package_functions must preserve each param's DECLARES_DEFAULT_VALUE flag"
+    );
+}
+
+#[test]
+fn package_extension_receiver_round_trips() {
+    use krusty::jvm::metadata::package_functions;
+    use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
+    // An extension `fun NavGraphBuilder.composable(route: String): Unit` — the receiver must be recorded
+    // as `Function.receiver_type`, NOT a value parameter, so the decoded LOGICAL arity is 1 (just
+    // `route`), not 2. Without this a dependent counts the receiver as an argument and can't resolve a
+    // `builder.composable("x")` call.
+    let funcs = vec![PkgFnMeta {
+        name: "composable".to_string(),
+        params: vec![("route".to_string(), Ty::String)],
+        ret: Ty::Unit,
+        receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
+        param_defaults: Vec::new(),
+        suspend: false,
+        jvm_desc: None,
+    }];
+    let (d1, d2) = build_package(&funcs, &[]);
+    let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
+
+    let f = package_functions(&ci)
+        .into_iter()
+        .find(|f| f.kotlin_name == "composable")
+        .expect("the decoded package metadata must list `composable`");
+    assert!(
+        f.is_extension,
+        "the receiver_type must mark it an extension"
+    );
+    assert_eq!(
+        f.receiver_class.as_deref(),
+        Some("androidx/navigation/NavGraphBuilder"),
+        "the extension receiver class must round-trip"
+    );
+    assert_eq!(
+        f.value_param_types.len(),
+        1,
+        "only the logical value param `route` is recorded — the receiver is NOT a value parameter"
     );
 }
