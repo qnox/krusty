@@ -180,6 +180,35 @@ fun box(): String {
 }
 
 #[test]
+fn body_var_property_class_round_trips_in_krusty() {
+    // A `@Serializable` class whose serializable properties are BODY `var`s (declared in the body, not
+    // the primary constructor). deserialize must construct via the (no-arg) primary constructor and
+    // assign each body property through its setter — previously it passed all fields as ctor args
+    // (`new C(x, y)`) and the verifier rejected the call (`new C()` takes none).
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class C { var x: Int = 0; var y: String = "" }
+fun box(): String {
+    val c = C().apply { x = 7; y = "hi" }
+    val s = Json.encodeToString(C.serializer(), c)
+    if (s != "{\"x\":7,\"y\":\"hi\"}") return "enc:$s"
+    val back = Json.decodeFromString(C.serializer(), s)
+    return if (back.x == 7 && back.y == "hi") "OK" else "dec:${back.x}/${back.y}"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "BodyVar") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "body-var-property round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty body-var-property round-trip OK");
+}
+
+#[test]
 fn computed_override_getter_takes_overridden_type_in_krusty() {
     // A custom serializer `object : KSerializer<Dummy>` whose `descriptor` is a COMPUTED getter with
     // NO explicit type (`override val descriptor get() = PrimitiveSerialDescriptor(...)`). The getter's
