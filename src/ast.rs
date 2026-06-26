@@ -469,11 +469,9 @@ pub struct ClassDecl {
     /// Per-entry class-body PROPERTIES (`ENTRY { val y = … ; override fun m() = y }`) — backing fields +
     /// getters on the `Enum$ENTRY` subclass. Parallel to `enum_entries`; empty `Vec` for none.
     pub enum_entry_props: Vec<Vec<PropDecl>>,
-    /// `abstract` — the class is not `final` (may be subclassed) and adds `ACC_ABSTRACT`.
-    pub is_abstract: bool,
-    /// `sealed` — abstract + open, and its subclasses are all known in this module (enabling
-    /// exhaustive `when` without `else`).
-    pub is_sealed: bool,
+    /// Inheritance modality (`final` / `abstract` / `sealed`). Replaces the old `is_abstract` +
+    /// `is_sealed` pair; read via `modality.is_abstract()` / `modality.is_sealed()`.
+    pub modality: Modality,
     /// `inner class` — captures the enclosing instance: emitted with a synthetic `this$0` field of the
     /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
     pub inner_of: Option<String>,
@@ -516,6 +514,30 @@ pub enum ClassKind {
     Annotation,
 }
 
+/// A class's inheritance modality. One field instead of parallel `is_abstract`/`is_sealed` booleans
+/// (which encoded the invariant `sealed ⟹ abstract` implicitly); read through the accessor methods.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Modality {
+    /// `final` (the Kotlin default) — cannot be subclassed.
+    #[default]
+    Final,
+    /// `abstract` — not `final`; carries `ACC_ABSTRACT`.
+    Abstract,
+    /// `sealed` — abstract AND its subclasses are all known in this module (enabling exhaustive `when`).
+    Sealed,
+}
+
+impl Modality {
+    /// `abstract` OR `sealed` — both add `ACC_ABSTRACT` and may be subclassed (`sealed ⟹ abstract`).
+    pub fn is_abstract(self) -> bool {
+        matches!(self, Modality::Abstract | Modality::Sealed)
+    }
+    /// Specifically `sealed`.
+    pub fn is_sealed(self) -> bool {
+        matches!(self, Modality::Sealed)
+    }
+}
+
 impl ClassDecl {
     pub fn is_interface(&self) -> bool {
         self.kind == ClassKind::Interface
@@ -528,6 +550,14 @@ impl ClassDecl {
     }
     pub fn is_annotation(&self) -> bool {
         self.kind == ClassKind::Annotation
+    }
+    /// `abstract` or `sealed` (both carry `ACC_ABSTRACT`).
+    pub fn is_abstract(&self) -> bool {
+        self.modality.is_abstract()
+    }
+    /// Specifically `sealed`.
+    pub fn is_sealed(&self) -> bool {
+        self.modality.is_sealed()
     }
 }
 

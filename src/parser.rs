@@ -602,8 +602,13 @@ impl<'a> Parser<'a> {
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
                     let mut d = self.parse_class();
-                    d.is_abstract = is_abstract;
-                    d.is_sealed = is_sealed;
+                    d.modality = if is_sealed {
+                        crate::ast::Modality::Sealed
+                    } else if is_abstract {
+                        crate::ast::Modality::Abstract
+                    } else {
+                        crate::ast::Modality::Final
+                    };
                     d.is_value = is_value;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
@@ -689,7 +694,9 @@ impl<'a> Parser<'a> {
                             .map_or(false, |t| t.kind == TokenKind::Ident) =>
                 {
                     let mut d = self.parse_interface();
-                    d.is_sealed = is_sealed;
+                    if is_sealed {
+                        d.modality = crate::ast::Modality::Sealed;
+                    }
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -1408,8 +1415,7 @@ impl<'a> Parser<'a> {
             enum_entry_args: entry_args,
             enum_entry_bodies: entry_bodies,
             enum_entry_props: entry_props,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes: enum_supertypes,
             delegations: Vec::new(),
@@ -1980,8 +1986,7 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations,
@@ -2187,8 +2192,7 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
@@ -2312,8 +2316,7 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations,
@@ -2442,8 +2445,7 @@ impl<'a> Parser<'a> {
             enum_entry_args: Vec::new(),
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
@@ -3165,7 +3167,11 @@ impl<'a> Parser<'a> {
                 let is_sealed = mods.iter().any(|m| m == "sealed");
                 let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
                 let mut d = self.parse_nested_type_decl();
-                d.is_abstract = is_abstract;
+                // Preserves the prior behavior: only abstractness was applied here (a local `sealed`
+                // class kept `is_sealed == false`), so map to `Abstract`, never `Sealed`.
+                if is_abstract {
+                    d.modality = crate::ast::Modality::Abstract;
+                }
                 self.finish_stmt(Stmt::LocalClass(d), start)
             }
             _ => {

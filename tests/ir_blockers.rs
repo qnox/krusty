@@ -81,7 +81,7 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 if c.is_interface() {
                     out.push("class: interface");
                 }
-                if c.is_abstract {
+                if c.is_abstract() {
                     out.push("class: abstract");
                 }
                 if c.base_class.is_some() {

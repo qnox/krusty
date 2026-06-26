@@ -553,8 +553,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 explicit_param_stores: false,
                 methods: vec![],
                 is_interface: c.is_interface(),
-                is_sealed: c.is_sealed,
-                is_abstract: c.is_abstract,
+                is_sealed: c.is_sealed(),
+                is_abstract: c.is_abstract(),
                 superclass,
                 super_args: Vec::new(),
                 // Entry names now; constructor-arg value-ids are lowered in pass 2.
