@@ -4,7 +4,12 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
-## Reference (kotlinc 1.9.24, `fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
+## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
+
+> The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
+> reverse-engineered; the encoding is version-stable so it still holds. The reference toolchain krusty
+> is **validated** against today is pinned by the `kotlin-versions` manifest (currently **2.4.0**) and
+> self-provisioned by `just kotlinc` — see `harness/run-diff.sh` / `just conformance`.
 
 Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`.
 
