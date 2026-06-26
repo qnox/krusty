@@ -266,9 +266,13 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 .iter()
                 .filter(|p| is_backing_field_prop(p))
                 .map(|p| {
+                    // Use the classpath-aware `field_ty` (not `ty_of`, which erases a CLASSPATH reference
+                    // type to `Any` since it doesn't consult imports) so a body property declared with a
+                    // classpath type (`override val context: CoroutineContext`) keeps its concrete field +
+                    // getter return type — matching an overridden interface member's descriptor.
                     let ty =
                         p.ty.as_ref()
-                            .map(|r| ty_of(file, r))
+                            .map(|r| lo.field_ty(file, r))
                             .unwrap_or_else(|| info.ty(p.init.unwrap()));
                     (p.name.clone(), ty)
                 })
@@ -4703,12 +4707,24 @@ impl<'a> Lower<'a> {
             self.scope = saved_scope;
             self.next_value = saved_next;
             let body_val = body_val?;
-            let boxed = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: body_val,
-                type_operand: object_ir.clone(),
-            });
-            stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+            let body_ty = self.info.ty(body);
+            if body_ty == Ty::Unit {
+                // A `suspend () -> Unit` lambda: run the body for effect, then return the `Unit`
+                // singleton — boxing a Unit-typed (no-value) body would `areturn` an empty stack.
+                stmts.push(body_val);
+                let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                stmts.push(self.ir.add_expr(IrExpr::Return(Some(unit))));
+            } else if body_ty == Ty::Nothing {
+                // The body always diverges (throws/returns) — no trailing return.
+                stmts.push(body_val);
+            } else {
+                let boxed = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: body_val,
+                    type_operand: object_ir.clone(),
+                });
+                stmts.push(self.ir.add_expr(IrExpr::Return(Some(boxed))));
+            }
             self.ir.add_expr(IrExpr::Block { stmts, value: None })
         };
         let invoke_susp_fid = self.add_synth_method(
@@ -4796,6 +4812,66 @@ impl<'a> Lower<'a> {
             vec![object_ir.clone(); arity + 1],
             Ty::obj("kotlin/Any"),
             inv_body,
+            true,
+        )?;
+
+        // create(value.., Continuation completion): Continuation — the `SuspendLambda` factory that
+        // `startCoroutine`/`createCoroutine` invoke at runtime (the base throws "not overridden"). Builds
+        // `new This(this.cap.., completion)`, stores each own parameter, and returns the new lambda.
+        // Value-indices: this=0, params 1..=arity, completion=arity+1, the fresh `r` at arity+2.
+        let mut create_new_args: Vec<u32> = (0..n_cap)
+            .map(|i| {
+                let this = self.ir.add_expr(IrExpr::GetValue(0));
+                self.ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class: class_id,
+                    index: i,
+                })
+            })
+            .collect();
+        // The completion parameter is already a `Continuation` (the ctor's last param) — no cast.
+        create_new_args.push(self.ir.add_expr(IrExpr::GetValue(completion_idx)));
+        let create_new = self.ir.add_expr(IrExpr::New {
+            class: class_id,
+            args: create_new_args,
+            ctor_params: None,
+        });
+        let cr_idx = arity as u32 + 2;
+        let mut create_stmts = vec![self.ir.add_expr(IrExpr::Variable {
+            index: cr_idx,
+            ty: lambda_ty,
+            init: Some(create_new),
+        })];
+        for (i, pty) in params.iter().enumerate() {
+            let pv = self.ir.add_expr(IrExpr::GetValue(1 + i as u32));
+            let coerced = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: pv,
+                type_operand: ty_to_ir(*pty),
+            });
+            let rg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
+            create_stmts.push(self.ir.add_expr(IrExpr::SetField {
+                receiver: rg,
+                class: class_id,
+                index: param_field_base + i as u32,
+                value: coerced,
+            }));
+        }
+        let crg = self.ir.add_expr(IrExpr::GetValue(cr_idx));
+        create_stmts.push(self.ir.add_expr(IrExpr::Return(Some(crg))));
+        let create_body = self.ir.add_expr(IrExpr::Block {
+            stmts: create_stmts,
+            value: None,
+        });
+        let mut create_params: Vec<Ty> = vec![Ty::obj("kotlin/Any"); arity];
+        create_params.push(Ty::obj("kotlin/coroutines/Continuation"));
+        self.add_synth_method(
+            &internal,
+            class_id,
+            "create",
+            create_params,
+            Ty::obj("kotlin/coroutines/Continuation"),
+            create_body,
             true,
         )?;
 
@@ -13633,6 +13709,31 @@ impl<'a> Lower<'a> {
                     } else {
                         args
                     };
+                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
+                    // (recognized via the registry). The suspend-function receiver + completion are passed
+                    // to `invokestatic ContinuationKt.startCoroutine(Function1, Continuation)V`.
+                    if args.len() == 1
+                        && matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
+                        && self.syms.libraries.coroutine_intrinsic(&name)
+                            == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
+                    {
+                        let recv_v = self.expr(receiver)?;
+                        let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
+                        let comp_v = self.lower_arg(args[0], &cont_ir)?;
+                        return Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Static {
+                                owner: "kotlin/coroutines/ContinuationKt".to_string(),
+                                name: "startCoroutine".to_string(),
+                                descriptor:
+                                    "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V"
+                                        .to_string(),
+                                inline: false,
+                                must_inline: false,
+                            },
+                            dispatch_receiver: None,
+                            args: vec![recv_v, comp_v],
+                        }));
+                    }
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0) to the base
                     // class's method (the receiver's own override is skipped). The base is the current
                     // class's superclass; the method's signature comes from the super (a user class via

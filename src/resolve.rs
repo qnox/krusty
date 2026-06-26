@@ -7472,6 +7472,15 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // `(suspend (…)->T).startCoroutine(completion)` — a `kotlin.coroutines` extension intrinsic
+                // (recognized via the registry). Receiver is a suspend function value; the call starts the
+                // coroutine and returns `Unit`. Lowering emits `ContinuationKt.startCoroutine(...)`.
+                if matches!(rt, Ty::Fun(s) if s.suspend)
+                    && self.syms.libraries.coroutine_intrinsic(&name)
+                        == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
+                {
+                    return Ty::Unit;
+                }
                 self.diags.error(
                     span,
                     format!("unresolved method '{name}' on '{}'", rt.name()),

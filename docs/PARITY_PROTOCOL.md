@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 462).
+  repo's `compiler/testData/codegen/box`). Current gate: **1777 OK / 0 FAIL** (scanned 7351, Phase 463).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 463 — `startCoroutine` + suspend-lambda `create()` + Unit-lambda return + classpath body-property
+  type (a full coroutine runs end-to-end; gate 1777, box-OK flat, FAIL=0).** Four pieces, completing the
+  plain-completion coroutine path (verified: `c.startCoroutine(Done())` over a suspend lambda runs to
+  `"OK"` on the JVM): (1) `startCoroutine` — checker (extension on a `Ty::Fun` receiver via the coroutine
+  registry → `Unit`) + lowering (`invokestatic kotlin/coroutines/ContinuationKt.startCoroutine(Function1,
+  Continuation)V`); (2) the synthesized suspend lambda now emits the `SuspendLambda` factory
+  `create(value.., Continuation): Continuation` (= `new This(captures.., completion)`) that
+  `startCoroutine`/`createCoroutine` invoke (the base throws "not overridden"); (3) a non-suspending
+  `suspend () -> Unit` lambda's `invokeSuspend` runs the body for effect then returns `Unit.INSTANCE`
+  (boxing a Unit/no-value body `areturn`'d an empty stack → VerifyError); (4) **general fix** — a body
+  property declared with a CLASSPATH type (`override val context: CoroutineContext`) now uses the
+  classpath-aware `field_ty` instead of `ty_of` (which erased it to `Object`), so its field + getter keep
+  the concrete type and match an overridden interface member (was AbstractMethodError). Corpus coroutine
+  tests use the `EmptyContinuation` companion completion, which additionally needs companion-extends-class
+  (next) — so box-OK is flat, but the plumbing is proven. TDD: tests/coroutine_intrinsics_e2e.rs.
 
 - **Phase 462 — class name used as a value resolves to its `companion object` (gate 1777, box-OK flat,
   FAIL=0).** A class `C` whose companion declares interface supertypes and has methods (so the backend
