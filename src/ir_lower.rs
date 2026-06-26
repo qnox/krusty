@@ -6113,6 +6113,18 @@ impl<'a> Lower<'a> {
                         } else {
                             return None;
                         }
+                    } else if i == args.len() - 1
+                        && n > 0
+                        && slot[n - 1].is_none()
+                        && self.afile.call_has_trailing_lambda.contains(&call.0)
+                    {
+                        // A SYNTACTIC trailing lambda always binds to the LAST parameter; any preceding
+                        // parameter left without a positional argument takes its default. So `host("x") {}`
+                        // on `host(a, modifier = d, builder)` fills `builder` (not `modifier`) and defaults
+                        // `modifier`. Without this, the lambda lands in the next free slot (`modifier`) and
+                        // the required `builder` is left unfilled → lowering bails.
+                        slot[n - 1] = Some(arg);
+                        arg_slot.push(n - 1);
                     } else {
                         if pos >= n {
                             return None;
@@ -6244,18 +6256,27 @@ impl<'a> Lower<'a> {
         if args.len() != n {
             return None;
         }
+        let has_trailing_lambda = self.afile.call_has_trailing_lambda.contains(&call.0);
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
         let mut pos = 0usize;
         let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
             match names.get(i).and_then(|o| o.as_ref()) {
                 None => {
-                    if pos >= n || slot[pos].is_some() {
+                    // A SYNTACTIC trailing lambda is the one unnamed argument Kotlin allows after named
+                    // arguments; it binds to the LAST parameter, not the next positional slot (`pos` may
+                    // already be taken by a reordered named argument).
+                    if has_trailing_lambda && i == args.len() - 1 && n > 0 && slot[n - 1].is_none()
+                    {
+                        slot[n - 1] = Some(arg);
+                        arg_slot.push(n - 1);
+                    } else if pos >= n || slot[pos].is_some() {
                         return None;
+                    } else {
+                        slot[pos] = Some(arg);
+                        arg_slot.push(pos);
+                        pos += 1;
                     }
-                    slot[pos] = Some(arg);
-                    arg_slot.push(pos);
-                    pos += 1;
                 }
                 Some(nm) => {
                     let idx = param_names.iter().position(|p| p == nm)?;
@@ -6267,11 +6288,18 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // Reordering changes evaluation order; only proceed when each argument is side-effect-free.
+        // Reordering changes evaluation order; only proceed when each argument is side-effect-free. The
+        // trailing lambda is exempt: it is the last source argument AND fills the last slot, so it never
+        // evaluates out of order.
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
         if reordered
-            && args.iter().any(|&a| {
-                !is_const_literal(self.afile, a) && !matches!(self.afile.expr(a), Expr::Name(_))
+            && args.iter().enumerate().any(|(i, &a)| {
+                let is_trailing_lambda = has_trailing_lambda
+                    && i == args.len() - 1
+                    && matches!(self.afile.expr(a), Expr::Lambda { .. });
+                !is_trailing_lambda
+                    && !is_const_literal(self.afile, a)
+                    && !matches!(self.afile.expr(a), Expr::Name(_))
             })
         {
             return None;

@@ -8736,6 +8736,43 @@ impl<'a> Checker<'a> {
                             }
                             Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
                         }
+                    } else if self.file.call_has_trailing_lambda.contains(&call.0)
+                        && !args.is_empty()
+                        && arg_tys.len() <= params.len()
+                    {
+                        // A purely-positional call with a SYNTACTIC trailing lambda: the lambda binds to the
+                        // LAST parameter, preceding positionals fill from the front, and any skipped middle
+                        // parameter must have a default (`host("x") { }` on `host(a, modifier = d, builder)`
+                        // ⇒ `modifier` defaults, the lambda fills `builder`). Route through `map_call_args`
+                        // by labelling the trailing lambda with the last parameter's name; it validates gaps
+                        // against `param_defaults` per-slot.
+                        let mut synth: Vec<Option<String>> = vec![None; args.len()];
+                        if let (Some(last), Some(name)) = (synth.last_mut(), cs.param_names.last())
+                        {
+                            *last = Some(name.clone());
+                        }
+                        match map_call_args(
+                            args,
+                            Some(&synth),
+                            &cs.param_names,
+                            cs.required,
+                            &cs.param_defaults,
+                        ) {
+                            Ok(slots) => {
+                                for (i, slot) in slots.iter().enumerate() {
+                                    if let Some(a) = slot {
+                                        let aty = self.expr_types[a.0 as usize];
+                                        self.expect_assignable(
+                                            params[i],
+                                            aty,
+                                            self.span(*a),
+                                            "argument",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
+                        }
                     } else if arg_tys.len() < cs.required || arg_tys.len() > params.len() {
                         let want = if cs.required == params.len() {
                             format!("{}", params.len())
