@@ -12,7 +12,7 @@
 //!   - No javac: the runner loads bytes with a per-test ClassLoader + reflection
 //!
 //! Env vars:
-//!   KRUSTY_KOTLIN_BOX_DIR   path to compiler/testData/codegen/box
+//!   KRUSTY_KOTLIN_BOX_DIR   optional override for compiler/testData/codegen/box
 //!   KRUSTY_REF_JAVA_HOME / JAVA_HOME
 //!   KRUSTY_BOX_LIMIT        cap on files scanned (default: all)
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
@@ -137,6 +137,90 @@ fn collect_kt(dir: &Path, out: &mut Vec<PathBuf>) {
                 out.push(p);
             }
         }
+    }
+}
+
+fn cached_box_dir(version: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("cache")
+        .join("box-corpus")
+        .join(version)
+        .join("compiler")
+        .join("testData")
+        .join("codegen")
+        .join("box")
+}
+
+fn supported_kotlin_versions() -> Vec<String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("kotlin-versions");
+    fs::read_to_string(manifest)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                line.split_whitespace().next().map(str::to_string)
+            }
+        })
+        .collect()
+}
+
+fn discover_box_dir() -> PathBuf {
+    if let Some(path) = env("KRUSTY_KOTLIN_BOX_DIR").map(PathBuf::from) {
+        return path;
+    }
+
+    for version in supported_kotlin_versions().into_iter().rev() {
+        let path = cached_box_dir(&version);
+        if path.is_dir() {
+            return path;
+        }
+    }
+
+    let cache_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("cache")
+        .join("box-corpus");
+    if let Ok(entries) = fs::read_dir(&cache_root) {
+        let mut candidates: Vec<PathBuf> =
+            entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        candidates.sort();
+        for root in candidates.into_iter().rev() {
+            let path = root
+                .join("compiler")
+                .join("testData")
+                .join("codegen")
+                .join("box");
+            if path.is_dir() {
+                return path;
+            }
+        }
+    }
+
+    let out = Command::new("just")
+        .arg("box-corpus")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("failed to provision Kotlin box corpus via `just box-corpus`: {e}")
+        });
+    if !out.status.success() {
+        panic!(
+            "`just box-corpus` failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    if path.is_dir() {
+        path
+    } else {
+        panic!(
+            "`just box-corpus` returned a non-existent path: {}",
+            path.display()
+        );
     }
 }
 
@@ -603,13 +687,7 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
 
 #[test]
 fn kotlin_codegen_box_conformance() {
-    let box_dir = env("KRUSTY_KOTLIN_BOX_DIR").unwrap_or_else(|| {
-        panic!(
-            "KRUSTY_KOTLIN_BOX_DIR not set — the Kotlin codegen/box corpus is required for the \
-             conformance gate, not optional. Run via `just test`/`just conformance` (provisions + \
-             caches it per supported version) or set it manually. Refusing to skip.",
-        )
-    });
+    let box_dir = discover_box_dir();
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping box conformance: set JAVA_HOME");
         return;
@@ -649,7 +727,7 @@ fn kotlin_codegen_box_conformance() {
         .unwrap_or(usize::MAX);
 
     let mut files = Vec::new();
-    collect_kt(Path::new(&box_dir), &mut files);
+    collect_kt(&box_dir, &mut files);
     // KRUSTY_BOX_LIMIT caps the run for fast dev rounds. Sample evenly across the *sorted* corpus
     // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
     // would hide coverage in every other package. A full (unset) run keeps the whole corpus.
@@ -919,7 +997,7 @@ fn kotlin_codegen_box_conformance() {
     );
     assert!(
         passed > 0,
-        "no box() cases ran — check KRUSTY_KOTLIN_BOX_DIR / JDK"
+        "no box() cases ran — check Kotlin box corpus discovery / JDK"
     );
 }
 

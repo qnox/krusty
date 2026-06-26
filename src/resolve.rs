@@ -373,11 +373,64 @@ impl SymbolTable {
 /// `throw RuntimeException("…")` resolves without an explicit import.
 
 /// The target type of a numeric conversion method (`n.toInt()` → `Int`, …).
-/// The erased JVM parameter descriptor of a signature (`(II)`-style, params only) — the key under which
-/// two overloads of the same name would collide on the JVM. Used both to reject true duplicates at
-/// collection and to find a selected overload's compiled method.
+/// The erased JVM parameter descriptor of a signature (`(II)`-style, params only) — the backend key
+/// used by IR lowering for the compiled method. Checker-side collision/selection uses the semantic
+/// erased key below so the checker does not need to format bytecode descriptors.
 pub fn erased_params_key(sig: &Signature) -> String {
     sig.params.iter().map(|t| t.descriptor()).collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ErasedTypeKey {
+    Ty(Ty),
+    Unresolved(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ErasedSigKey {
+    name: String,
+    receiver: Option<ErasedTypeKey>,
+    params: Vec<ErasedTypeKey>,
+}
+
+/// Kotlin-level erasure key used by the checker for overload identity. This mirrors the JVM-relevant
+/// distinctions without formatting descriptors: generic arguments and nullability are erased, unsigned
+/// inline primitives fold to their signed representation, nullable primitives box, and type parameters
+/// erase to their bound.
+fn erased_type_key(t: Ty) -> ErasedTypeKey {
+    let key = match t {
+        Ty::UInt => Ty::Int,
+        Ty::ULong => Ty::Long,
+        Ty::String => Ty::obj("kotlin/String"),
+        Ty::Obj(n, _) => Ty::Obj(n, &[]),
+        Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
+        Ty::Array(elem) => Ty::array(match erased_type_key(*elem) {
+            ErasedTypeKey::Ty(t) => t,
+            ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
+        }),
+        Ty::Fun(s) => Ty::obj(&Ty::fun_interface(
+            (s.params.len() + usize::from(s.suspend)) as u8,
+        )),
+        Ty::Nullable(inner) => match *inner {
+            Ty::UInt => Ty::obj("kotlin/UInt"),
+            Ty::ULong => Ty::obj("kotlin/ULong"),
+            other if other.is_primitive() => other.boxed_ref().unwrap_or(other),
+            other => match erased_type_key(other) {
+                ErasedTypeKey::Ty(t) => t,
+                ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
+            },
+        },
+        Ty::TyParam(_, bound) => match erased_type_key(*bound) {
+            ErasedTypeKey::Ty(t) => t,
+            ErasedTypeKey::Unresolved(n) => Ty::obj(&n),
+        },
+        other => other,
+    };
+    ErasedTypeKey::Ty(key)
+}
+
+fn erased_params_semantic_key(sig: &Signature) -> Vec<ErasedTypeKey> {
+    sig.params.iter().copied().map(erased_type_key).collect()
 }
 
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
@@ -971,11 +1024,15 @@ pub fn collect_signatures_with_cp(
                             diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
                         }
                     } else {
-                        // Overloading: keep ALL same-name functions, keyed by name. Only an EXACT
-                        // erased-parameter duplicate (same JVM descriptor) is a real conflict.
-                        let key = erased_params_key(&sig);
+                        // Overloading: keep ALL same-name functions, keyed by name. Only an exact
+                        // erased-parameter duplicate is a real conflict; use a Kotlin-level erasure key
+                        // here instead of formatting JVM descriptors in the checker.
+                        let key = erased_params_semantic_key(&sig);
                         let overloads = table.funs.entry(f.name.clone()).or_default();
-                        if overloads.iter().any(|s| erased_params_key(s) == key) {
+                        if overloads
+                            .iter()
+                            .any(|s| erased_params_semantic_key(s) == key)
+                        {
                             diags.error(f.span, format!("conflicting declarations: {}", f.name));
                         } else {
                             overloads.push(sig);
@@ -3949,56 +4006,28 @@ impl<'a> Checker<'a> {
         base
     }
 
-    /// The erased JVM signature key (`name(paramDescs)`) of a function, using the type parameters
-    /// currently in `self.tparams` plus the function's own. Two functions that produce the same key
-    /// collide on the JVM after erasure — kotlinc erases each type parameter to its declared *bound*
-    /// (keeping bound-distinct overloads separate), which krusty does not model, so we reject the
-    /// file rather than emit a `ClassFormatError`-inducing duplicate method.
-    fn erased_sig_key(&self, f: &FunDecl) -> String {
-        let (params, _) = self.erased_param_ret(f);
-        // An extension function's receiver is its first JVM parameter — part of the signature, so
-        // `Int.foo()` and `String.foo()` don't collide.
-        let recv = f
-            .receiver
-            .as_ref()
-            .map(|r| {
-                if let Some(t) = Ty::from_name(&r.name) {
-                    t.descriptor()
-                } else if let Some(cs) = self.syms.classes.get(&r.name) {
-                    Ty::obj(&cs.internal).descriptor()
-                } else {
-                    // Unresolved (type parameter / unknown) — keep the name so distinct receivers get
-                    // distinct keys (don't collapse to a single `Object` and hide a real JVM collision).
-                    format!("L{};", r.name)
-                }
-            })
-            .unwrap_or_default();
-        format!("{}({}{})", f.name, recv, params)
-    }
-
-    /// The erased JVM parameter descriptors (concatenated) and return descriptor of a function,
-    /// using the type parameters in scope plus the function's own (each → `Object`).
-    fn erased_param_ret(&self, f: &FunDecl) -> (String, String) {
+    /// The erased signature key of a function, using the type parameters currently in `self.tparams`
+    /// plus the function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
+    /// formatting belongs in the backend.
+    fn erased_sig_key(&self, f: &FunDecl) -> ErasedSigKey {
         let extra: std::collections::HashSet<&str> =
             f.type_params.iter().map(|s| s.as_str()).collect();
-        let descr = |name: &str| -> String {
+        let key = |name: &str| -> ErasedTypeKey {
             if let Some(t) = Ty::from_name(name) {
-                t.descriptor()
+                erased_type_key(t)
             } else if self.tparams.contains(name) || extra.contains(name) {
-                Ty::obj("kotlin/Any").descriptor()
+                erased_type_key(Ty::obj("kotlin/Any"))
             } else if let Some(cs) = self.syms.classes.get(name) {
-                Ty::obj(&cs.internal).descriptor()
+                erased_type_key(Ty::obj(&cs.internal))
             } else {
-                Ty::obj("kotlin/Any").descriptor()
+                ErasedTypeKey::Unresolved(name.to_string())
             }
         };
-        let params: String = f.params.iter().map(|p| descr(&p.ty.name)).collect();
-        let ret = f
-            .ret
-            .as_ref()
-            .map(|r| descr(&r.name))
-            .unwrap_or_else(|| "V".to_string());
-        (params, ret)
+        ErasedSigKey {
+            name: f.name.clone(),
+            receiver: f.receiver.as_ref().map(|r| key(&r.name)),
+            params: f.params.iter().map(|p| key(&p.ty.name)).collect(),
+        }
     }
 
     /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
@@ -4023,17 +4052,17 @@ impl<'a> Checker<'a> {
             // impl is inherited from a generic base and returns the erased `Object` (`fun foo(): T` over
             // `A<IC>`). The bridge would have to unbox `Object` → value class via the class's unbox-impl —
             // codegen krusty can't emit (VerifyError / AbstractMethodError). Skip rather than miscompile.
-            if ssig.ret.descriptor() != impl_sig.ret.descriptor()
+            if erased_type_key(ssig.ret) != erased_type_key(impl_sig.ret)
                 && self.ty_is_value_class(ssig.ret)
                 && impl_sig.ret == obj
             {
                 self.diags.error(span, format!("krusty: method '{name}' needs a value-class unbox bridge from an erased generic return (unsupported)"));
                 return;
             }
-            let sp: String = ssig.params.iter().map(|t| t.descriptor()).collect();
-            let ip: String = impl_sig.params.iter().map(|t| t.descriptor()).collect();
+            let sp = erased_params_semantic_key(ssig);
+            let ip = erased_params_semantic_key(&impl_sig);
             let params_differ = sp != ip;
-            let ret_differs = ssig.ret.descriptor() != impl_sig.ret.descriptor();
+            let ret_differs = erased_type_key(ssig.ret) != erased_type_key(impl_sig.ret);
             // Each erased param must either equal the concrete one (passes through) or be `Object`
             // (the generic-erasure case — the bridge checkcasts a reference or unboxes a primitive).
             // A non-`Object` erased param that differs means `method_of` resolved the wrong overload.
@@ -4080,8 +4109,8 @@ impl<'a> Checker<'a> {
     /// are rejected — member overloading needs erasure/bridge handling krusty doesn't model, so the file
     /// is skipped rather than miscompiled.
     fn check_no_erased_clash(&mut self, funs: &[&FunDecl], allow_overload: bool) {
-        let mut by_name: HashMap<String, String> = HashMap::new(); // name → first erased key
-        let mut seen: HashMap<String, Span> = HashMap::new();
+        let mut by_name: HashMap<String, ErasedSigKey> = HashMap::new(); // name → first erased key
+        let mut seen: HashMap<ErasedSigKey, Span> = HashMap::new();
         for f in funs {
             // `erased_sig_key` includes the name and (for extensions) the receiver, so distinct names and
             // same-named extensions on different receivers don't collide.
@@ -4354,17 +4383,17 @@ impl<'a> Checker<'a> {
             // Use this declaration's own collected overload's return type (matched by its erased
             // parameter descriptors when the name is overloaded); for a companion method (not in `funs`)
             // fall back to the declared return type.
-            let want: String = f
+            let want: Vec<ErasedTypeKey> = f
                 .params
                 .iter()
-                .map(|p| self.resolve_ty(&p.ty).descriptor())
+                .map(|p| erased_type_key(self.resolve_ty(&p.ty)))
                 .collect();
             let own_ret = self.syms.funs.get(&f.name).and_then(|v| {
                 if v.len() == 1 {
                     Some(v[0].ret)
                 } else {
                     v.iter()
-                        .find(|s| erased_params_key(s) == want)
+                        .find(|s| erased_params_semantic_key(s) == want)
                         .map(|s| s.ret)
                 }
             });
@@ -8009,7 +8038,7 @@ impl<'a> Checker<'a> {
                 // so it's keyed under the `Any` descriptor and matches ANY actual receiver. Specialize the
                 // return: a return naming the receiver type param (`T`) → the actual receiver type `rt`;
                 // one naming a value-param type param → that argument's type; else the declared return.
-                if rt.descriptor() != Ty::obj("kotlin/Any").descriptor() {
+                if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
                     // The generic-receiver extension keys under the `Any` descriptor — rung 1 in the
                     // module source's extension lookup (rung 0 is the exact receiver, handled above).
                     let module_ext = crate::module_symbols::ModuleSymbols::new(self.syms)
@@ -9791,6 +9820,12 @@ mod tests {
         err_contains(
             "class Foo(v: Int) { init { set(v) }\n fun set(x: Int) { field = x }\n var field: Int = 0 }\nfun box(): String = \"OK\"",
             "init order",
+        );
+        // Unsigned inline primitives erase to their signed JVM representation, so these overloads
+        // would collide as the same backend method even though they are distinct Kotlin surface types.
+        err_contains(
+            "fun f(x: Int): Int = x\nfun f(x: UInt): UInt = x\nfun box(): String = \"OK\"",
+            "conflicting declarations",
         );
     }
 
