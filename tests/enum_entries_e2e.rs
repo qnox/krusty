@@ -63,6 +63,34 @@ fn enum_emits_entries_field_and_accessor() {
 }
 
 #[test]
+fn plain_enum_ctor_is_private_nonsynthetic_with_signature() {
+    // kotlinc's enum ctor is `private` (NOT synthetic) and carries a generic `Signature` listing only
+    // the USER params (`()V` for a plain enum) — javap reads it to hide the synthetic `(String,int)`.
+    // These three together make a plain enum's `<init>` byte-identical to kotlinc.
+    let src = "enum class Color { RED, GREEN, BLUE }\nfun box(): String = \"OK\"\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    let ci = class_of(&cs, "Color").expect("Color class");
+    let ctor = ci
+        .methods
+        .iter()
+        .find(|m| m.name == "<init>")
+        .expect("<init>");
+    assert_eq!(
+        ctor.access & 0x1000,
+        0,
+        "enum ctor must NOT be ACC_SYNTHETIC"
+    );
+    assert_ne!(ctor.access & 0x0002, 0, "enum ctor must be ACC_PRIVATE");
+    assert_eq!(
+        ctor.signature.as_deref(),
+        Some("()V"),
+        "enum ctor needs the `()V` generic Signature"
+    );
+}
+
+#[test]
 fn enum_with_ctor_and_method_still_emits_entries() {
     let src = "enum class Planet(val mass: Int) {\n\
         \x20   EARTH(5), MARS(6);\n\

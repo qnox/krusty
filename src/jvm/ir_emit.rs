@@ -1951,14 +1951,24 @@ fn emit_enum_class(
     ctor.ret_void();
     ctor.ensure_locals(1 + ctor_words);
     ctor.link();
-    // A subclassed enum's constructor must be reachable from its entry subclasses' `<init>` (an
-    // `invokespecial` from another class) — package-private, not private.
-    let base_ctor_acc = if has_subclass {
-        ACC_SYNTHETIC
-    } else {
-        0x0002 | ACC_SYNTHETIC
+    // A plain enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
+    // `(String,int)` params in its display). A subclassed enum's ctor must be reachable from its entry
+    // subclasses' `<init>` (an `invokespecial` from another class): kotlinc keeps it `private` and relies
+    // on nestmate access, which krusty doesn't emit, so it stays package-private + synthetic here.
+    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 };
+    // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
+    // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
+    // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
+    // params leak into the disassembly (a per-enum divergence from kotlinc).
+    let ctor_sig = {
+        let mut s = String::from("(");
+        for t in &user_tys {
+            s.push_str(&t.descriptor());
+        }
+        s.push_str(")V");
+        s
     };
-    cw.add_method(base_ctor_acc, "<init>", &ctor_desc, &ctor);
+    cw.add_method_sig(base_ctor_acc, "<init>", &ctor_desc, &ctor, Some(&ctor_sig));
 
     // <clinit>: construct each entry, then `$VALUES = $values()` and
     // `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)`. BUILT here but ADDED last (kotlinc orders it
@@ -2043,7 +2053,8 @@ fn emit_enum_class(
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
     vals.getstatic(valref, 1);
-    let clone_m = cw.methodref(&arr_desc, "clone", "()Ljava/lang/Object;");
+    // kotlinc invokes `clone()` via `java/lang/Object` (not the `[LE;` array type).
+    let clone_m = cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
     vals.invokevirtual(clone_m, 0, 1);
     let arr_cls = cw.class_ref(&arr_desc);
     vals.checkcast(arr_cls);

@@ -11952,14 +11952,28 @@ impl<'a> Lower<'a> {
                     }
                 }
                 let rt = self.recv_ty(receiver);
-                // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()`/`Enum.name()`.
+                // `e.ordinal` / `e.name` on an enum value → `ordinal()`/`name()` inherited from
+                // `java.lang.Enum`, but dispatched on the receiver's STATIC type (kotlinc emits
+                // `invokevirtual Color.ordinal`, not `Enum.ordinal`).
                 if matches!(name.as_str(), "ordinal" | "name") {
                     if let Some(ci) = self.class_of(rt) {
-                        if !self.ir.classes[ci.id as usize].enum_entries.is_empty() {
+                        let cid = ci.id as usize;
+                        if !self.ir.classes[cid].enum_entries.is_empty() {
+                            // Read the owner before the mutable `self.expr` borrow (drops `ci`'s borrow).
+                            let owner = self.ir.classes[cid].fq_name.clone();
                             let recv = self.expr(receiver)?;
-                            let fq = format!("java/lang/Enum.{name}");
+                            let descriptor = if name == "ordinal" {
+                                "()I"
+                            } else {
+                                "()Ljava/lang/String;"
+                            };
                             return Some(self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::External(fq),
+                                callee: Callee::Virtual {
+                                    owner,
+                                    name: name.clone(),
+                                    descriptor: descriptor.to_string(),
+                                    interface: false,
+                                },
                                 dispatch_receiver: Some(recv),
                                 args: vec![],
                             }));
