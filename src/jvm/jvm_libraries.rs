@@ -1316,17 +1316,31 @@ impl SymbolSource for JvmLibraries {
                     physical_ret
                 };
                 let inline = self.cp.is_inline_method(&c.owner, &c.name);
-                // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution. A
-                // top-level function has no receiver, so the logical params equal the (truncated) source
-                // params — only wire names when the count aligns. Defaults aren't recovered here, so a
-                // named call must still supply every argument (just reorderable).
+                // Source value-parameter NAMES (from `@Metadata`) for named-argument resolution, and the
+                // REQUIRED arity (non-defaulted param count) so a call may OMIT trailing defaulted args.
+                // A top-level function has no receiver, so the logical params equal the (truncated) source
+                // params — only wire names when the count aligns.
+                let param_defaults = self
+                    .cp
+                    .metadata_param_defaults(&c.owner, &c.name, &params)
+                    .unwrap_or_default();
+                let required = if param_defaults.is_empty() {
+                    params.len()
+                } else {
+                    param_defaults.iter().filter(|d| !**d).count()
+                };
                 let call_sig = match self.cp.metadata_param_names(&c.owner, &c.name, &params) {
                     Some(names) if names.len() == params.len() => crate::libraries::CallSig {
-                        required: params.len(),
+                        required,
                         param_names: names,
+                        param_defaults,
                         ..Default::default()
                     },
-                    _ => crate::libraries::CallSig::default(),
+                    _ => crate::libraries::CallSig {
+                        required,
+                        param_defaults,
+                        ..Default::default()
+                    },
                 };
                 overloads.push(FunctionInfo {
                     kind: FnKind::TopLevel,
