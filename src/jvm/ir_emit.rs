@@ -2446,9 +2446,49 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name.clone();
-                self.emit_value(receiver, code);
-                self.emit_value(value, code);
                 let fref = self.cw.fieldref(&owner, &name, &jt.descriptor());
+                // A BRANCHY value (`When` — an `if`/`when`/safe-call) stored through a SIDE-EFFECT-FREE
+                // receiver (`this`/a local): emit the value FIRST onto a clean operand stack so its branch
+                // frames are correct, spill it to a temp local, THEN push the receiver and reload the value.
+                // Pushing the receiver before a branchy value leaves it on the stack ACROSS the value's
+                // branch — which the (splice/When) frame emission doesn't model → a VerifyError. The receiver
+                // is side-effect-free, so evaluating the value first preserves Kotlin's left-to-right order.
+                // Unwrap `Block`s (a safe-call lowers to `Block { val t = recv; when … }`) to find whether
+                // the produced value is a `When` (a branch).
+                let mut vexpr = value;
+                while let IrExpr::Block {
+                    value: Some(inner), ..
+                } = self.ir.expr(vexpr)
+                {
+                    vexpr = *inner;
+                }
+                let value_branchy = matches!(self.ir.expr(vexpr), IrExpr::When { .. });
+                let recv_simple = matches!(self.ir.expr(receiver), IrExpr::GetValue(_));
+                // `slot_words(jt) > 0` excludes a degenerate void/`Unit`-descriptor field (no real value to
+                // spill), keeping the temp's reserved slots in step with its store/load width.
+                if value_branchy && recv_simple && slot_words(jt) > 0 {
+                    let cat = match jt.descriptor().as_bytes().first() {
+                        Some(b'J') => Ty::Long,
+                        Some(b'D') => Ty::Double,
+                        Some(b'F') => Ty::Float,
+                        Some(b'I' | b'Z' | b'B' | b'S' | b'C') => Ty::Int,
+                        _ => Ty::obj("kotlin/Any"),
+                    };
+                    let saved = self.next_slot;
+                    let tmp = self.next_slot;
+                    self.next_slot += slot_words(jt);
+                    self.emit_value(value, code);
+                    store(cat, tmp, code);
+                    self.emit_value(receiver, code);
+                    load(cat, tmp, code);
+                    if self.next_slot > code.max_locals {
+                        code.max_locals = self.next_slot;
+                    }
+                    self.next_slot = saved;
+                } else {
+                    self.emit_value(receiver, code);
+                    self.emit_value(value, code);
+                }
                 code.putfield(fref, slot_words(jt) as i32);
             }
             IrExpr::SetStatic { index, value } => {
