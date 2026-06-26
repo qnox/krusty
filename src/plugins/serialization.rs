@@ -163,13 +163,12 @@ fn serializable_fields(ir: &IrFile, class_id: u32) -> Vec<crate::ir::IrField> {
     for &bid in bases.iter().rev() {
         inherited.extend(ir.classes[bid].fields.iter().cloned());
     }
-    // An inherited field is only foldable when it round-trips: it must be a `var` (have an inherited
-    // setter so decode can restore it — an inherited `val` would silently drop its decoded value) and be
-    // non-generic (a type-param field needs the substituted-serializer plumbing). Otherwise keep own only.
-    if inherited
-        .iter()
-        .any(|f| f.type_param.is_some() || !class_has_method(ir, class_id, &setter_name(&f.name)))
-    {
+    // An inherited GENERIC (type-param) field needs the substituted-serializer plumbing — not modeled
+    // here, so keep own fields only. An inherited `val` (no setter) is fine: because this branch only
+    // runs for a no-ctor-param derived class, every inherited property is set deterministically at
+    // construction (a constant/derived initializer or the fixed super-call), so `construct_obj` keeping
+    // its initializer on decode reproduces the encoded value (matches kotlinc for this shape).
+    if inherited.iter().any(|f| f.type_param.is_some()) {
         return own();
     }
     inherited.extend(ir.classes[class_id as usize].fields.iter().cloned());

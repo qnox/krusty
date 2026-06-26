@@ -180,6 +180,33 @@ fun box(): String {
 }
 
 #[test]
+fn serializable_inheritance_with_val_property_in_krusty() {
+    // A `@Serializable` subclass inheriting both a `var` and a `val` body property from a `@Serializable`
+    // base. The inherited `var` (`x`) round-trips through its setter; the inherited `val` (`tag`, no
+    // setter) is set deterministically at construction, so keeping its initializer on decode reproduces
+    // the encoded value — both inherited properties appear in the descriptor.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable open class Base { var x: Int = 0; val tag: Int = 9 }
+@Serializable class Sub : Base()
+fun box(): String {
+    val s = Json.encodeToString(Sub.serializer(), Sub().apply { x = 5 })
+    val back = Json.decodeFromString(Sub.serializer(), s)
+    return if (back.x == 5 && back.tag == 9) "OK" else "dec:${back.x}/${back.tag}"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerInheritVal") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "inheritance with val property wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty inheritance with val property OK");
+}
+
+#[test]
 fn serializable_inheritance_round_trips_in_krusty() {
     // A `@Serializable` subclass serializes its INHERITED `@Serializable` base properties too (base
     // properties first), and decodes them by assigning through the inherited setters. Previously the
