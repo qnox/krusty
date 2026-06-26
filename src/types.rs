@@ -184,6 +184,45 @@ impl Ty {
         }
     }
 
+    /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension
+    /// declared on one to resolve on the other. A Kotlin-level erasure that reproduces the equivalence
+    /// the old JVM descriptor key gave for *reference* receivers, without referencing the backend — it
+    /// drops a nullable reference's `?` (`String?` and `String` take the same extensions), generic
+    /// arguments (`List<Int>` and `List<String>` share `List`'s extensions, recursively through
+    /// arrays), and a type parameter to its (also-erased) bound (`fun T.f()` keys under the bound).
+    /// `null`/`Nothing`/error key under `Any` (a `null` receiver reaches an `Any?` extension). Replaces
+    /// a computed JVM descriptor string, which leaked the backend representation and allocated on every
+    /// insert and lookup.
+    ///
+    /// It is deliberately NOT a faithful descriptor clone in two corners the descriptor folded only by
+    /// accident of JVM erasure: signed vs unsigned primitives stay distinct (the descriptor merged
+    /// `Int`/`UInt` because both erase to `I`), and function-type receivers stay distinct by full
+    /// signature (the descriptor merged every arity-N `Fun` to `FunctionN`; that merge let an
+    /// `((Int)->Int).f()` extension resolve on an `((String)->String)` receiver, which kotlinc rejects).
+    /// A nullable *primitive* IS kept distinct from the unboxed primitive (`Int?` boxes — same key as an
+    /// already-boxed `Array<Int>` element — while `Int` does not), matching the descriptor.
+    pub fn erased_recv(self) -> Ty {
+        match self {
+            // A nullable primitive boxes to a distinct wrapper, so it keys apart from the unboxed
+            // primitive: fold it to the primitive's boxed Kotlin class (the same key the already-boxed
+            // `Array<Int>` element type carries). A nullable reference shares the non-null form's key.
+            Ty::Nullable(inner) => match *inner {
+                Ty::UInt => Ty::obj("kotlin/UInt"),
+                Ty::ULong => Ty::obj("kotlin/ULong"),
+                p if p.is_primitive() => p.boxed_ref().unwrap_or(p),
+                other => other.erased_recv(),
+            },
+            Ty::TyParam(_, b) => b.erased_recv(),
+            Ty::Obj(n, _) => Ty::Obj(n, &[]),
+            Ty::Array(e) => Ty::array(e.erased_recv()),
+            // `null`/`Nothing` (and the error placeholder) are subtypes of every reference type, so a
+            // receiver of one of these can invoke an `Any`/`Any?`-receiver extension — key them under
+            // `Any` (`null.unsafeCast()` reaches `fun <T> Any?.unsafeCast()`).
+            Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
+            _ => self,
+        }
+    }
+
     /// A generic type-parameter type `T` with the given declared upper bound (`kotlin/Any` if unbounded).
     pub fn ty_param(name: &str, bound: Ty) -> Ty {
         Ty::TyParam(intern(name), intern_ty(bound))
@@ -555,6 +594,47 @@ mod tests {
         assert!(!Ty::Int.is_ty_param());
         assert_eq!(Ty::Int.ty_param_name(), None);
         assert_eq!(Ty::Int.ty_param_bound(), None);
+    }
+
+    #[test]
+    fn erased_recv_folds_nullability_generics_and_type_params() {
+        // Nullability: `String?` and `String` resolve the same extensions.
+        assert_eq!(Ty::nullable(Ty::String).erased_recv(), Ty::String);
+        // Generic arguments are dropped (instantiation-independent).
+        assert_eq!(
+            Ty::obj_args("kotlin/collections/List", &[Ty::Int]).erased_recv(),
+            Ty::obj_args("kotlin/collections/List", &[Ty::String]).erased_recv()
+        );
+        assert_eq!(
+            Ty::obj_args("kotlin/collections/List", &[Ty::Int]).erased_recv(),
+            Ty::obj("kotlin/collections/List")
+        );
+        // A type parameter keys under its (also-erased) bound.
+        assert_eq!(
+            Ty::ty_param("T", Ty::obj_args("kotlin/collections/List", &[Ty::Int])).erased_recv(),
+            Ty::obj("kotlin/collections/List")
+        );
+        // Array element generics erase too, but the array-ness is kept.
+        assert_eq!(
+            Ty::array(Ty::obj_args("kotlin/collections/List", &[Ty::Int])).erased_recv(),
+            Ty::array(Ty::obj("kotlin/collections/List"))
+        );
+        // Reference vs primitive and signed vs unsigned stay distinct.
+        assert_ne!(Ty::Int.erased_recv(), Ty::UInt.erased_recv());
+        assert_eq!(Ty::Int.erased_recv(), Ty::Int);
+        // A nullable primitive boxes — distinct from the unboxed primitive, equal to a boxed element.
+        assert_ne!(Ty::nullable(Ty::Int).erased_recv(), Ty::Int.erased_recv());
+        assert_eq!(Ty::nullable(Ty::Int).erased_recv(), Ty::obj("kotlin/Int"));
+        assert_eq!(Ty::nullable(Ty::UInt).erased_recv(), Ty::obj("kotlin/UInt"));
+        // A nullable reference shares the non-null key.
+        assert_eq!(Ty::nullable(Ty::String).erased_recv(), Ty::String);
+        // `null`/`Nothing`/error all key under `Any` (a `null` receiver reaches an `Any?` extension).
+        assert_eq!(Ty::Null.erased_recv(), Ty::obj("kotlin/Any"));
+        assert_eq!(Ty::Nothing.erased_recv(), Ty::obj("kotlin/Any"));
+        assert_eq!(
+            Ty::nullable(Ty::obj("kotlin/Any")).erased_recv(),
+            Ty::obj("kotlin/Any")
+        );
     }
 
     #[test]
