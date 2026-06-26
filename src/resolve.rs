@@ -6324,6 +6324,16 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
+    /// A lambda literal with NO explicit parameters that never references the implicit `it` — the shape of
+    /// a receiver lambda body (`{ append("x") }`), used to disambiguate `R.() -> Ret` from `(R) -> Ret`
+    /// when only the (erased-equivalent) generic signature is available.
+    fn lambda_no_params_no_it(&self, a: ExprId) -> bool {
+        if let Expr::Lambda { params, body } = self.file.expr(a) {
+            return params.is_empty() && !expr_uses_name(self.file, *body, "it");
+        }
+        false
+    }
+
     /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
     /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
     /// resolve. Falls back to the raw class type when there are no explicit type arguments.
@@ -7850,7 +7860,20 @@ impl<'a> Checker<'a> {
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
                                     self.resolver().toplevel_is_inline(&fname);
-                                let t = self.check_lambda_with_types(a, &pts[i]);
+                                // A RECEIVER lambda `R.() -> Ret` (`buildString { append(…) }`): the recovered
+                                // input is the receiver. The generic signature can't distinguish it from a
+                                // plain `(R) -> Ret`, so use a conservative shape test — a single OBJECT-typed
+                                // input, no explicit params, no `it` use — and bind `this` = receiver so bare
+                                // member access resolves. A plain `(R) -> Ret` that ignores its arg is
+                                // unaffected (same JVM `Function` type; the unused receiver is harmless).
+                                let recv_form = pts[i].len() == 1
+                                    && matches!(pts[i][0], Ty::Obj(..) | Ty::String)
+                                    && self.lambda_no_params_no_it(a);
+                                let t = if recv_form {
+                                    self.check_lambda_with_receiver_types(a, &pts[i])
+                                } else {
+                                    self.check_lambda_with_types(a, &pts[i])
+                                };
                                 self.allow_lambda_mutation = prev;
                                 return t;
                             }
