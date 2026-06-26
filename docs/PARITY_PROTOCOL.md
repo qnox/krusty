@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 467).
+  repo's `compiler/testData/codegen/box`). Current gate: **1810 OK / 0 FAIL** (scanned 7351, Phase 468).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 468 — constructor default args captured FILE-INDEPENDENTLY (no cross-file `ExprId`); gate 1810,
+  FAIL=0 (L2 itself +0 functional — the baseline rose to 1810 via merged interface-default/annotation work).** `ClassSig.ctor_defaults` stored each default as an `ExprId` into the DEFINING file's
+  expr-arena. When a DIFFERENT file fills that default — a cross-file constructor call (the multi-file /
+  `// WITH_COROUTINES` shape) — the checker (`check_call` ok-arity) and the `super(…)` default-fill
+  dereferenced that id against the WRONG (caller's) arena and PANICKED (`ast.rs` index-out-of-bounds). Now
+  `ctor_defaults: Vec<Option<CtorDefaultValue>>` — a file-independent value (literals + an `Object(internal)`
+  singleton for `= EmptyCoroutineContext`-style defaults, resolved at collect via the type universe). The
+  checker matches on it (no arena deref); the regular-class and companion `super(…)` default-fills build the
+  `Const`/`getstatic …INSTANCE` directly (`ctor_default_to_ir`). Same-file behavior is byte-identical
+  (Phase 464/466 e2e + the gate). Cross-file now SKIPS cleanly instead of panicking (cross-file class
+  *construction* is itself still unmodeled, so the file skips — never a crash, never a miscompile). This is
+  the L2 layer of the coroutine blocker stack (the checker-side cross-file panic) — see
+  [[coroutine-intrinsics-plan]]. TDD: tests/cross_file_ctor_default_e2e.rs (a two-file module compiled with
+  shared signatures — a cross-file `Base()` with a literal AND an object-singleton default completes without
+  panicking).
 
 - **Phase 467 — emit fail-soft: a `GetValue`/`SetValue` of an unallocated value slot skips the file, never
   panics (gate 1782, flat, FAIL=0).** The JVM emitter indexed `self.slots` directly (`self.slots[i]`) for
