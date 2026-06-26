@@ -6053,16 +6053,17 @@ impl<'a> Checker<'a> {
         if targs.is_empty() {
             return ret;
         }
+        // The called method declares its OWN type parameter of this name → the return is the method's,
+        // independent of the receiver's argument; don't substitute (shadowing). `method_of` walks the
+        // base-class chain so an INHERITED shadowing method is caught too.
+        if self
+            .syms
+            .method_of(internal, method)
+            .is_some_and(|s| s.type_params.iter().any(|t| t == pname))
+        {
+            return ret;
+        }
         if let Some(cs) = self.syms.class_by_internal(internal) {
-            // The called method declares its OWN type parameter of this name → the return is the
-            // method's, independent of the receiver's argument; don't substitute (shadowing).
-            if cs
-                .methods
-                .get(method)
-                .is_some_and(|s| s.type_params.iter().any(|t| t == pname))
-            {
-                return ret;
-            }
             if let Some(i) = cs.tparam_names.iter().position(|t| t == pname) {
                 if let Some(&arg) = targs.get(i) {
                     // A `@JvmInline value class` argument flows through a generic member as its boxed form
