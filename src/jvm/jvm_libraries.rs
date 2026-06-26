@@ -1738,22 +1738,19 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
-    fn toplevel_lambda_recvs(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<bool>> {
+    fn toplevel_lambda_recvs(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<Option<Ty>>> {
+        // A top-level fn's source params equal its JVM params (no receiver slot), so the per-source-param
+        // receiver-function-type receivers from `@Metadata` align positionally with `arg_tys`. Reads ONLY
+        // `@Metadata` — no JVM `Signature` attribute needed (a krusty-emitted module omits it).
         for c in self.cp.find_top_level(name) {
-            let Some(sig) = c.signature.as_deref() else {
-                continue;
-            };
-            let Some((_, psigs, _)) = parse_method_gsig(sig) else {
-                continue;
-            };
-            if psigs.len() != arg_tys.len() {
-                continue;
-            }
-            // A top-level fn's source params equal its JVM params (no receiver slot), so the per-source-
-            // param receiver-function-type flags from `@Metadata` align positionally with `arg_tys`.
             let recvs = self.cp.metadata_param_recv_funs(&c.owner, name);
             if recvs.len() == arg_tys.len() && recvs.iter().any(|o| o.is_some()) {
-                return Some(recvs.iter().map(|o| o.is_some()).collect());
+                return Some(
+                    recvs
+                        .into_iter()
+                        .map(|o| o.map(|internal| Ty::obj(&internal)))
+                        .collect(),
+                );
             }
         }
         None
