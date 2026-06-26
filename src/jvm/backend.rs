@@ -104,6 +104,7 @@ impl Backend for JvmBackend {
                     name: f.name.clone(),
                     params,
                     ret: sig.ret,
+                    receiver: None,
                     param_defaults: Vec::new(),
                     suspend: true,
                     jvm_desc: Some(jvm_desc),
