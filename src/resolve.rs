@@ -35,6 +35,11 @@ pub struct Signature {
     /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
     /// `it` / parameter types. Parallel to `params`.
     pub lambda_param_types: Vec<Vec<Ty>>,
+    /// For each parameter: `true` when it is a RECEIVER function type `R.(A) -> Ret` (kotlin
+    /// `fun_has_receiver`). The receiver `R` is `lambda_param_types[i][0]` (folded as `Function`'s first
+    /// param); a lambda passed here binds `this` = `R` (implicit-receiver member access), not `it`.
+    /// Parallel to `params`; empty/`false` when unknown or non-receiver.
+    pub lambda_has_receiver: Vec<bool>,
     /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
     /// argument may capture a mutable local), instead of forming a closure.
     pub is_inline: bool,
@@ -829,6 +834,8 @@ pub fn collect_signatures_with_cp(
                             }
                         })
                         .collect();
+                    let lambda_has_receiver: Vec<bool> =
+                        f.params.iter().map(|p| p.ty.fun_has_receiver).collect();
                     let sig = Signature {
                         params,
                         ret,
@@ -837,6 +844,7 @@ pub fn collect_signatures_with_cp(
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         lambda_param_types,
+                        lambda_has_receiver,
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
@@ -1204,6 +1212,8 @@ pub fn collect_signatures_with_cp(
                                         }
                                     })
                                     .collect();
+                                let lambda_has_receiver: Vec<bool> =
+                                    m.params.iter().map(|p| p.ty.fun_has_receiver).collect();
                                 Signature {
                                     params,
                                     ret,
@@ -1220,6 +1230,7 @@ pub fn collect_signatures_with_cp(
                                         .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
+                                    lambda_has_receiver,
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
@@ -1241,6 +1252,7 @@ pub fn collect_signatures_with_cp(
                                     param_defaults: Vec::new(),
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
+                                    lambda_has_receiver: Vec::new(),
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
@@ -1259,6 +1271,7 @@ pub fn collect_signatures_with_cp(
                                 param_defaults: vec![true; props.len()],
                                 param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
                                 lambda_param_types: Vec::new(),
+                                lambda_has_receiver: Vec::new(),
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
@@ -1357,6 +1370,8 @@ pub fn collect_signatures_with_cp(
                                         }
                                     })
                                     .collect();
+                                let lambda_has_receiver: Vec<bool> =
+                                    m.params.iter().map(|p| p.ty.fun_has_receiver).collect();
                                 Signature {
                                     params,
                                     ret,
@@ -1373,6 +1388,7 @@ pub fn collect_signatures_with_cp(
                                         .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
+                                    lambda_has_receiver,
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
@@ -1411,6 +1427,7 @@ pub fn collect_signatures_with_cp(
                                 param_defaults: vec![],
                                 param_names: vec![],
                                 lambda_param_types: vec![],
+                                lambda_has_receiver: vec![],
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
@@ -2784,6 +2801,10 @@ pub struct TypeInfo {
     /// `: I by d` member, e.g. `d.size` on a `: Map by data` class) — `(iface_internal, jvm_name,
     /// descriptor)`. Lowering emits `invokeinterface iface_internal.jvm_name` on the receiver.
     pub iface_member_calls: HashMap<ExprId, (String, String, String)>,
+    /// A lambda passed to a RECEIVER function-type parameter (`f: R.() -> Unit`) — its body was
+    /// type-checked with `this` = `R` (implicit-receiver member access), so lowering binds the lambda's
+    /// first `Function` parameter as `this` (not `it`). See `check_lambda_with_receiver_types`.
+    pub recv_lambdas: std::collections::HashSet<ExprId>,
     /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
     /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
     pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
@@ -2881,6 +2902,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         obj_value_refs: HashMap::new(),
         ext_prop_calls: HashMap::new(),
         iface_member_calls: HashMap::new(),
+        recv_lambdas: std::collections::HashSet::new(),
         companion_calls: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
@@ -3389,6 +3411,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         obj_value_refs: c.obj_value_refs,
         ext_prop_calls: c.ext_prop_calls,
         iface_member_calls: c.iface_member_calls,
+        recv_lambdas: c.recv_lambdas,
         companion_calls: c.companion_calls,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
@@ -3429,6 +3452,7 @@ struct Checker<'a> {
     obj_value_refs: HashMap<ExprId, String>,
     ext_prop_calls: HashMap<ExprId, (String, String, String)>,
     iface_member_calls: HashMap<ExprId, (String, String, String)>,
+    recv_lambdas: std::collections::HashSet<ExprId>,
     companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
@@ -6249,6 +6273,57 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
+    /// Type-check a lambda passed to a RECEIVER function-type parameter `R.(A…) -> Ret`. `param_types` is
+    /// the FOLDED `Function` parameter list `[R, A…]` (receiver first, as kotlin lowers it). The body sees
+    /// `this` = `R` (unqualified member access, like `apply`); any explicit lambda params bind to `A…`.
+    /// Records the lambda in `recv_lambdas` so lowering binds its first `Function` param as `this` (not
+    /// `it`). Returns the lambda's `Function` type `Ty::fun([R, A…], bodyRet)`.
+    fn check_lambda_with_receiver_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
+        if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
+            let recv = param_types
+                .first()
+                .copied()
+                .unwrap_or(Ty::obj("kotlin/Any"));
+            let value_types: &[Ty] = if param_types.is_empty() {
+                &[]
+            } else {
+                &param_types[1..]
+            };
+            if !self.allow_lambda_mutation {
+                let outer_names: std::collections::HashSet<String> =
+                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                if !outer_names.is_empty() {
+                    self.record_captured_vars(body, &outer_names);
+                }
+            }
+            self.recv_lambdas.insert(e);
+            let prev_this = self.this_ty;
+            self.this_ty = Some(recv);
+            self.push_scope();
+            // A user-class receiver's own properties are visible unqualified (mirrors `check_with_receiver`);
+            // a builtin/library receiver resolves bare members via the implicit-`this` probe instead.
+            if let Ty::Obj(internal, _) = recv {
+                if let Some(cs) = self.syms.class_by_internal(internal) {
+                    for (n, t, is_var) in cs.props.clone() {
+                        self.declare(&n, t, is_var);
+                    }
+                }
+            }
+            for (i, name) in params.iter().enumerate() {
+                let pty = value_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                self.declare(name, pty, false);
+            }
+            let saved_field = self.field_ty.take();
+            let bret = self.expr(body);
+            self.field_ty = saved_field;
+            self.pop_scope();
+            self.this_ty = prev_this;
+            let ty = Ty::fun(param_types.to_vec(), bret);
+            return self.set(e, ty);
+        }
+        self.expr(e)
+    }
+
     /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
     /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
     /// resolve. Falls back to the raw class type when there are no explicit type arguments.
@@ -7810,9 +7885,15 @@ impl<'a> Checker<'a> {
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
                                 let pt = sig.lambda_param_types.get(i).cloned().unwrap_or_default();
+                                let has_recv = *sig.lambda_has_receiver.get(i).unwrap_or(&false)
+                                    && !pt.is_empty();
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation = sig.is_inline;
-                                let t = self.check_lambda_with_types(a, &pt);
+                                let t = if has_recv {
+                                    self.check_lambda_with_receiver_types(a, &pt)
+                                } else {
+                                    self.check_lambda_with_types(a, &pt)
+                                };
                                 self.allow_lambda_mutation = prev;
                                 return t;
                             }
@@ -9051,6 +9132,7 @@ impl<'a> Checker<'a> {
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
+            lambda_has_receiver: Vec::new(),
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,

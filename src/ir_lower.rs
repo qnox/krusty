@@ -4217,8 +4217,15 @@ impl<'a> Lower<'a> {
         if sig.ret == Ty::Nothing && !body_has_bare_return(self.afile, body) {
             return None;
         }
-        // Bound parameter names: explicit, or the implicit single `it` for a unary lambda.
-        let bind_names: Vec<String> = if !params.is_empty() {
+        // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. A RECEIVER
+        // lambda `R.(A…) -> Ret` (resolved into `recv_lambdas`) binds its FIRST `Function` parameter as
+        // `this` — the implicit receiver — followed by any explicit value params, so an unqualified member
+        // access in the body lowers through `this` (the `lookup("this")` setter/getter path).
+        let bind_names: Vec<String> = if self.info.recv_lambdas.contains(&e) {
+            let mut bn = vec!["this".to_string()];
+            bn.extend(params.iter().cloned());
+            bn
+        } else if !params.is_empty() {
             params.to_vec()
         } else if arity == 1 {
             vec!["it".to_string()]

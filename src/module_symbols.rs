@@ -304,6 +304,7 @@ mod tests {
             param_defaults: vec![],
             param_names: vec![],
             lambda_param_types: vec![],
+            lambda_has_receiver: vec![],
             is_inline: false,
             is_final: false,
             is_suspend: false,
