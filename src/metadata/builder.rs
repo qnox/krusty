@@ -12,6 +12,10 @@ pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
+    /// Per-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `params`; empty = none default). Sets
+    /// `ValueParameter.flags` bit 1 so a cross-module caller may OMIT a defaulted argument (the reader's
+    /// `metadata_param_defaults` recovers it). A short/empty vec leaves the remaining params required.
+    pub param_defaults: Vec<bool>,
     /// `suspend fun` — sets `Function.flags` `IS_SUSPEND` (bit 13). Its `params`/`ret` are the LOGICAL
     /// signature (no `Continuation`, the source return), exactly as kotlinc records in `@Metadata`.
     pub suspend: bool,
@@ -25,6 +29,9 @@ pub struct FnMeta {
 /// PUBLIC-visibility / FINAL-modality bits (`0x06`) — `8198`. Without the visibility bits a reader
 /// treats the function as `internal`/inaccessible; the reader keys suspension off bit 13 either way.
 const SUSPEND_FUN_FLAGS: u64 = (1 << 13) | 0x06;
+
+/// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
+const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
 
 /// `predefinedIndex` of a builtin type's fq-name in `PREDEFINED_STRINGS`.
 fn builtin_index(t: Ty) -> Option<u64> {
@@ -111,8 +118,13 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
     p.field_varint(2, st.local(&f.name) as u64); // Function.name = 2
     let ret = type_pb(st, f.ret);
     p.field_message(3, &ret); // Function.return_type = 3
-    for (pname, pty) in &f.params {
+    for (i, (pname, pty)) in f.params.iter().enumerate() {
         let mut vp = Pb::new();
+        // ValueParameter.flags = 1 (before name, matching kotlinc's field order): bit 1 =
+        // DECLARES_DEFAULT_VALUE, set when this parameter has a default so a caller may omit it.
+        if f.param_defaults.get(i).copied().unwrap_or(false) {
+            vp.field_varint(1, DECLARES_DEFAULT_VALUE_BIT);
+        }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
         let ty = type_pb(st, *pty);
         vp.field_message(3, &ty); // ValueParameter.type = 3
@@ -221,6 +233,7 @@ mod tests {
                 name: "f".into(),
                 params: vec![("a".into(), Ty::Int)],
                 ret: Ty::Int,
+                param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
             }],
@@ -238,6 +251,7 @@ mod tests {
                 name: "g".into(),
                 params: vec![("x".into(), Ty::Int)],
                 ret: Ty::Int,
+                param_defaults: Vec::new(),
                 suspend: false,
                 jvm_desc: None,
             }],
