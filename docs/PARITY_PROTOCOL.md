@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1781 OK / 0 FAIL** (scanned 7351, Phase 464).
+  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 465).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 465 — `companion object : Base()` extends a base CLASS (gate 1781 → 1782, +1, FAIL=0).** A
+  method-less or method-ful companion that declares a base class is now emitted extending that base, so the
+  companion — used as a value (`C` denotes its companion instance) — is genuinely an instance of `Base`.
+  `ir_lower` synthesizes the `C$Companion` for a companion that has methods OR a base class OR interface
+  supertypes, and builds the `super(…)` call by filling the base ctor's default-value exprs (mirrors the
+  Phase 464 regular-class super-default-fill). Modeled only for a SAME-FILE non-interface base with no
+  explicit base args and a no-arg / all-defaulted ctor; any other base (classpath, required param, explicit
+  args) bails the whole file (skip, never miscompile). The `resolve` registration of the typed
+  `C$Companion` is gated to EXACTLY that same shape (same-file non-interface base) so a *different* file
+  can't type-check a use of a companion that has no class file behind it (would `NoClassDefFoundError`).
+  This is the regular-class half of the coroutine `EmptyContinuation` completion; the self-referential
+  companion (`companion object : EmptyContinuation()`) and the classpath-object default
+  (`= EmptyCoroutineContext`) remain (next). TDD: tests/companion_supertype_e2e.rs (no-arg + default-param
+  base, used as their base-class value; round-tripped). See [[coroutine-intrinsics-plan]].
 
 - **Phase 464 — `super(…)` default-fill for a class/object extending an all-defaulted base (gate 1777 →
   1781, +4, FAIL=0).** `class B : A()` / `object O : A()` where `A(val x = …)` has all-defaulted ctor

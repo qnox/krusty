@@ -1296,6 +1296,19 @@ pub fn collect_signatures_with_cp(
                         .iter()
                         .map(&mut resolve_super)
                         .collect();
+                    // A `companion object`'s declared base CLASS (`companion object : Base()`) — the
+                    // synthesized `C$Companion` extends it, so `C`-as-value is assignable as `Base` (and
+                    // transitively its supertypes, e.g. `EmptyContinuation` → `Continuation`). Only a
+                    // SAME-FILE non-interface base is registered: that is EXACTLY the shape `ir_lower`
+                    // emits (it bails the whole file for any other base). Registering a base `ir_lower`
+                    // won't emit would let a *different* file type-check a use of this companion that has
+                    // no class file behind it → `NoClassDefFoundError`.
+                    let companion_super_internal = c.companion_base.as_ref().and_then(|base| {
+                        let is_file_class = file.decls.iter().any(|&fd| {
+                            matches!(file.decl(fd), Decl::Class(bc) if bc.name == *base && !bc.is_interface())
+                        });
+                        is_file_class.then(|| resolve_super(base))
+                    });
                     // `companion object` members → static methods/props on this class.
                     let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -1505,13 +1518,13 @@ pub fn collect_signatures_with_cp(
                         },
                     );
                     // Register the synthesized `C$Companion` as a typed object so `C` used as a value (its
-                    // companion instance) is assignable to its INTERFACE supertypes and their members
-                    // resolve. Gated to exactly what the backend emits: the companion class + `Companion`
-                    // field only exist when the companion has methods (`ir_lower` synthesizes it then), and
-                    // only INTERFACE supertypes are emitted on it (a base CLASS is ignored — left `Any` —
-                    // so `super_internal` is `None`, never claiming a base it isn't). A method-less or
-                    // interface-less companion isn't a first-class value yet (its use as a value skips).
-                    if !companion_interfaces.is_empty() && !c.companion_methods.is_empty() {
+                    // companion instance) is assignable to its supertypes and their members resolve. Gated
+                    // to exactly what the backend emits: the companion class + `Companion` field only exist
+                    // when the companion has methods (`ir_lower` synthesizes it then), and it carries a
+                    // declared INTERFACE supertype and/or a base CLASS (`ir_lower` extends the companion to
+                    // the base when it's a file class with no-arg / all-default ctor). A companion with no
+                    // supertype isn't a first-class value yet (its use as a value skips).
+                    if !companion_interfaces.is_empty() || companion_super_internal.is_some() {
                         table.classes.insert(
                             comp_internal.clone(),
                             ClassSig {
@@ -1526,7 +1539,7 @@ pub fn collect_signatures_with_cp(
                                 static_props: HashMap::new(),
                                 lateinit_props: Default::default(),
                                 interfaces: companion_interfaces,
-                                super_internal: None,
+                                super_internal: companion_super_internal,
                                 is_annotation: false,
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
