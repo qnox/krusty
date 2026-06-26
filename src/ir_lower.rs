@@ -5163,6 +5163,58 @@ impl<'a> Lower<'a> {
         internal: &str,
         is_synth: bool,
     ) -> Option<()> {
+        let iface_internal = class_internal(file, iface_name);
+        // A CLASSPATH interface delegate (`class Dto(val data: Map<…>) : Map<…> by data`): the interface
+        // isn't a user class, so forward each abstract method by the ERASED JVM descriptor the classpath
+        // reports (size → `getSize()I`, get → `get(Object)Object`, …). Erased forwarding needs no generic
+        // substitution — `Map<Int,Int>` IS `java/util/Map` at the JVM level — and a property member is just
+        // a `getX`/`setX` method here. Methods a read-only delegate can't service (`put`) aren't called by
+        // valid code; they exist only so the class isn't abstract.
+        if !self.syms.classes.contains_key(iface_name) {
+            let resolved = self
+                .syms
+                .class_names
+                .get(iface_name)
+                .cloned()
+                .unwrap_or_else(|| iface_internal.clone());
+            let jvm_internal = crate::jvm::jvm_class_map::to_jvm_internal(&resolved).to_string();
+            let methods = self.syms.libraries.abstract_methods(&jvm_internal);
+            if methods.is_empty() {
+                return None; // not a resolvable classpath interface — skip, never miscompile
+            }
+            for m in methods {
+                let params_ir: Vec<Ty> = m.params.iter().map(|t| ty_to_ir(*t)).collect();
+                let ret_ir = ty_to_ir(m.ret);
+                let field = self.this_field(class_id, delegate_idx);
+                let args: Vec<u32> = (0..m.params.len())
+                    .map(|i| self.ir.add_expr(IrExpr::GetValue(i as u32 + 1)))
+                    .collect();
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Virtual {
+                        owner: jvm_internal.clone(),
+                        name: m.name.clone(),
+                        descriptor: m.descriptor.clone(),
+                        interface: true,
+                    },
+                    dispatch_receiver: Some(field),
+                    args,
+                });
+                let body = if m.ret == Ty::Unit {
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![call],
+                        value: None,
+                    })
+                } else {
+                    let ret_stmt = self.ir.add_expr(IrExpr::Return(Some(call)));
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![ret_stmt],
+                        value: None,
+                    })
+                };
+                self.add_synth_method(internal, class_id, &m.name, params_ir, ret_ir, body, false);
+            }
+            return Some(());
+        }
         if is_synth {
             if self
                 .syms
@@ -5178,7 +5230,6 @@ impl<'a> Lower<'a> {
                 return None;
             }
         }
-        let iface_internal = class_internal(file, iface_name);
         let methods: Vec<(String, Vec<Ty>, Ty)> = self
             .syms
             .classes
@@ -11686,6 +11737,26 @@ impl<'a> Lower<'a> {
                         },
                         dispatch_receiver: None,
                         args: vec![a],
+                    }));
+                }
+                // A member resolved on an IMPLEMENTED INTERFACE of the receiver's class (a delegated
+                // `: I by d` member, e.g. `d.size` on a `: Map by data` class) → `invokeinterface
+                // <iface>.<name>` on the receiver. The recorded owner is the Kotlin interface internal;
+                // map it to its JVM identity (`kotlin/collections/Map` → `java/util/Map`).
+                if let Some((iface, method, descriptor)) =
+                    self.info.iface_member_calls.get(&e).cloned()
+                {
+                    let a = self.expr(receiver)?;
+                    let owner = crate::jvm::jvm_class_map::to_jvm_internal(&iface).to_string();
+                    return Some(self.ir.add_expr(IrExpr::Call {
+                        callee: Callee::Virtual {
+                            owner,
+                            name: method,
+                            descriptor,
+                            interface: true,
+                        },
+                        dispatch_receiver: Some(a),
+                        args: vec![],
                     }));
                 }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.

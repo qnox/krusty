@@ -2780,6 +2780,10 @@ pub struct TypeInfo {
     /// static `get<Name>(recv)` on `(owner, method, descriptor)` (e.g. `d.elementDescriptors` →
     /// `SerialDescriptorKt.getElementDescriptors(d)`). Lowering emits that `invokestatic`.
     pub ext_prop_calls: HashMap<ExprId, (String, String, String)>,
+    /// A member `recv.name` that resolved on an IMPLEMENTED INTERFACE of the receiver's class (a delegated
+    /// `: I by d` member, e.g. `d.size` on a `: Map by data` class) — `(iface_internal, jvm_name,
+    /// descriptor)`. Lowering emits `invokeinterface iface_internal.jvm_name` on the receiver.
+    pub iface_member_calls: HashMap<ExprId, (String, String, String)>,
     /// A `ClassName.fn(args)` call resolving to a value-class COMPANION function (`Result.success`).
     /// Lowering emits the companion `getstatic` receiver + an inline-splice of the companion method.
     pub companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
@@ -2876,6 +2880,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_call_map: HashMap::new(),
         obj_value_refs: HashMap::new(),
         ext_prop_calls: HashMap::new(),
+        iface_member_calls: HashMap::new(),
         companion_calls: HashMap::new(),
         fun_ret_overrides: HashMap::new(),
         ext_calls: HashMap::new(),
@@ -3383,6 +3388,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_call_map: c.local_call_map,
         obj_value_refs: c.obj_value_refs,
         ext_prop_calls: c.ext_prop_calls,
+        iface_member_calls: c.iface_member_calls,
         companion_calls: c.companion_calls,
         fun_ret_overrides: c.fun_ret_overrides,
         ext_calls: c.ext_calls,
@@ -3422,6 +3428,7 @@ struct Checker<'a> {
     local_call_map: HashMap<ExprId, StmtId>,
     obj_value_refs: HashMap<ExprId, String>,
     ext_prop_calls: HashMap<ExprId, (String, String, String)>,
+    iface_member_calls: HashMap<ExprId, (String, String, String)>,
     companion_calls: HashMap<ExprId, crate::libraries::CompanionFn>,
     fun_ret_overrides: HashMap<String, Ty>,
     ext_calls: HashMap<ExprId, (String, String, String)>,
@@ -6385,6 +6392,41 @@ impl<'a> Checker<'a> {
                         );
                     }
                     return cl.ret;
+                }
+            }
+        }
+        // A member inherited from an implemented INTERFACE the class didn't itself define — a delegated
+        // `: I by d` member, or a plain interface member. The class's own/super members were tried above;
+        // resolve it on each implemented interface: a USER interface via its declared property, a CLASSPATH
+        // one (`Map`, via `: Map<…> by d`) via the library (its property getter or method). Records
+        // `iface_member_calls` so lowering emits the interface call (`invokeinterface I.m` on the receiver).
+        if let Some(internal) = rt.non_null().obj_internal() {
+            let ifaces = self
+                .syms
+                .class_by_internal(internal)
+                .map(|c| c.interfaces.clone())
+                .unwrap_or_default();
+            for itf in ifaces {
+                // A CLASSPATH interface member (its property getter or a method) — resolved via the
+                // library and recorded for lowering (`invokeinterface`). Only the classpath path is
+                // handled (a USER interface property delegate has no forwarder yet, so leaving it
+                // unresolved makes the file skip cleanly rather than resolve-without-a-lowering).
+                let getter = property_getter_name(name);
+                for cand in [name.to_string(), getter] {
+                    if let Some(m) = crate::call_resolver::resolve_instance(
+                        &*self.syms.libraries,
+                        &itf,
+                        &cand,
+                        &[],
+                    ) {
+                        if !matches!(m.ret, Ty::Unit | Ty::Error) {
+                            if let Some(e) = mexpr {
+                                self.iface_member_calls
+                                    .insert(e, (itf.clone(), cand.clone(), m.descriptor.clone()));
+                            }
+                            return m.ret;
+                        }
+                    }
                 }
             }
         }

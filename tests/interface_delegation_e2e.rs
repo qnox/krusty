@@ -33,3 +33,19 @@ fun box(): String { val c = C(IA(), IB()); return if (c.a() + c.b() == \"ab\") \
         "OK"
     );
 }
+
+#[test]
+fn classpath_interface_delegation_map() {
+    // Delegation to a CLASSPATH interface: `class Dto(val data: Map<…>) : Map<…> by data`. krusty
+    // forwards each of `java/util/Map`'s abstract methods (erased descriptors) to the `data` field, and a
+    // `Dto`-typed PROPERTY access inherited from the interface (`d.size`) dispatches through it.
+    const SRC: &str = "class Dto(val data: Map<Int, Int>) : Map<Int, Int> by data\n\
+fun box(): String {\n\
+val d = Dto(mapOf(1 to 2, 3 to 4))\n\
+return if (d.size == 2 && d.data.size == 2) \"OK\" else \"size ${d.size}\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("classpath interface delegation compiles + runs"),
+        "OK"
+    );
+}
