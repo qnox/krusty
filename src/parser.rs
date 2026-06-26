@@ -1577,8 +1577,31 @@ impl<'a> Parser<'a> {
                     recv_nullable = true;
                 }
                 self.expect(TokenKind::Dot, "'.'");
+                // The receiver type may be DOTTED (`fun Int.Companion.MAX()`, `fun Foo.Bar.baz()`):
+                // consume `Ident` segments while each is followed by another `.`; the final segment (the
+                // one NOT followed by a `.`) is the function name, the rest form the receiver type name.
+                let mut recv_name = first_name;
+                let mut fun_name = "<error>".to_string();
+                loop {
+                    let seg = if self.at(TokenKind::Ident) {
+                        let n = self.text().to_string();
+                        self.bump();
+                        n
+                    } else {
+                        self.diags
+                            .error(self.tok().span, "expected extension function name");
+                        break;
+                    };
+                    if self.eat(TokenKind::Dot) {
+                        recv_name.push('.');
+                        recv_name.push_str(&seg);
+                    } else {
+                        fun_name = seg;
+                        break;
+                    }
+                }
                 let recv_ty = TypeRef {
-                    name: first_name,
+                    name: recv_name,
                     nullable: recv_nullable,
                     arg: None,
                     targs: vec![],
@@ -1586,15 +1609,6 @@ impl<'a> Parser<'a> {
                     fun_params: vec![],
                     fun_has_receiver: false,
                     fun_suspend: false,
-                };
-                let fun_name = if self.at(TokenKind::Ident) {
-                    let n = self.text().to_string();
-                    self.bump();
-                    n
-                } else {
-                    self.diags
-                        .error(self.tok().span, "expected extension function name");
-                    "<error>".to_string()
                 };
                 (Some(recv_ty), fun_name)
             } else {
