@@ -6434,20 +6434,27 @@ impl<'a> Checker<'a> {
                     // A method with default parameters (e.g. data-class `copy`) — `required < params` —
                     // queried through the module source.
                     let rt = self.expr(*receiver);
+                    let module_overloads = crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .functions(name, Some(rt))
+                        .overloads;
                     let module_member = matches!(rt, Ty::Obj(_, _))
-                        && crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .functions(name, Some(rt))
-                            .overloads
-                            .into_iter()
+                        && module_overloads
+                            .iter()
                             .find(|o| o.kind == crate::libraries::FnKind::Member)
                             .map_or(false, |fi| {
                                 fi.call_sig.required < fi.callable.params.len()
                                     && !fi.call_sig.param_names.is_empty()
                             });
+                    // A user-module EXTENSION with named parameters (`"s".foo(b = …, a = …)`).
+                    let module_ext = module_overloads.iter().any(|o| {
+                        o.kind == crate::libraries::FnKind::Extension
+                            && !o.call_sig.param_names.is_empty()
+                    });
                     // A CLASSPATH instance MEMBER or EXTENSION whose `@Metadata` records parameter names
                     // (`g.greet(b = …, a = …)` / `"s".tag(b = …, a = …)` against a jar/dependency function).
                     // An extension receiver may be any type (`String`/primitive), not only `Ty::Obj`.
                     module_member
+                        || module_ext
                         || self
                             .syms
                             .libraries
@@ -7394,7 +7401,36 @@ impl<'a> Checker<'a> {
                     if let Some(fi) = module_ext {
                         // Logical params (the receiver is `callable.params[0]`; the rest are the args).
                         let logical: Vec<Ty> = fi.callable.params[1..].to_vec();
-                        if logical.len() != arg_tys.len() {
+                        let cs = &fi.call_sig;
+                        if (arg_names.is_some() || arg_tys.len() != logical.len())
+                            && cs.required < logical.len()
+                            && !cs.param_names.is_empty()
+                        {
+                            // Omitted/named extension arguments filled by parameter defaults.
+                            match map_call_args(
+                                args,
+                                arg_names.as_deref(),
+                                &cs.param_names,
+                                cs.required,
+                                &cs.param_defaults,
+                            ) {
+                                Ok(slots) => {
+                                    for (i, slot) in slots.iter().enumerate() {
+                                        if let Some(a) = slot {
+                                            self.expect_assignable(
+                                                logical[i],
+                                                self.expr_types[a.0 as usize],
+                                                self.span(*a),
+                                                "argument",
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(msg) => {
+                                    self.diags.error(span, format!("call to '{name}': {msg}"))
+                                }
+                            }
+                        } else if logical.len() != arg_tys.len() {
                             self.diags.error(
                                 span,
                                 format!(
