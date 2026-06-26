@@ -1151,3 +1151,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   box()=OK unchanged, FAIL 0. `tests/enum_class_signature_e2e.rs`. Separate remaining enum-class diffs
   (out of scope): the `$EnumSwitchMapping$` `when`-over-enum tableswitch optimization; a generic class
   bound `<T : Enum<T>>`.
+- **Enum `entries` members + `$values()` helper + member order (byte-parity FIX, box()=OK flat, FAIL=0).**
+  Kotlin 2.x emits, on EVERY enum: a `private static final kotlin/enums/EnumEntries $ENTRIES` field
+  (the `entries` backing), a `public static EnumEntries<E> getEntries()` accessor (generic
+  `Signature ()Lkotlin/enums/EnumEntries<LE;>;`), and a private synthetic `$values()` array builder that
+  `<clinit>` calls; `<clinit>` then does `$ENTRIES = EnumEntriesKt.enumEntries((Enum[]) $VALUES)`.
+  Member order is `<init>, values, valueOf, getEntries, [user methods], $values, <clinit>`. krusty
+  emitted none of these and inlined the array build directly in `<clinit>` (which it emitted early), so
+  every enum diverged. `emit_enum_class` now adds the `$ENTRIES` field, builds `<clinit>` but ADDS it
+  LAST, emits `getEntries`/`$values`, and routes `<clinit>` through `$values()` + the `$ENTRIES` init.
+  Runtime-safe (the `<clinit>` `enumEntries` call resolves against stdlib): box()=OK unchanged, FAIL 0.
+  `tests/enum_entries_e2e.rs`. Remaining per-enum diffs (separate, pre-existing, NOT enum-emission):
+  `Color.RED.ordinal` emits `invokevirtual java/lang/Enum.ordinal` where kotlinc uses the static
+  receiver type `Color.ordinal` (a general invokevirtual-owner rule); and javap displays the enum ctor
+  params (`Color(String,int)` vs kotlinc's `Color()`).

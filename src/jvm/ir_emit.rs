@@ -1918,6 +1918,13 @@ fn emit_enum_class(
         "$VALUES",
         &arr_desc,
     );
+    // The `entries` property backing (Kotlin 2.x emits this on EVERY enum): a `private static final`
+    // `kotlin/enums/EnumEntries`, initialized in `<clinit>` from `EnumEntriesKt.enumEntries($VALUES)`.
+    cw.add_field(
+        0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
+        "$ENTRIES",
+        "Lkotlin/enums/EnumEntries;",
+    );
 
     // Private constructor: `(Ljava/lang/String;I<user>)V` → `super(name, ordinal)` + store user fields.
     let ctor_params: Vec<Ty> = std::iter::once(Ty::String)
@@ -1953,9 +1960,11 @@ fn emit_enum_class(
     };
     cw.add_method(base_ctor_acc, "<init>", &ctor_desc, &ctor);
 
-    // <clinit>: construct each entry, then build `$VALUES`.
+    // <clinit>: construct each entry, then `$VALUES = $values()` and
+    // `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)`. BUILT here but ADDED last (kotlinc orders it
+    // after values/valueOf/getEntries/$values); the linked `CodeBuilder` is self-contained.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
-    {
+    let clinit = {
         let mut e = Emitter {
             ir,
             cw: &mut cw,
@@ -2007,23 +2016,28 @@ fn emit_enum_class(
             let fref = e.cw.fieldref(&fq, entry, &self_desc);
             clinit.putstatic(fref, 1);
         }
-        clinit.push_int(c.enum_entries.len() as i32, e.cw);
-        let acls = e.cw.class_ref(&fq);
-        clinit.anewarray(acls);
-        for (i, (entry, _)) in c.enum_entries.iter().enumerate() {
-            clinit.dup();
-            clinit.push_int(i as i32, e.cw);
-            let fref = e.cw.fieldref(&fq, entry, &self_desc);
-            clinit.getstatic(fref, 1);
-            clinit.array_store(0x53, 1); // aastore
-        }
+        // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
+        let vfn = e.cw.methodref(&fq, "$values", &format!("(){arr_desc}"));
+        clinit.invokestatic(vfn, 0, 1);
         let valref = e.cw.fieldref(&fq, "$VALUES", &arr_desc);
         clinit.putstatic(valref, 1);
+        // `$ENTRIES = EnumEntriesKt.enumEntries((Enum[]) $VALUES)`.
+        clinit.getstatic(valref, 1);
+        let enumarr = e.cw.class_ref("[Ljava/lang/Enum;");
+        clinit.checkcast(enumarr);
+        let entries_fn = e.cw.methodref(
+            "kotlin/enums/EnumEntriesKt",
+            "enumEntries",
+            "([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;",
+        );
+        clinit.invokestatic(entries_fn, 1, 1);
+        let entref = e.cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+        clinit.putstatic(entref, 1);
         clinit.ret_void();
-        clinit.ensure_locals(e.next_slot.max(4));
+        clinit.ensure_locals(e.next_slot.max(2));
         clinit.link();
-        e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-    }
+        clinit
+    };
 
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
@@ -2060,6 +2074,22 @@ fn emit_enum_class(
         &vof,
     );
 
+    // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
+    // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
+    let mut gent = CodeBuilder::new(0);
+    let entref = cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    gent.getstatic(entref, 1);
+    gent.areturn();
+    gent.ensure_locals(0);
+    gent.link();
+    cw.add_method_sig(
+        0x0009,
+        "getEntries",
+        "()Lkotlin/enums/EnumEntries;",
+        &gent,
+        Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
+    );
+
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -2078,6 +2108,34 @@ fn emit_enum_class(
             );
         }
     }
+    // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
+    // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
+    let mut vbuild = CodeBuilder::new(1);
+    vbuild.push_int(c.enum_entries.len() as i32, &mut cw);
+    let acls = cw.class_ref(&fq);
+    vbuild.anewarray(acls);
+    vbuild.astore(0);
+    for (i, (entry, _)) in c.enum_entries.iter().enumerate() {
+        vbuild.aload(0);
+        vbuild.push_int(i as i32, &mut cw);
+        let fref = cw.fieldref(&fq, entry, &self_desc);
+        vbuild.getstatic(fref, 1);
+        vbuild.array_store(0x53, 1); // aastore
+    }
+    vbuild.aload(0);
+    vbuild.areturn();
+    vbuild.ensure_locals(1);
+    vbuild.link();
+    cw.add_method(
+        0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
+        "$values",
+        &format!("(){arr_desc}"),
+        &vbuild,
+    );
+
+    // <clinit> is added LAST (built earlier), matching kotlinc's member order.
+    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+
     // Erased bridges for a generic-interface method overridden at the enum level
     // (`enum E : A<String> { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`).
     emit_bridges(c, &mut cw);
