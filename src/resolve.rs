@@ -1825,13 +1825,23 @@ pub fn map_call_args(
             }
             None => {
                 if seen_named {
-                    return Err("a positional argument cannot follow a named argument".to_string());
+                    // A TRAILING LAMBDA is the one positional argument Kotlin allows after named args —
+                    // it fills the LAST parameter (a function type). Only the FINAL argument may be such;
+                    // any other positional-after-named is an error.
+                    if i == args.len() - 1 && n > 0 && slots[n - 1].is_none() {
+                        slots[n - 1] = Some(a);
+                    } else {
+                        return Err(
+                            "a positional argument cannot follow a named argument".to_string()
+                        );
+                    }
+                } else {
+                    if pos >= n {
+                        return Err(format!("too many arguments: expected at most {n}"));
+                    }
+                    slots[pos] = Some(a);
+                    pos += 1;
                 }
-                if pos >= n {
-                    return Err(format!("too many arguments: expected at most {n}"));
-                }
-                slots[pos] = Some(a);
-                pos += 1;
             }
         }
     }
