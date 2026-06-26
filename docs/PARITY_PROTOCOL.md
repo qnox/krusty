@@ -1161,7 +1161,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   every enum diverged. `emit_enum_class` now adds the `$ENTRIES` field, builds `<clinit>` but ADDS it
   LAST, emits `getEntries`/`$values`, and routes `<clinit>` through `$values()` + the `$ENTRIES` init.
   Runtime-safe (the `<clinit>` `enumEntries` call resolves against stdlib): box()=OK unchanged, FAIL 0.
-  `tests/enum_entries_e2e.rs`. Remaining per-enum diffs (separate, pre-existing, NOT enum-emission):
-  `Color.RED.ordinal` emits `invokevirtual java/lang/Enum.ordinal` where kotlinc uses the static
-  receiver type `Color.ordinal` (a general invokevirtual-owner rule); and javap displays the enum ctor
-  params (`Color(String,int)` vs kotlinc's `Color()`).
+  `tests/enum_entries_e2e.rs`.
+- **A plain `enum class` is now BYTE-IDENTICAL to kotlinc (box()=OK flat, FAIL=0).** Four remaining
+  per-enum divergences fixed together; `bytediff` on `enum class Color { RED, GREEN, BLUE }` reports
+  100% byte-identical (both `Color` and the `ColorKt` facade):
+  1. `e.ordinal`/`e.name` dispatched on the receiver's STATIC type (`invokevirtual Color.ordinal`), not
+     `java/lang/Enum.ordinal` — fixed in `ir_lower` (a `Callee::Virtual` with `owner = ci.fq_name`
+     instead of `Callee::External("java/lang/Enum.ordinal")`). General invokevirtual-owner rule.
+  2. The enum ctor is `private` (`ACC_PRIVATE`), not `ACC_SYNTHETIC` — kotlinc keeps it private even
+     when entry subclasses call it (via nestmates; see below).
+  3. The enum ctor carries a generic `Signature` listing only the USER params (`()V` for a plain enum,
+     `(I)V` for `E(val n: Int)`) — javap reads it to hide the synthetic `(String,int)`; without it the
+     synthetic params leaked into the disassembly.
+  4. `values()` invokes `clone()` via `java/lang/Object` (kotlinc), not the `[LE;` array type.
+  `tests/enum_entries_e2e.rs` (`plain_enum_ctor_is_private_nonsynthetic_with_signature`). Remaining
+  enum diffs (separate, larger): a SUBCLASSED enum (bodied entries) — kotlinc keeps the base ctor
+  `private` and relies on `NestHost`/`NestMembers` (krusty emits neither, so it stays package-private),
+  and the entry-subclass `E$A` ctor needs the same `()V` Signature (separate emit path); the
+  `$EnumSwitchMapping$` `when`-over-enum tableswitch optimization.
