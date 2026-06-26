@@ -1125,15 +1125,15 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
             }
             if let Some(recv_ref) = &f.receiver {
                 // Extension function `fun Recv.name(…)` → a static method whose first parameter is the
-                // receiver (Kotlin's compilation strategy). Keyed by (receiver descriptor, name). A
+                // receiver (Kotlin's compilation strategy). Keyed by (erased receiver, name). A
                 // receiver that doesn't resolve to a concrete type (a generic `T.foo()`) isn't modeled —
                 // bail rather than guess `Object`.
                 let recv_ty = lo.ext_receiver_ty(file, recv_ref);
                 if recv_ty == Ty::Error {
                     return None;
                 }
-                let recv_desc = recv_ty.descriptor();
-                let sig = syms.ext_funs.get(&(recv_desc.clone(), f.name.clone()))?;
+                let recv_key = recv_ty.erased_recv();
+                let sig = syms.ext_funs.get(&(recv_key, f.name.clone()))?;
                 let mut params = vec![ty_to_ir(recv_ty)];
                 params.extend(sig.params.iter().map(|t| ty_to_ir(*t)));
                 let ret = ty_to_ir(sig.ret);
@@ -1146,7 +1146,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: None,
                     param_checks: vec![],
                 });
-                lo.ext_fun_ids.insert((recv_desc, f.name.clone()), id);
+                lo.ext_fun_ids.insert((recv_key, f.name.clone()), id);
             } else {
                 // This declaration's own overload (matched by erased parameter descriptors when the
                 // name is overloaded).
@@ -1294,7 +1294,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     return None;
                 }
                 let recv_ty = ty_of(file, recv_ref);
-                let recv_desc = recv_ty.descriptor();
+                let recv_key = recv_ty.erased_recv();
                 let pty = body_prop_ty(file, info, p);
                 let gfid = lo.ir.add_fun(IrFunction {
                     name: getter_name(&p.name),
@@ -1305,8 +1305,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     dispatch_receiver: None,
                     param_checks: vec![],
                 });
-                lo.ext_prop_get_ids
-                    .insert((recv_desc.clone(), p.name.clone()), gfid);
+                lo.ext_prop_get_ids.insert((recv_key, p.name.clone()), gfid);
                 if p.is_var {
                     let sfid = lo.ir.add_fun(IrFunction {
                         name: setter_name(&p.name),
@@ -1317,8 +1316,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         dispatch_receiver: None,
                         param_checks: vec![],
                     });
-                    lo.ext_prop_set_ids
-                        .insert((recv_desc, p.name.clone()), sfid);
+                    lo.ext_prop_set_ids.insert((recv_key, p.name.clone()), sfid);
                 }
                 continue;
             }
@@ -1374,11 +1372,11 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
                     let recv_ty = lo.ext_receiver_ty(file, recv_ref);
-                    let recv_desc = recv_ty.descriptor();
-                    let fid = lo.ext_fun_ids[&(recv_desc.clone(), f.name.clone())];
+                    let recv_key = recv_ty.erased_recv();
+                    let fid = lo.ext_fun_ids[&(recv_key, f.name.clone())];
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
-                    (fid, syms.ext_funs.get(&(recv_desc, f.name.clone()))?)
+                    (fid, syms.ext_funs.get(&(recv_key, f.name.clone()))?)
                 } else {
                     let sigs = syms.funs.get(&f.name)?;
                     let sig = if sigs.len() == 1 {
@@ -2714,11 +2712,9 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 if let Some(recv_ref) = &p.receiver {
                     // Extension property getter: lower `get() = …` with `this` = receiver (param 0).
                     let recv_ty = ty_of(file, recv_ref);
-                    let recv_desc = recv_ty.descriptor();
+                    let recv_key = recv_ty.erased_recv();
                     let pty = body_prop_ty(file, info, p);
-                    let gfid = *lo
-                        .ext_prop_get_ids
-                        .get(&(recv_desc.clone(), p.name.clone()))?;
+                    let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
                     lo.cur_fn_name = getter_name(&p.name);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
@@ -2728,7 +2724,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     // `var` extension property setter: `set(v) { … }` with `this` = receiver (param 0),
                     // the value parameter `v` (param 1).
                     if p.is_var {
-                        let sfid = *lo.ext_prop_set_ids.get(&(recv_desc, p.name.clone()))?;
+                        let sfid = *lo.ext_prop_set_ids.get(&(recv_key, p.name.clone()))?;
                         let setter = p.setter.as_ref().unwrap();
                         lo.scope.clear();
                         lo.next_value = 0;
@@ -3246,20 +3242,21 @@ pub(crate) struct Lower<'a> {
     /// Top-level function ids keyed by (name, erased-parameter-descriptor) so overloads (same name,
     /// different params) each map to their own compiled method.
     fun_ids: HashMap<(String, String), u32>,
-    /// Top-level extension functions, keyed by `(receiver type descriptor, name)` — separate from
-    /// `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by receiver.
-    ext_fun_ids: HashMap<(String, String), u32>,
+    /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
+    /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
+    /// receiver. Same key scheme as `SymbolTable::ext_funs` so the two never disagree.
+    ext_fun_ids: HashMap<(Ty, String), u32>,
     /// Top-level extension PROPERTIES (`val/var Recv.name: T get() = … [set(v) = …]`), keyed by
-    /// `(receiver descriptor, name)` → the synthesized static getter (`getName(Recv): T`) / setter
+    /// `(erased receiver, name)` → the synthesized static getter (`getName(Recv): T`) / setter
     /// (`setName(Recv, T)`) FunId.
-    ext_prop_get_ids: HashMap<(String, String), u32>,
+    ext_prop_get_ids: HashMap<(Ty, String), u32>,
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
     companion_consts: HashMap<(String, String), Ty>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
-    ext_prop_set_ids: HashMap<(String, String), u32>,
+    ext_prop_set_ids: HashMap<(Ty, String), u32>,
     classes: HashMap<String, ClassInfo>,
     /// Top-level property name → (index into `ir.statics`, type).
     statics: HashMap<String, (u32, Ty)>,
@@ -6792,7 +6789,7 @@ impl<'a> Lower<'a> {
         // receiver; the metafactory binds it and `invoke(args)` supplies the rest (same as a local-fun
         // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter). A
         // `Unit` return is wrapped so `invoke` yields the `Unit` singleton.
-        if let Some(&fid) = self.ext_fun_ids.get(&(rty.descriptor(), name.to_string())) {
+        if let Some(&fid) = self.ext_fun_ids.get(&(rty.erased_recv(), name.to_string())) {
             let cap = self.expr(recv)?;
             let impl_fn = if ret == Ty::Unit {
                 self.unit_ref_wrapper(fid, e.0)
@@ -8187,7 +8184,7 @@ impl<'a> Lower<'a> {
         // static impl). Mirrors a qualified `recv.name(args)` module-extension call.
         if let Some(&fid) = self
             .ext_fun_ids
-            .get(&(this_ty.descriptor(), name.to_string()))
+            .get(&(this_ty.erased_recv(), name.to_string()))
         {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == args.len() + 1 {
@@ -8803,9 +8800,9 @@ impl<'a> Lower<'a> {
             BinOp::Rem => "remAssign",
             _ => return None,
         };
-        let recv_desc = self.recv_ty(lhs).descriptor();
+        let recv_key = self.recv_ty(lhs).erased_recv();
         // Extension operator: `invokestatic owner.plusAssign(recv, arg)` (receiver is the first param).
-        if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, aname.to_string())) {
+        if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, aname.to_string())) {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == 2 {
                 let r = self.lower_arg(lhs, &params[0])?;
@@ -9530,7 +9527,7 @@ impl<'a> Lower<'a> {
             } => {
                 let rt = self.info.ty(receiver);
                 // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
-                if let Some(&sfid) = self.ext_prop_set_ids.get(&(rt.descriptor(), name.clone())) {
+                if let Some(&sfid) = self.ext_prop_set_ids.get(&(rt.erased_recv(), name.clone())) {
                     let pty = self.ir.functions[sfid as usize]
                         .params
                         .get(1)
@@ -10244,14 +10241,14 @@ impl<'a> Lower<'a> {
         // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
         // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
         let body_diverges = self.info.ty(body) == Ty::Nothing;
-        // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(receiver
-        // descriptor, name)` with value params only; a GENERIC extension isn't registered there (its
+        // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(erased
+        // receiver, name)` with value params only; a GENERIC extension isn't registered there (its
         // receiver erased to `Any`), so derive from the decl.
         let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(rt) = &recv_ty {
             if let Some(s) = self
                 .syms
                 .ext_funs
-                .get(&(rt.descriptor(), fname.to_string()))
+                .get(&(rt.erased_recv(), fname.to_string()))
             {
                 (s.params.clone(), s.ret)
             } else {
@@ -12039,7 +12036,10 @@ impl<'a> Lower<'a> {
                 }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
                 let rty = self.info.ty(receiver);
-                if let Some(&gfid) = self.ext_prop_get_ids.get(&(rty.descriptor(), name.clone())) {
+                if let Some(&gfid) = self
+                    .ext_prop_get_ids
+                    .get(&(rty.erased_recv(), name.clone()))
+                {
                     let a = self.expr(receiver)?;
                     return Some(self.ir.add_expr(IrExpr::Call {
                         callee: Callee::Local(gfid),
@@ -12308,8 +12308,8 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 if let Some(opn) = op_name {
-                    let recv_desc = self.recv_ty(lhs).descriptor();
-                    if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, opn.to_string())) {
+                    let recv_key = self.recv_ty(lhs).erased_recv();
+                    if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, opn.to_string())) {
                         let params = self.ir.functions[fid as usize].params.clone();
                         if params.len() == 2 {
                             let l = self.lower_arg(lhs, &params[0])?;
@@ -14656,13 +14656,13 @@ impl<'a> Lower<'a> {
                     // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
                     // receiver bound as `this`, instead of a real static call.
                     {
-                        let recv_desc = self.recv_ty(receiver).descriptor();
+                        let recv_key = self.recv_ty(receiver).erased_recv();
                         let is_inline_ext = self.afile.decls.iter().any(|&d| {
                             matches!(self.afile.decl(d), Decl::Fun(f)
                                 if f.name == name && f.is_inline
                                 && f.receiver.as_ref().is_some_and(|r|
                                     f.type_params.iter().any(|tp| tp == &r.name)
-                                    || ty_of(self.afile, r).descriptor() == recv_desc))
+                                    || ty_of(self.afile, r).erased_recv() == recv_key))
                         });
                         if is_inline_ext {
                             if let Some(r) =
@@ -14675,8 +14675,8 @@ impl<'a> Lower<'a> {
                     // A top-level extension function `recv.name(args)` → a static call whose first
                     // argument is the receiver (matching how the extension was registered/emitted).
                     {
-                        let recv_desc = self.recv_ty(receiver).descriptor();
-                        if let Some(&fid) = self.ext_fun_ids.get(&(recv_desc, name.clone())) {
+                        let recv_key = self.recv_ty(receiver).erased_recv();
+                        if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, name.clone())) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == args.len() + 1 {
                                 let recv = self.lower_arg(receiver, &params[0])?;

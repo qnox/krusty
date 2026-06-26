@@ -239,12 +239,13 @@ pub struct SymbolTable {
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn LibrarySet>,
-    /// Top-level extension functions: (receiver_descriptor, method_name) → Signature.
-    /// Used to resolve `recv.method(args)` when no instance method matches.
-    pub ext_funs: HashMap<(String, String), Signature>,
-    /// Top-level extension properties: (receiver_descriptor, prop_name) → (type, is_var). The
+    /// Top-level extension functions: (erased receiver, method_name) → Signature. The receiver is its
+    /// [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
+    /// `recv.method(args)` when no instance method matches.
+    pub ext_funs: HashMap<(Ty, String), Signature>,
+    /// Top-level extension properties: (erased receiver, prop_name) → (type, is_var). The
     /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
-    pub ext_props: HashMap<(String, String), (Ty, bool)>,
+    pub ext_props: HashMap<(Ty, String), (Ty, bool)>,
     /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
@@ -931,12 +932,13 @@ pub fn collect_signatures_with_cp(
                         is_suspend: f.is_suspend,
                     };
                     if let Some(recv_ref) = &f.receiver {
-                        // Extension function: index by (receiver_descriptor, method_name).
+                        // Extension function: index by (erased receiver, method_name).
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
-                        // A nullable reference receiver (`fun String?.foo()`) erases to the same
-                        // descriptor as the non-null form, so krusty (whose `Ty` drops nullability)
-                        // can't pick between a `String.foo` and a `String?.foo` at the call site. An
-                        // ordinary-named lone overload is unambiguous and supported. But an *operator*
+                        // A nullable reference receiver (`fun String?.foo()`) shares its
+                        // [`Ty::erased_recv`] key with the non-null form, so krusty can't pick between a
+                        // `String.foo` and a `String?.foo` at the call site (receiver nullability is
+                        // folded). An ordinary-named lone overload is unambiguous and supported. But an
+                        // *operator*
                         // name (`String?.plus`) shadows the builtin/member operator: with nullability
                         // erased, krusty would route every `String + …` (even a non-null one) to the
                         // extension, recursing infinitely when the body uses the same operator. kotlinc
@@ -960,7 +962,7 @@ pub fn collect_signatures_with_cp(
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
                         } else if table
                             .ext_funs
-                            .insert((recv_ty.descriptor(), f.name.clone()), sig)
+                            .insert((recv_ty.erased_recv(), f.name.clone()), sig)
                             .is_some()
                         {
                             // Two extensions with the same erased receiver + name (a duplicate, or a
@@ -1707,8 +1709,8 @@ pub fn collect_signatures_with_cp(
                     }
                 }
                 Decl::Property(p) => {
-                    // Extension property `val Recv.name: T get() = …`: register by (receiver
-                    // descriptor, name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
+                    // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
+                    // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
                     if let Some(recv_ref) = &p.receiver {
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &Default::default(), diags);
                         let ty =
@@ -1726,7 +1728,7 @@ pub fn collect_signatures_with_cp(
                                 })
                                 .unwrap_or(Ty::Error);
                         if recv_ty != Ty::Error && ty != Ty::Error {
-                            let key = (recv_ty.descriptor(), p.name.clone());
+                            let key = (recv_ty.erased_recv(), p.name.clone());
                             // Two extension properties that erase to the same `(receiver, name)` (e.g.
                             // generic overloads `C<T: Any?>.p` and `C<T: Any>.p`) would emit duplicate
                             // `getName` methods → `ClassFormatError`. Reject (skip), never miscompile.
@@ -3623,7 +3625,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                             p.receiver.as_ref().map(|r| c.resolve_ty(r)).and_then(|rt| {
                                 c.syms
                                     .ext_props
-                                    .get(&(rt.descriptor(), p.name.clone()))
+                                    .get(&(rt.erased_recv(), p.name.clone()))
                                     .map(|(t, _)| *t)
                             })
                         })
@@ -4341,11 +4343,10 @@ impl<'a> Checker<'a> {
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = self.resolve_ty(recv_ref);
             self.this_ty = Some(recv_ty);
-            let recv_desc = recv_ty.descriptor();
             self.ret_ty = self
                 .syms
                 .ext_funs
-                .get(&(recv_desc, f.name.clone()))
+                .get(&(recv_ty.erased_recv(), f.name.clone()))
                 .map(|s| s.ret)
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
@@ -5991,7 +5992,7 @@ impl<'a> Checker<'a> {
                     if let Some(sig) = self
                         .syms
                         .ext_funs
-                        .get(&(rty.descriptor(), name.clone()))
+                        .get(&(rty.erased_recv(), name.clone()))
                         .cloned()
                     {
                         if !sig.vararg && sig.params.len() == sig.required {
@@ -6383,12 +6384,12 @@ impl<'a> Checker<'a> {
             }
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
-        // by the receiver's erased descriptor, exactly as a qualified `recv.name(args)` extension call
+        // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
         if let Some(sig) = self
             .syms
             .ext_funs
-            .get(&(rt.descriptor(), name.to_string()))
+            .get(&(rt.erased_recv(), name.to_string()))
             .cloned()
         {
             if !sig.vararg && sig.params.len() == arg_tys.len() {
@@ -6790,11 +6791,11 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Extension property: `recv.name` resolved by (receiver descriptor, name).
+        // Extension property: `recv.name` resolved by (erased receiver, name).
         if let Some((ty, _)) = self
             .syms
             .ext_props
-            .get(&(rt.descriptor(), name.to_string()))
+            .get(&(rt.erased_recv(), name.to_string()))
         {
             return *ty;
         }
@@ -9274,7 +9275,7 @@ impl<'a> Checker<'a> {
                 if let Some((lty, is_var)) = self
                     .syms
                     .ext_props
-                    .get(&(rt.descriptor(), name.clone()))
+                    .get(&(rt.erased_recv(), name.clone()))
                     .copied()
                 {
                     if !is_var {

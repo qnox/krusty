@@ -212,13 +212,13 @@ impl SymbolSource for ModuleSymbols<'_> {
                     let mut rung: u32 = 0;
                     self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
                 }
-                // Extension functions, keyed by erased receiver descriptor: the exact receiver (rung 0),
-                // then the generic `Any`/`Object` key (rung 1) for a type-variable-receiver extension —
-                // matching the checker's exact-then-generic extension lookup.
-                let exact = recv.descriptor();
-                let any = Ty::obj("kotlin/Any").descriptor();
+                // Extension functions, keyed by erased receiver: the exact receiver (rung 0), then the
+                // generic `Any` key (rung 1) for a type-variable-receiver extension — matching the
+                // checker's exact-then-generic extension lookup.
+                let exact = recv.erased_recv();
+                let any = Ty::obj("kotlin/Any");
                 for (rank, key) in [exact, any].into_iter().enumerate() {
-                    if let Some(sig) = self.syms.ext_funs.get(&(key.clone(), name.to_string())) {
+                    if let Some(sig) = self.syms.ext_funs.get(&(key, name.to_string())) {
                         overloads.push(fn_info(
                             FnKind::Extension,
                             sig,
@@ -419,11 +419,11 @@ mod tests {
     }
 
     #[test]
-    fn extension_prepends_receiver_and_keys_by_descriptor() {
+    fn extension_prepends_receiver_and_keys_by_erased_receiver() {
         let mut st = SymbolTable::default();
         let recv = Ty::obj("demo/Point");
         st.ext_funs.insert(
-            (recv.descriptor(), "shifted".into()),
+            (recv.erased_recv(), "shifted".into()),
             sig(vec![Ty::Int], recv),
         );
         let m = ModuleSymbols::new(&st);
