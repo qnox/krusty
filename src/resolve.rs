@@ -5579,9 +5579,6 @@ impl<'a> Checker<'a> {
                             .into_iter()
                             .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
                             .collect();
-                        if std::env::var("KRUSTY_DEBUG").is_ok() {
-                            eprintln!("  [fnref-check] ::{name} tl={}", tl.len());
-                        }
                         if let [o] = tl.as_slice() {
                             if o.callable.vararg_elem.is_none()
                                 && o.call_sig.required == o.callable.params.len()
