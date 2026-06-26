@@ -759,3 +759,70 @@ surface work. `tests/serialization_conformance.rs` encodes the end-state as an `
 test (executable spec) plus a guard test that flips when the blockers close.
 
 This document and the tests state these boundaries explicitly rather than implying the bar is met.
+
+#### Update (2026-06-26) — receiver-lambda builders → `Json { }` → decode-instance inference → corpus 20/69
+
+This session landed the **receiver-lambda / `Json { }` builder / decode-inference chain** (7 commits,
+`86e022b → a347638`), taking the single-file `boxIr` corpus from **18 → 20** (`ser-survey.sh`), main box gate
+**0-FAIL throughout**, every change reviewer-vetted. Two corpus files greened and one genuine miscompile fixed.
+
+- **Inherited `val` properties in `@Serializable` inheritance** (`86e022b`) — `serializable_fields` folds an
+  inherited body `val` for a no-ctor-param derived class (deterministic-init reasoning; `construct_obj` keeps
+  its initializer on decode).
+- **Receiver function-type parameters + builder DSLs** (`3876134`, `b32c998`) — a parameter of receiver
+  function type `f: B.() -> Unit` called `build { member = v }` type-checks the lambda body with `this` = the
+  receiver (unqualified member access, like `apply`) and emits it as a **real `Function1`** (receiver = param 0),
+  invoked via `f(b)` — generalizing the inlined `apply`/`run` to non-inlined HOFs. Extended to **classpath**
+  builders (`buildList { add(1) }`): the receiver type is recovered from the JVM generic signature
+  (`toplevel_lambda_param_types`/`function_input_types`); a conservative name-free shape test (single
+  object-typed input, no explicit params, no `it`) selects the receiver form. (`Signature.lambda_has_receiver`,
+  `TypeInfo.recv_lambdas`, `check_lambda_with_receiver_types`; `lower_lambda_sam` binds the param as `this`.)
+- **`Json { encodeDefaults = true }` config builder** (`b0d8f3d`) — the keystone, six coordinated parts: the
+  top-level `Json(from = Json.Default, builderAction)` function is preferred over the `Json` companion when a
+  trailing lambda is present; `resolve_callable` gains a trailing-lambda `$default` branch (lambda fills the
+  LAST real param, leading `from` defaulted); a `$default` callable is not read as vararg;
+  `toplevel_lambda_param_types` recovers the builder lambda's `JsonBuilder` receiver across the arity gap; a
+  bare classpath-receiver property write (`encodeDefaults = true`) resolves to its setter; `$default` emission
+  places the lambda in the last slot with the right bit-mask + invokes the classpath setter.
+- **Decode-on-instance generic-return inference** (`f10e84b`) — a generic classpath member/extension called on
+  an INSTANCE receiver whose return erased to `Any` recovers its substituted return from the arguments
+  (`j.decodeFromString(Foo.serializer(), s)` infers `Foo`), mirroring the companion path. **Greens
+  `singleFileInheritanceJs` → 19/69.**
+- **Branchy-value-to-field VerifyError fix** (`b91f318`) — a real **miscompile**: a property initializer whose
+  value is a branch (`when`/`if`/safe-call) stored through a side-effect-free receiver left the receiver on the
+  operand stack across the branch, but the branch/splice stackmap frames don't include that ambient receiver
+  (the emitter tracks stack height, not the ambient types). Fix: emit the branchy value first onto a clean
+  stack (correct frames), spill to a temp local, then push the receiver + reload + `putfield` (value-first
+  preserves order since the receiver is side-effect-free).
+- **Safe-call property inference + reified `decodeFromJsonElement`** (`a347638`) — `infer_lit_ty_p` gains a
+  `SafeCall` arm (`val xyz = abc?.let { … }` infers its nullable type via the new generic
+  `LibrarySet::extension_call_return`, which unifies the lambda body type into the extension's return variable —
+  **no stdlib name matched**, purely structural); `try_reified_serial` handles reified
+  `Json.decodeFromJsonElement<C>(element)` (the 2-arg member + synthesized `C.serializer()` + checkcast).
+  **Greens `issueWithVariablesHiddening` → 20/69.** A jdk-aware e2e harness (`run_box_in_krusty_jdk`) puts the
+  JDK jimage on the compile classpath for APIs whose member resolution walks the mapped `java/*` types.
+
+**Honest remaining gap (PASS 20/69).** Every one of the 27 remaining single-file FAIL cases needs a DEEP,
+multi-feature effort — there is no bounded fix left (a `?.let { }` *Unit*-result safe call was attempted and
+reverted three times: it regresses `coerctionToUnitForLastExpressionWithStarProjection` and needs deep
+Unit-coercion/control-flow codegen). The prioritized roadmap:
+- **Generic-base serialization** (largest cluster: `genericBaseClassMultiple` already runs but emits empty
+  values, `genericBaseClassSimple`, `multimoduleInheritanceJsGeneric`). Blocked on a **foundational IR change**:
+  `IrClass.superclass` is a bare fq-name carrying NO type arguments, so substituting a type-param through the
+  inheritance chain (`Bottom2 : … : Top<List<String>>` → `top: List<String>`) is impossible. The non-inheritance
+  generic-serializer foundation (`$serializer`-as-class with per-type-param `KSerializer` ctor args) already
+  exists; this needs the inherited-substitution layer.
+- **Reified `serializer<T>()` on a generic class** + captured-type-parameter exceptions
+  (`intrinsicsNonReified`/`intrinsicsStarProjections` throw `NoSuchMethodError Box.serializer()` then need the
+  `IllegalArgumentException("Captured type parameter…")`).
+- **Meta-annotations** (`@MetaSerializable`), **enum-as-cached** (`GeneratedSerializer`/`childSerializers`
+  reflection), **recursive types + companion-init caching** (`caching`), **polymorphic type parameters**,
+  **`typeOf`/contextual**, **multi-field value classes** (`multiFieldValueClasses` — a value-class codegen
+  VerifyError), **reflection** (`.parameters`/`.properties`), and **parser gaps** (interface-body declarations,
+  local `@Serializable` classes, `data object` factory forms, annotation array members).
+
+69/69 is a genuine multi-session program requiring essentially the full kotlinx-serialization feature set plus
+several core-compiler language features — NOT an extension-surface gap. The surface itself is proven (both
+plugins load from jar; KSP covers all its cases; serialization spans primitives, nesting, nullability, custom/
+contextual/sealed/enum/value-class/generic serializers, default values, the `Json { }` builder, and
+decode-inference). The working roadmap with exact file:line steps lives in the session memory notes.
