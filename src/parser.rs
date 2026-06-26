@@ -707,6 +707,27 @@ impl<'a> Parser<'a> {
                     };
                     self.parse_type_args(); // skip `<T, R>` if present
                     self.eat(TokenKind::Eq);
+                    // A type-use annotation on the RHS type (`typealias S = @Serializable(X::class) T`):
+                    // consume each `@Anno[(args)]`; capture a `@Serializable(with = X::class)` so a property
+                    // typed by this alias serializes through `X` (the kotlinx type-alias serializer rule).
+                    while self.at(TokenKind::At) {
+                        self.bump(); // '@'
+                        let aname = self.parse_qualified_name();
+                        self.parse_type_args();
+                        // The arg-list `(` must be ADJACENT to the name (else it's a function type).
+                        let adjacent =
+                            self.i > 0 && self.t[self.i - 1].span.hi == self.tok().span.lo;
+                        let args = if self.at(TokenKind::LParen) && adjacent {
+                            self.parse_call_arguments()
+                        } else {
+                            Vec::new()
+                        };
+                        if aname.rsplit(['.', '/']).next() == Some("Serializable") {
+                            if let (false, Some(&arg)) = (alias.is_empty(), args.first()) {
+                                self.file.type_alias_serializers.insert(alias.clone(), arg);
+                            }
+                        }
+                    }
                     // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
                     let target = if self.at(TokenKind::LParen) {
                         // function type — skip entire line
@@ -2533,17 +2554,32 @@ impl<'a> Parser<'a> {
         // (`@Composable () -> Unit`); an argument-bearing type annotation (`@Foo(1) Bar`, rare) is not
         // yet handled.
         let mut type_anns = Vec::new();
+        let mut type_ann_args: Vec<Vec<ExprId>> = Vec::new();
         while self.at(TokenKind::At) {
             self.bump(); // '@'
             let qname = self.parse_qualified_name();
             self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
+                                    // An argument-bearing type annotation (`@Serializable(X::class) Bruh`): consume + capture
+                                    // the argument list so a plugin can recover e.g. a type-use serializer. A bare `@Foo` has
+                                    // none. The `(` must be ADJACENT to the annotation name (Kotlin's rule) — a `(` after a
+                                    // space belongs to a following FUNCTION TYPE (`@Composable () -> Unit`), not the annotation.
+            let adjacent = self.i > 0 && self.t[self.i - 1].span.hi == self.tok().span.lo;
+            let args = if self.at(TokenKind::LParen) && adjacent {
+                self.parse_call_arguments()
+            } else {
+                Vec::new()
+            };
             if !qname.is_empty() {
                 type_anns.push(qname.rsplit('.').next().unwrap_or(&qname).to_string());
+                type_ann_args.push(args);
             }
         }
         let span = self.tok().span;
         if !type_anns.is_empty() {
             self.file.type_annotations.insert(span.lo, type_anns);
+            self.file
+                .type_annotation_args
+                .insert(span.lo, type_ann_args);
         }
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
         let mut fun_suspend = false;

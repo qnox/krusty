@@ -266,6 +266,46 @@ fun box(): String { DummySer; return "OK" }
 }
 
 #[test]
+fn type_use_and_typealias_serializer_annotations_in_krusty() {
+    // `@Serializable(with=X)` written on a TYPE USE (`val b3: @Serializable(BB) Bruh`) and on a
+    // TYPEALIAS (`typealias Aliased = @Serializable(BB) Bruh`, used as `val b4: Aliased`) both route
+    // that property through `BB` — alongside a class-level default serializer for the plain field `b1`.
+    let src = r##"import kotlinx.serialization.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+@Serializable(BA::class)
+class Bruh(val s: String)
+object BA : KSerializer<Bruh> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Bruh", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Bruh) { encoder.encodeString(value.s) }
+    override fun deserialize(decoder: Decoder): Bruh = Bruh(decoder.decodeString())
+}
+object BB : KSerializer<Bruh> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Bruh", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Bruh) { encoder.encodeString(value.s + "#") }
+    override fun deserialize(decoder: Decoder): Bruh = Bruh(decoder.decodeString())
+}
+typealias Aliased = @Serializable(BB::class) Bruh
+@Serializable
+class T(val b1: Bruh, val b3: @Serializable(BB::class) Bruh, val b4: Aliased)
+fun box(): String {
+    val s = Json.encodeToString(T(Bruh("a"), Bruh("c"), Bruh("d")))
+    return if (s == "{\"b1\":\"a\",\"b3\":\"c#\",\"b4\":\"d#\"}") "OK" else s
+}
+"##;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "TypeUseAlias") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "type-use / typealias serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty type-use + typealias serializer annotations OK");
+}
+
+#[test]
 fn custom_serializers_class_and_property_level_in_krusty() {
     // A class-level `@Serializable(with = X)` (Bruh → BruhSerializerA) AND a property-level override
     // (`@Serializable(with = BruhSerializerB) val b2`). Encoding a holder exercises BOTH: a field uses

@@ -5803,25 +5803,55 @@ impl<'a> Lower<'a> {
         c.props
             .iter()
             .filter_map(|p| {
-                let i = p
+                // (1) A PROPERTY-level annotation: `@Serializable(X::class) val p`.
+                let from_prop = p
                     .annotations
                     .iter()
-                    .position(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))?;
-                let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-                if let Expr::CallableRef {
-                    receiver: Some(r),
-                    name,
-                } = self.afile.expr(*arg)
-                {
-                    if name == "class" {
-                        if let Expr::Name(x) = self.afile.expr(*r) {
-                            return Some((p.name.clone(), self.syms.class_names.get(x)?.clone()));
-                        }
-                    }
-                }
-                None
+                    .position(|a| a.rsplit(['/', '.']).next() == Some("Serializable"))
+                    .and_then(|i| p.annotation_args.get(i).and_then(|args| args.first()))
+                    .and_then(|arg| self.serializer_class_from_arg(*arg));
+                // (2) A TYPE-USE annotation: `val p: @Serializable(X::class) T`. The annotation is
+                // recorded against the type's start offset; a property annotation (1) takes precedence.
+                let from_type = || {
+                    let lo = p.ty.span.lo;
+                    let anns = self.afile.type_annotations.get(&lo)?;
+                    let idx = anns.iter().position(|a| a == "Serializable")?;
+                    let arg = self
+                        .afile
+                        .type_annotation_args
+                        .get(&lo)?
+                        .get(idx)?
+                        .first()?;
+                    self.serializer_class_from_arg(*arg)
+                };
+                // (3) The property's type is an annotated typealias (`typealias S = @Serializable(X) T`).
+                let from_alias = || {
+                    let arg = self.afile.type_alias_serializers.get(&p.ty.name)?;
+                    self.serializer_class_from_arg(*arg)
+                };
+                Some((
+                    p.name.clone(),
+                    from_prop.or_else(from_type).or_else(from_alias)?,
+                ))
             })
             .collect()
+    }
+
+    /// The internal name of the serializer in a `@Serializable(with = X::class)` argument expression
+    /// (`X::class`), via the type universe. `None` if the argument isn't a class literal.
+    fn serializer_class_from_arg(&self, arg: AstExprId) -> Option<String> {
+        if let Expr::CallableRef {
+            receiver: Some(r),
+            name,
+        } = self.afile.expr(arg)
+        {
+            if name == "class" {
+                if let Expr::Name(x) = self.afile.expr(*r) {
+                    return self.syms.class_names.get(x).cloned();
+                }
+            }
+        }
+        None
     }
 
     /// Property names whose element serializer is CONTEXTUAL: a property carrying `@Contextual`, or one

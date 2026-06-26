@@ -664,6 +664,14 @@ pub struct File {
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
     /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
     pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
+    /// Argument lists for argument-bearing TYPE annotations (`@Serializable(X::class) Bruh`), parallel to
+    /// `type_annotations` (same key = the type's start offset, same order). An annotation with no `(…)`
+    /// has an empty `Vec`. Lets a plugin recover e.g. a type-use `@Serializable(with = …)` serializer.
+    pub type_annotation_args: std::collections::HashMap<u32, Vec<Vec<ExprId>>>,
+    /// For a typealias whose RHS type carries `@Serializable(with = X::class)` (`typealias S =
+    /// @Serializable(X::class) T`): the alias name → the `X::class` argument expression. A property typed
+    /// by such an alias serializes through `X` (mirrors a type-use `@Serializable` on the property type).
+    pub type_alias_serializers: std::collections::HashMap<String, ExprId>,
 }
 
 impl File {
