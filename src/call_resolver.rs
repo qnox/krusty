@@ -172,7 +172,7 @@ impl<'a> CallResolver<'a> {
             .functions(name, Some(receiver))
             .overloads
             .iter()
-            .any(|o| o.kind == FnKind::Extension && o.flags.inline)
+            .any(|o| o.kind == FnKind::Extension && o.flags.inline.can_inline())
     }
 
     /// Whether `name` has an `inline` top-level overload.
@@ -181,7 +181,7 @@ impl<'a> CallResolver<'a> {
             .functions(name, None)
             .overloads
             .iter()
-            .any(|o| o.flags.inline)
+            .any(|o| o.flags.inline.can_inline())
     }
 
     /// Whether `name` has a `suspend` top-level overload. The flag flows uniformly from the AST
@@ -209,7 +209,7 @@ impl<'a> CallResolver<'a> {
             .functions(name, None)
             .overloads
             .iter()
-            .any(|o| o.flags.inline_only)
+            .any(|o| o.flags.inline.must_inline())
     }
 
     /// Resolve a single-selector `@OverloadResolutionByLambdaReturnType` call (`sumOf { … }`): pick the

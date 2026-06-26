@@ -3365,21 +3365,15 @@ impl<'a> Emitter<'a> {
                     name,
                     descriptor,
                     inline,
-                    must_inline,
                 } => {
-                    let (owner, name, descriptor, inline, must_inline) = (
-                        owner.clone(),
-                        name.clone(),
-                        descriptor.clone(),
-                        *inline,
-                        *must_inline,
-                    );
+                    let (owner, name, descriptor, inline) =
+                        (owner.clone(), name.clone(), descriptor.clone(), *inline);
                     let args = args.clone();
                     // An inline call to an INSTANCE method on a singleton receiver (a value-class COMPANION
                     // fn, `Result.success`): the receiver loads first, then the body is spliced with the
                     // receiver prepended as `this` (local 0). `splice_desc` adds the receiver as the first
                     // parameter; the body is fetched by its REAL (instance) descriptor.
-                    if inline {
+                    if inline.can_inline() {
                         if let Some(&recv) = dispatch_receiver.as_ref() {
                             let recv_desc = self.value_ty(recv).descriptor();
                             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -3401,15 +3395,15 @@ impl<'a> Emitter<'a> {
                     // A cross-module `inline fun`: try to splice its compiled body here (the bytecode
                     // inliner). On any unsupported shape `try_inline_static` returns false and we emit the
                     // ordinary `invokestatic` — so an un-spliceable inline call is never miscompiled.
-                    if inline
+                    if inline.can_inline()
                         && dispatch_receiver.is_none()
                         && self.try_inline_static(&owner, &name, &descriptor, &args, code)
                     {
                         return;
                     }
-                    // A `must_inline` callee (non-public `@InlineOnly`) has no legal `invokestatic`: the
+                    // A `MustInline` callee (non-public `@InlineOnly`) has no legal `invokestatic`: the
                     // splice failed (e.g. a branchy body on a non-empty operand stack), so skip the file.
-                    if must_inline {
+                    if inline.must_inline() {
                         INLINE_BAIL.with(|b| b.set(true));
                         // Still emit a (discarded) call so the builder's stack height stays consistent.
                     }
@@ -4312,8 +4306,7 @@ impl<'a> Emitter<'a> {
                         name,
                         descriptor,
                         inline,
-                        must_inline,
-                    } if *inline || *must_inline => {
+                    } if inline.can_inline() => {
                         args.iter().any(|&a| {
                             matches!(self.ir.expr(a),
                                 IrExpr::Lambda { inline_body: Some(b), .. } if self.records_frame(*b))

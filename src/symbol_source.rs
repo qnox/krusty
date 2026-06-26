@@ -130,10 +130,9 @@ mod tests {
             ret: Ty::Unit,
             physical_ret: Ty::Unit,
             descriptor: "()V".to_string(),
-            is_inline: false,
+            inline: crate::libraries::InlineKind::None,
             default_call: false,
             vararg_elem: None,
-            must_inline: false,
             signature: None,
             origin: crate::libraries::Origin::Library,
         }

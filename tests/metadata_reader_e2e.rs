@@ -118,7 +118,7 @@ fn result_get_or_throw_resolves_as_inline_extension() {
         .expect("getOrThrow resolves on a Result receiver via @Metadata");
     assert_eq!(c.owner, "kotlin/ResultKt");
     assert_eq!(c.name, "getOrThrow");
-    assert!(c.is_inline, "getOrThrow is inline");
+    assert!(c.inline.can_inline(), "getOrThrow is inline");
 
     // The same name must NOT resolve on an unrelated receiver (the erased-Object candidate is gated by
     // the @Metadata receiver class).
