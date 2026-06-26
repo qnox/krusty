@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 466).
+  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 467).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 467 — emit fail-soft: a `GetValue`/`SetValue` of an unallocated value slot skips the file, never
+  panics (gate 1782, flat, FAIL=0).** The JVM emitter indexed `self.slots` directly (`self.slots[i]`) for
+  `GetValue`/`SetValue`; if a lowering ever produced malformed IR — a value index whose slot was never
+  allocated (e.g. an unsupported multi-parameter suspend-lambda shape that the state-machine lowering fails
+  to bail on in the multi-file path) — the compiler PANICKED ("no entry found for key"), aborting the whole
+  run instead of skipping that one file. A compiler must never crash on its own IR. Now a missing slot sets
+  a thread-local `EMIT_BAIL` (mirrors the existing `INLINE_BAIL` un-spliceable-call path) and `emit_all`
+  returns `None`, so the file is skipped — never miscompiled, never a crash. Pure safety net: at the current
+  gate no file triggers it, so the result is byte-identical (1782/0 flat). This is the foundational hardening
+  for the coroutine blocker-stack work (a 5-layer effort: L1 suspend-codegen slots, L2 checker cross-file
+  ExprId, L0/L3 generic anonymous-object capture, L4 the `Continuation()` factory) — see
+  [[coroutine-intrinsics-plan]]. TDD: a unit test (src/jvm/ir_emit.rs `fail_soft_tests`) feeds a hand-built
+  `IrFile` whose `box()` body is `GetValue` of an undeclared slot and asserts `emit_all` returns `None`.
 
 - **Phase 466 — check primary-constructor parameter defaults → object-singleton defaults lower (gate 1782,
   flat, FAIL=0).** A constructor parameter whose default is an OBJECT singleton (`val ctx: CoroutineContext

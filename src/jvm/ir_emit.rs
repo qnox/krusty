@@ -15,6 +15,11 @@ use crate::types::Ty;
 // such a callee, so the whole file is skipped (`emit_all` returns `None`) rather than miscompiled.
 thread_local! {
     static INLINE_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set when a `GetValue`/`SetValue` references a value slot that was never allocated (a lowering
+    /// produced malformed IR — e.g. an unsupported suspend shape). The emitter does NOT panic on this:
+    /// it sets the flag and `emit_all` drops the whole file (returns `None`), so the file is skipped,
+    /// never miscompiled. A compiler must never crash on its own IR.
+    static EMIT_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -62,6 +67,7 @@ pub fn emit_all_with_class_meta(
         return None;
     }
     INLINE_BAIL.with(|b| b.set(false));
+    EMIT_BAIL.with(|b| b.set(false));
     let mut out = Vec::new();
     // Facade: the static top-level functions (those with no dispatch receiver). A function that BELONGS
     // to a class — including a `static` member like the serialization plugin's `serializer()` accessor,
@@ -97,6 +103,9 @@ pub fn emit_all_with_class_meta(
     }
     if INLINE_BAIL.with(|b| b.get()) {
         return None; // an un-spliceable `must_inline` call — skip the file, never miscompile
+    }
+    if EMIT_BAIL.with(|b| b.get()) {
+        return None; // a value slot was never allocated (malformed IR) — skip, never miscompile
     }
     Some(out)
 }
@@ -2784,7 +2793,10 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::SetValue { var, value } => {
-                let (slot, jt) = self.slots[&var];
+                let Some(&(slot, jt)) = self.slots.get(&var) else {
+                    EMIT_BAIL.with(|b| b.set(true));
+                    return;
+                };
                 // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
                 // compiles to `iinc slot, k` (kotlinc's form), not load/const/add/store.
                 let delta: Option<i32> = if jt == Ty::Int {
@@ -2950,7 +2962,12 @@ impl<'a> Emitter<'a> {
                 code.ldc_class(&name, self.cw);
             }
             IrExpr::GetValue(i) => {
-                let (slot, jt) = self.slots[i];
+                // A slot that was never allocated means the lowering produced malformed IR (e.g. an
+                // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
+                let Some(&(slot, jt)) = self.slots.get(i) else {
+                    EMIT_BAIL.with(|b| b.set(true));
+                    return;
+                };
                 load(jt, slot, code);
             }
             IrExpr::GetField {
@@ -5500,5 +5517,40 @@ fn discard(t: Ty, code: &mut CodeBuilder) {
         2 => code.pop2(),
         1 => code.pop(),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod fail_soft_tests {
+    use super::*;
+    use crate::ir::{IrExpr, IrFile, IrFunction};
+    use crate::jvm::classreader::MethodCode;
+    use crate::jvm::inline::MethodBodies;
+    use crate::types::Ty;
+
+    struct NoBodies;
+    impl MethodBodies for NoBodies {
+        fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
+            None
+        }
+    }
+
+    // A `GetValue` of a value slot that was never allocated is malformed IR (e.g. an unsupported
+    // suspend shape the lowering should have bailed on). The emitter must SKIP the file
+    // (`emit_all` -> `None`), never panic — a compiler must not crash on its own IR.
+    #[test]
+    fn getvalue_of_unallocated_slot_skips_not_panics() {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::GetValue(99));
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        assert!(emit_all(&ir, "TestKt", &NoBodies, None).is_none());
     }
 }
