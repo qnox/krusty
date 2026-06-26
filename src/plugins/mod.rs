@@ -210,6 +210,8 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         explicit_param_stores: false,
         methods: Vec::new(),
         is_interface: false,
+        is_annotation: false,
+        annotation_impl_of: None,
         is_sealed: false,
         is_abstract: false,
         superclass: "java/lang/Object".to_string(),

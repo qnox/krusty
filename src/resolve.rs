@@ -2933,20 +2933,10 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // access; uses it can't represent unboxed yet (a value-class-typed local/param/field/
                 // return, boxing, equality) make `lower_file` bail so the file skips rather than
                 // miscompile. No blanket rejection here.
-                // An annotation with an array member needs content-based equals/hashCode
-                // (`Arrays.equals`/`Arrays.hashCode`) per the annotation contract — krusty's synthesized
-                // members use reference equality, so reject it rather than miscompile equality.
-                if cl.is_annotation()
-                    && cl
-                        .props
-                        .iter()
-                        .any(|p| matches!(c.resolve_ty(&p.ty), Ty::Array(_)))
-                {
-                    c.diags.error(
-                        cl.span,
-                        "krusty: an annotation with an array member is not supported".to_string(),
-                    );
-                }
+                // An annotation class emits as a JVM annotation interface + a synthetic impl whose
+                // `equals`/`hashCode` are CONTENT-based (`Arrays.equals`/`Arrays.hashCode` for array
+                // members) per the `java.lang.annotation.Annotation` contract — so an array member is
+                // supported (no krusty-synthesized reference-equality member to miscompile).
                 // Class type parameters are in scope for all members (erased; only function params
                 // specialize — see `TParams::erased`).
                 c.tparams = TParams::erased(&cl.type_params);
