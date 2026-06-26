@@ -1411,7 +1411,10 @@ pub fn collect_signatures_with_cp(
                         table.objects.insert(c.name.clone());
                     }
                     if c.is_enum() {
-                        table.enums.insert(c.name.clone(), c.enum_entries.clone());
+                        table.enums.insert(
+                            c.name.clone(),
+                            c.enum_entries.iter().map(|e| e.name.clone()).collect(),
+                        );
                     }
                     // Resolve each supertype to a JVM internal name via `class_names` (user/classpath
                     // classes, stdlib aliases, mapped built-ins). A supertype that resolves to none
@@ -3295,16 +3298,16 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // checked like a method of the enum — `this` is the enum type, the enum's properties AND
                 // the entry's own body properties are in scope, and the return type comes from the
                 // abstract member it overrides.
-                for (ei, body) in cl.enum_entry_bodies.iter().enumerate() {
+                for entry in &cl.enum_entries {
                     // Type each entry-body property's initializer, then make it visible (as a member) to
                     // that entry's override methods.
                     let mut entry_props = props.clone();
-                    if let Some(bprops) = cl.enum_entry_props.get(ei) {
+                    if !entry.props.is_empty() {
                         c.push_scope();
                         for (n, t, v) in &props {
                             c.declare(n, *t, *v);
                         }
-                        for bp in bprops {
+                        for bp in &entry.props {
                             let ty = match (&bp.ty, bp.init) {
                                 (Some(r), _) => c.resolve_ty(r),
                                 (None, Some(init)) => c.expr(init),
@@ -3321,7 +3324,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                         }
                         c.pop_scope();
                     }
-                    for bm in body {
+                    for bm in &entry.methods {
                         c.check_method(bm, &entry_props);
                     }
                 }
@@ -3547,8 +3550,8 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                 // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
                 if cl.is_enum() {
                     let ctor_tys: Vec<Ty> = cl.props.iter().map(|p| c.resolve_ty(&p.ty)).collect();
-                    for args in &cl.enum_entry_args {
-                        for (a, expected_ty) in args.iter().zip(&ctor_tys) {
+                    for entry in &cl.enum_entries {
+                        for (a, expected_ty) in entry.args.iter().zip(&ctor_tys) {
                             let at = c.expr(*a);
                             c.expect_assignable(
                                 *expected_ty,
