@@ -42,3 +42,22 @@ fun box(): String { val b: Base = O; return b.g() }\n";
         "OK"
     );
 }
+
+#[test]
+fn object_with_computed_property_override() {
+    // An `object` implementing an interface with a COMPUTED property override
+    // (`override val d: Int get() = …`) — the same `getX()` lowering a class uses. Previously an
+    // object only admitted plain backing-field body properties; a computed getter bailed the file.
+    // This is the shape of a custom-serializer `object : KSerializer<…>` whose `descriptor` is a
+    // `get() = …`.
+    const SRC: &str = "interface I { val d: Int; val e: String }\n\
+object O : I {\n\
+override val d: Int get() = 40 + 2\n\
+override val e: String get() = \"x\"\n\
+}\n\
+fun box(): String { val i: I = O; return if (i.d == 42 && i.e == \"x\") \"OK\" else \"no\" }\n";
+    assert_eq!(
+        run(SRC).expect("object computed-property override compiles + runs"),
+        "OK"
+    );
+}

@@ -2960,7 +2960,10 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
         && (c.base_class.is_none() || c.supertypes.is_empty())
         && c.companion_methods.is_empty() && c.companion_props.is_empty() && c.secondary_ctors.is_empty()
         && c.props.is_empty()
-        && c.body_props.iter().all(is_plain_body_prop)
+        // A plain backing field or a computed property (custom getter, no field) — the latter emitted as
+        // a `getX()` method, the same lowering a class uses. A computed `override val descriptor get() =
+        // …` is the common shape of a custom-serializer `object : KSerializer<…>`.
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p))
         && c.methods.iter().all(|m| m.receiver.is_none() && !matches!(m.body, FunBody::None))
         // An `init { … }` block with side effects must not run when a `const val` is read (a const is
         // inlined, not fetched through INSTANCE) — krusty doesn't model const-inlining, so bail.
