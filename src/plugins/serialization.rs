@@ -125,18 +125,9 @@ fn getter_name(prop: &str) -> String {
 }
 
 /// The boxed reference descriptor for a primitive fq name, or `None` if it isn't a primitive.
-fn boxed_descriptor(fq: &str) -> Option<&'static str> {
-    Some(match fq {
-        "kotlin/Int" => "Ljava/lang/Integer;",
-        "kotlin/Long" => "Ljava/lang/Long;",
-        "kotlin/Boolean" => "Ljava/lang/Boolean;",
-        "kotlin/Double" => "Ljava/lang/Double;",
-        "kotlin/Float" => "Ljava/lang/Float;",
-        "kotlin/Char" => "Ljava/lang/Character;",
-        "kotlin/Byte" => "Ljava/lang/Byte;",
-        "kotlin/Short" => "Ljava/lang/Short;",
-        _ => return None,
-    })
+/// Routes through the canonical primitive→wrapper table in `jvm_class_map` rather than re-listing it.
+fn boxed_descriptor(fq: &str) -> Option<String> {
+    crate::jvm::jvm_class_map::kotlin_prim_to_wrapper(fq).map(|w| format!("L{w};"))
 }
 
 /// The JVM descriptor for a property type (just what `serialize`'s getter calls need). A nullable
@@ -149,7 +140,7 @@ fn ty_descriptor(ty: &Ty) -> String {
     };
     if nullable {
         if let Some(boxed) = boxed_descriptor(fq) {
-            return boxed.to_string();
+            return boxed;
         }
     }
     match fq {
@@ -2519,6 +2510,30 @@ mod tests {
             SerializationAbi::from_classpath(&snap),
             Some(SerializationAbi::V1_6Plus)
         );
+    }
+
+    #[test]
+    fn boxed_descriptor_matches_wrapper_table() {
+        // The boxed descriptor for each primitive fq byte-matches the JVM wrapper literal — pins the
+        // de-dup (routed through `jvm_class_map::kotlin_prim_to_wrapper`) at this call site.
+        assert_eq!(
+            boxed_descriptor("kotlin/Int").as_deref(),
+            Some("Ljava/lang/Integer;")
+        );
+        assert_eq!(
+            boxed_descriptor("kotlin/Long").as_deref(),
+            Some("Ljava/lang/Long;")
+        );
+        assert_eq!(
+            boxed_descriptor("kotlin/Char").as_deref(),
+            Some("Ljava/lang/Character;")
+        );
+        assert_eq!(
+            boxed_descriptor("kotlin/Boolean").as_deref(),
+            Some("Ljava/lang/Boolean;")
+        );
+        // String is a reference, not a boxed primitive → no boxed descriptor.
+        assert_eq!(boxed_descriptor("kotlin/String"), None);
     }
 
     #[test]
