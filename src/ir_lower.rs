@@ -3197,7 +3197,7 @@ fn getter_name(prop: &str) -> String {
 }
 
 /// The JVM setter name for a property: `x` → `setX`; `isOpen` → `setOpen` (the `is` prefix is dropped).
-fn setter_name(prop: &str) -> String {
+pub(crate) fn setter_name(prop: &str) -> String {
     let b = prop.as_bytes();
     let base = if prop.starts_with("is") && b.len() > 2 && b[2].is_ascii_uppercase() {
         &prop[2..]
@@ -6451,6 +6451,8 @@ impl<'a> Lower<'a> {
                 getter_name: getter_name(name),
                 prop_ty,
                 bound,
+                static_dispatch: false,
+                mutable: false,
             }),
             func_ref: None,
             bridges: vec![],
@@ -6477,6 +6479,101 @@ impl<'a> Lower<'a> {
                 field: "INSTANCE",
             }))
         }
+    }
+
+    /// Lower a top-level property reference `::foo` to a `(Mutable)PropertyReference0Impl` singleton.
+    /// The property is backed by a static getter (`getFoo`) — and a setter (`setFoo`) for a `var` — on
+    /// the file facade, so the synthesized `get`/`set` dispatch via `invokestatic`. `owner_internal` is
+    /// the declaring facade (empty = this file's facade, resolved at emit); a cross-file property names
+    /// its facade explicitly. The expression evaluates to the singleton's `INSTANCE`.
+    fn lower_toplevel_prop_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
+        // A DELEGATED top-level property (`val x by Delegate`) reserves a `x$delegate` static and has no
+        // plain `setX`; its reference needs reflection metadata (`getDelegate()`) krusty doesn't emit.
+        // Skip (the whole `::x` expression then fails to lower and the case is dropped, not miscompiled).
+        if self.statics.contains_key(&format!("{name}$delegate")) {
+            return None;
+        }
+        // Resolve the property's type, mutability, and declaring facade. A same-file property uses the
+        // facade sentinel (empty); a cross-file one carries its facade. `const val`s have no accessor,
+        // so they can't be referenced — skip.
+        let (owner, prop_ty, is_var) =
+            if let Some((ty, is_var, is_const)) = self.syms.props.get(name).cloned() {
+                if is_const {
+                    return None;
+                }
+                (String::new(), ty, is_var)
+            } else if let Some((facade, ty, is_var, is_const)) =
+                self.syms.prop_facades.get(name).cloned()
+            {
+                if is_const {
+                    return None;
+                }
+                (facade, ty, is_var)
+            } else {
+                return None;
+            };
+        let prop_ty = ty_to_ir(prop_ty);
+        let superclass = if is_var {
+            "kotlin/jvm/internal/MutablePropertyReference0Impl"
+        } else {
+            "kotlin/jvm/internal/PropertyReference0Impl"
+        };
+        let synth_fq = class_internal(
+            self.afile,
+            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+        );
+        self.lambda_seq += 1;
+        let synth_id = self.ir.add_class(IrClass {
+            fq_name: synth_fq,
+            serial_names: Vec::new(),
+            custom_serializer: None,
+            field_serializers: Vec::new(),
+            contextual_fields: Vec::new(),
+            is_value: false,
+            type_param_bounds: vec![],
+            type_params: Vec::new(),
+            supertypes: vec![],
+            fields: vec![],
+            ctor_param_count: 0,
+            ctor_args: vec![],
+            init_body: None,
+            explicit_param_stores: false,
+            methods: vec![],
+            is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            is_abstract: false,
+            superclass: superclass.to_string(),
+            super_args: vec![],
+            enum_entries: vec![],
+            enum_entry_subclass: vec![],
+            enum_entry_of: None,
+            prop_ref: Some(crate::ir::PropRef {
+                owner_internal: owner,
+                prop_name: name.to_string(),
+                getter_name: getter_name(name),
+                prop_ty,
+                bound: false,
+                static_dispatch: true,
+                mutable: is_var,
+            }),
+            func_ref: None,
+            bridges: vec![],
+            interfaces: vec![],
+            is_object: false,
+            ctor_param_checks: vec![],
+            is_companion: false,
+            companion_class: None,
+            secondary_ctors: vec![],
+            has_primary_ctor: true,
+        });
+        let _ = e;
+        Some(self.ir.add_expr(IrExpr::StaticInstance {
+            owner: synth_id,
+            ty: synth_id,
+            field: "INSTANCE",
+        }))
     }
 
     /// Lower a method reference `obj::m` (bound — the receiver is an in-scope value, captured) or
@@ -11142,6 +11239,14 @@ impl<'a> Lower<'a> {
                 // handle it before the `Fun` guard below.
                 if let Some(recv) = receiver {
                     if let Some(pr) = self.lower_prop_ref(e, recv, &name) {
+                        return Some(pr);
+                    }
+                }
+                // Top-level property reference `::foo` (no receiver) — typed as `KProperty0` /
+                // `KMutableProperty0`, lowered to a `(Mutable)PropertyReference0Impl` singleton whose
+                // `get`/`set` dispatch statically to the facade accessor.
+                if receiver.is_none() {
+                    if let Some(pr) = self.lower_toplevel_prop_ref(e, &name) {
                         return Some(pr);
                     }
                 }

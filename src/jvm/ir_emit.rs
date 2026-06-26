@@ -384,7 +384,7 @@ fn emit_class(
         return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
     }
     if c.prop_ref.is_some() {
-        return emit_prop_ref_class(c);
+        return emit_prop_ref_class(c, facade);
     }
     if c.func_ref.is_some() {
         return emit_func_ref_class(c, facade);
@@ -906,8 +906,11 @@ fn emit_enum_entry_subclass(
 /// `super(owner.class, name, "getName()desc", 0)`, a `get(Object)Object` override that reads
 /// `((Owner) it).getName()` (boxing a primitive), and a `<clinit>` that builds the singleton. `.name`
 /// is inherited from `PropertyReference1Impl` (returns the constructor's name argument).
-fn emit_prop_ref_class(c: &crate::ir::IrClass) -> Vec<u8> {
+fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
+    if pr.static_dispatch {
+        return emit_toplevel_prop_ref_class(c, pr, facade);
+    }
     if pr.bound {
         return emit_bound_prop_ref_class(c, pr);
     }
@@ -1023,6 +1026,102 @@ fn emit_bound_prop_ref_class(c: &crate::ir::IrClass, pr: &crate::ir::PropRef) ->
     get.ensure_locals(1);
     get.link();
     cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+    cw.finish()
+}
+
+/// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
+/// `INSTANCE` singleton whose `get()` does `invokestatic <facade>.getFoo()` (no receiver), and — for a
+/// `var` — a `set(Object)` doing `invokestatic <facade>.setFoo(v)`. The super ctor is the 4-arg
+/// `(Class, String, String, int)` form with top-level flags = 1. An empty `owner_internal` is the
+/// facade sentinel (the declaring file class, unknown until emit).
+fn emit_toplevel_prop_ref_class(
+    c: &crate::ir::IrClass,
+    pr: &crate::ir::PropRef,
+    facade: &str,
+) -> Vec<u8> {
+    let owner: &str = if pr.owner_internal.is_empty() {
+        facade
+    } else {
+        &pr.owner_internal
+    };
+    let fq = c.fq_name.clone();
+    let self_desc = format!("L{fq};");
+    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+    cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+
+    let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
+    let prop_desc = prop_jvm.descriptor();
+    let getter_desc = format!("(){prop_desc}");
+    let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
+
+    // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
+    let mut ctor = CodeBuilder::new(1);
+    ctor.aload(0);
+    ctor.ldc_class(owner, &mut cw);
+    ctor.push_string(&pr.prop_name, &mut cw);
+    ctor.push_string(&signature, &mut cw);
+    ctor.push_int(1, &mut cw);
+    let sup = cw.methodref(
+        &c.superclass,
+        "<init>",
+        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+    );
+    ctor.invokespecial(sup, 4, 0);
+    ctor.ret_void();
+    ctor.ensure_locals(1);
+    ctor.link();
+    cw.add_method(0x0000, "<init>", "()V", &ctor);
+
+    // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
+    let mut get = CodeBuilder::new(1);
+    let gref = cw.methodref(owner, &pr.getter_name, &getter_desc);
+    get.invokestatic(gref, 0, slot_words(prop_jvm) as i32);
+    if prop_jvm.is_primitive() {
+        box_prim_free(&mut cw, &mut get, prop_jvm);
+    }
+    get.areturn();
+    get.ensure_locals(1);
+    get.link();
+    cw.add_method(0x0001, "get", "()Ljava/lang/Object;", &get);
+
+    // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
+    if pr.mutable {
+        let setter = crate::ir_lower::setter_name(&pr.prop_name);
+        let setter_desc = format!("({prop_desc})V");
+        let mut set = CodeBuilder::new(2);
+        set.aload(1);
+        if prop_jvm.is_primitive() {
+            let wref = cw.class_ref(
+                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
+            );
+            set.checkcast(wref);
+            unbox_prim(&mut cw, &mut set, prop_jvm);
+        } else if let Some(internal) = checkcast_internal(prop_jvm) {
+            let cref = cw.class_ref(&internal);
+            set.checkcast(cref);
+        }
+        let sref = cw.methodref(owner, &setter, &setter_desc);
+        set.invokestatic(sref, slot_words(prop_jvm) as i32, 0);
+        set.ret_void();
+        set.ensure_locals(2);
+        set.link();
+        cw.add_method(0x0001, "set", "(Ljava/lang/Object;)V", &set);
+    }
+
+    // `<clinit>`: INSTANCE = new.
+    let mut clinit = CodeBuilder::new(0);
+    let cls = cw.class_ref(&fq);
+    clinit.new_obj(cls);
+    clinit.dup();
+    let init = cw.methodref(&fq, "<init>", "()V");
+    clinit.invokespecial(init, 0, 0);
+    let fref = cw.fieldref(&fq, "INSTANCE", &self_desc);
+    clinit.putstatic(fref, 1);
+    clinit.ret_void();
+    clinit.ensure_locals(0);
+    clinit.link();
+    cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     cw.finish()
 }
 

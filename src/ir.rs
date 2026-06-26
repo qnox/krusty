@@ -660,6 +660,13 @@ pub struct PropRef {
     /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
     /// whose `get()` reads `this.receiver`).
     pub bound: bool,
+    /// A top-level property reference `::foo` (a `(Mutable)PropertyReference0Impl` singleton): the
+    /// getter/setter are STATIC on the file facade, so `get`/`set` dispatch via `invokestatic`
+    /// (`owner_internal` empty = the facade sentinel, resolved at emit). No receiver is captured.
+    pub static_dispatch: bool,
+    /// The referenced property is a `var` — emit a `set(Object)` override (calls `setName`). Only
+    /// meaningful with `static_dispatch` (a `MutablePropertyReference0Impl`).
+    pub mutable: bool,
 }
 
 /// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target

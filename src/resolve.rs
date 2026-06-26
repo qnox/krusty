@@ -5557,6 +5557,18 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
+                    // Top-level property reference `::foo` → `KProperty0` (a `val`) or
+                    // `KMutableProperty0` (a `var`). Backed by a static getter (and setter) on the
+                    // file facade; the lowering emits a `PropertyReference0Impl` /
+                    // `MutablePropertyReference0Impl` whose `get`/`set` dispatch statically.
+                    if let Some((_, is_var, _)) = self.syms.props.get(&name) {
+                        let iface = if *is_var {
+                            "kotlin/reflect/KMutableProperty0"
+                        } else {
+                            "kotlin/reflect/KProperty0"
+                        };
+                        return self.set(e, Ty::obj(iface));
+                    }
                     if let Some(sig) = self
                         .syms
                         .funs
