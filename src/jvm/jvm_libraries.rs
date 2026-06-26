@@ -1448,6 +1448,53 @@ impl LibrarySet for JvmLibraries {
         sam
     }
 
+    fn abstract_methods(&self, internal: &str) -> Vec<LibraryMember> {
+        let Some(root) = self.cp.find(internal) else {
+            return Vec::new();
+        };
+        if !root.is_interface() {
+            return Vec::new();
+        }
+        // Walk the interface + its extended-interface chain (`KSerializer : SerializationStrategy,
+        // DeserializationStrategy` declare `serialize`/`deserialize`), collecting every public abstract
+        // instance method that isn't an `Object` method. Dedup by name+descriptor.
+        let mut out: Vec<LibraryMember> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut stack = vec![internal.to_string()];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(name) = stack.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(ci) = self.cp.find(&name) else {
+                continue;
+            };
+            for itf in &ci.interfaces {
+                stack.push(itf.clone());
+            }
+            for m in &ci.methods {
+                if m.access & 0x0400 == 0 || m.is_static() || !m.is_public() {
+                    continue;
+                }
+                if matches!(m.name.as_str(), "equals" | "hashCode" | "toString") {
+                    continue;
+                }
+                if !seen.insert((m.name.clone(), m.descriptor.clone())) {
+                    continue;
+                }
+                let (params, ret) = parse_method_desc(&m.descriptor);
+                out.push(LibraryMember {
+                    name: m.name.clone(),
+                    params,
+                    ret,
+                    descriptor: m.descriptor.clone(),
+                });
+            }
+        }
+        out
+    }
+
     fn mangled_member(&self, internal: &str, prefix: &str) -> Option<(String, String)> {
         // The first public instance method whose name starts with `prefix` (`getFirst-…`), searching the
         // class and its superclass chain — an inline-range getter is declared on the `…Progression`

@@ -1562,8 +1562,20 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                         // interface's erased `compareTo(Object)`), emit the `ACC_BRIDGE` the JVM needs to
                         // dispatch an interface-typed call — without it `(x as Comparable).compareTo(y)`
                         // hits `AbstractMethodError` instead of running the override (or throwing CCE).
-                        if !lo.classes.contains_key(itf) {
-                            if let Some(m) = lo.syms.libraries.sam_method(itf) {
+                        // Skip a MAPPED-BUILTIN interface (`kotlin/collections/*` → `java/util/*`): those
+                        // have intricate JVM-mapping bridges (remove/removeAt clash, MutableIterator ≡
+                        // java/util/Iterator, covariant stubs) that krusty's collection machinery realizes.
+                        if !lo.classes.contains_key(itf)
+                            && crate::jvm::jvm_class_map::to_jvm_internal(itf) == *itf
+                        {
+                            let jvm_desc = |params: &[Ty], ret: &Ty| {
+                                format!(
+                                    "({}){}",
+                                    params.iter().map(|t| (*t).descriptor()).collect::<String>(),
+                                    (*ret).descriptor()
+                                )
+                            };
+                            for m in lo.syms.libraries.abstract_methods(itf) {
                                 if let Some((_, _, impl_fid, _)) =
                                     lo.resolve_method(&internal, &m.name)
                                 {
@@ -1571,9 +1583,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                                         m.params.iter().map(|t| ty_to_ir(*t)).collect();
                                     let ir_ = ty_to_ir(m.ret);
                                     let cp = lo.ir.functions[impl_fid as usize].params.clone();
-                                    let cr = lo.ir.functions[impl_fid as usize].ret.clone();
-                                    if (ip != cp || ir_ != cr)
-                                        && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
+                                    let cr = lo.ir.functions[impl_fid as usize].ret;
+                                    // Skip a bridge whose target override has a DIVERGING expression body
+                                    // (`= TODO()` / `= throw …`): such a serializer exists only for its
+                                    // descriptor (a non-serializable type), has no real serialize/
+                                    // deserialize to delegate to, and bridging it makes the method-body
+                                    // lowering bail. Descriptor introspection still works; an actual call
+                                    // would throw either way.
+                                    let diverges = c.methods.iter().any(|cm| {
+                                        cm.name == m.name
+                                            && matches!(&cm.body,
+                                                ast::FunBody::Expr(e) if lo.info.ty(*e) == Ty::Nothing)
+                                    });
+                                    if !diverges
+                                        && jvm_desc(&ip, &ir_) != jvm_desc(&cp, &cr)
+                                        && seen.insert(format!("{}{}", m.name, jvm_desc(&ip, &ir_)))
                                     {
                                         lo.ir.classes[cid as usize].bridges.push(
                                             crate::ir::Bridge {

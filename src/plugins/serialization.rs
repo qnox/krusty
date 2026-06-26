@@ -355,6 +355,18 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     let Some(fq_name) = nn.obj_internal() else {
         return None;
     };
+    // A field whose TYPE is a class carrying a class-level `@Serializable(with = X::class)` uses an
+    // instance of `X` — the same serializer `Type.serializer()` returns — since no `$serializer` is
+    // generated for it. (A per-property `@Serializable(with = …)` annotation, checked before this in the
+    // childSerializers/serialize paths, still overrides — matching Kotlin's property-over-type rule.)
+    if let Some(custom) = ir
+        .classes
+        .iter()
+        .find(|c| c.fq_name == fq_name)
+        .and_then(|c| c.custom_serializer.clone())
+    {
+        return Some(build_field_serializer_instance(ir, &custom));
+    }
     let type_args = nn.type_args();
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
@@ -1559,6 +1571,27 @@ impl IrPlugin for SerializationPlugin {
                                     dispatch_receiver: Some(c),
                                     args: vec![d, idx, inst, v],
                                 }));
+                            } else if let Some(internal) = field_sers.get(pname) {
+                                // Property-level `@Serializable(with = X)`: encode[Nullable]Serializable
+                                // Element(desc, i, <X instance>, value.getX()). The nullable variant is a
+                                // method-name swap (the encoder writes JSON null), so the serializer itself
+                                // is NOT `.nullable`-wrapped. Checked before the field's own type serializer
+                                // so a property annotation overrides the type's class-level serializer.
+                                let inst = build_field_serializer_instance(ir, internal);
+                                let method = if is_nullable(ty) {
+                                    "encodeNullableSerializableElement"
+                                } else {
+                                    "encodeSerializableElement"
+                                };
+                                stmts.push(ir.add_expr(IrExpr::Call {
+                                    callee: virtual_iface(
+                                        "kotlinx/serialization/encoding/CompositeEncoder",
+                                        method,
+                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
+                                    ),
+                                    dispatch_receiver: Some(c),
+                                    args: vec![d, idx, inst, v],
+                                }));
                             } else if nested[i].is_some()
                                 || ty
                                     .non_null()
@@ -1778,6 +1811,19 @@ impl IrPlugin for SerializationPlugin {
                             if tp_field[i].is_some() || contextual.contains(pname) {
                                 return true;
                             }
+                            // A property-level `@Serializable(with=X)` field, or a field whose TYPE has a
+                            // class-level custom serializer, decodes through that serializer (symmetric
+                            // with the serialize path) — `decodeSerializableElement` below.
+                            if field_sers.contains_key(pname) {
+                                return true;
+                            }
+                            if t.non_null().obj_internal().is_some_and(|fq| {
+                                ir.classes
+                                    .iter()
+                                    .any(|c| c.fq_name == fq && c.custom_serializer.is_some())
+                            }) {
+                                return true;
+                            }
                             // A nested @Serializable element is decodable only if its serializer is
                             // actually derivable (a generic field with an un-derivable type arg is not) —
                             // else deserialize stubs cleanly rather than emit a `null` element serializer.
@@ -1959,6 +2005,45 @@ impl IrPlugin for SerializationPlugin {
                                         op: IrTypeOp::Cast,
                                         arg: raw,
                                         type_operand: ty.clone(),
+                                    })
+                                } else if field_sers.contains_key(&fields[k].0)
+                                    || ty.non_null().obj_internal().is_some_and(|fq| {
+                                        ir.classes.iter().any(|c| {
+                                            c.fq_name == fq && c.custom_serializer.is_some()
+                                        })
+                                    })
+                                {
+                                    // Property-level `@Serializable(with=X)` OR a field whose TYPE has a
+                                    // class-level custom serializer: f_k = (T) c.decode[Nullable]Serializable
+                                    // Element(desc, k, <X instance>, null) — symmetric with the serialize
+                                    // path (a property annotation overrides the type's class serializer).
+                                    let inst = if let Some(internal) = field_sers.get(&fields[k].0)
+                                    {
+                                        build_field_serializer_instance(ir, internal)
+                                    } else {
+                                        element_serializer_expr(ir, ty).unwrap_or_else(|| {
+                                            ir.add_expr(IrExpr::Const(IrConst::Null))
+                                        })
+                                    };
+                                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+                                    let method = if is_nullable(ty) {
+                                        "decodeNullableSerializableElement"
+                                    } else {
+                                        "decodeSerializableElement"
+                                    };
+                                    let raw = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlinx/serialization/encoding/CompositeDecoder",
+                                            method,
+                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(cdk),
+                                        args: vec![dk, idxc, inst, prev],
+                                    });
+                                    ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::Cast,
+                                        arg: raw,
+                                        type_operand: *ty,
                                     })
                                 } else if nested[k].is_some()
                                     || ty

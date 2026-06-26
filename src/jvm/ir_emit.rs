@@ -1217,6 +1217,13 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         let cp: Vec<Ty> = b.concrete_params.iter().map(ir_ty_to_jvm).collect();
         let er = ir_ty_to_jvm(&b.erased_ret);
         let cr = ir_ty_to_jvm(&b.concrete_ret);
+        // Skip a bridge whose JVM signature already exists on the class — another codegen path
+        // (the suspend state machine's `resumeWith`, a collection covariant stub, …) may have emitted
+        // the same erased method, and a duplicate would be a `ClassFormatError`. Bridges are emitted
+        // last (after all real methods), so `has_method` sees every prior method.
+        if cw.has_method(&b.name, &method_descriptor(&ep, er)) {
+            continue;
+        }
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
         code.aload(0);

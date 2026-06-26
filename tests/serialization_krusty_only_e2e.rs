@@ -180,6 +180,50 @@ fun box(): String {
 }
 
 #[test]
+fn custom_serializers_class_and_property_level_in_krusty() {
+    // A class-level `@Serializable(with = X)` (Bruh → BruhSerializerA) AND a property-level override
+    // (`@Serializable(with = BruhSerializerB) val b2`). Encoding a holder exercises BOTH: a field uses
+    // its type's class serializer; an annotated field uses the property serializer. The user serializer
+    // `object`s implement `KSerializer<Bruh>` and are invoked by the runtime through the ERASED
+    // interface (`SerializationStrategy.serialize(Encoder, Object)`), so this also verifies the synthetic
+    // `ACC_BRIDGE` methods krusty emits for a multi-method generic interface.
+    let src = r##"import kotlinx.serialization.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.descriptors.*
+import kotlinx.serialization.encoding.*
+@Serializable(BruhSerializerA::class)
+class Bruh(val s: String)
+object BruhSerializerA : KSerializer<Bruh> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Bruh", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Bruh) { encoder.encodeString(value.s) }
+    override fun deserialize(decoder: Decoder): Bruh = Bruh(decoder.decodeString())
+}
+object BruhSerializerB : KSerializer<Bruh> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Bruh", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Bruh) { encoder.encodeString(value.s + "#") }
+    override fun deserialize(decoder: Decoder): Bruh = Bruh(decoder.decodeString())
+}
+@Serializable
+class Tester(val b1: Bruh, @Serializable(BruhSerializerB::class) val b2: Bruh)
+fun box(): String {
+    val s = Json.encodeToString(Tester(Bruh("a"), Bruh("b")))
+    if (s != "{\"b1\":\"a\",\"b2\":\"b#\"}") return "enc:$s"
+    val back = Json.decodeFromString<Tester>(s)
+    return if (back.b1.s == "a" && back.b2.s == "b#") "OK" else "dec:${back.b1.s}/${back.b2.s}"
+}
+"##;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "CustomSer") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "custom class/property serializers wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty class + property custom serializers OK");
+}
+
+#[test]
 fn reified_serializer_round_trips_entirely_in_krusty() {
     // The REIFIED form `Json.encodeToString(x)` / `Json.decodeFromString<C>(s)` (no explicit serializer
     // argument) — a `reified inline` that can't be called directly. krusty desugars it to the 2-arg

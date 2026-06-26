@@ -468,6 +468,14 @@ pub trait LibrarySet: SymbolSource {
         None
     }
 
+    /// ALL public abstract instance methods of an interface (incl. those on its extended interfaces) —
+    /// like `sam_method` without the "exactly one" restriction, for emitting erased `ACC_BRIDGE` methods
+    /// a class implementing a multi-method generic interface (`KSerializer<T>`) needs. Empty if not a
+    /// classpath interface.
+    fn abstract_methods(&self, _internal: &str) -> Vec<LibraryMember> {
+        Vec::new()
+    }
+
     /// Resolve a method on `internal` whose JVM name starts with `prefix`, returning `(name, descriptor)`.
     /// Inline-class members carry a mangled name suffix (`getFirst-pVg5ArA` on `UIntRange`, where the
     /// `-…` hash encodes the inline-class signature), so a call site can't name them directly — it looks
