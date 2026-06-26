@@ -9091,10 +9091,10 @@ impl<'a> Lower<'a> {
                     // private) — write through the property setter `setX(v)`.
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                    let internal = this_ty.obj_internal()?.to_string();
+                    let sname = setter_name(&name);
+                    if let Some((sclass, sindex, sfid, _)) = self.resolve_method(&internal, &sname)
                     {
-                        let internal = this_ty.obj_internal()?.to_string();
-                        let (sclass, sindex, sfid, _) =
-                            self.resolve_method(&internal, &setter_name(&name))?;
                         let pty = self.ir.functions[sfid as usize]
                             .params
                             .first()
@@ -9106,6 +9106,33 @@ impl<'a> Lower<'a> {
                             index: sindex,
                             receiver: recv,
                             args: vec![Some(val)],
+                        }))
+                    } else {
+                        // A CLASSPATH receiver (`encodeDefaults = true` inside `Json { … }`, `this` =
+                        // `JsonBuilder`): `invokevirtual` its setter directly (no IR method exists).
+                        let vt = self.info.ty(value);
+                        let m = crate::call_resolver::resolve_instance(
+                            &*self.syms.libraries,
+                            &internal,
+                            &sname,
+                            &[vt],
+                        )?;
+                        let pty = m.params.first().copied().unwrap_or(Ty::obj("kotlin/Any"));
+                        let val = self.lower_arg(value, &ty_to_ir(pty))?;
+                        let interface = self
+                            .syms
+                            .libraries
+                            .resolve_type(&internal)
+                            .is_some_and(|t| t.is_interface());
+                        Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner: internal,
+                                name: sname,
+                                descriptor: m.descriptor,
+                                interface,
+                            },
+                            dispatch_receiver: Some(recv),
+                            args: vec![val],
                         }))
                     }
                 }
@@ -13692,16 +13719,42 @@ impl<'a> Lower<'a> {
                             if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
                                 return None;
                             }
-                            for (i, &arg) in args.iter().enumerate() {
-                                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                            let n = args.len();
+                            let m = c.params.len();
+                            // A TRAILING-lambda default call (`Json { … }`): the lambda fills the LAST real
+                            // parameter, args before it fill a prefix, and the gap between is defaulted. (The
+                            // resolver only marks `default_call` for a trailing lambda in this exact shape.)
+                            let trailing_lambda_default = n >= 1
+                                && m >= 1
+                                && matches!(self.afile.expr(args[n - 1]), Expr::Lambda { .. })
+                                && c.params[m - 1].obj_internal().is_some_and(|s| {
+                                    s.starts_with("kotlin/jvm/functions/Function")
+                                });
+                            if trailing_lambda_default {
+                                for (i, &arg) in args.iter().enumerate().take(n - 1) {
+                                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                                }
+                                for j in (n - 1)..(m - 1) {
+                                    let ph = self.zero_placeholder(c.params[j]);
+                                    a.push(ph);
+                                }
+                                a.push(self.lower_arg(args[n - 1], &ty_to_ir(c.params[m - 1]))?);
+                                let mask: i32 = ((n - 1)..(m - 1)).map(|j| 1i32 << j).sum();
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                            } else {
+                                for (i, &arg) in args.iter().enumerate() {
+                                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                                }
+                                for j in args.len()..c.params.len() {
+                                    let ph = self.zero_placeholder(c.params[j]);
+                                    a.push(ph);
+                                }
+                                let mask: i32 =
+                                    (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
+                                a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                             }
-                            for j in args.len()..c.params.len() {
-                                let ph = self.zero_placeholder(c.params[j]);
-                                a.push(ph);
-                            }
-                            let mask: i32 = (args.len()..c.params.len()).map(|j| 1i32 << j).sum();
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Int(mask))));
-                            a.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                         } else {
                             if c.params.len() != args.len() {
                                 return None;

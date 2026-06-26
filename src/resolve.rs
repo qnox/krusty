@@ -8109,31 +8109,48 @@ impl<'a> Checker<'a> {
                         }
                         return self.ctor_result(call, &cls.internal);
                     }
+                    // A trailing-lambda call to a name that is BOTH a classpath type AND a top-level function
+                    // (`Json { … }`: `Json` is a sealed class with a companion AND a builder function)
+                    // resolves to the FUNCTION in Kotlin — skip the constructor paths so it falls through to
+                    // top-level function resolution. Guarded on a same-named top-level overload existing, so a
+                    // constructor-with-trailing-lambda (`Thread { … }`, no top-level `Thread`) is unaffected.
+                    let prefer_toplevel_fn = args
+                        .last()
+                        .is_some_and(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                        && self
+                            .syms
+                            .libraries
+                            .functions(&fname, None)
+                            .overloads
+                            .iter()
+                            .any(|o| o.kind == crate::libraries::FnKind::TopLevel && o.public);
                     // Constructing a classpath Java type: `Calc()` where `Calc` is imported.
-                    if let Some(internal) = self.imports.get(&fname).cloned() {
-                        if crate::call_resolver::resolve_constructor(
-                            &*self.syms.libraries,
-                            &internal,
-                            &arg_tys,
-                        )
-                        .is_some()
-                        {
-                            return self.ctor_result(call, &internal);
+                    if !prefer_toplevel_fn {
+                        if let Some(internal) = self.imports.get(&fname).cloned() {
+                            if crate::call_resolver::resolve_constructor(
+                                &*self.syms.libraries,
+                                &internal,
+                                &arg_tys,
+                            )
+                            .is_some()
+                            {
+                                return self.ctor_result(call, &internal);
+                            }
                         }
-                    }
-                    // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
-                    // type with no explicit import): ask the library to resolve the constructor. The
-                    // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
-                    // JVM jimage can't surface) — the resolver no longer special-cases throwables.
-                    if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
-                        if crate::call_resolver::resolve_constructor(
-                            &*self.syms.libraries,
-                            &internal,
-                            &arg_tys,
-                        )
-                        .is_some()
-                        {
-                            return self.ctor_result(call, &internal);
+                        // A library type by simple name (`throw RuntimeException("msg")`, a mapped/aliased
+                        // type with no explicit import): ask the library to resolve the constructor. The
+                        // library owns any target-specific knowledge (e.g. the throwable-ctor shapes the
+                        // JVM jimage can't surface) — the resolver no longer special-cases throwables.
+                        if let Some(internal) = self.syms.class_names.get(&fname).cloned() {
+                            if crate::call_resolver::resolve_constructor(
+                                &*self.syms.libraries,
+                                &internal,
+                                &arg_tys,
+                            )
+                            .is_some()
+                            {
+                                return self.ctor_result(call, &internal);
+                            }
                         }
                     }
                     // `StringBuilder()` / `StringBuilder("init")` / `StringBuilder(capacity)`.
@@ -8338,10 +8355,16 @@ impl<'a> Checker<'a> {
                             .libraries
                             .resolve_callable(&fname, None, &arg_tys, &call_targs)
                     {
-                        let vararg = c.params.len() != arg_tys.len()
-                            || c.params.last().map_or(false, |p| {
-                                p.array_elem().is_some() && arg_tys.last() != Some(p)
-                            });
+                        // A `$default` callable carries the FULL real-parameter list while the call supplies
+                        // only a subset (the rest defaulted), so its `params.len() != arg_tys.len()` is
+                        // expected — it must NOT be read as a vararg call (which would check arg[0] against
+                        // the wrong parameter). The non-vararg branch maps the provided prefix positionally
+                        // and skips the trailing lambda.
+                        let vararg = !c.default_call
+                            && (c.params.len() != arg_tys.len()
+                                || c.params.last().map_or(false, |p| {
+                                    p.array_elem().is_some() && arg_tys.last() != Some(p)
+                                }));
                         if vararg && !c.params.is_empty() {
                             let fixed = c.params.len() - 1;
                             let elem = c.params[fixed].array_elem().unwrap_or(Ty::Error);
@@ -8755,9 +8778,12 @@ impl<'a> Checker<'a> {
                             // A bare write to an *inherited* `var` member (`x = …` where `x` is declared in a
                             // superclass): the own properties are in the implicit-`this` scope (found by
                             // `lookup` above), but inherited ones are resolved through `this`'s class chain.
+                            // A bare write to a CLASSPATH receiver's property (`encodeDefaults = true` inside a
+                            // `Json { … }` builder lambda, `this` = `JsonBuilder`) resolves via `prop_of`.
                             let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty.clone()
                             {
                                 self.lookup_prop(&internal, &name)
+                                    .or_else(|| self.syms.prop_of(internal, &name))
                             } else {
                                 None
                             };
@@ -8772,8 +8798,33 @@ impl<'a> Checker<'a> {
                                     self.expect_assignable(lty, vt, span, "assignment");
                                 }
                                 None => {
-                                    self.diags
-                                        .error(span, format!("unresolved reference '{name}'."));
+                                    // A bare write to a CLASSPATH receiver's `var` property
+                                    // (`encodeDefaults = true`, `this` = `JsonBuilder`): accept it when the
+                                    // receiver class exposes the matching setter. Lowering emits the setter
+                                    // through `this` (the implicit-receiver getter/setter path).
+                                    let cp_setter = if let Some(Ty::Obj(internal, _)) = self.this_ty
+                                    {
+                                        let mut cs = name.chars();
+                                        let setter = match cs.next() {
+                                            Some(f) => {
+                                                format!("set{}{}", f.to_uppercase(), cs.as_str())
+                                            }
+                                            None => String::new(),
+                                        };
+                                        crate::call_resolver::resolve_instance(
+                                            &*self.syms.libraries,
+                                            internal,
+                                            &setter,
+                                            &[vt],
+                                        )
+                                        .is_some()
+                                    } else {
+                                        false
+                                    };
+                                    if !cp_setter {
+                                        self.diags
+                                            .error(span, format!("unresolved reference '{name}'."));
+                                    }
                                 }
                             }
                         }

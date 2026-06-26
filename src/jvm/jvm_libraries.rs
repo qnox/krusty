@@ -1737,19 +1737,40 @@ impl LibrarySet for JvmLibraries {
             let Some((_, psigs, _)) = parse_method_gsig(sig) else {
                 continue;
             };
-            if psigs.len() != arg_tys.len() {
-                continue;
-            }
-            let mut binds = std::collections::HashMap::new();
-            for (ps, at) in psigs.iter().zip(arg_tys) {
-                if let Some(t) = at {
-                    unify_gsig(ps, *t, &mut binds);
+            let n = arg_tys.len();
+            let m = psigs.len();
+            // Exact-arity: each argument aligns with its parameter positionally.
+            let out: Vec<Vec<Ty>> = if m == n {
+                let mut binds = std::collections::HashMap::new();
+                for (ps, at) in psigs.iter().zip(arg_tys) {
+                    if let Some(t) = at {
+                        unify_gsig(ps, *t, &mut binds);
+                    }
                 }
-            }
-            let out: Vec<Vec<Ty>> = psigs
-                .iter()
-                .map(|ps| function_input_types(ps, &binds))
-                .collect();
+                psigs
+                    .iter()
+                    .map(|ps| function_input_types(ps, &binds))
+                    .collect()
+            } else if m > n && n >= 1 {
+                // A TRAILING-lambda call with LEADING/MIDDLE defaults (`Json { … }`): the last argument
+                // (the trailing lambda) aligns with the LAST parameter, the args before it with a leading
+                // prefix, and the gap is defaulted. Report parameter types indexed by ARGUMENT position so
+                // the caller types the trailing lambda against the builder parameter (`JsonBuilder.()->Unit`).
+                let mut binds = std::collections::HashMap::new();
+                for i in 0..n - 1 {
+                    if let Some(t) = arg_tys[i] {
+                        unify_gsig(&psigs[i], t, &mut binds);
+                    }
+                }
+                let mut out = vec![Vec::new(); n];
+                for (i, slot) in out.iter_mut().enumerate().take(n - 1) {
+                    *slot = function_input_types(&psigs[i], &binds);
+                }
+                out[n - 1] = function_input_types(&psigs[m - 1], &binds);
+                out
+            } else {
+                continue;
+            };
             // Accept this overload only if a *lambda* position (an untyped `None` argument) actually
             // recovered parameter types — so an overload whose lambda is elsewhere isn't mis-picked.
             if out
@@ -1935,6 +1956,67 @@ impl LibrarySet for JvmLibraries {
                             }
                             for (ps, a) in psigs.iter().zip(args) {
                                 unify_gsig(ps, *a, &mut binds);
+                            }
+                            gsig_to_ty(&rsig, &binds)
+                        })
+                        .unwrap_or(ret);
+                    return Some(LibraryCallable {
+                        owner: c.owner.clone(),
+                        name: c.name.clone(),
+                        params: kept,
+                        ret: ret_ty,
+                        physical_ret: ret,
+                        descriptor: c.descriptor.clone(),
+                        is_inline: self.cp.is_inline_method(&c.owner, &c.name),
+                        default_call: true,
+                        vararg_elem: None,
+                        must_inline: false,
+                        signature: c.signature.clone(),
+                        origin: crate::libraries::Origin::Library,
+                    });
+                }
+            }
+            // A TRAILING-lambda call whose LEADING parameters are defaulted (`Json { … }` →
+            // `Json$default(<from default>, builderAction, mask, null)`): the prefix-fill branch above can't
+            // model it (the lambda fills the LAST real parameter, not a prefix). Map the trailing lambda to
+            // the last real parameter, any args before it to a leading prefix, and default the gap between.
+            if pick.is_none() && trailing_lambda {
+                let fsd = self.functions(&format!("{name}$default"), None);
+                for o in fsd
+                    .overloads
+                    .iter()
+                    .filter(|o| o.kind == FnKind::TopLevel && o.public)
+                {
+                    let c = &o.callable;
+                    let (params, ret) = parse_method_desc(&c.descriptor);
+                    if params.len() < 2 {
+                        continue; // need at least int mask + Object marker
+                    }
+                    let real_count = params.len() - 2;
+                    // The trailing lambda fills the last real parameter; the args before it fill a prefix.
+                    if real_count == 0 || args.len() > real_count {
+                        continue;
+                    }
+                    if !arg_fits(&params[real_count - 1], &args[args.len() - 1]) {
+                        continue;
+                    }
+                    let prefix = args.len() - 1;
+                    if !params[..prefix]
+                        .iter()
+                        .zip(&args[..prefix])
+                        .all(|(p, a)| arg_fits(p, a))
+                    {
+                        continue;
+                    }
+                    let kept: Vec<Ty> = params[..real_count].to_vec();
+                    let ret_ty = c
+                        .signature
+                        .as_ref()
+                        .and_then(|sig| parse_method_gsig(sig))
+                        .map(|(formals, _psigs, rsig)| {
+                            let mut binds = std::collections::HashMap::new();
+                            for (f, t) in formals.iter().zip(type_args) {
+                                binds.insert(f.clone(), *t);
                             }
                             gsig_to_ty(&rsig, &binds)
                         })

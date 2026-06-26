@@ -145,6 +145,33 @@ fun box(): String {
 }
 
 #[test]
+fn json_builder_config_lambda_in_krusty() {
+    // `Json { encodeDefaults = true }` — the receiver-lambda config builder. krusty resolves the
+    // top-level `Json(from = …, builderAction)` function (preferring it over the `Json` companion object
+    // because of the trailing lambda), defaults the leading `from` parameter through `Json$default`,
+    // types the lambda body with `this` = `JsonBuilder` (so `encodeDefaults` resolves to its setter), and
+    // emits the lambda as a real `Function1`. The resulting `Json` instance then encodes.
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable
+class Foo(val a: Int, val b: String)
+fun box(): String {
+    val j = Json { encodeDefaults = true }
+    return j.encodeToString(Foo.serializer(), Foo(7, "hi"))
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "JsonBuilder") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "{\"a\":7,\"b\":\"hi\"}",
+        "Json {{ }} builder config wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty Json {{ }} builder OK: {stdout}");
+}
+
+#[test]
 fn serial_name_overrides_json_key_entirely_in_krusty() {
     // `@SerialName("…")` on a constructor property renames its descriptor element (and thus its JSON
     // key) — including a const-folded value (`@SerialName("$prefix.bar")` with `const val prefix`).
