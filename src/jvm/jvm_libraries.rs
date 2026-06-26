@@ -1522,7 +1522,15 @@ impl LibrarySet for JvmLibraries {
                 });
             if let Some(m) = found {
                 let sig = m.signature.as_deref()?;
-                let (_, _, rsig) = parse_method_gsig(sig)?;
+                let (m_formals, _, rsig) = parse_method_gsig(sig)?;
+                // A method type parameter that SHADOWS a class one (`<T> T m()` inside `class C<T>`) is
+                // INDEPENDENT of the receiver's type argument — drop the class binding for every name
+                // the method re-declares, so its return erases to the method param's bound instead of
+                // mis-substituting the receiver's argument (which would `checkcast` a wrong type → CCE).
+                let mut binds = binds;
+                for f in &m_formals {
+                    binds.remove(f);
+                }
                 return Some(gsig_to_ty(&rsig, &binds));
             }
             // Propagate type arguments up each supertype edge (substituting this class's bindings).

@@ -814,6 +814,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   this(x, x)` would set `a` instead of using its default → wrong fields). An omitted parameter with a
   non-literal default skips at lowering. Tests: `tests/named_ctor_args_e2e.rs`.
 
+- **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
+  classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
+  type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a
+  member's generic return under them, so `List<Int>.get(i): E` types as `Int`. A method that declares
+  its OWN type parameter of the same name is INDEPENDENT of the receiver's argument — the substitution
+  now drops every class binding whose name the method re-declares (recovered from the method's generic
+  signature, already parsed), so the shadowing `T` erases to its bound instead of mis-binding to the
+  receiver's argument. Without this, `Box<String>.m(42)` typed as `String` and the call site would
+  `checkcast String` an `Integer` → `ClassCastException`. Kotlin warns on such shadowing, so it is
+  absent from the same-file box corpus; the same-file member path does no such substitution (a generic
+  member return is left at its erased bound), so the bug is classpath-only. Test:
+  `tests/shadowed_method_tparam_e2e.rs` (a `javac`-compiled generic class with a shadowing method).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
