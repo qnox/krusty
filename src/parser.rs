@@ -75,6 +75,21 @@ fn anon_bound_names(file: &File, did: DeclId) -> std::collections::HashSet<Strin
     s
 }
 
+/// Map the parsed class modifiers to a [`Modality`]. `sealed` wins (it implies abstract+open), then
+/// `abstract`, then `open`, else `final`.
+fn modality_of(is_open: bool, is_abstract: bool, is_sealed: bool) -> crate::ast::Modality {
+    use crate::ast::Modality;
+    if is_sealed {
+        Modality::Sealed
+    } else if is_abstract {
+        Modality::Abstract
+    } else if is_open {
+        Modality::Open
+    } else {
+        Modality::Final
+    }
+}
+
 /// A non-nullable, non-generic type reference to a simple type name (for a literal-inferred local).
 fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
     TypeRef {
@@ -605,9 +620,7 @@ impl<'a> Parser<'a> {
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
                     let mut d = self.parse_class();
-                    d.is_open = is_open;
-                    d.is_abstract = is_abstract;
-                    d.is_sealed = is_sealed;
+                    d.modality = modality_of(is_open, is_abstract, is_sealed);
                     d.is_value = is_value;
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
@@ -693,7 +706,9 @@ impl<'a> Parser<'a> {
                             .map_or(false, |t| t.kind == TokenKind::Ident) =>
                 {
                     let mut d = self.parse_interface();
-                    d.is_sealed = is_sealed;
+                    if is_sealed {
+                        d.modality = crate::ast::Modality::Sealed;
+                    }
                     let id = self.file.add_decl(Decl::Class(d));
                     self.file.decls.push(id);
                 }
@@ -1429,9 +1444,7 @@ impl<'a> Parser<'a> {
             enum_entry_bodies: entry_bodies,
             enum_entry_props: entry_props,
             is_fun_interface: false,
-            is_open: false,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes: enum_supertypes,
             delegations: Vec::new(),
@@ -2030,9 +2043,7 @@ impl<'a> Parser<'a> {
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
             is_fun_interface: false,
-            is_open: false,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations,
@@ -2242,9 +2253,7 @@ impl<'a> Parser<'a> {
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
             is_fun_interface: false,
-            is_open: false,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
@@ -2372,9 +2381,7 @@ impl<'a> Parser<'a> {
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
             is_fun_interface: false,
-            is_open: false,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations,
@@ -2507,9 +2514,7 @@ impl<'a> Parser<'a> {
             enum_entry_bodies: Vec::new(),
             enum_entry_props: Vec::new(),
             is_fun_interface: false,
-            is_open: false,
-            is_abstract: false,
-            is_sealed: false,
+            modality: crate::ast::Modality::Final,
             inner_of: None,
             supertypes,
             delegations: Vec::new(),
@@ -3249,8 +3254,9 @@ impl<'a> Parser<'a> {
                 let is_open = is_sealed || mods.iter().any(|m| m == "open");
                 let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
                 let mut d = self.parse_nested_type_decl();
-                d.is_open = is_open;
-                d.is_abstract = is_abstract;
+                // Preserves the prior behavior: this path applied open/abstract but left `is_sealed`
+                // at its default `false` (so a local `sealed` class never reported `is_sealed`).
+                d.modality = modality_of(is_open, is_abstract, false);
                 self.finish_stmt(Stmt::LocalClass(d), start)
             }
             _ => {
