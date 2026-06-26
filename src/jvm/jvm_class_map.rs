@@ -150,6 +150,25 @@ const TYPE_MAP: &[(&str, &str)] = &[
     // here also requires normalizing that name everywhere the classpath surfaces it.
 ];
 
+/// The JVM wrapper (box) class internal name for a Kotlin primitive's INTERNAL NAME
+/// (`kotlin/Int` → `java/lang/Integer`), or `None` if `internal` is not a Kotlin primitive name.
+/// The single source of truth for the boxed form, shared by the emit-only boxing in
+/// [`to_jvm_internal`], the `Ty`-keyed [`wrapper_internal`], and descriptor callers in the backend
+/// and plugins — so the primitive→wrapper table is listed exactly once.
+pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
+    Some(match internal {
+        "kotlin/Int" => "java/lang/Integer",
+        "kotlin/Long" => "java/lang/Long",
+        "kotlin/Short" => "java/lang/Short",
+        "kotlin/Byte" => "java/lang/Byte",
+        "kotlin/Double" => "java/lang/Double",
+        "kotlin/Float" => "java/lang/Float",
+        "kotlin/Boolean" => "java/lang/Boolean",
+        "kotlin/Char" => "java/lang/Character",
+        _ => return None,
+    })
+}
+
 /// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
@@ -165,16 +184,8 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // Integer;`). The front end carries it as the Kotlin primitive name (`kotlin/Int`); only here does
     // it erase to the JVM wrapper. ONE-WAY (boxed primitives are never read back from the classpath
     // under these names), so it stays out of the bidirectional `TYPE_MAP`.
-    match internal {
-        "kotlin/Int" => return "java/lang/Integer",
-        "kotlin/Long" => return "java/lang/Long",
-        "kotlin/Short" => return "java/lang/Short",
-        "kotlin/Byte" => return "java/lang/Byte",
-        "kotlin/Double" => return "java/lang/Double",
-        "kotlin/Float" => return "java/lang/Float",
-        "kotlin/Boolean" => return "java/lang/Boolean",
-        "kotlin/Char" => return "java/lang/Character",
-        _ => {}
+    if let Some(wrapper) = kotlin_prim_to_wrapper(internal) {
+        return wrapper;
     }
     // Emit-only erasure of the Kotlin collection types (read-only AND mutable) to their single JVM
     // interface — `kotlin/collections/MutableList` → `java/util/List`, `…/List` → `java/util/List`, etc.
@@ -207,22 +218,42 @@ pub fn to_kotlin_internal(internal: &str) -> &str {
 /// The JVM wrapper (box) class for a primitive `Ty` (`Int` → `java/lang/Integer`), or `None` for a
 /// non-primitive. The single source of truth for boxing owners shared by codegen and the front end.
 pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
-    Some(match t {
-        Ty::Int => "java/lang/Integer",
-        Ty::Long => "java/lang/Long",
-        Ty::Short => "java/lang/Short",
-        Ty::Byte => "java/lang/Byte",
-        Ty::Double => "java/lang/Double",
-        Ty::Float => "java/lang/Float",
-        Ty::Boolean => "java/lang/Boolean",
-        Ty::Char => "java/lang/Character",
-        _ => return None,
-    })
+    // Route through the single primitive→wrapper table: `boxed_ref` carries a primitive as its Kotlin
+    // internal name (`Ty::Int` → `Obj("kotlin/Int")`), which `kotlin_prim_to_wrapper` boxes. `None`
+    // for a non-primitive (or the unsigned inline-class primitives, which `boxed_ref` excludes).
+    kotlin_prim_to_wrapper(t.boxed_ref()?.obj_internal()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::to_jvm_internal;
+    use super::{kotlin_prim_to_wrapper, to_jvm_internal, wrapper_internal};
+    use crate::types::Ty;
+
+    #[test]
+    fn primitive_wrapper_table_is_single_source() {
+        // The 8 Kotlin primitive internal names → their JVM wrappers.
+        let pairs = [
+            ("kotlin/Int", "java/lang/Integer", Ty::Int),
+            ("kotlin/Long", "java/lang/Long", Ty::Long),
+            ("kotlin/Short", "java/lang/Short", Ty::Short),
+            ("kotlin/Byte", "java/lang/Byte", Ty::Byte),
+            ("kotlin/Double", "java/lang/Double", Ty::Double),
+            ("kotlin/Float", "java/lang/Float", Ty::Float),
+            ("kotlin/Boolean", "java/lang/Boolean", Ty::Boolean),
+            ("kotlin/Char", "java/lang/Character", Ty::Char),
+        ];
+        for (internal, wrapper, prim) in pairs {
+            assert_eq!(kotlin_prim_to_wrapper(internal), Some(wrapper));
+            // The emit-only boxing in `to_jvm_internal` and the `Ty`-keyed `wrapper_internal` agree.
+            assert_eq!(to_jvm_internal(internal), wrapper);
+            assert_eq!(wrapper_internal(prim), Some(wrapper));
+        }
+        // Non-primitives have no wrapper.
+        assert_eq!(kotlin_prim_to_wrapper("kotlin/String"), None);
+        assert_eq!(kotlin_prim_to_wrapper("demo/Foo"), None);
+        assert_eq!(wrapper_internal(Ty::String), None);
+        assert_eq!(wrapper_internal(Ty::UInt), None);
+    }
 
     #[test]
     fn collection_types_erase_to_jvm_at_emit() {
