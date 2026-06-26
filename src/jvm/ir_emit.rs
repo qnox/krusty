@@ -128,7 +128,7 @@ fn collect_var_types(ir: &IrFile) -> HashMap<u32, Ty> {
     m
 }
 
-fn jvm_can_emit(ir: &IrFile) -> bool {
+pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &Ty) -> bool {
         match t.non_null() {
             Ty::Fun(s) => s.params.len() <= 22 && s.params.iter().all(ty_ok) && ty_ok(&s.ret),
@@ -149,6 +149,9 @@ fn jvm_can_emit(ir: &IrFile) -> bool {
     ir.exprs.iter().all(|e| match e {
         IrExpr::Lambda { arity, .. } => *arity <= 22,
         IrExpr::Variable { ty, .. } => ty_ok(ty),
+        // A plugin placeholder that reached emit means its owning plugin didn't run (or couldn't
+        // specialize it) — decline the file rather than miscompile (the node has no JVM lowering).
+        IrExpr::PluginPlaceholder { .. } => false,
         _ => true,
     })
 }

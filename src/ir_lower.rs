@@ -6019,23 +6019,28 @@ impl<'a> Lower<'a> {
         if !self.is_string_format(&fmt) {
             return None;
         }
+        // Core stays generic: it detects the call structurally and records the resolved facts (format
+        // type, `@Serializable` class) plus the already-lowered operands in a `PluginPlaceholder`. The
+        // serialization plugin owns the `StringFormat` member descriptors and specializes this node
+        // (into the 2-arg member call, with a `checkcast` for decode) before emit.
+        //
+        // INVARIANT: a placeholder is only produced when `C` is an in-file `@Serializable` class
+        // (`serializable_internal`), and `plugins::run_enabled` runs the serialization plugin exactly
+        // when the file has such a class — so every placeholder is specialized before emit. If this
+        // ever emits for a class that does NOT trigger `run_enabled` (e.g. a cross-file `@Serializable`),
+        // the placeholder would survive; `jvm_can_emit` then DECLINES the file (no miscompile) rather
+        // than emitting an un-lowered node.
         match name {
             "encodeToString" => {
                 let c = self.serializable_internal(self.info.ty(args[0]))?;
                 let recv = self.expr(receiver)?;
                 let ser = self.serializer_crossfile(&c);
                 let val = self.expr(args[0])?;
-                Some(self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: fmt,
-                        name: "encodeToString".to_string(),
-                        descriptor:
-                            "(Lkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)Ljava/lang/String;"
-                                .to_string(),
-                        interface: false,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![ser, val],
+                Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "encodeToString",
+                    exprs: vec![recv, ser, val],
+                    data: vec![fmt, c],
                 }))
             }
             "decodeFromString" => {
@@ -6050,20 +6055,12 @@ impl<'a> Lower<'a> {
                 let recv = self.expr(receiver)?;
                 let ser = self.serializer_crossfile(&c);
                 let s = self.expr(args[0])?;
-                let decoded = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: fmt,
-                        name: "decodeFromString".to_string(),
-                        descriptor:
-                            "(Lkotlinx/serialization/DeserializationStrategy;Ljava/lang/String;)Ljava/lang/Object;"
-                                .to_string(),
-                        interface: false,
-                    },
-                    dispatch_receiver: Some(recv),
-                    args: vec![ser, s],
-                });
-                // The 2-arg member returns erased `Object`; checkcast to `C`.
-                Some(self.coerce_erased(decoded, Ty::obj(&c), Ty::obj("kotlin/Any")))
+                Some(self.ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "decodeFromString",
+                    exprs: vec![recv, ser, s],
+                    data: vec![fmt, c],
+                }))
             }
             _ => None,
         }

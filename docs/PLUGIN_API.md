@@ -64,6 +64,21 @@ points so a port maps method-for-method:
 bodies) — matching kotlinc's phase ordering, so a plugin can rely on another's supertypes being in
 place before its declarations run.
 
+### Core→plugin handoff: `IrExpr::PluginPlaceholder`
+
+When a desugaring needs **lowering-time information** (resolved types, explicit type arguments) that a
+post-lowering plugin can't re-derive, core lowering does the detection but stays **generic**: it emits
+`IrExpr::PluginPlaceholder { plugin, kind, exprs, data }` — `exprs` are already-lowered operands,
+`data` carries resolved names, and their meaning is private to the named plugin. The plugin rewrites
+each placeholder's arena slot in its `transform_bodies` pass. Core thus carries no plugin-specific ABI
+(e.g. kotlinx member descriptors live in the serialization plugin, not core lowering).
+
+The reified `kotlinx.serialization` round-trip uses this: core detects `fmt.encodeToString(x)` /
+`fmt.decodeFromString<C>(s)` structurally (a `StringFormat` receiver + an in-file `@Serializable`
+class) and records the format type + class in a placeholder; the serialization plugin specializes it
+into the 2-arg `StringFormat` member call (with a `checkcast` for decode). A placeholder that survives
+to emit (its plugin didn't run) is **declined** by `jvm_can_emit` — never miscompiled.
+
 Phase separation is a **convention, not a structural guarantee**: every hook gets `&mut IrFile`, so
 nothing stops `generate_declarations` from rewriting a body. This mirrors kotlinc (FIR/IR extensions
 also get broad access) and is deliberate — the phase ordering, not a capability sandbox, is the
