@@ -487,7 +487,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             let targs: Vec<Ty> =
                                 p.ty.targs
                                     .iter()
-                                    .map(|a| ty_to_ir(ty_of(file, a)))
+                                    .map(|a| field_ty_with_args(file, a))
                                     .collect();
                             let base = Ty::obj_args(fq_name, &targs);
                             if ir.is_nullable() {
@@ -15416,6 +15416,33 @@ fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
         || r.targs.iter().any(|a| ref_uses_tparam(a, tps))
         || r.fun_params.iter().any(|a| ref_uses_tparam(a, tps))
         || r.arg.as_ref().is_some_and(|a| ref_uses_tparam(a, tps))
+}
+
+/// An IR field type that PRESERVES generic type arguments at every depth (`List<List<String>>` keeps both
+/// the outer and inner element types). `ty_of`/`ty_to_ir` erase a general `Obj`'s args; this rebuilds them
+/// recursively from the source `TypeRef` so the serialization extension can derive a nested element
+/// serializer (`ListSerializer(ListSerializer(StringSerializer))`). Additive metadata on the type only.
+fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef) -> Ty {
+    let base = ty_to_ir(ty_of(file, tr));
+    // Rebuild the non-null type with recursively-preserved type arguments, then re-apply the source `?`
+    // from the `TypeRef` (`ty_of` strips it from a reference type) — so a nullable element `String?` keeps
+    // its nullability, which the element serializer needs for a `.nullable` wrapper.
+    let resolved = match base.non_null().obj_internal() {
+        Some(fq) if !tr.targs.is_empty() => {
+            let targs: Vec<Ty> = tr
+                .targs
+                .iter()
+                .map(|a| field_ty_with_args(file, a))
+                .collect();
+            Ty::obj_args(fq, &targs)
+        }
+        _ => base.non_null(),
+    };
+    if tr.nullable {
+        Ty::nullable(resolved)
+    } else {
+        resolved
+    }
 }
 
 fn ty_of(file: &ast::File, r: &ast::TypeRef) -> Ty {

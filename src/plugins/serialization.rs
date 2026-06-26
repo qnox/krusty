@@ -387,7 +387,15 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
         if type_args.len() >= n {
             let mut arg_sers = Vec::with_capacity(n);
             for a in type_args.iter().take(n) {
-                arg_sers.push(element_serializer_expr(ir, a)?);
+                // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
+                // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
+                // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
+                let elem = element_serializer_expr(ir, a)?;
+                arg_sers.push(if is_nullable(a) {
+                    wrap_nullable_serializer(ir, elem)
+                } else {
+                    elem
+                });
             }
             let pdesc = "Lkotlinx/serialization/KSerializer;".repeat(n);
             return Some(ir.add_expr(IrExpr::Call {
