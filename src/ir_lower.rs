@@ -11197,8 +11197,18 @@ impl<'a> Lower<'a> {
                 // Constructor reference `::A` (the name is a class, not a function): synthesize a
                 // static impl `(ctor params) -> new A(params)` and wrap it in a closure, exactly as a
                 // lambda `{ a -> A(a) }` would lower. Only the simple primary-constructor positional
-                // case (the closure's arity matches the constructor's field params) is modeled.
-                if !self.module_declares(&name) {
+                // case (the closure's arity matches the constructor's field params) is modeled. A
+                // reference to a FUNCTION of this name (module or classpath, e.g. `::greet`) is NOT a
+                // constructor reference — fall through to the function-reference paths below.
+                let names_a_function = self.fun_ids.iter().any(|((n, _), _)| n == &name)
+                    || self
+                        .syms
+                        .libraries
+                        .functions(&name, None)
+                        .overloads
+                        .iter()
+                        .any(|o| o.kind == crate::libraries::FnKind::TopLevel);
+                if !self.module_declares(&name) && !names_a_function {
                     let ci = self.class_of(sig.ret)?;
                     let class_id = ci.id;
                     let ctor_count = self.ir.classes[class_id as usize].ctor_param_count as usize;
@@ -11248,42 +11258,80 @@ impl<'a> Lower<'a> {
                 }
                 // `::foo` only resolves for a single-overload name (the checker enforces this), so the
                 // sole entry for this name is the target.
-                let fid = *self
+                if let Some(fid) = self
                     .fun_ids
                     .iter()
                     .find(|((n, _), _)| n == &name)
-                    .map(|(_, id)| id)?;
-                let ret = self.ir.functions[fid as usize].ret.clone();
-                let fn_params = self.ir.functions[fid as usize].params.clone();
-                // A generic referenced function erases its type parameters — not modeled.
-                if fn_params.len() != arity {
-                    return None;
-                }
-                if self
-                    .top_fun_decl(&name)
-                    .map_or(false, |f| !f.type_params.is_empty())
+                    .map(|(_, id)| *id)
                 {
+                    let ret = self.ir.functions[fid as usize].ret.clone();
+                    let fn_params = self.ir.functions[fid as usize].params.clone();
+                    // A generic referenced function erases its type parameters — not modeled.
+                    if fn_params.len() != arity {
+                        return None;
+                    }
+                    if self
+                        .top_fun_decl(&name)
+                        .map_or(false, |f| !f.type_params.is_empty())
+                    {
+                        return None;
+                    }
+                    if ret == Ty::Nothing {
+                        return None;
+                    }
+                    // A top-level function reference → a `FunctionReferenceImpl` subclass whose `invoke`
+                    // calls `invokestatic <facade>.foo(args)` (empty owner = facade). Unbound (an
+                    // `INSTANCE` singleton), top-level flags = 1. The subclass carries real reference
+                    // equality.
+                    return Some(self.make_func_ref(
+                        e.0,
+                        false,
+                        arity as u8,
+                        String::new(),
+                        name.clone(),
+                        1,
+                        crate::ir::FrDispatch::Static,
+                        String::new(),
+                        name.clone(),
+                        false,
+                        fn_params,
+                        ret,
+                        None,
+                    ));
+                }
+                // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module): the
+                // sole `TopLevel` overload's `invoke` does `invokestatic <classpath-facade>.greet(args)`.
+                let tl: Vec<_> = self
+                    .syms
+                    .libraries
+                    .functions(&name, None)
+                    .overloads
+                    .into_iter()
+                    .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                    .collect();
+                let [o] = tl.as_slice() else { return None };
+                let c = &o.callable;
+                if c.params.len() != arity || c.vararg_elem.is_some() || c.ret == Ty::Nothing {
                     return None;
                 }
-                if ret == Ty::Nothing {
-                    return None;
-                }
-                // A top-level function reference → a `FunctionReferenceImpl` subclass whose `invoke`
-                // calls `invokestatic <facade>.foo(args)` (empty owner = facade). Unbound (an `INSTANCE`
-                // singleton), top-level flags = 1. The subclass carries real reference equality.
+                // The classpath callable's params/ret are checker `Ty`s (`Ty::Int`); `make_func_ref` /
+                // `emit_func_ref_class` expect the IR/boxed form (`Obj("kotlin/Int")`) that `ir_ty_to_jvm`
+                // round-trips to a primitive descriptor — convert via `ty_to_ir` (a bare `Ty::Int` would
+                // emit as `Object` and the `invoke` would call a non-existent erased target method).
+                let param_tys: Vec<Ty> = c.params.iter().map(|t| ty_to_ir(*t)).collect();
                 return Some(self.make_func_ref(
                     e.0,
                     false,
                     arity as u8,
-                    String::new(),
+                    c.owner.clone(),
                     name.clone(),
                     1,
                     crate::ir::FrDispatch::Static,
-                    String::new(),
-                    name.clone(),
+                    c.owner.clone(),
+                    c.name.clone(),
                     false,
-                    fn_params,
-                    ret,
+                    param_tys,
+                    ty_to_ir(c.ret),
                     None,
                 ));
             }
