@@ -180,6 +180,34 @@ fun box(): String {
 }
 
 #[test]
+fn serializable_inheritance_round_trips_in_krusty() {
+    // A `@Serializable` subclass serializes its INHERITED `@Serializable` base properties too (base
+    // properties first), and decodes them by assigning through the inherited setters. Previously the
+    // subclass serializer only saw its own field (encode `{"y":2}`, missing inherited `x`).
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+@Serializable open class Base { var x: Int = 0 }
+@Serializable class Sub : Base() { var y: Int = 0 }
+fun box(): String {
+    val s0 = Sub().apply { x = 1; y = 2 }
+    val js = Json.encodeToString(Sub.serializer(), s0)
+    if (js != "{\"x\":1,\"y\":2}") return "enc:$js"
+    val back = Json.decodeFromString(Sub.serializer(), js)
+    return if (back.x == 1 && back.y == 2) "OK" else "dec:${back.x}/${back.y}"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerInherit") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "serializable inheritance round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty serializable inheritance round-trip OK");
+}
+
+#[test]
 fn body_var_property_class_round_trips_in_krusty() {
     // A `@Serializable` class whose serializable properties are BODY `var`s (declared in the body, not
     // the primary constructor). deserialize must construct via the (no-arg) primary constructor and

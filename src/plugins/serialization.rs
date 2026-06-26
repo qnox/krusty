@@ -132,6 +132,76 @@ fn setter_name(prop: &str) -> String {
     }
 }
 
+/// The full list of serializable fields for `class_id`, INCLUDING those inherited from `@Serializable`
+/// base classes (kotlinc serializes a derived class's inherited properties too). Base properties come
+/// FIRST (top-most base first), matching kotlinc's descriptor element order; then the class's own fields.
+/// A non-`@Serializable` base (or `Object`) contributes nothing.
+fn serializable_fields(ir: &IrFile, class_id: u32) -> Vec<crate::ir::IrField> {
+    let own = || ir.classes[class_id as usize].fields.clone();
+    // Fold inherited fields ONLY for the round-trippable shape: the derived class constructs via a no-arg
+    // primary constructor (no own ctor-PARAMETER properties) and is non-generic. Otherwise the leading-
+    // ctor-args / type-param-field alignment in `construct_obj`/childSerializers wouldn't hold — keep just
+    // the class's own fields (the prior behavior).
+    if ir.classes[class_id as usize].ctor_param_count > 0
+        || !ir.classes[class_id as usize].type_params.is_empty()
+    {
+        return own();
+    }
+    let mut bases: Vec<usize> = Vec::new();
+    let mut cur = ir.classes[class_id as usize].superclass.clone();
+    let mut seen = std::collections::HashSet::new();
+    while !cur.is_empty() && cur != "java/lang/Object" && seen.insert(cur.clone()) {
+        let Some(bid) = ir.classes.iter().position(|c| c.fq_name == cur) else {
+            break;
+        };
+        if ir.classes.iter().any(|c| c.fq_name == serializer_fq(&cur)) {
+            bases.push(bid);
+        }
+        cur = ir.classes[bid].superclass.clone();
+    }
+    let mut inherited: Vec<crate::ir::IrField> = Vec::new();
+    for &bid in bases.iter().rev() {
+        inherited.extend(ir.classes[bid].fields.iter().cloned());
+    }
+    // An inherited field is only foldable when it round-trips: it must be a `var` (have an inherited
+    // setter so decode can restore it — an inherited `val` would silently drop its decoded value) and be
+    // non-generic (a type-param field needs the substituted-serializer plumbing). Otherwise keep own only.
+    if inherited
+        .iter()
+        .any(|f| f.type_param.is_some() || !class_has_method(ir, class_id, &setter_name(&f.name)))
+    {
+        return own();
+    }
+    inherited.extend(ir.classes[class_id as usize].fields.iter().cloned());
+    inherited
+}
+
+/// Whether `class_id` (or any superclass) declares a method named `name` — used to find an INHERITED
+/// setter for a body property assigned during deserialization.
+fn class_has_method(ir: &IrFile, class_id: u32, name: &str) -> bool {
+    let mut cur = Some(class_id);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(cid) = cur {
+        if !seen.insert(cid) {
+            break;
+        }
+        if ir.classes[cid as usize]
+            .methods
+            .iter()
+            .any(|&m| ir.functions[m as usize].name == name)
+        {
+            return true;
+        }
+        let sup = ir.classes[cid as usize].superclass.clone();
+        cur = ir
+            .classes
+            .iter()
+            .position(|c| c.fq_name == sup)
+            .map(|i| i as u32);
+    }
+    false
+}
+
 /// Construct a serialized object from per-field `values`: the leading `n_ctor` fields are primary-
 /// constructor parameters (`new Foo(v0, …)`); each trailing BODY property (`var x` declared in the body
 /// or inherited from a `@Serializable` base) is assigned through its setter (`obj.setX(vk)`). A body `val`
@@ -163,11 +233,7 @@ fn construct_obj(
     })];
     for k in n_ctor..fields.len() {
         let sname = setter_name(&fields[k].0);
-        let has_setter = ir.classes[foo_id as usize]
-            .methods
-            .iter()
-            .any(|&m| ir.functions[m as usize].name == sname);
-        if !has_setter {
+        if !class_has_method(ir, foo_id, &sname) {
             continue; // a body `val` — keep its initializer (no setter to call)
         }
         let recv = ir.add_expr(IrExpr::GetValue(obj_slot));
@@ -1100,15 +1166,16 @@ impl IrPlugin for SerializationPlugin {
                 None,
             );
 
-            let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
-                .fields
+            // Serializable fields incl. inherited `@Serializable` base properties (base first), so the
+            // descriptor's element list matches what serialize/deserialize iterate.
+            let foo_serial_fields = serializable_fields(ir, class_id);
+            let foo_fields: Vec<(String, Ty)> = foo_serial_fields
                 .iter()
                 .map(|f| (f.name.clone(), f.ty.clone()))
                 .collect();
             // Per-property constant default (`Some` ⇒ the element is `isOptional` — omitted on encode when
             // it still equals the default).
-            let foo_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
-                .fields
+            let foo_defaults: Vec<Option<IrConst>> = foo_serial_fields
                 .iter()
                 .map(|f| f.default.clone())
                 .collect();
@@ -1400,8 +1467,10 @@ impl IrPlugin for SerializationPlugin {
             // such a field AS its underlying type — encode/decode the primitive directly (same JSON as
             // kotlinc's inline serializer), not via the (boxed) `<Foo>$serializer` which would store a
             // `Foo` reference into the unboxed slot (VerifyError).
-            let fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
-                .fields
+            // Serializable fields INCLUDING those inherited from `@Serializable` base classes (base
+            // properties first) — a derived class serializes its inherited properties too.
+            let serial_fields = serializable_fields(ir, class_id);
+            let fields: Vec<(String, Ty)> = serial_fields
                 .iter()
                 .map(|f| {
                     (
@@ -1413,11 +1482,8 @@ impl IrPlugin for SerializationPlugin {
             let field_types: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
             // Per-property constant default (`Some` ⇒ OPTIONAL — serialize omits it when it still equals
             // the default, via `shouldEncodeElementDefault(desc,i) || value.x != default`).
-            let field_defaults: Vec<Option<IrConst>> = ir.classes[class_id as usize]
-                .fields
-                .iter()
-                .map(|f| f.default.clone())
-                .collect();
+            let field_defaults: Vec<Option<IrConst>> =
+                serial_fields.iter().map(|f| f.default.clone()).collect();
             // Per-property explicit serializers (`@Serializable(with = X::class)` on a field).
             let field_sers: std::collections::HashMap<String, String> = ir.classes
                 [class_id as usize]
