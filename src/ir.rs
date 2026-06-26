@@ -128,6 +128,25 @@ pub enum IrExpr {
         dispatch_receiver: Option<ExprId>,
         args: Vec<ExprId>,
     },
+    /// A placeholder a compiler-extension plugin must specialize before emit — core lowering produces
+    /// it generically (no plugin-specific ABI), and the plugin rewrites this arena slot into concrete
+    /// IR in its body phase. Currently the only producer is the reified kotlinx.serialization round-trip
+    /// (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`): core detects the call STRUCTURALLY (a
+    /// `StringFormat` receiver + a `@Serializable` type) and records the resolved facts here; the
+    /// serialization plugin owns the `StringFormat` member descriptors (so a new serialization runtime
+    /// doesn't require recompiling core). `exprs` are already-lowered operands, `data` carries resolved
+    /// names; the meaning of both is private to the named plugin. A node that survives to emit is
+    /// declined by `jvm_can_emit` (never miscompiled).
+    PluginPlaceholder {
+        /// Which plugin specializes this node (e.g. `"serialization"`).
+        plugin: &'static str,
+        /// The plugin-specific operation (e.g. `"encodeToString"` / `"decodeFromString"`).
+        kind: &'static str,
+        /// Already-lowered operand expressions, in a plugin-defined order.
+        exprs: Vec<ExprId>,
+        /// Resolved names the plugin needs (e.g. the format internal name, the `@Serializable` class).
+        data: Vec<String>,
+    },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),
     /// `IrBlock` — a sequence of statements; value is the last expression (or Unit).
@@ -949,6 +968,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             catches.iter().for_each(|c| f(c.body));
             finally.iter().for_each(|&fin| f(fin));
         }
+        IrExpr::PluginPlaceholder { exprs: kids, .. } => kids.iter().for_each(|&k| f(k)),
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
         | IrExpr::GetValue(_)

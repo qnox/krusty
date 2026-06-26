@@ -25,6 +25,16 @@ pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
 const GENERATED_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/GeneratedSerializer";
 
+/// `StringFormat.encodeToString(SerializationStrategy, value): String` — the 2-arg member a reified
+/// `fmt.encodeToString(x)` lowers to. Owned here (not core) so a new serialization runtime is a
+/// plugin concern. Specializes a core `PluginPlaceholder { kind: "encodeToString" }`.
+const ENCODE_TO_STRING_DESC: &str =
+    "(Lkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)Ljava/lang/String;";
+/// `StringFormat.decodeFromString(DeserializationStrategy, String): Any` — the 2-arg member a reified
+/// `fmt.decodeFromString<C>(s)` lowers to (its erased `Object` result is `checkcast` to `C`).
+const DECODE_FROM_STRING_DESC: &str =
+    "(Lkotlinx/serialization/DeserializationStrategy;Ljava/lang/String;)Ljava/lang/Object;";
+
 /// The `kotlinx.serialization` runtime ABI the generated code must match. The synthesized member
 /// shape changed across releases, so the plugin emits *per target version* — exactly as krusty
 /// itself is pinned to a kotlinc version. A mismatch between generated code and the linked runtime
@@ -129,6 +139,64 @@ fn getter_name(prop: &str) -> String {
 /// Routes through the canonical primitive→wrapper table in `jvm_class_map` rather than re-listing it.
 fn boxed_descriptor(fq: &str) -> Option<String> {
     crate::jvm::jvm_class_map::kotlin_prim_to_wrapper(fq).map(|w| format!("L{w};"))
+}
+
+/// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
+/// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
+/// (`exprs = [receiver, serializer, value-or-string]`) and the resolved names (`data = [format
+/// internal, @Serializable class internal]`); the kotlinx member descriptors are owned here. Each
+/// placeholder's arena slot is overwritten in place (the index-based IR makes this a local edit):
+/// encode becomes the `encodeToString` call; decode becomes the `decodeFromString` call wrapped in a
+/// `checkcast` to the decoded class (the member returns erased `Object`).
+fn specialize_reified_placeholders(ir: &mut IrFile) {
+    let markers: Vec<usize> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                ..
+            } => Some(i),
+            _ => None,
+        })
+        .collect();
+    for mid in markers {
+        let IrExpr::PluginPlaceholder {
+            kind, exprs, data, ..
+        } = &ir.exprs[mid]
+        else {
+            continue;
+        };
+        // Operand/name layout is fixed by the core producer; a malformed node is left untouched
+        // (`jvm_can_emit` then declines the file rather than miscompiling).
+        let (&[recv, ser, arg], [fmt, class_internal]) = (exprs.as_slice(), data.as_slice()) else {
+            continue;
+        };
+        let (kind, fmt, class_internal) = (*kind, fmt.clone(), class_internal.clone());
+        let call = |descriptor: &str| IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: fmt.clone(),
+                name: kind.to_string(),
+                descriptor: descriptor.to_string(),
+                interface: false,
+            },
+            dispatch_receiver: Some(recv),
+            args: vec![ser, arg],
+        };
+        match kind {
+            "encodeToString" => ir.exprs[mid] = call(ENCODE_TO_STRING_DESC),
+            "decodeFromString" => {
+                let decoded = ir.add_expr(call(DECODE_FROM_STRING_DESC));
+                ir.exprs[mid] = IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: decoded,
+                    type_operand: Ty::obj(&class_internal),
+                };
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The JVM descriptor for a property type (just what `serialize`'s getter calls need). A nullable
@@ -1298,6 +1366,10 @@ impl IrPlugin for SerializationPlugin {
     /// IR backend generation: fill `childSerializers` with a real per-field element-serializer array
     /// (arity == field count), and `serialize`/`deserialize` with placeholder `return` bodies.
     fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext) {
+        // Specialize the generic reified-serialization placeholders core emitted in user bodies
+        // (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`) into the concrete `StringFormat`
+        // member calls — the kotlinx descriptors live here, not in core lowering.
+        specialize_reified_placeholders(ir);
         for class_id in ctx.classes_with_simple("Serializable") {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
@@ -2542,5 +2614,98 @@ mod tests {
         let before = ir.classes.len();
         run(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), before, "no @Serializable → no synthesis");
+    }
+
+    /// A generic reified-serialization placeholder (what core lowering emits) is specialized by the
+    /// plugin into the concrete `StringFormat` member call — the kotlinx descriptors live here.
+    fn placeholder(kind: &'static str) -> (IrFile, u32, [u32; 3]) {
+        let mut ir = IrFile::default();
+        let recv = ir.add_expr(IrExpr::GetValue(0));
+        let ser = ir.add_expr(IrExpr::GetValue(1));
+        let arg = ir.add_expr(IrExpr::GetValue(2));
+        let mid = ir.add_expr(IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind,
+            exprs: vec![recv, ser, arg],
+            data: vec![
+                "kotlinx/serialization/json/Json".to_string(),
+                "demo/Foo".to_string(),
+            ],
+        });
+        (ir, mid, [recv, ser, arg])
+    }
+
+    #[test]
+    fn reified_encode_placeholder_specialized() {
+        let (mut ir, mid, [recv, ser, arg]) = placeholder("encodeToString");
+        specialize_reified_placeholders(&mut ir);
+        match &ir.exprs[mid as usize] {
+            IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        owner,
+                        name,
+                        descriptor,
+                        interface,
+                    },
+                dispatch_receiver,
+                args,
+            } => {
+                assert_eq!(owner, "kotlinx/serialization/json/Json");
+                assert_eq!(name, "encodeToString");
+                assert_eq!(descriptor, ENCODE_TO_STRING_DESC);
+                assert!(!interface);
+                assert_eq!(*dispatch_receiver, Some(recv));
+                assert_eq!(args, &vec![ser, arg]);
+            }
+            other => panic!("expected encodeToString call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reified_decode_placeholder_specialized_with_checkcast() {
+        let (mut ir, mid, [recv, ser, arg]) = placeholder("decodeFromString");
+        specialize_reified_placeholders(&mut ir);
+        // The slot becomes a checkcast to the decoded class wrapping the decode member call.
+        let inner = match &ir.exprs[mid as usize] {
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: inner,
+                type_operand,
+            } => {
+                assert_eq!(*type_operand, Ty::obj("demo/Foo"));
+                *inner
+            }
+            other => panic!("expected checkcast, got {other:?}"),
+        };
+        match &ir.exprs[inner as usize] {
+            IrExpr::Call {
+                callee: Callee::Virtual {
+                    name, descriptor, ..
+                },
+                dispatch_receiver,
+                args,
+            } => {
+                assert_eq!(name, "decodeFromString");
+                assert_eq!(descriptor, DECODE_FROM_STRING_DESC);
+                assert_eq!(*dispatch_receiver, Some(recv));
+                assert_eq!(args, &vec![ser, arg]);
+            }
+            other => panic!("expected decodeFromString call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surviving_placeholder_declines_emit() {
+        // A placeholder that reaches the JVM emitter (plugin never ran) must make the file decline,
+        // not miscompile. `run` here is a non-`@Serializable` no-op, so the marker survives.
+        let (mut ir, _mid, _) = placeholder("encodeToString");
+        assert!(
+            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            "a surviving PluginPlaceholder must be declined by jvm_can_emit"
+        );
+        // After specialization the file is emittable again.
+        specialize_reified_placeholders(&mut ir);
+        assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
     }
 }
