@@ -331,6 +331,7 @@ mod tests {
             tparam_names: vec![],
             generic_props: HashMap::new(),
             value_field: None,
+            generic_methods: HashMap::new(),
         }
     }
 

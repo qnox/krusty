@@ -14965,7 +14965,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                     let rt = self.recv_ty(receiver);
-                    if let Some((class, index, fid, _)) = self
+                    if let Some((class, index, fid, mret)) = self
                         .class_of(rt)
                         .map(|ci| ci.internal.clone())
                         .and_then(|i| self.resolve_method(&i, &name))
@@ -14983,12 +14983,16 @@ impl<'a> Lower<'a> {
                         for (arg, pt) in args.iter().zip(&params) {
                             a.push(self.lower_arg(*arg, pt)?);
                         }
-                        self.ir.add_expr(IrExpr::MethodCall {
+                        let call = self.ir.add_expr(IrExpr::MethodCall {
                             class,
                             index,
                             receiver: recv,
                             args: a.into_iter().map(Some).collect(),
-                        })
+                        });
+                        // A generic higher-order member erases its `<R>` return to `Object`; the checker
+                        // recovers the concrete result (`box.map { it.length }` → `Int`), so insert the
+                        // `checkcast`/unbox kotlinc emits on the erased return (a no-op when they match).
+                        self.coerce_generic_read(call, e, mret)
                     } else if let Some((owner, sig_params, sig_ret, interface)) = match &rt {
                         // An instance method on a class defined in ANOTHER file → `CrossFileVirtual`
                         // (own methods only; inherited/defaulted/vararg cross-file calls bail).
