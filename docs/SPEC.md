@@ -572,6 +572,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class properties) to the literal-inference scope; previously only the properties were visible, so a
   body referencing a parameter inferred `Unit` and then tripped a return-type mismatch against the body.
   This also unblocks a **bound method reference** `obj::m` whose method has an inferred return.
+- **Inferred returns are recorded per overload, keyed by `(name, parameter types)`** (not name alone), so
+  two same-name overloads with different inferred returns don't clobber each other and a call binds the
+  right overload's return (`tests/overloaded_inferred_return_e2e.rs`). The key uses the SELECTED
+  signature's params at every site — `resolve_ty` + vararg→array at the insert (matching
+  `collect_signatures`), `fi.callable.params` at the call-site read, `sig.params` at codegen — so a
+  reference-bounded type parameter (`fun <T : Number> show(x: T) = x.toString()`) erases to its bound
+  consistently across all three; a key rebuilt from the raw AST in codegen (`ty_of`, which erases a bare
+  type parameter to `Object`) would diverge and make codegen miss the override
+  (`tests/generic_inferred_return_e2e.rs`).
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
