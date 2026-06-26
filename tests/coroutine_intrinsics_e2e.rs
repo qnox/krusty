@@ -11,6 +11,13 @@ mod common;
 
 use std::path::PathBuf;
 
+fn run(src: &str) -> Option<String> {
+    let jh = common::java_home()?;
+    let sl = common::stdlib_jar()?;
+    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
+    common::compile_and_run_box(src, "Main", &[sl], Some(&jdk))
+}
+
 fn compiles(src: &str) -> bool {
     let Some(jh) = common::java_home() else {
         return true; // no JDK — skip (treated as pass)
@@ -30,6 +37,23 @@ fun box(): String = \"OK\"\n";
     assert!(
         compiles(SRC),
         "leaf coroutine intrinsics should resolve + lower"
+    );
+}
+
+#[test]
+fn start_coroutine_runs_a_suspend_lambda() {
+    // `c.startCoroutine(completion)` starts a coroutine: the suspend lambda runs to completion and the
+    // completion's `resumeWith` is invoked. Uses a plain `Continuation` completion (not a companion).
+    const SRC: &str = "import kotlin.coroutines.*\n\
+class Done : Continuation<Unit> {\n\
+  override val context: CoroutineContext = EmptyCoroutineContext\n\
+  override fun resumeWith(result: Result<Unit>) {}\n\
+}\n\
+fun builder(c: suspend () -> Unit) { c.startCoroutine(Done()) }\n\
+fun box(): String { builder { }; return \"OK\" }\n";
+    assert_eq!(
+        run(SRC).expect("startCoroutine runs a suspend lambda"),
+        "OK"
     );
 }
 
