@@ -465,7 +465,7 @@ fn emit_class(
     let param_tys: Vec<Ty> = if c.ctor_args.is_empty() {
         field_tys[..c.ctor_param_count as usize].to_vec()
     } else {
-        c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+        c.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
     };
     // For a generic class, the `<init>` carries a `Signature` whose type-parameter params read `T<tp>;`
     // (`class Box<T>(var a: T)` → `(TT;)V`) — kotlinc does the same. No `<…>` prefix: the constructor
@@ -474,7 +474,7 @@ fn emit_class(
         let is_field: Vec<bool> = if c.ctor_args.is_empty() {
             vec![true; param_tys.len()]
         } else {
-            c.ctor_args.iter().map(|(_, f)| *f).collect()
+            c.ctor_args.iter().map(|a| a.is_field).collect()
         };
         let mut sig = String::from("(");
         let mut any = false;
@@ -517,7 +517,7 @@ fn emit_class(
                                 .map(|f| ir_ty_to_jvm(&f.ty))
                                 .collect()
                         } else {
-                            sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                            sc.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
                         }
                     })
                     .unwrap_or_default()
@@ -551,9 +551,8 @@ fn emit_class(
             }
             // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
             // the very start of `<init>` — before the super() call.
-            let ctor_checks = c.ctor_param_checks.clone();
-            for (i, check) in ctor_checks.iter().enumerate() {
-                if let Some(name) = check {
+            for (i, a) in c.ctor_args.iter().enumerate() {
+                if let Some(name) = &a.check {
                     if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
                         ctor.aload(slot);
                         ctor.push_string(name, e.cw);
@@ -602,7 +601,7 @@ fn emit_class(
                 let is_field: Vec<bool> = if c.ctor_args.is_empty() {
                     vec![true; param_tys.len()]
                 } else {
-                    c.ctor_args.iter().map(|(_, f)| *f).collect()
+                    c.ctor_args.iter().map(|a| a.is_field).collect()
                 };
                 for (i, t) in param_tys.iter().enumerate() {
                     if is_field.get(i).copied().unwrap_or(true) {
@@ -709,7 +708,7 @@ fn emit_class(
                                         .map(|f| ir_ty_to_jvm(&f.ty))
                                         .collect()
                                 } else {
-                                    sc.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                                    sc.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
                                 }
                             })
                             .unwrap_or_default()
@@ -3212,7 +3211,7 @@ impl<'a> Emitter<'a> {
                 let field_tys: Vec<Ty> = match ctor_params {
                     Some(ps) => ps.iter().map(ir_ty_to_jvm).collect(),
                     None if !c.ctor_args.is_empty() => {
-                        c.ctor_args.iter().map(|(t, _)| ir_ty_to_jvm(t)).collect()
+                        c.ctor_args.iter().map(|a| ir_ty_to_jvm(&a.ty)).collect()
                     }
                     None => c.fields[..c.ctor_param_count as usize]
                         .iter()

@@ -98,7 +98,7 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     let orig_ctor_args: Vec<Vec<Ty>> = ir
         .classes
         .iter()
-        .map(|c| c.ctor_args.iter().map(|(t, _)| t.clone()).collect())
+        .map(|c| c.ctor_args.iter().map(|a| a.ty).collect())
         .collect();
     // Pre-erasure secondary-constructor parameter types (class → ctor → params) — slot types for a
     // regular class's secondary-`<init>` body/delegation box/unbox (slot 0 = `this`, slots 1.. = params).
@@ -400,21 +400,17 @@ pub fn lower_value_classes(ir: &mut IrFile) -> bool {
     // 2. Erase class field + ctor-arg types; drop the `<init>` null-check on a constructor parameter
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     for c in &mut ir.classes {
-        // `ctor_param_checks` is parallel to the first `ctor_args`. Drop the `<init>` null-check on a param
-        // that erased to a non-reference, OR whose value-class underlying chain is null-capable
-        // (`ZN2(val z: ZN)` where `ZN(val z: Z1?)` → the value can be null, so kotlinc emits no check).
-        for (k, a) in c.ctor_args.iter().enumerate() {
-            if !is_ref(&erase(&a.0, &under)) || vc_underlying_nullable(&a.0, &under) {
-                if let Some(chk) = c.ctor_param_checks.get_mut(k) {
-                    *chk = None;
-                }
-            }
-        }
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
         }
         for a in &mut c.ctor_args {
-            a.0 = erase(&a.0, &under);
+            // Drop the `<init>` null-check on a param that erased to a non-reference, OR whose value-class
+            // underlying chain is null-capable (`ZN2(val z: ZN)` where `ZN(val z: Z1?)` → the value can be
+            // null, so kotlinc emits no check). Then erase the param type itself.
+            if !is_ref(&erase(&a.ty, &under)) || vc_underlying_nullable(&a.ty, &under) {
+                a.check = None;
+            }
+            a.ty = erase(&a.ty, &under);
         }
         // A regular class's secondary-`<init>` value-class params erase too (`Test(x: String, s: S)` →
         // `(String, String)`); a value class's own secondary ctors were already consumed into static

@@ -222,7 +222,6 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         bridges: Vec::new(),
         interfaces: Vec::new(),
         is_object: false,
-        ctor_param_checks: Vec::new(),
         is_companion: false,
         companion_class: None,
         func_ref: None,
