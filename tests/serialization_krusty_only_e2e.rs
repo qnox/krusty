@@ -587,6 +587,37 @@ fun box(): String {
 }
 
 #[test]
+fn collection_field_serializer_in_krusty() {
+    // Standard COLLECTION fields (`List<T>`/`Set<T>`/`Map<K,V>`) serialize through the kotlinx builtin
+    // collection serializers — `ListSerializer(elem)`, `SetSerializer(elem)`, `MapSerializer(k, v)` (from
+    // `BuiltinSerializersKt`), over recursively-derived element serializers. Full encode + decode
+    // round-trip. (Deeply-NESTED generics like `List<List<T>>` lose inner type args today — separate gap.)
+    let src = r#"import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+
+@Serializable
+data class C(val xs: List<Int>, val s: Set<String>, val m: Map<String, Int>)
+
+fun box(): String {
+    val c = C(listOf(1, 2), setOf("p", "q"), mapOf("a" to 3))
+    val str = Json.encodeToString(C.serializer(), c)
+    if (str != "{\"xs\":[1,2],\"s\":[\"p\",\"q\"],\"m\":{\"a\":3}}") return "enc=$str"
+    val back = Json.decodeFromString(C.serializer(), str)
+    return if (back == c) "OK" else "back=$back"
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerCollectionField") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "OK",
+        "collection field serializer wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("pure-krusty collection field serializer OK");
+}
+
+#[test]
 fn classpath_typed_field_serializer_in_krusty() {
     // A `@Serializable` class with a CLASSPATH-typed field (`kotlin.uuid.Uuid`, resolved via a wildcard
     // import) serializes through the kotlinx builtin `UuidSerializer`. Exercises the field-type classpath
