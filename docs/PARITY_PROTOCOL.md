@@ -1179,3 +1179,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `private` and relies on `NestHost`/`NestMembers` (krusty emits neither, so it stays package-private),
   and the entry-subclass `E$A` ctor needs the same `()V` Signature (separate emit path); the
   `$EnumSwitchMapping$` `when`-over-enum tableswitch optimization.
+- **`StringBuilder.append(String)` for a String from a method-return descriptor (byte-parity FIX,
+  box()=OK flat, FAIL=0).** A String value whose `Ty` was parsed from a method RETURN descriptor —
+  a classpath call (`"ab".uppercase()`) or the data-class `Arrays.toString(field)` wrapper — is
+  `Ty::Obj("java/lang/String")`, NOT `Ty::String`. `append_top` matched only `Ty::String`, so it
+  appended such values via the less-specific `append(Ljava/lang/Object;)` where kotlinc uses
+  `append(Ljava/lang/String;)` — a per-concat divergence (every string template/`+`/data-class
+  `toString` over a String-returning call). `append_top` now treats `Ty::Obj("java/lang/String")` /
+  `"kotlin/String"` as `String`. (A plain String field read was already `Ty::String` via `ir_ty_to_jvm`,
+  so only descriptor-typed values were affected.) `tests/string_concat_append_overload_e2e.rs`. Surfaced
+  by `bytediff dataClasses/equals/intarray` (the IntArray data-class `toString`).
