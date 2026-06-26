@@ -52,12 +52,29 @@ fun box(): String { val i: I = C; return i.f() }\n";
 }
 
 #[test]
-fn companion_with_base_class_skips_cleanly() {
-    // A companion with a base CLASS is not yet modeled (needs a super(args) call) — it must skip the
-    // file (compile returns None / the harness marks it unsupported), never miscompile.
-    const SRC: &str = "open class Base\n\
+fn companion_extends_no_arg_base_runs() {
+    // A companion with a no-arg base CLASS: the registration pass now synthesizes the `super()` call,
+    // so `C` used as a value is a `Base`.
+    const SRC: &str = "open class Base { fun tag() = \"OK\" }\n\
 class C { companion object : Base() }\n\
-fun box(): String = \"OK\"\n";
-    // Either it compiles (if some path supports it) or skips — both are acceptable; it must not panic.
-    let _ = compiles(SRC);
+fun box(): String { val b: Base = C; return b.tag() }\n";
+    assert_eq!(
+        run(SRC).expect("companion extending a no-arg base compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn companion_extends_default_param_base_runs() {
+    // The base ctor takes a parameter with a DEFAULT; the registration pass fills the default into the
+    // synthesized `super(<default>)` call. (Base is referenced by a DIFFERENT class than the one whose
+    // companion extends it — self-reference is a separate, unsupported shape.)
+    const SRC: &str =
+        "open class Base(val n: Int = 7) { fun tag() = if (n == 7) \"OK\" else \"x$n\" }\n\
+class C { companion object : Base() }\n\
+fun box(): String { val b: Base = C; return b.tag() }\n";
+    assert_eq!(
+        run(SRC).expect("companion extending a default-param base fills the default + runs"),
+        "OK"
+    );
 }

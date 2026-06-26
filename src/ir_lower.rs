@@ -890,8 +890,14 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 }
             }
             // `companion object` with methods → a synthesized `C$Companion` class (private ctor, the
-            // companion methods as instance methods) + a `Companion` field on the outer class.
-            if !c.companion_methods.is_empty() {
+            // companion methods as instance methods) + a `Companion` field on the outer class. Also
+            // synthesized for a method-LESS companion that declares a supertype (`companion object :
+            // EmptyContinuation()`) — it must still be emitted (extending its base/interfaces) so the
+            // companion is usable as a value of that type.
+            if !c.companion_methods.is_empty()
+                || c.companion_base.is_some()
+                || !c.companion_supertypes.is_empty()
+            {
                 let comp_fq = format!("{internal}$Companion");
                 // The companion's declared supertypes (`companion object : Base, I`): make the synthesized
                 // companion implement its declared INTERFACES so it is genuinely an `I` at runtime. The
@@ -903,7 +909,6 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // an interface method with a DIFFERENT erased descriptor (generic/covariant) would
                 // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
                 // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
-                let comp_super = "kotlin/Any".to_string();
                 let mut comp_ifaces = Vec::new();
                 let csig0 = syms.classes.get(&c.name)?;
                 for st in &c.companion_supertypes {
@@ -925,6 +930,54 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     }
                     comp_ifaces.push(iface_internal);
                 }
+                // A companion with a declared base CLASS (`companion object : Base()`): make the synthesized
+                // companion extend it (so the companion — used as a value — is an instance of `Base`, e.g.
+                // the coroutine `EmptyContinuation`). Only a FILE base with NO explicit base args is modeled:
+                // a no-arg base → `super()`; an all-defaulted base → fill the base's default exprs into
+                // `super(…)` (mirrors the regular-class super-default-fill). The plan is computed as owned
+                // data first so the `syms` borrow is dropped before lowering. Any other shape → keep `Any`.
+                let comp_base_plan: Option<(String, Vec<(AstExprId, Ty)>)> = match &c.companion_base
+                {
+                    Some(base) if c.companion_base_args.is_empty() => {
+                        let is_file_class = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(bc) if bc.name == *base && !bc.is_interface()));
+                        if !is_file_class {
+                            return None;
+                        }
+                        let base_internal = class_internal(file, base);
+                        let bsig = syms.class_by_internal(&base_internal)?;
+                        let n = bsig.ctor_params.len();
+                        if n == 0 {
+                            Some((base_internal, Vec::new()))
+                        } else if bsig.ctor_defaults.len() >= n
+                            && bsig.ctor_defaults[..n].iter().all(|d| d.is_some())
+                        {
+                            let plan = (0..n)
+                                .map(|i| (bsig.ctor_defaults[i].unwrap(), bsig.ctor_params[i]))
+                                .collect();
+                            Some((base_internal, plan))
+                        } else {
+                            return None; // a required base param without a default — can't fill
+                        }
+                    }
+                    Some(_) => return None, // explicit base args on a companion — not modeled
+                    None => None,
+                };
+                let (comp_super, comp_super_args) =
+                    if let Some((base_internal, plan)) = comp_base_plan {
+                        lo.scope.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_fq.clone());
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let mut sargs = Vec::new();
+                        for (d, pt) in &plan {
+                            sargs.push(lo.lower_arg(*d, &ty_to_ir(*pt))?);
+                        }
+                        (base_internal, sargs)
+                    } else {
+                        ("kotlin/Any".to_string(), Vec::new())
+                    };
                 let comp_id = lo.ir.add_class(IrClass {
                     serial_names: Vec::new(),
                     custom_serializer: None,
@@ -946,7 +999,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     is_sealed: false,
                     is_abstract: false,
                     superclass: comp_super,
-                    super_args: vec![],
+                    super_args: comp_super_args,
                     enum_entries: vec![],
                     enum_entry_subclass: vec![],
                     enum_entry_of: None,
