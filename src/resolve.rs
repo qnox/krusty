@@ -153,7 +153,31 @@ pub struct ClassSig {
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
     /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
     pub value_field: Option<(String, Ty)>,
+    /// For a generic higher-order method (`fun <R> map(f: (T) -> R): R`), the un-erased declared shape
+    /// needed to substitute the receiver's type arguments into the lambda parameter types and infer the
+    /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
+    /// substitution actually depends on a type parameter are recorded (ordinary methods are absent).
+    pub generic_methods: HashMap<String, GenericMethod>,
 }
+
+/// The un-erased declared shape of a generic higher-order method, retained so a call site can
+/// substitute the receiver's type arguments and infer the method's own type parameters (mirrors the
+/// `GSig` unify/substitute machinery, but built from the source `TypeRef`s of a user-declared method).
+/// `TypeRef` is self-contained (owned, not arena-indexed), so cloning it here stays file-independent.
+#[derive(Clone, Debug)]
+pub struct GenericMethod {
+    /// The method's own type parameters (`fun <R>` → `["R"]`), inferred from the argument types.
+    pub method_tparams: Vec<String>,
+    /// Declared parameter type refs, in order (un-erased).
+    pub param_refs: Vec<TypeRef>,
+    /// Declared return type ref (un-erased), substituted under the bound type parameters.
+    pub ret_ref: TypeRef,
+}
+
+/// A generic higher-order member call's substitution plan: the recorded [`GenericMethod`] shape, the
+/// class type-parameter → receiver type-argument bindings (`{T: String}`), and — per logical argument —
+/// the lambda parameter types with that substitution applied (`[(T) -> R]` → `[[String]]`).
+type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
 impl ClassSig {
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
@@ -1299,6 +1323,35 @@ pub fn collect_signatures_with_cp(
                             })
                         })
                         .collect();
+                    // Record the un-erased shape of each generic higher-order method (a function-typed
+                    // parameter, an explicit return, and a type parameter — the class's or the method's
+                    // own — somewhere in its signature), so a call site can substitute the receiver's
+                    // type arguments into the lambda parameter types and infer the method's `<R>` from
+                    // the lambda body. Plain methods (no type parameter to bind) are skipped.
+                    let generic_methods: HashMap<String, GenericMethod> = c
+                        .methods
+                        .iter()
+                        .filter_map(|m| {
+                            let has_fun_param = m
+                                .params
+                                .iter()
+                                .any(|p| !p.ty.fun_params.is_empty() || p.ty.name == "<fun>");
+                            let ret = m.ret.as_ref()?;
+                            if !has_fun_param
+                                || (m.type_params.is_empty() && c.type_params.is_empty())
+                            {
+                                return None;
+                            }
+                            Some((
+                                m.name.clone(),
+                                GenericMethod {
+                                    method_tparams: m.type_params.clone(),
+                                    param_refs: m.params.iter().map(|p| p.ty.clone()).collect(),
+                                    ret_ref: ret.clone(),
+                                },
+                            ))
+                        })
+                        .collect();
                     // `data class` synthesizes componentN() + copy(props...) callable members.
                     if c.is_data {
                         let self_ty = Ty::obj(&internal);
@@ -1595,6 +1648,7 @@ pub fn collect_signatures_with_cp(
                             tparam_names,
                             generic_props,
                             value_field,
+                            generic_methods,
                         },
                     );
                     // Register the synthesized `C$Companion` as a typed object so `C` used as a value (its
@@ -1626,6 +1680,7 @@ pub fn collect_signatures_with_cp(
                                 tparam_names: Vec::new(),
                                 generic_props: HashMap::new(),
                                 value_field: None,
+                                generic_methods: HashMap::new(),
                             },
                         );
                     }
@@ -2693,6 +2748,15 @@ impl TParams {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
     }
 
+    /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
+    /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
+    /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
+    pub fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
+        TParams {
+            erasure: bindings.into_iter().collect(),
+        }
+    }
+
     /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
     /// kotlinc specializes a class's primitive-bounded param too, but krusty's value-class pass already
     /// owns class-param bound handling, and naive specialization there breaks the Object/value-class
@@ -2752,6 +2816,38 @@ impl TParams {
 
     pub fn clear(&mut self) {
         self.erasure.clear();
+    }
+}
+
+/// Bind a method's own type parameters by unifying a declared `TypeRef` against an actual `Ty`
+/// (`R` ↔ `Int`; `(T) -> R` ↔ `(String) -> Int` binds `R`; `List<R>` ↔ `List<Int>`). Only names in
+/// `tparams` are bound — anything else recurses structurally. The source-`TypeRef` analogue of
+/// [`crate::call_resolver::unify_gsig`], for user-declared generic methods.
+fn unify_ref(r: &TypeRef, actual: Ty, tparams: &[String], binds: &mut HashMap<String, Ty>) {
+    // A function-type ref `(A) -> B` unifies against a lambda's `Ty::Fun`: its parameters bind from the
+    // function's parameters, its return from the function's return (where `map`'s `R` is bound).
+    if !r.fun_params.is_empty() || r.name == "<fun>" {
+        if let Ty::Fun(fsig) = actual {
+            for (p, a) in r.fun_params.iter().zip(fsig.params.iter()) {
+                unify_ref(p, *a, tparams, binds);
+            }
+            if let Some(ret) = &r.arg {
+                unify_ref(ret, fsig.ret, tparams, binds);
+            }
+        }
+        return;
+    }
+    if tparams.iter().any(|t| t == &r.name) {
+        binds.entry(r.name.clone()).or_insert(actual);
+        return;
+    }
+    // A generic class ref `C<…>` unifies its arguments positionally against the actual's carried args.
+    if !r.targs.is_empty() {
+        if let Ty::Obj(_, targs) = actual {
+            for (a, t) in r.targs.iter().zip(targs.iter()) {
+                unify_ref(a, *t, tparams, binds);
+            }
+        }
     }
 }
 
@@ -6409,6 +6505,81 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
+    /// For a generic higher-order member call (`box.map { it.length }` where `box: Box<String>`),
+    /// produce the call's substitution plan: the recorded [`GenericMethod`] shape, the class type
+    /// parameter → receiver type argument bindings (`{T: String}`), and — per logical argument — the
+    /// lambda parameter types with that substitution applied (`[(T) -> R]` → `[[String]]`, so `it`
+    /// types as `String`). `None` when the receiver carries no such generic method.
+    fn plan_generic_member(&self, rt: Ty, name: &str) -> Option<GenericMemberPlan> {
+        let Ty::Obj(internal, targs) = rt else {
+            return None;
+        };
+        let cs = self.syms.class_by_internal(internal)?;
+        let gm = cs.generic_methods.get(name)?.clone();
+        // Class type parameters → the receiver's type arguments; a parameter the receiver doesn't
+        // supply (a raw type) keeps the erased `Object`, preserving the previous lenient behavior.
+        let mut class_binds: HashMap<String, Ty> = cs
+            .tparam_names
+            .iter()
+            .map(|n| (n.clone(), Ty::obj("kotlin/Any")))
+            .collect();
+        for (n, t) in cs.tparam_names.iter().zip(targs.iter()) {
+            class_binds.insert(n.clone(), *t);
+        }
+        // For resolving the lambda PARAMETER types, the method's own type parameters are still unbound
+        // (they bind from the lambda body, below), so erase them to `Object` for this resolution.
+        let mut input_subst = class_binds.clone();
+        for tp in &gm.method_tparams {
+            input_subst
+                .entry(tp.clone())
+                .or_insert(Ty::obj("kotlin/Any"));
+        }
+        let tp_in = TParams::from_bindings(input_subst);
+        let mut scratch = DiagSink::new();
+        let lambda_pts: Vec<Vec<Ty>> = gm
+            .param_refs
+            .iter()
+            .map(|r| {
+                if !r.fun_params.is_empty() || r.name == "<fun>" {
+                    r.fun_params
+                        .iter()
+                        .map(|p| ty_of_ref(p, &self.syms.class_names, &tp_in, &mut scratch))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        Some((gm, class_binds, lambda_pts))
+    }
+
+    /// Infer the method's own type parameters from the typed arguments (a lambda argument is a
+    /// `Ty::Fun` whose return is the body type), then realize the declared return ref under both the
+    /// class bindings and the inferred method bindings — `fun <R> map(f: (T) -> R): R` on `Box<String>`
+    /// with `{ it.length }` yields `Int`.
+    fn generic_member_ret(
+        &self,
+        gm: &GenericMethod,
+        class_binds: &HashMap<String, Ty>,
+        arg_tys: &[Ty],
+    ) -> Ty {
+        let mut binds = class_binds.clone();
+        for (i, r) in gm.param_refs.iter().enumerate() {
+            if !r.fun_params.is_empty() || r.name == "<fun>" {
+                if let Some(a) = arg_tys.get(i) {
+                    unify_ref(r, *a, &gm.method_tparams, &mut binds);
+                }
+            }
+        }
+        let mut scratch = DiagSink::new();
+        ty_of_ref(
+            &gm.ret_ref,
+            &self.syms.class_names,
+            &TParams::from_bindings(binds),
+            &mut scratch,
+        )
+    }
+
     /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
     /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
     /// resolve. Falls back to the raw class type when there are no explicit type arguments.
@@ -6994,6 +7165,11 @@ impl<'a> Checker<'a> {
                         .find(|o| o.kind == crate::libraries::FnKind::Member),
                     _ => None,
                 };
+                // A generic higher-order member (`box.map { it.length }` where `box: Box<String>`):
+                // substitute the receiver's type arguments into the lambda parameter types (so `it`
+                // types as `String`/`Int`, not the erased `Any`) and remember the plan to infer the
+                // method's own `<R>` from the lambda body — the call's result type — after the args type.
+                let generic_member: Option<GenericMemberPlan> = self.plan_generic_member(rt, &name);
                 // A library extension taking a lambda (`list.map { it … }`): the lambda's parameter
                 // types are recovered from the extension's generic signature — bound by the receiver's
                 // element type and the non-lambda arguments — so the lambda body checks against `Int`
@@ -7141,6 +7317,16 @@ impl<'a> Checker<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
+                        // A generic member's substituted lambda parameter types (`it: String`) take
+                        // precedence over the method signature's erased ones (`it: Any`).
+                        if let Some((_, _, ref lpt)) = generic_member {
+                            if lpt.get(i).is_some_and(|v| !v.is_empty())
+                                && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            {
+                                let pt = lpt[i].clone();
+                                return self.check_lambda_with_types(a, &pt);
+                            }
+                        }
                         if let Some(ref sig) = method_sig {
                             let lpt = &sig.call_sig.lambda_param_types;
                             if i < lpt.len()
@@ -7279,6 +7465,11 @@ impl<'a> Checker<'a> {
                             for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
+                        }
+                        // A generic higher-order member: the result is the method's `<R>` inferred from
+                        // the lambda body (`box.map { it.length }` → `Int`), not the erased `Object`.
+                        if let Some((gm, class_binds, _)) = &generic_member {
+                            return self.generic_member_ret(gm, class_binds, &arg_tys);
                         }
                         return fi.callable.ret;
                     }

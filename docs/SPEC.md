@@ -775,6 +775,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   boxed, and the value-class pass would unbox a `null` (NPE) — so it skips rather than miscompile. Test:
   `tests/nullable_cast_e2e.rs`.
 
+- **Generic higher-order method (`class Box<T> { fun <R> map(f: (T) -> R): R }`).** A call on a
+  parameterized receiver substitutes BOTH the receiver's type arguments and the method's own type
+  parameter. The lambda parameter `it` types as the receiver's element type (`Box<String>.map { it…}` →
+  `it: String`), recovered like the class-type-parameter property substitution — not the erased `Object`.
+  The method type parameter `R` is inferred from the lambda body's type (`{ it.length }` → `Int`) and
+  becomes the call's result type — the source-`TypeRef` analogue of the library `GSig` unify/substitute
+  machinery (`unify_ref`/`ty_of_ref` over a `GenericMethod` shape stored on `ClassSig`, populated at
+  collection because `TypeRef` is owned/file-independent). The JVM method still erases `<R>` to `Object`;
+  the checker recovers the concrete result so codegen inserts the `checkcast`/unbox kotlinc emits on the
+  erased return (`coerce_generic_read` now also wraps a user instance-method call). Covers a reference
+  element type (`Box<String>`, `it.length`) and a primitive one (`Box<Int>`, `it * 2`), with `R` inferred
+  to both a primitive and a reference. Constructor argument-based type inference is unmodeled, so the
+  receiver's type argument comes from the declared variable type (`val b: Box<String> = Box("hi")`), as
+  with the property-substitution path. Tests: `tests/generic_hof_method_check.rs` (front-end) and
+  `tests/generic_fn_e2e.rs::generic_hof_method_substitution_runs` (round-trip).
+
 - **Interface delegation to an expression (`class D : I by Impl()`).** A delegate that is not a `val`
   constructor parameter but an arbitrary EXPRESSION: it is evaluated once into a synthesized
   `$$delegate_e<j>` field (stored in the constructor, with ctor params and `this` in scope, so

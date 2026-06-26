@@ -63,3 +63,38 @@ return \"OK\"\n\
     };
     assert_eq!(out, "OK");
 }
+
+/// A generic instance method with its OWN type parameter and a function parameter
+/// (`class Box<T> { fun <R> map(f: (T) -> R): R }`) substitutes both: the lambda parameter `it` types
+/// as the receiver's element type `T` (`Box<String>` → `it: String`), and the method type parameter
+/// `R` is inferred from the lambda body's type and becomes the call's result type. Covers a reference
+/// element type (`Box<String>`, `it.length`) and a primitive element type (`Box<Int>`, `it * 2`), with
+/// `R` inferred to both a primitive (`Int`) and a reference (`String`).
+#[test]
+fn generic_hof_method_substitution_runs() {
+    let Some(java_home) = common::java_home() else {
+        eprintln!("skipping generic_hof_method_substitution: set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skipping generic_hof_method_substitution: no kotlin-stdlib jar found");
+        return;
+    };
+    let src = "class Box<T>(val v: T) { fun <R> map(f: (T) -> R): R = f(v) }\n\
+fun box(): String {\n\
+val bs: Box<String> = Box(\"hi\")\n\
+val n: Int = bs.map { it.length }\n\
+if (n + 1 != 3) return \"f1\"\n\
+val bi: Box<Int> = Box(21)\n\
+val d: Int = bi.map { it * 2 }\n\
+if (d != 42) return \"f2\"\n\
+val s: String = bi.map { it.toString() }\n\
+if (s != \"21\") return \"f3\"\n\
+return \"OK\"\n\
+}\n";
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(out) = common::compile_and_run_box(src, "G", &[stdlib], Some(&jdk)) else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
