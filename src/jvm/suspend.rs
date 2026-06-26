@@ -1760,7 +1760,6 @@ fn build_continuation_class(
         superclass: CONTINUATION_IMPL.to_string(),
         super_args: vec![super_arg],
         enum_entries: vec![],
-        enum_entry_subclass: vec![],
         enum_entry_of: None,
         prop_ref: None,
         func_ref: None,
