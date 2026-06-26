@@ -6080,17 +6080,30 @@ impl<'a> Lower<'a> {
         // if any reordered argument may have side effects, skip (proper source-order temp-spilling isn't
         // modeled yet) — pure reordered arguments (const/name reads) are order-independent and proceed.
         let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        let mut seen_named = false;
         for (i, &arg) in args.iter().enumerate() {
             match names.get(i).and_then(|o| o.as_ref()) {
                 None => {
-                    if pos >= n {
-                        return None;
+                    if seen_named {
+                        // A TRAILING LAMBDA is the one positional argument allowed after named args — it
+                        // fills the LAST parameter. Only the final argument may be such.
+                        if i == args.len() - 1 && n > 0 && slot[n - 1].is_none() {
+                            slot[n - 1] = Some(arg);
+                            arg_slot.push(n - 1);
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        if pos >= n {
+                            return None;
+                        }
+                        slot[pos] = Some(arg);
+                        arg_slot.push(pos);
+                        pos += 1;
                     }
-                    slot[pos] = Some(arg);
-                    arg_slot.push(pos);
-                    pos += 1;
                 }
                 Some(nm) => {
+                    seen_named = true;
                     let idx = param_meta.iter().position(|(name, _)| name == nm)?;
                     if idx >= n || slot[idx].is_some() {
                         return None;
@@ -6101,9 +6114,16 @@ impl<'a> Lower<'a> {
             }
         }
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
+        // A reordered named call evaluates side-effecting args out of source order — bail unless every
+        // reordered arg is pure (const/name read). The TRAILING LAMBDA is excluded: it is the last source
+        // argument AND fills the last slot, so it is never evaluated out of order.
         if reordered
-            && args.iter().any(|&a| {
-                !is_const_literal(self.afile, a) && !matches!(self.afile.expr(a), Expr::Name(_))
+            && args.iter().enumerate().any(|(i, &a)| {
+                let is_trailing_lambda =
+                    i == args.len() - 1 && matches!(self.afile.expr(a), Expr::Lambda { .. });
+                !is_trailing_lambda
+                    && !is_const_literal(self.afile, a)
+                    && !matches!(self.afile.expr(a), Expr::Name(_))
             })
         {
             return None;
