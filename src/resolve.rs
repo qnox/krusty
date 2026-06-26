@@ -5567,6 +5567,31 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
                     }
+                    // A CLASSPATH top-level function reference (`::greet` from a jar/dependency module) —
+                    // a single non-vararg, fully-applied `TopLevel` overload. Typed as its function type;
+                    // the lowering emits a `FunctionReferenceImpl` whose `invoke` calls it.
+                    if !self.syms.classes.contains_key(&name) && self.lookup(&name).is_none() {
+                        let tl: Vec<_> = self
+                            .syms
+                            .libraries
+                            .functions(&name, None)
+                            .overloads
+                            .into_iter()
+                            .filter(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                            .collect();
+                        if std::env::var("KRUSTY_DEBUG").is_ok() {
+                            eprintln!("  [fnref-check] ::{name} tl={}", tl.len());
+                        }
+                        if let [o] = tl.as_slice() {
+                            if o.callable.vararg_elem.is_none()
+                                && o.call_sig.required == o.callable.params.len()
+                                && o.callable.ret != Ty::Nothing
+                            {
+                                return self
+                                    .set(e, Ty::fun(o.callable.params.clone(), o.callable.ret));
+                            }
+                        }
+                    }
                     // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
                     if !self.syms.objects.contains(&name) {
                         if let Some(cls) = self.syms.classes.get(&name).cloned() {
