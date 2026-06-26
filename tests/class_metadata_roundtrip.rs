@@ -6,7 +6,7 @@
 //! and untested; this pins the round-trip before it is wired into emit.
 
 use krusty::jvm::classreader::ClassInfo;
-use krusty::jvm::metadata::class_functions;
+use krusty::jvm::metadata::{class_functions, package_functions};
 use krusty::metadata::class_builder::{build_class, FnMeta};
 use krusty::types::Ty;
 
@@ -64,5 +64,34 @@ fn class_member_value_params_round_trip() {
             Some("kotlin/Int".to_string())
         ],
         "build_class → class_functions must preserve each member param's source type"
+    );
+}
+
+#[test]
+fn package_value_param_defaults_round_trip() {
+    use krusty::metadata::builder::{build_package, FnMeta as PkgFnMeta};
+    // A top-level `fun host(a: String, b: Int = 7): String` — only `b` DECLARES_DEFAULT_VALUE. The
+    // per-parameter default flags must survive `build_package` → `package_functions`, so a dependent
+    // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
+    let funcs = vec![PkgFnMeta {
+        name: "host".to_string(),
+        params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
+        ret: Ty::String,
+        param_defaults: vec![false, true],
+        suspend: false,
+        jvm_desc: None,
+    }];
+    let (d1, d2) = build_package(&funcs, &[]);
+    let ci = class_info("com/example/HostKt", d1, d2);
+
+    let fns = package_functions(&ci);
+    let host = fns
+        .iter()
+        .find(|f| f.kotlin_name == "host")
+        .expect("the decoded package metadata must list `host`");
+    assert_eq!(
+        host.value_param_has_default,
+        vec![false, true],
+        "build_package → package_functions must preserve each param's DECLARES_DEFAULT_VALUE flag"
     );
 }
