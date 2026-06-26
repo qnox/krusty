@@ -6303,6 +6303,32 @@ impl<'a> Lower<'a> {
     /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
     /// the unsigned `div`/`rem` intrinsics). Returns `None` for a name/receiver this doesn't model.
     fn lower_prim_op_method(&mut self, recv: AstExprId, name: &str, arg: AstExprId) -> Option<u32> {
+        // Bitwise/shift operator-methods (`a.and(b)`, `a shl b`, …) are stdlib intrinsics on `Int`/`Long`
+        // only — kotlinc maps them to `iand`/`ishl`/… . `and`/`or`/`xor` take the receiver's own type;
+        // the shifts take an `Int` count (no numeric promotion). Recognized here so both the plain `.`
+        // call and an (unnecessary) safe `?.` call on a non-null primitive share one lowering.
+        let lt = self.info.ty(recv);
+        if matches!(lt, Ty::Int | Ty::Long) {
+            let shift = matches!(name, "shl" | "shr" | "ushr");
+            let bop = match name {
+                "and" => Some(IrBinOp::BitAnd),
+                "or" => Some(IrBinOp::BitOr),
+                "xor" => Some(IrBinOp::BitXor),
+                "shl" => Some(IrBinOp::Shl),
+                "shr" => Some(IrBinOp::Shr),
+                "ushr" => Some(IrBinOp::Ushr),
+                _ => None,
+            };
+            if let Some(op) = bop {
+                let l = self.expr(recv)?;
+                let rt = if shift { Ty::Int } else { lt };
+                let r = self.lower_arg(arg, &ty_to_ir(rt))?;
+                return Some(
+                    self.ir
+                        .add_expr(IrExpr::PrimitiveBinOp { op, lhs: l, rhs: r }),
+                );
+            }
+        }
         let op = match name {
             "plus" => BinOp::Add,
             "minus" => BinOp::Sub,
@@ -14859,46 +14885,24 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `Int`/`Long` bitwise/shift members are stdlib functions the compiler treats as
-                    // intrinsics (kotlinc maps `Int.and` → `iand`, etc.). This is an ordinary method
-                    // call `a.and(b)` — `a and b` is just its infix spelling, already desugared by the
-                    // parser — so both spellings land here. Recognize them by (receiver type, name).
+                    // `Int`/`Long.inv()` — the bitwise complement intrinsic (`x xor -1`). The binary
+                    // bitwise/shift members (`and`/`or`/`xor`/`shl`/`shr`/`ushr`) are handled by the
+                    // shared `lower_prim_op_method` above (one lowering for the plain `.` and safe `?.`
+                    // call); only the zero-arg `inv` remains here (the helper is one-arg).
                     {
                         let rty = self.info.ty(receiver);
-                        if matches!(rty, Ty::Int | Ty::Long) {
-                            let shift = matches!(name.as_str(), "shl" | "shr" | "ushr");
-                            let bop = match name.as_str() {
-                                "and" => Some(IrBinOp::BitAnd),
-                                "or" => Some(IrBinOp::BitOr),
-                                "xor" => Some(IrBinOp::BitXor),
-                                "shl" => Some(IrBinOp::Shl),
-                                "shr" => Some(IrBinOp::Shr),
-                                "ushr" => Some(IrBinOp::Ushr),
-                                _ => None,
-                            };
-                            if let (Some(op), 1) = (bop, args.len()) {
-                                let l = self.expr(receiver)?;
-                                let rt = if shift { Ty::Int } else { rty };
-                                let r = self.lower_arg(args[0], &ty_to_ir(rt))?;
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op,
-                                    lhs: l,
-                                    rhs: r,
-                                }));
-                            }
-                            if name == "inv" && args.is_empty() {
-                                let l = self.expr(receiver)?;
-                                let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long {
-                                    IrConst::Long(-1)
-                                } else {
-                                    IrConst::Int(-1)
-                                }));
-                                return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                    op: IrBinOp::BitXor,
-                                    lhs: l,
-                                    rhs: neg1,
-                                }));
-                            }
+                        if matches!(rty, Ty::Int | Ty::Long) && name == "inv" && args.is_empty() {
+                            let l = self.expr(receiver)?;
+                            let neg1 = self.ir.add_expr(IrExpr::Const(if rty == Ty::Long {
+                                IrConst::Long(-1)
+                            } else {
+                                IrConst::Int(-1)
+                            }));
+                            return Some(self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                                op: IrBinOp::BitXor,
+                                lhs: l,
+                                rhs: neg1,
+                            }));
                         }
                     }
                     // `EnumClass.values()` / `EnumClass.valueOf(s)` — static enum methods.
