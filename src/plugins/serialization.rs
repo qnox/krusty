@@ -161,7 +161,9 @@ fn ty_descriptor(ty: &Ty) -> String {
         "kotlin/String" => "Ljava/lang/String;".to_string(),
         // A type-parameter-typed property erases to `Object` — its getter is `()Ljava/lang/Object;`.
         "kotlin/Any" => "Ljava/lang/Object;".to_string(),
-        other => format!("L{other};"),
+        // Map a Kotlin builtin type to its JVM class (`kotlin/collections/List` → `java/util/List`), so a
+        // collection-field getter's descriptor matches the emitted `()Ljava/util/List;` accessor.
+        other => format!("L{};", crate::jvm::jvm_class_map::to_jvm_internal(other)),
     }
 }
 
@@ -332,6 +334,22 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
 /// - a directly-supported builtin (`String`/primitive/…) → its `…Serializer.INSTANCE`.
 ///
 /// Returns `None` for a type with no derivable serializer (the caller bails to a clean no-op).
+/// The `BuiltinSerializersKt` factory name + type-argument count for a standard collection type, or `None`.
+/// `List`/`Set`/`Collection`/`Iterable` → 1-arg `ListSerializer`/`SetSerializer`; `Map` → 2-arg `MapSerializer`.
+fn collection_serializer_builder(fq_name: &str) -> Option<(&'static str, usize)> {
+    match fq_name {
+        "kotlin/collections/List"
+        | "kotlin/collections/MutableList"
+        | "kotlin/collections/Collection"
+        | "kotlin/collections/MutableCollection"
+        | "kotlin/collections/Iterable"
+        | "kotlin/collections/MutableIterable" => Some(("ListSerializer", 1)),
+        "kotlin/collections/Set" | "kotlin/collections/MutableSet" => Some(("SetSerializer", 1)),
+        "kotlin/collections/Map" | "kotlin/collections/MutableMap" => Some(("MapSerializer", 2)),
+        _ => None,
+    }
+}
+
 fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     let nn = ty.non_null();
     let Some(fq_name) = nn.obj_internal() else {
@@ -359,6 +377,31 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             dispatch_receiver: None,
             args: vec![],
         }));
+    }
+    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
+    // the kotlinx builtin collection serializer over its element serializer(s):
+    // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
+    // `BuiltinSerializersKt`). The element serializers are derived recursively; if any can't be, the whole
+    // collection can't (a clean `null`/bail, as before).
+    if let Some((builder, n)) = collection_serializer_builder(fq_name) {
+        if type_args.len() >= n {
+            let mut arg_sers = Vec::with_capacity(n);
+            for a in type_args.iter().take(n) {
+                arg_sers.push(element_serializer_expr(ir, a)?);
+            }
+            let pdesc = "Lkotlinx/serialization/KSerializer;".repeat(n);
+            return Some(ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: "kotlinx/serialization/builtins/BuiltinSerializersKt".to_string(),
+                    name: builder.to_string(),
+                    descriptor: format!("({pdesc})Lkotlinx/serialization/KSerializer;"),
+                    inline: false,
+                    must_inline: false,
+                },
+                dispatch_receiver: None,
+                args: arg_sers,
+            }));
+        }
     }
     // A field with OPEN-polymorphic dispatch serializes via `PolymorphicSerializer(<type>::class)`
     // (descriptor serialName `kotlinx.serialization.Polymorphic<T>`), not a generated `$serializer`. Two
@@ -551,6 +594,14 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
                 .any(|&m| ir.functions[m as usize].name == "serializer")
     }) {
         return true;
+    }
+    // A standard COLLECTION field (mirrors `element_serializer_expr`): derivable iff every element type is.
+    if let Some((_, n)) = collection_serializer_builder(fq_name) {
+        return type_args.len() >= n
+            && type_args
+                .iter()
+                .take(n)
+                .all(|a| can_derive_element_serializer(ir, a));
     }
     // An interface (any) / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
     // `element_serializer_expr`; a `@Serializable` sealed interface was claimed by the sealed branch above).
@@ -1500,11 +1551,17 @@ impl IrPlugin for SerializationPlugin {
                                     dispatch_receiver: Some(c),
                                     args: vec![d, idx, inst, v],
                                 }));
-                            } else if nested[i].is_some() {
-                                // Nested @Serializable: encode[Nullable]SerializableElement(desc, i,
-                                // <element serializer>, value.getX()) — the nested `$serializer.INSTANCE`
-                                // (non-generic) or `Foo.serializer(A_ser)` (generic). The nullable variant
-                                // shares the SAME descriptor (writes JSON null) — a method-name swap.
+                            } else if nested[i].is_some()
+                                || ty
+                                    .non_null()
+                                    .obj_internal()
+                                    .and_then(collection_serializer_builder)
+                                    .is_some()
+                            {
+                                // Nested @Serializable OR a standard collection: encode[Nullable]Serializable
+                                // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
+                                // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
+                                // the SAME descriptor (writes JSON null) — a method-name swap.
                                 let Some(inst) = element_serializer_expr(ir, ty) else {
                                     bail = true;
                                     break;
@@ -1719,6 +1776,15 @@ impl IrPlugin for SerializationPlugin {
                             if nested[i].is_some() {
                                 return can_derive_element_serializer(ir, t);
                             }
+                            // A standard collection field decodes through its builtin collection serializer
+                            // (via the `element_serializer_expr` fallback below) when its elements derive.
+                            if t.non_null()
+                                .obj_internal()
+                                .and_then(collection_serializer_builder)
+                                .is_some()
+                            {
+                                return can_derive_element_serializer(ir, t);
+                            }
                             if is_nullable(t) {
                                 return builtin_element_serializer(t).is_some();
                             }
@@ -1886,11 +1952,18 @@ impl IrPlugin for SerializationPlugin {
                                         arg: raw,
                                         type_operand: ty.clone(),
                                     })
-                                } else if nested[k].is_some() {
+                                } else if nested[k].is_some()
+                                    || ty
+                                        .non_null()
+                                        .obj_internal()
+                                        .and_then(collection_serializer_builder)
+                                        .is_some()
+                                {
                                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
                                     // <element serializer>, null) — the nested `$serializer.INSTANCE`
-                                    // (non-generic) or `Foo.serializer(A_ser)` (generic). Same descriptor;
-                                    // the nullable variant yields null for a JSON-null `Inner?` element.
+                                    // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
+                                    // (collection). Same descriptor; the nullable variant yields null for a
+                                    // JSON-null element.
                                     let inst =
                                         element_serializer_expr(ir, ty).unwrap_or_else(|| {
                                             ir.add_expr(IrExpr::Const(IrConst::Null))
