@@ -1141,3 +1141,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   miscompiles (a VALUE-class delegate is unboxed and doesn't implement `I` → skip; a `.`-containing
   filename emitted an illegal facade name → `file_class_name` now sanitizes). Gate 1767 → 1773 box()=OK,
   0 miscompiles. `tests/interface_delegation_expr_e2e.rs`.
+- **Enum class generic `Signature` attribute (byte-parity FIX, gate box()=OK flat, FAIL=0).** Every
+  `enum class E` extends the generic `java.lang.Enum<E>`, so kotlinc emits a class
+  `Signature: Ljava/lang/Enum<LE;>;` (plus a raw `L<itf>;` per superinterface). `emit_enum_class` named
+  only the erased `java/lang/Enum` superclass and emitted NO `Signature`, so `javap` showed `extends
+  java.lang.Enum` instead of `extends java.lang.Enum<E>` — a per-enum divergence on EVERY enum, surfaced
+  by `bytediff when/enumOptimization` (`En`, `ABCD`, `Season`, `E`, …). Now `emit_enum_class` sets
+  `Ljava/lang/Enum<LSelf;>;` (+ interfaces). Runtime-inert (the JVM ignores `Signature` for execution) —
+  box()=OK unchanged, FAIL 0. `tests/enum_class_signature_e2e.rs`. Separate remaining enum-class diffs
+  (out of scope): the `$EnumSwitchMapping$` `when`-over-enum tableswitch optimization; a generic class
+  bound `<T : Enum<T>>`.
