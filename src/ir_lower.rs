@@ -1411,22 +1411,40 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // bodies already use. This does NOT emit a `name$default` stub: stub emission runs only on
                 // the class path (`emit_default_stub`), never the facade, so a top-level function's codegen
                 // is unchanged (top-level calls keep filling omitted args at the call site).
-                if f.receiver.is_none()
+                // Register parameter defaults for a top-level function OR EXTENSION (the latter's IR
+                // function prepends the receiver as parameter 0, so the defaults/names get a leading
+                // receiver slot). The omitted args are filled at the CALL SITE (no `$default` stub), like a
+                // plain top-level call.
+                // An EXTENSION fills its omitted defaults at the CALL SITE by REUSING these lowered default
+                // exprs, so restrict it to CONSTANT defaults (a literal carries no function-local value
+                // dependency); a non-constant extension default isn't modeled — skip registration so an
+                // omitted-arg call bails (the file skips, never miscompiles). A plain top-level function
+                // re-lowers its defaults from the AST at the call site, so it accepts any constant-literal.
+                let const_ok = f.receiver.is_none()
+                    || f.params.iter().all(|p| match p.default {
+                        Some(d) => is_const_literal(file, d),
+                        None => true,
+                    });
+                if const_ok
                     && f.params.iter().any(|p| p.default.is_some())
                     && !f.params.iter().any(|p| p.is_vararg)
                     && f.params.len() <= 31
                 {
-                    let mut defaults = Vec::new();
-                    for (p, t) in f.params.iter().zip(&sig.params) {
+                    let ir_params = lo.ir.functions[fid as usize].params.clone();
+                    let recv_off = usize::from(f.receiver.is_some());
+                    let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
+                    for (i, p) in f.params.iter().enumerate() {
                         match p.default {
-                            Some(d) => defaults.push(Some(lo.lower_arg(d, &ty_to_ir(*t))?)),
+                            Some(d) => {
+                                defaults.push(Some(lo.lower_arg(d, &ir_params[recv_off + i])?))
+                            }
                             None => defaults.push(None),
                         }
                     }
                     lo.ir.fn_param_defaults.insert(fid, defaults);
-                    lo.ir
-                        .fn_param_names
-                        .insert(fid, f.params.iter().map(|p| p.name.clone()).collect());
+                    let mut names = vec!["$receiver".to_string(); recv_off];
+                    names.extend(f.params.iter().map(|p| p.name.clone()));
+                    lo.ir.fn_param_names.insert(fid, names);
                 }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
@@ -14388,6 +14406,75 @@ impl<'a> Lower<'a> {
                                     dispatch_receiver: None,
                                     args: a,
                                 }));
+                            }
+                            // OMITTED extension arguments (`"x".foo()` where `foo(a = 1)`): fill them at the
+                            // call site from the registered CONSTANT defaults (IR params are
+                            // `[receiver, p1…]`; defaults are aligned to them). Named/positional args map to
+                            // their logical slots; unfilled slots take their constant default.
+                            if let (Some(defaults), Some(names)) = (
+                                self.ir.fn_param_defaults.get(&fid).cloned(),
+                                self.ir.fn_param_names.get(&fid).cloned(),
+                            ) {
+                                let n = params.len();
+                                let arg_names = self.afile.call_arg_names.get(&e.0).cloned();
+                                let recv = self.lower_arg(receiver, &params[0])?;
+                                let mut slot: Vec<Option<u32>> = vec![None; n];
+                                slot[0] = Some(recv);
+                                let mut pos = 1usize;
+                                let mut ok = names.len() == n;
+                                for (ai, arg) in args.iter().enumerate() {
+                                    let nm = arg_names
+                                        .as_ref()
+                                        .and_then(|v| v.get(ai).cloned().flatten());
+                                    let p = match nm {
+                                        Some(s) => names.iter().position(|f| *f == s),
+                                        None => {
+                                            let p = pos;
+                                            pos += 1;
+                                            Some(p)
+                                        }
+                                    };
+                                    match p {
+                                        Some(p) if p < n && slot[p].is_none() => {
+                                            slot[p] = Some(self.lower_arg(*arg, &params[p])?);
+                                        }
+                                        _ => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if ok {
+                                    let mut a = Vec::with_capacity(n);
+                                    for (k, s) in slot.iter().enumerate() {
+                                        let v = match s {
+                                            Some(v) => *v,
+                                            // A constant default — clone it as a fresh node (avoid aliasing).
+                                            None => match defaults
+                                                .get(k)
+                                                .and_then(|d| *d)
+                                                .map(|d| self.ir.exprs[d as usize].clone())
+                                            {
+                                                Some(IrExpr::Const(c)) => {
+                                                    self.ir.add_expr(IrExpr::Const(c))
+                                                }
+                                                _ => {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            },
+                                        };
+                                        a.push(v);
+                                        let _ = k;
+                                    }
+                                    if ok && a.len() == n {
+                                        return Some(self.ir.add_expr(IrExpr::Call {
+                                            callee: Callee::Local(fid),
+                                            dispatch_receiver: None,
+                                            args: a,
+                                        }));
+                                    }
+                                }
                             }
                         }
                     }
