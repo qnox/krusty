@@ -352,6 +352,9 @@ struct ParsedFunction {
     jvm_sig: Option<(u64, u64)>,
     ret_class: Option<u64>,
     recv_class: Option<u64>,
+    /// Whether `receiver_type` (field 5) was present — TRUE for an extension on a type PARAMETER
+    /// (`fun <T> T.takeIf`), where `recv_class` is None. Distinguishes an extension from a top-level fn.
+    has_receiver: bool,
     /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable = 3`. The JVM
     /// descriptor/`Signature` erase this; only `@Metadata` carries it. Drives the elvis null-check for a
     /// nullable-returning scope fn (`takeIf`/`takeUnless` return `T?`).
@@ -374,6 +377,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut jvm_sig = None;
     let mut ret_class = None;
     let mut recv_class = None;
+    let mut has_receiver = false;
     let mut ret_nullable = false;
     let mut value_param_classes: Vec<Option<u64>> = Vec::new();
     let mut value_param_names: Vec<u64> = Vec::new();
@@ -390,7 +394,9 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 ret_nullable = parse_type_nullable(tbody);
             }
             (5, 2) => {
-                // receiver_type (inline Type message)
+                // receiver_type (inline Type message) — PRESENCE marks an extension, even when the
+                // receiver is a type parameter (`fun <T> T.takeIf`) whose `class_name` is absent.
+                has_receiver = true;
                 let n = pb.varint()? as usize;
                 let tbody = pb.bytes(n)?;
                 recv_class = parse_type_class_name(tbody);
@@ -437,6 +443,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         jvm_sig,
         ret_class,
         recv_class,
+        has_receiver,
         ret_nullable,
         value_param_classes,
         value_param_names,
@@ -504,8 +511,13 @@ pub struct MetaFn {
     pub is_public: bool,
     pub is_inline: bool,
     pub is_suspend: bool,
-    /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any.
+    /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
+    /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
     pub receiver_class: Option<String>,
+    /// Whether this is an EXTENSION (has a receiver of any kind — class or type parameter) vs a true
+    /// top-level function. Lets the classpath ext index avoid mis-indexing a top-level generic as an
+    /// extension on its first parameter's type.
+    pub is_extension: bool,
     /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
     pub ret_class: Option<String>,
     /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable`. The JVM descriptor/`Signature`
@@ -597,6 +609,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                         is_inline: pf.is_inline,
                         is_suspend: pf.is_suspend,
                         receiver_class,
+                        is_extension: pf.has_receiver,
                         ret_class,
                         ret_nullable: pf.ret_nullable,
                         value_param_types,

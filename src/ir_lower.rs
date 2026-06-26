@@ -1025,7 +1025,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 // receiver (Kotlin's compilation strategy). Keyed by (receiver descriptor, name). A
                 // receiver that doesn't resolve to a concrete type (a generic `T.foo()`) isn't modeled —
                 // bail rather than guess `Object`.
-                let recv_ty = ty_of(file, recv_ref);
+                let recv_ty = lo.ext_receiver_ty(file, recv_ref);
                 if recv_ty == Ty::Error {
                     return None;
                 }
@@ -1270,7 +1270,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
-                    let recv_ty = ty_of(file, recv_ref);
+                    let recv_ty = lo.ext_receiver_ty(file, recv_ref);
                     let recv_desc = recv_ty.descriptor();
                     let fid = lo.ext_fun_ids[&(recv_desc.clone(), f.name.clone())];
                     let this_v = lo.fresh_value();
@@ -7785,6 +7785,26 @@ impl<'a> Lower<'a> {
             };
             if let Some(rt) = self.ty_ref(&nn) {
                 if rt != Ty::obj("kotlin/Any") {
+                    return rt;
+                }
+            }
+        }
+        base
+    }
+
+    /// An extension function RECEIVER type: `ty_of` (file-local + built-ins, e.g. `String`), falling back
+    /// to the classpath-aware [`ty_ref`] when `ty_of` can't resolve it (a classpath type like
+    /// `kotlinx...SerialDescriptor` — `ty_of` yields `Error`/`Any` since it doesn't consult imports). The
+    /// registration and body-lowering of the extension must agree with the checker's receiver descriptor.
+    fn ext_receiver_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
+        let base = ty_of(file, r);
+        if base == Ty::Error || base == Ty::obj("kotlin/Any") {
+            let nn = ast::TypeRef {
+                nullable: false,
+                ..r.clone()
+            };
+            if let Some(rt) = self.ty_ref(&nn) {
+                if rt != Ty::Error && rt != Ty::obj("kotlin/Any") {
                     return rt;
                 }
             }
