@@ -82,19 +82,13 @@ impl JvmLibraries {
     /// (`coerceAtMost-J1ME1BU` → `UInt`), from `@Metadata` (facade parts merged). The descriptor return is
     /// the erased underlying; this recovers the unsigned/value-class type. `None` if not found.
     fn metadata_ext_return_ty(&self, owner: &str, jvm_name: &str) -> Option<Ty> {
-        let owner_ci = self.cp.find(owner)?;
-        let mut fns = crate::jvm::metadata::package_functions(&owner_ci);
-        if fns.is_empty() {
-            for part in &owner_ci.kotlin_d1 {
-                if let Some(pci) = self.cp.find(part) {
-                    fns.extend(crate::jvm::metadata::package_functions(&pci));
-                }
-            }
-        }
-        let rc = fns
-            .into_iter()
+        let rc = self
+            .cp
+            .meta_functions(owner)
+            .iter()
             .find(|m| m.jvm_name == jvm_name)?
-            .ret_class?;
+            .ret_class
+            .clone()?;
         Some(match rc.as_str() {
             "kotlin/Boolean" => Ty::Boolean,
             "kotlin/Byte" => Ty::Byte,
@@ -1045,11 +1039,12 @@ impl SymbolSource for JvmLibraries {
                     // visibility (no callable `invokestatic` → must splice).
                     let mut public = c.public;
                     if !c.public {
-                        let meta_fn = self.cp.find(&c.owner).and_then(|ci| {
-                            crate::jvm::metadata::package_functions(&ci)
-                                .into_iter()
-                                .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
-                        });
+                        let meta_fn = self
+                            .cp
+                            .meta_functions(&c.owner)
+                            .iter()
+                            .find(|m| m.jvm_name == c.name && m.kotlin_name == name)
+                            .cloned();
                         let value_recv_match = meta_fn
                             .as_ref()
                             .filter(|m| m.is_public && m.is_inline)
@@ -1136,7 +1131,8 @@ impl SymbolSource for JvmLibraries {
             // under the receiver's ERASED underlying descriptor, so the literal-name `find_extensions` above
             // misses it. kotlinc resolves it from `@Metadata`: the Kotlin name + extension receiver class.
             // For a value-class receiver only (bounding the blast radius), map `name` → the mangled method
-            // via `package_functions`, then load the real candidate by that JVM name.
+            // via `meta_functions` (the facade-merged `@Metadata` decode), then load the real candidate by
+            // that JVM name.
             // The receiver's value-class internal name — a dedicated `Ty::UInt`/`ULong` or an `Obj`.
             let recv_value_internal: Option<String> = match &receiver {
                 Ty::UInt => Some("kotlin/UInt".to_string()),
@@ -1148,22 +1144,11 @@ impl SymbolSource for JvmLibraries {
                 if let Some(recv_desc) = self.value_class_underlying_desc(&recv_internal) {
                     {
                         for owner in self.cp.find_extension_owners(&recv_desc) {
-                            let Some(owner_ci) = self.cp.find(&owner) else {
-                                continue;
-                            };
-                            // A multifile FACADE has no function metadata of its own — its functions live in
-                            // the PART classes named in its `@Metadata` `d1` (`URangesKt` →
-                            // `URangesKt___URangesKt`). Merge them, mirroring `metadata_fn_type`.
-                            let mut metafns = crate::jvm::metadata::package_functions(&owner_ci);
-                            if metafns.is_empty() {
-                                for part in &owner_ci.kotlin_d1 {
-                                    if let Some(pci) = self.cp.find(part) {
-                                        metafns
-                                            .extend(crate::jvm::metadata::package_functions(&pci));
-                                    }
-                                }
-                            }
-                            for mf in metafns {
+                            // `meta_functions` shares the facade-merged decode — for a multifile FACADE
+                            // the functions live in the PART classes named in its `@Metadata` `d1`
+                            // (`URangesKt` → `URangesKt___URangesKt`), already merged there.
+                            let metafns = self.cp.meta_functions(&owner);
+                            for mf in metafns.iter() {
                                 // Only a metadata-mangled (jvm_name != kotlin name) public extension whose
                                 // `@Metadata` receiver IS this value class.
                                 if mf.kotlin_name != name

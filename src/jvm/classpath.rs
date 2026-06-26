@@ -249,6 +249,11 @@ struct ClassMeta {
     /// length is the source arity (synthetic trailing params excluded). Names drive classpath
     /// named-argument resolution; the default flags drive classpath default-argument OMISSION.
     overload_params: Vec<OverloadParam>,
+    /// The full facade-merged [`MetaFn`] list this is projected from — exposed via
+    /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
+    /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
+    /// instead of re-decoding + re-merging the `d1` themselves.
+    fns: std::rc::Rc<[super::metadata::MetaFn]>,
 }
 /// Per-class `@Metadata` cache: class internal name → (Kotlin function name → its `@JvmName`-mangled
 /// overloads `[(jvm_name, jvm_desc, kotlin_return_class)]`). Bridges a Kotlin name to the JVM method that
@@ -406,11 +411,19 @@ impl Classpath {
             receivers: super::metadata::receivers(&fns),
             return_nullable: super::metadata::return_nullable(&fns),
             overload_params,
+            fns: fns.into(),
         });
         self.meta_fns
             .borrow_mut()
             .insert(internal.to_string(), meta.clone());
         meta
+    }
+
+    /// Every `@Metadata` function of `internal` (a facade's PART classes merged), decoded once and
+    /// cached — the single source the metadata-primary `MetaFn` lookups share. Use this instead of
+    /// re-calling `package_functions` + re-merging the facade parts at each call site.
+    pub fn meta_functions(&self, internal: &str) -> std::rc::Rc<[super::metadata::MetaFn]> {
+        self.class_meta(internal).fns.clone()
     }
 
     /// The LOGICAL Kotlin return type of `internal.fn_name` as a `Ty`, from `@Metadata`. Used for a
@@ -509,28 +522,12 @@ impl Classpath {
     /// such a param binds `this` to the receiver. `None` if the facade/function isn't found; an empty/all-
     /// `None` vec means no receiver-lambda params.
     pub fn metadata_param_recv_funs(&self, internal: &str, fn_name: &str) -> Vec<Option<String>> {
-        let mut fns = self
-            .find(internal)
-            .map(|ci| super::metadata::package_functions(&ci));
-        if fns
-            .as_ref()
-            .is_some_and(|v| v.iter().all(|f| f.kotlin_name != fn_name))
-        {
-            // A multifile FACADE lists its PART classes in `d1`; the functions live there — merge them.
-            if let Some(ci) = self.find(internal) {
-                let mut merged = Vec::new();
-                for part in &ci.kotlin_d1 {
-                    if let Some(pci) = self.find(part) {
-                        merged.extend(super::metadata::package_functions(&pci));
-                    }
-                }
-                if !merged.is_empty() {
-                    fns = Some(merged);
-                }
-            }
-        }
-        fns.and_then(|v| v.into_iter().find(|f| f.kotlin_name == fn_name))
-            .map(|f| f.value_param_recv_funs)
+        // Projects over the shared facade-merged decode (`meta_functions`) — the same multifile-facade
+        // part merge this used to do inline.
+        self.meta_functions(internal)
+            .iter()
+            .find(|f| f.kotlin_name == fn_name)
+            .map(|f| f.value_param_recv_funs.clone())
             .unwrap_or_default()
     }
 
