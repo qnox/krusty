@@ -44,6 +44,10 @@ pub struct Signature {
     /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
     /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
     pub is_suspend: bool,
+    /// The function's OWN declared type parameters (`fun <U> m()` → `["U"]`). Empty for a non-generic
+    /// function. Used to avoid substituting a class type parameter into a member return when the method
+    /// SHADOWS it (`class Box<T> { fun <T> m(): T }` — the return `T` is the method's, not the class's).
+    pub type_params: Vec<String>,
 }
 
 /// Everything a caller needs about a declared Kotlin class: its JVM internal name, its
@@ -842,6 +846,7 @@ pub fn collect_signatures_with_cp(
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
+                        type_params: f.type_params.clone(),
                     };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (receiver_descriptor, method_name).
@@ -1275,6 +1280,7 @@ pub fn collect_signatures_with_cp(
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
+                                    type_params: m.type_params.clone(),
                                 }
                             })
                         })
@@ -1296,6 +1302,7 @@ pub fn collect_signatures_with_cp(
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
+                                    type_params: Vec::new(),
                                 },
                             );
                         }
@@ -1314,6 +1321,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                type_params: Vec::new(),
                             },
                         );
                     }
@@ -1407,6 +1415,7 @@ pub fn collect_signatures_with_cp(
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
+                                    type_params: m.type_params.clone(),
                                 }
                             })
                         })
@@ -1445,6 +1454,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                type_params: Vec::new(),
                             },
                         );
                     }
@@ -6030,11 +6040,10 @@ impl<'a> Checker<'a> {
     /// return isn't a type parameter, the receiver carries no arguments, or the name isn't one of the
     /// class's parameters (the bare `TyParam` then flows on, erasing to its bound at JVM emit).
     ///
-    /// LIMITATION: a method type parameter that SHADOWS a class one (`class Box<T> { fun <T> m(): T }`)
-    /// is indistinguishable here — `Ty::TyParam` carries only the name — so it would wrongly bind to the
-    /// receiver's argument. Kotlin warns on such shadowing and it is absent from the corpus; a real guard
-    /// needs the method's own `type_params` plumbed onto the callable. Tracked as a follow-up.
-    fn subst_member_ret(&self, receiver: Ty, ret: Ty) -> Ty {
+    /// A method type parameter that SHADOWS a class one (`class Box<T> { fun <T> m(): T }`) is NOT
+    /// substituted: the return `T` is the method's, not the class's. `method` names the called member so
+    /// its own declared `type_params` can be consulted to detect the shadow.
+    fn subst_member_ret(&self, receiver: Ty, ret: Ty, method: &str) -> Ty {
         let Some(pname) = ret.ty_param_name() else {
             return ret;
         };
@@ -6045,6 +6054,15 @@ impl<'a> Checker<'a> {
             return ret;
         }
         if let Some(cs) = self.syms.class_by_internal(internal) {
+            // The called method declares its OWN type parameter of this name → the return is the
+            // method's, independent of the receiver's argument; don't substitute (shadowing).
+            if cs
+                .methods
+                .get(method)
+                .is_some_and(|s| s.type_params.iter().any(|t| t == pname))
+            {
+                return ret;
+            }
             if let Some(i) = cs.tparam_names.iter().position(|t| t == pname) {
                 if let Some(&arg) = targs.get(i) {
                     // A `@JvmInline value class` argument flows through a generic member as its boxed form
@@ -7093,7 +7111,7 @@ impl<'a> Checker<'a> {
                                     self.diags.error(span, format!("call to '{name}': {msg}"))
                                 }
                             }
-                            return self.subst_member_ret(rt, fi.callable.ret);
+                            return self.subst_member_ret(rt, fi.callable.ret, &name);
                         }
                         if params.len() != arg_tys.len() {
                             self.diags.error(
@@ -7109,7 +7127,7 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
                             }
                         }
-                        return self.subst_member_ret(rt, fi.callable.ret);
+                        return self.subst_member_ret(rt, fi.callable.ret, &name);
                     }
                     // A CLASSPATH instance member called with NAMED arguments: reorder the labels onto
                     // parameter positions via the member's `@Metadata` names, then check each against its
@@ -8961,6 +8979,7 @@ impl<'a> Checker<'a> {
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,
+            type_params: f.type_params.clone(),
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.

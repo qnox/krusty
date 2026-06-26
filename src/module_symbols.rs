@@ -307,6 +307,7 @@ mod tests {
             is_inline: false,
             is_final: false,
             is_suspend: false,
+            type_params: vec![],
         }
     }
 
