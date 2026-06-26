@@ -1885,6 +1885,16 @@ fn emit_enum_class(
         access |= 0x0010;
     } // FINAL
     cw.set_access(access);
+    // Every enum extends the generic `java.lang.Enum<Self>`, so kotlinc emits a class `Signature`
+    // (`Ljava/lang/Enum<LSelf;>;` plus a raw `L<itf>;` for each superinterface). The erased
+    // descriptor already names `java/lang/Enum`; the Signature carries the `<Self>` type argument.
+    let mut sig = format!("Ljava/lang/Enum<L{fq};>;");
+    for itf in &c.interfaces {
+        sig.push('L');
+        sig.push_str(itf);
+        sig.push(';');
+    }
+    cw.set_signature(&sig);
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
     for itf in &c.interfaces {
