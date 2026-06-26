@@ -3109,6 +3109,30 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
                     }
                     c.pop_scope();
                 }
+                // Primary-constructor parameter defaults (`class A(val ctx: CoroutineContext =
+                // EmptyCoroutineContext)`) are evaluated in the CALLER's context — they may not read other
+                // ctor params (enforced in collect) and have no `this` — so check each in a fresh scope.
+                // This records each default's sub-expression types and object-value references, which the
+                // default-fill lowering needs (a call-site `A()` fill, and the `super(<defaults>)` synthesized
+                // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
+                // pass so a function-typed parameter's lambda default types concretely.
+                c.push_scope();
+                for p in &cl.props {
+                    if let Some(dx) = p.default {
+                        let pty = c.resolve_ty(&p.ty);
+                        let dty = if matches!(c.file.expr(dx), Expr::Lambda { .. })
+                            && (!p.ty.fun_params.is_empty() || p.ty.name == "<fun>")
+                        {
+                            let lam_pts: Vec<Ty> =
+                                p.ty.fun_params.iter().map(|r| c.resolve_ty(r)).collect();
+                            c.check_lambda_with_types(dx, &lam_pts)
+                        } else {
+                            c.expr(dx)
+                        };
+                        c.expect_assignable(pty, dty, c.span(dx), "default argument");
+                    }
+                }
+                c.pop_scope();
                 // Body-property initializers and `init` blocks see the properties (implicit `this`)
                 // and the primary-constructor parameters (including non-property ones).
                 // A *deferred* `val` (declared with no initializer/getter — `val a: Int`) is assigned
