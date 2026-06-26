@@ -1752,6 +1752,8 @@ fn build_continuation_class(
         explicit_param_stores: false,
         methods: vec![inv_fid],
         is_interface: false,
+        is_annotation: false,
+        annotation_impl_of: None,
         is_sealed: false,
         is_abstract: false,
         superclass: CONTINUATION_IMPL.to_string(),

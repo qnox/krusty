@@ -557,6 +557,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 explicit_param_stores: false,
                 methods: vec![],
                 is_interface: c.is_interface(),
+                is_annotation: c.is_annotation(),
+                annotation_impl_of: None,
                 is_sealed: c.is_sealed,
                 is_abstract: c.is_abstract,
                 superclass,
@@ -580,6 +582,21 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 secondary_ctors: vec![],
                 has_primary_ctor: c.has_primary_ctor,
             });
+            // For an `annotation class`, ALSO emit the synthetic IMPLEMENTATION class (kotlinc's
+            // `…$annotationImpl`) implementing the annotation interface + the `java.lang.annotation.
+            // Annotation` contract, so `A(args)` can construct an annotation instance. The backend
+            // generates the whole impl from `fields` (see `emit_annotation_impl_class`).
+            if c.is_annotation() {
+                let mut impl_class = lo.ir.classes[id as usize].clone();
+                impl_class.fq_name = format!("{internal}$annotationImpl");
+                impl_class.is_annotation = false;
+                impl_class.annotation_impl_of = Some(internal.clone());
+                impl_class.interfaces = vec![internal.clone()];
+                impl_class.superclass = "java/lang/Object".to_string();
+                impl_class.supertypes = vec![];
+                impl_class.methods = vec![];
+                lo.ir.add_class(impl_class);
+            }
             let mut methods = HashMap::new();
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
@@ -995,6 +1012,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     explicit_param_stores: false,
                     methods: vec![],
                     is_interface: false,
+                    is_annotation: false,
+                    annotation_impl_of: None,
 
                     is_sealed: false,
                     is_abstract: false,
@@ -2508,6 +2527,8 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                             explicit_param_stores: false,
                             methods: vec![],
                             is_interface: false,
+                            is_annotation: false,
+                            annotation_impl_of: None,
 
                             is_sealed: false,
                             is_abstract: false,
@@ -4435,6 +4456,8 @@ impl<'a> Lower<'a> {
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
 
             is_sealed: false,
             is_abstract: false,
@@ -6371,6 +6394,8 @@ impl<'a> Lower<'a> {
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
 
             is_sealed: false,
             is_abstract: false,
@@ -6639,6 +6664,8 @@ impl<'a> Lower<'a> {
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
 
             is_sealed: false,
             is_abstract: false,
@@ -11596,6 +11623,33 @@ impl<'a> Lower<'a> {
                         args: vec![a],
                     }));
                 }
+                // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
+                // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.
+                if let Ty::Obj(internal, _) = self.info.ty(receiver) {
+                    if let Some(field) = self
+                        .ir
+                        .classes
+                        .iter()
+                        .find(|c| c.fq_name == internal && c.is_annotation)
+                        .and_then(|c| c.fields.iter().find(|f| f.name == *name))
+                    {
+                        let descriptor = format!(
+                            "(){}",
+                            crate::jvm::ir_emit::ir_ty_to_jvm(&field.ty).descriptor()
+                        );
+                        let a = self.expr(receiver)?;
+                        return Some(self.ir.add_expr(IrExpr::Call {
+                            callee: Callee::Virtual {
+                                owner: internal.to_string(),
+                                name: name.clone(),
+                                descriptor,
+                                interface: true,
+                            },
+                            dispatch_receiver: Some(a),
+                            args: vec![],
+                        }));
+                    }
+                }
                 // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
                 let rty = self.info.ty(receiver);
                 if let Some(&gfid) = self.ext_prop_get_ids.get(&(rty.descriptor(), name.clone())) {
@@ -13619,6 +13673,23 @@ impl<'a> Lower<'a> {
                         // Constructor: the call's result type is the class.
                         let ci = self.class_of(self.info.ty(e))?;
                         let class = ci.id;
+                        // Constructing an annotation (`A(args)`) builds its synthetic IMPL class — the
+                        // annotation INTERFACE itself can't be `new`'d. Redirect to `<A>$annotationImpl`
+                        // (same fields/ctor); the result still types as the annotation (the impl IS-A `A`).
+                        let class = if self.ir.classes[class as usize].is_annotation {
+                            let impl_name = format!(
+                                "{}$annotationImpl",
+                                self.ir.classes[class as usize].fq_name
+                            );
+                            self.ir
+                                .classes
+                                .iter()
+                                .position(|c| c.fq_name == impl_name)
+                                .map(|p| p as u32)
+                                .unwrap_or(class)
+                        } else {
+                            class
+                        };
                         // The IR models only an exact positional match against the primary
                         // constructor's parameter fields. Default arguments and secondary
                         // constructors aren't lowered — bail (skip) rather than emit a call whose

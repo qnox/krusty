@@ -534,6 +534,16 @@ pub struct IrClass {
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
     pub is_interface: bool,
+    /// `true` for a Kotlin `annotation class`. Emitted as a JVM annotation INTERFACE (`ACC_ANNOTATION|
+    /// ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/annotation/Annotation`, one abstract accessor per
+    /// member named after the property — from `fields`). NOT a plain class.
+    pub is_annotation: bool,
+    /// `Some(annotation_interface_internal)` when this class is the synthetic IMPLEMENTATION of an
+    /// annotation (kotlinc's `…$annotationImpl$A$0`): it implements the annotation interface and the JVM
+    /// `java.lang.annotation.Annotation` contract (per-member accessors + content `equals`/`hashCode`/
+    /// `toString`/`annotationType`), so `A(args)` can construct an annotation instance. `fields` are the
+    /// members in order. The backend emits the whole contract from `fields`.
+    pub annotation_impl_of: Option<String>,
     /// `true` for a `sealed class`/`sealed interface`. The serialization extension routes a sealed
     /// `@Serializable` base's `serializer()` to a runtime `SealedClassSerializer` over its `@Serializable`
     /// subclasses (polymorphic), instead of generating an empty `$serializer`. Ignored by the core backend.

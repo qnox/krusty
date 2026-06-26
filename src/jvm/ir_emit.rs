@@ -362,6 +362,12 @@ fn emit_class(
     if !c.enum_entries.is_empty() {
         return emit_enum_class(ir, c, facade, bodies);
     }
+    if let Some(iface) = &c.annotation_impl_of {
+        return emit_annotation_impl_class(c, iface);
+    }
+    if c.is_annotation {
+        return emit_annotation_class(c, class_meta);
+    }
     if c.is_interface {
         return emit_interface_class(ir, c, facade, bodies, class_meta);
     }
@@ -1329,6 +1335,370 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     code.checkcast(ci);
     let m = cw.methodref(cls, meth, desc);
     code.invokevirtual(m, 0, slot_words(t) as i32);
+}
+
+/// Emit a Kotlin `annotation class` as a JVM ANNOTATION INTERFACE: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT|
+/// ACC_ANNOTATION`, extending `java/lang/annotation/Annotation`, with one `public abstract` accessor per
+/// member (`int x()`, `String s()`) named after the property and returning its type — kotlinc's shape.
+/// Members come from `fields`. Instances are built by the synthetic impl ([`emit_annotation_impl_class`]).
+fn emit_annotation_class(c: &crate::ir::IrClass, class_meta: Option<&KotlinMetadata>) -> Vec<u8> {
+    let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
+    cw.set_access(0x0001 | 0x0200 | 0x0400 | 0x2000); // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
+    cw.add_interface("java/lang/annotation/Annotation");
+    for field in &c.fields {
+        let ret = ir_ty_to_jvm(&field.ty);
+        cw.add_abstract_method(0x0401, &field.name, &format!("(){}", ret.descriptor()));
+        // PUBLIC|ABSTRACT
+    }
+    if let Some(m) = class_meta {
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
+    cw.finish()
+}
+
+/// The boxed-wrapper internal name + a static `hashCode` helper descriptor for a primitive `Ty`, used by
+/// the annotation impl's `hashCode`. Returns `(wrapper_internal, hashCode_arg_descriptor)`.
+fn prim_wrapper(t: Ty) -> Option<(&'static str, &'static str)> {
+    Some(match t {
+        Ty::Boolean => ("java/lang/Boolean", "Z"),
+        Ty::Byte => ("java/lang/Byte", "B"),
+        Ty::Short => ("java/lang/Short", "S"),
+        Ty::Char => ("java/lang/Character", "C"),
+        Ty::Int => ("java/lang/Integer", "I"),
+        Ty::Long => ("java/lang/Long", "J"),
+        Ty::Float => ("java/lang/Float", "F"),
+        Ty::Double => ("java/lang/Double", "D"),
+        _ => return None,
+    })
+}
+
+/// Java `String.hashCode()` of `s` (the annotation `hashCode` weights each member by `127 *
+/// name.hashCode()`, a compile-time constant).
+fn java_string_hash(s: &str) -> i32 {
+    s.chars()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+}
+
+/// Emit the synthetic IMPLEMENTATION class for a Kotlin annotation instantiation (`A(args)`): a final
+/// class implementing the annotation interface `iface` and the full `java.lang.annotation.Annotation`
+/// contract — private final fields, a constructor, per-member accessors (`x()`/`s()`), `annotationType()`,
+/// and content-correct `equals`/`hashCode`/`toString` (arrays via `java.util.Arrays`, `float`/`double` via
+/// their wrappers' `equals`/`hashCode` for NaN/`-0.0` semantics). `c.fields` are the members in order.
+fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
+    let fq = c.fq_name.clone();
+    let members: Vec<(String, Ty)> = c
+        .fields
+        .iter()
+        .map(|f| (f.name.clone(), ir_ty_to_jvm(&f.ty)))
+        .collect();
+    let mut cw = ClassWriter::new(&fq, "java/lang/Object");
+    cw.set_access(0x0001 | 0x0010 | 0x1000); // PUBLIC | FINAL | SYNTHETIC
+    cw.add_interface(iface);
+    for (name, jt) in &members {
+        cw.add_field(0x0002 | 0x0010, name, &jt.descriptor()); // PRIVATE | FINAL
+    }
+
+    // <init>(members…): super(); store each arg to its field.
+    {
+        let params_words: u16 = members.iter().map(|(_, jt)| slot_words(*jt)).sum();
+        let mut ctor = CodeBuilder::new(1 + params_words);
+        ctor.aload(0);
+        let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
+        ctor.invokespecial(obj_init, 0, 0);
+        let mut slot = 1u16;
+        for (name, jt) in &members {
+            ctor.aload(0);
+            load(*jt, slot, &mut ctor);
+            let fref = cw.fieldref(&fq, name, &jt.descriptor());
+            ctor.putfield(fref, slot_words(*jt) as i32);
+            slot += slot_words(*jt);
+        }
+        ctor.ret_void();
+        ctor.ensure_locals(1 + params_words);
+        ctor.link();
+        let desc = format!(
+            "({})V",
+            members
+                .iter()
+                .map(|(_, jt)| jt.descriptor())
+                .collect::<String>()
+        );
+        cw.add_method(0x0001, "<init>", &desc, &ctor);
+    }
+
+    // Per-member accessor `x()T`: return this.x.
+    for (name, jt) in &members {
+        let mut g = CodeBuilder::new(1);
+        g.aload(0);
+        let fref = cw.fieldref(&fq, name, &jt.descriptor());
+        g.getfield(fref, slot_words(*jt) as i32);
+        emit_return(*jt, &mut g);
+        g.ensure_locals(1);
+        g.link();
+        cw.add_method(0x0011, name, &format!("(){}", jt.descriptor()), &g);
+    }
+
+    // annotationType(): return <iface>.class.
+    {
+        let mut m = CodeBuilder::new(1);
+        m.ldc_class(iface, &mut cw);
+        m.areturn();
+        m.ensure_locals(1);
+        m.link();
+        cw.add_method(0x0011, "annotationType", "()Ljava/lang/Class;", &m);
+    }
+
+    emit_annotation_equals(&mut cw, &fq, iface, &members);
+    emit_annotation_hashcode(&mut cw, &fq, &members);
+    emit_annotation_tostring(&mut cw, &fq, iface, &members);
+    cw.finish()
+}
+
+/// `equals(Object)Z` for an annotation impl: `o` must be an instance of the annotation interface and every
+/// member must be equal (arrays compared by content via `Arrays.equals`; `float`/`double` via their
+/// wrappers' `equals` so `NaN`==`NaN` and `-0.0`!=`0.0` per the annotation contract; other references via
+/// `Object.equals`). One `false` exit label.
+fn emit_annotation_equals(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
+    let mut cb = CodeBuilder::new(2); // this=0, o=1
+    cb.ensure_locals(3); // +o-as-iface at local 2
+    let lfalse = cb.new_label();
+    let icls = cw.class_ref(iface);
+    cb.aload(1);
+    cb.instance_of(icls);
+    cb.ifeq(lfalse);
+    cb.aload(1);
+    cb.checkcast(icls);
+    cb.astore(2);
+    for (name, jt) in members {
+        let fref = cw.fieldref(fq, name, &jt.descriptor());
+        let aref = cw.interface_methodref(iface, name, &format!("(){}", jt.descriptor()));
+        let push_this = |cb: &mut CodeBuilder| {
+            cb.aload(0);
+            cb.getfield(fref, slot_words(*jt) as i32);
+        };
+        let push_other = |cb: &mut CodeBuilder| {
+            cb.aload(2);
+            cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
+        };
+        match jt {
+            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => {
+                push_this(&mut cb);
+                push_other(&mut cb);
+                cb.if_icmpne(lfalse);
+            }
+            Ty::Long => {
+                push_this(&mut cb);
+                push_other(&mut cb);
+                cb.lcmp();
+                cb.ifne(lfalse);
+            }
+            Ty::Float | Ty::Double => {
+                let (wrap, pd) = prim_wrapper(*jt).unwrap();
+                let valueof = cw.methodref(wrap, "valueOf", &format!("({pd})L{wrap};"));
+                push_this(&mut cb);
+                cb.invokestatic(valueof, slot_words(*jt) as i32, 1);
+                push_other(&mut cb);
+                cb.invokestatic(valueof, slot_words(*jt) as i32, 1);
+                let eq = cw.methodref(wrap, "equals", "(Ljava/lang/Object;)Z");
+                cb.invokevirtual(eq, 1, 1);
+                cb.ifeq(lfalse);
+            }
+            Ty::Array(elem) => {
+                let arr_desc = arrays_param_desc(elem);
+                let eq = cw.methodref(
+                    "java/util/Arrays",
+                    "equals",
+                    &format!("({arr_desc}{arr_desc})Z"),
+                );
+                push_this(&mut cb);
+                push_other(&mut cb);
+                cb.invokestatic(eq, 2, 1);
+                cb.ifeq(lfalse);
+            }
+            _ => {
+                // Reference member (String / enum / nested annotation): Object.equals.
+                push_this(&mut cb);
+                push_other(&mut cb);
+                let eq = cw.methodref("java/lang/Object", "equals", "(Ljava/lang/Object;)Z");
+                cb.invokevirtual(eq, 1, 1);
+                cb.ifeq(lfalse);
+            }
+        }
+    }
+    cb.push_int(1, cw);
+    cb.ireturn();
+    cb.bind(lfalse);
+    let impl_ref = cw.class_ref(fq);
+    let obj_ref = cw.class_ref("java/lang/Object");
+    cb.add_frame_if_new(
+        lfalse,
+        vec![VerifType::Object(impl_ref), VerifType::Object(obj_ref)],
+        vec![],
+    );
+    cb.push_int(0, cw);
+    cb.ireturn();
+    cb.set_needs_stackmap();
+    cb.link();
+    cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &cb);
+}
+
+/// `Arrays.equals`/`Arrays.hashCode` parameter descriptor for an array whose element `Ty` is `elem`: a
+/// primitive array has its own overload (`[I`), a reference array uses `[Ljava/lang/Object;` (array
+/// covariance lets a `String[]`/`Enum[]` flow in).
+fn arrays_param_desc(elem: &Ty) -> String {
+    match elem {
+        Ty::Boolean
+        | Ty::Byte
+        | Ty::Short
+        | Ty::Char
+        | Ty::Int
+        | Ty::Long
+        | Ty::Float
+        | Ty::Double => {
+            format!("[{}", elem.descriptor())
+        }
+        _ => "[Ljava/lang/Object;".to_string(),
+    }
+}
+
+/// `hashCode()I` for an annotation impl: the contract sum of `(127 * memberName.hashCode()) ^
+/// memberValue.hashCode()` over members (arrays via `Arrays.hashCode`, primitives via their wrappers'
+/// static `hashCode`). Straight-line (no frames).
+fn emit_annotation_hashcode(cw: &mut ClassWriter, fq: &str, members: &[(String, Ty)]) {
+    let mut cb = CodeBuilder::new(1);
+    cb.push_int(0, cw); // acc
+    for (name, jt) in members {
+        cb.push_int(127i32.wrapping_mul(java_string_hash(name)), cw);
+        // value.hashCode():
+        let fref = cw.fieldref(fq, name, &jt.descriptor());
+        cb.aload(0);
+        cb.getfield(fref, slot_words(*jt) as i32);
+        match jt {
+            Ty::Int | Ty::Short | Ty::Byte | Ty::Char => { /* int value IS its hashCode */ }
+            Ty::Boolean | Ty::Long | Ty::Float | Ty::Double => {
+                let (wrap, pd) = prim_wrapper(*jt).unwrap();
+                let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
+                cb.invokestatic(hc, slot_words(*jt) as i32, 1);
+            }
+            Ty::Array(elem) => {
+                let ad = arrays_param_desc(elem);
+                let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
+                cb.invokestatic(hc, 1, 1);
+            }
+            _ => {
+                let hc = cw.methodref("java/lang/Object", "hashCode", "()I");
+                cb.invokevirtual(hc, 0, 1);
+            }
+        }
+        cb.ixor();
+        cb.iadd();
+    }
+    cb.ireturn();
+    cb.ensure_locals(1);
+    cb.link();
+    cw.add_method(0x0011, "hashCode", "()I", &cb);
+}
+
+/// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays
+/// rendered via `Arrays.toString`). Straight-line (no frames).
+fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
+    let mut cb = CodeBuilder::new(1);
+    let sb = "java/lang/StringBuilder";
+    let sb_cls = cw.class_ref(sb);
+    cb.new_obj(sb_cls);
+    cb.dup();
+    let sb_init = cw.methodref(sb, "<init>", "()V");
+    cb.invokespecial(sb_init, 0, 0);
+    let append_str = cw.methodref(
+        sb,
+        "append",
+        "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+    );
+    let append_lit = |cb: &mut CodeBuilder, cw: &mut ClassWriter, s: &str| {
+        cb.push_string(s, cw);
+        cb.invokevirtual(append_str, 1, 1);
+    };
+    append_lit(&mut cb, cw, &format!("@{}(", iface.replace('/', ".")));
+    for (i, (name, jt)) in members.iter().enumerate() {
+        append_lit(
+            &mut cb,
+            cw,
+            &format!("{}{}=", if i == 0 { "" } else { ", " }, name),
+        );
+        let fref = cw.fieldref(fq, name, &jt.descriptor());
+        match jt {
+            Ty::Array(elem) => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ad = arrays_param_desc(elem);
+                let ats = cw.methodref(
+                    "java/util/Arrays",
+                    "toString",
+                    &format!("({ad})Ljava/lang/String;"),
+                );
+                cb.invokestatic(ats, 1, 1);
+                cb.invokevirtual(append_str, 1, 1);
+            }
+            Ty::Int | Ty::Short | Ty::Byte => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ap = cw.methodref(sb, "append", "(I)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 1, 1);
+            }
+            Ty::Char => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ap = cw.methodref(sb, "append", "(C)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 1, 1);
+            }
+            Ty::Boolean => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ap = cw.methodref(sb, "append", "(Z)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 1, 1);
+            }
+            Ty::Long => {
+                cb.aload(0);
+                cb.getfield(fref, 2);
+                let ap = cw.methodref(sb, "append", "(J)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 2, 1);
+            }
+            Ty::Float => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ap = cw.methodref(sb, "append", "(F)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 1, 1);
+            }
+            Ty::Double => {
+                cb.aload(0);
+                cb.getfield(fref, 2);
+                let ap = cw.methodref(sb, "append", "(D)Ljava/lang/StringBuilder;");
+                cb.invokevirtual(ap, 2, 1);
+            }
+            Ty::String => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                cb.invokevirtual(append_str, 1, 1);
+            }
+            _ => {
+                cb.aload(0);
+                cb.getfield(fref, 1);
+                let ap = cw.methodref(
+                    sb,
+                    "append",
+                    "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+                );
+                cb.invokevirtual(ap, 1, 1);
+            }
+        }
+    }
+    append_lit(&mut cb, cw, ")");
+    let to_str = cw.methodref(sb, "toString", "()Ljava/lang/String;");
+    cb.invokevirtual(to_str, 0, 1);
+    cb.areturn();
+    cb.ensure_locals(1);
+    cb.link();
+    cw.add_method(0x0011, "toString", "()Ljava/lang/String;", &cb);
 }
 
 /// Emit an `interface`: `ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT`, extends `java/lang/Object`. A method
@@ -3617,9 +3987,22 @@ impl<'a> Emitter<'a> {
                         let m = self.cw.methodref("java/lang/Float", "hashCode", "(F)I");
                         code.invokestatic(m, 1, 1);
                     }
-                    // A reference dispatches to its `hashCode` override.
+                    // A reference dispatches to its `hashCode` override via `invokevirtual`. For a class
+                    // receiver use its own static type (matching kotlinc, byte-for-byte). For an INTERFACE
+                    // static type (e.g. an annotation), `invokevirtual <interface>.hashCode` is an
+                    // `IncompatibleClassChangeError` — use `java/lang/Object` (still dispatches virtually).
                     _ => {
                         let owner = ref_internal(ty);
+                        let owner = if self
+                            .ir
+                            .classes
+                            .iter()
+                            .any(|c| c.fq_name == owner && (c.is_interface || c.is_annotation))
+                        {
+                            "java/lang/Object".to_string()
+                        } else {
+                            owner
+                        };
                         let m = self.cw.methodref(&owner, "hashCode", "()I");
                         code.invokevirtual(m, 0, 1);
                     }
