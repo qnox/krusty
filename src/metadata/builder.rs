@@ -127,7 +127,7 @@ fn type_pb_recv_fun(st: &mut StringTable, fun_class: Ty, recv: Ty) -> Pb {
     let recv_ty = type_pb(st, recv);
     let mut arg = Pb::new();
     arg.field_message(2, &recv_ty); // Argument.type = 2 (projection INV omitted)
-    p.repeated_message(1, &arg); // Type.argument = 1
+    p.repeated_message(2, &arg); // Type.argument = 2
     let ext_id = st.class_id_from_desc("Lkotlin/ExtensionFunctionType;");
     let mut anno = Pb::new();
     anno.field_varint(1, ext_id as u64); // Annotation.id = 1

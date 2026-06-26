@@ -1738,6 +1738,27 @@ impl LibrarySet for JvmLibraries {
         None
     }
 
+    fn toplevel_lambda_recvs(&self, name: &str, arg_tys: &[Option<Ty>]) -> Option<Vec<bool>> {
+        for c in self.cp.find_top_level(name) {
+            let Some(sig) = c.signature.as_deref() else {
+                continue;
+            };
+            let Some((_, psigs, _)) = parse_method_gsig(sig) else {
+                continue;
+            };
+            if psigs.len() != arg_tys.len() {
+                continue;
+            }
+            // A top-level fn's source params equal its JVM params (no receiver slot), so the per-source-
+            // param receiver-function-type flags from `@Metadata` align positionally with `arg_tys`.
+            let recvs = self.cp.metadata_param_recv_funs(&c.owner, name);
+            if recvs.len() == arg_tys.len() && recvs.iter().any(|o| o.is_some()) {
+                return Some(recvs.iter().map(|o| o.is_some()).collect());
+            }
+        }
+        None
+    }
+
     fn extension_lambda_param_types(
         &self,
         recv: Ty,

@@ -8115,6 +8115,13 @@ impl<'a> Checker<'a> {
                             .toplevel_lambda_param_types(&fname, partial)
                     })
                     .or_else(|| user_generic.clone());
+                // Per-param RECEIVER function-type flags for a classpath top-level HOF (`NavHost(builder:
+                // NGB.()->Unit){…}`) — a lambda to a `true` param binds its implicit `this` to the receiver
+                // (`pts[i][0]`). From `@Metadata`'s `@ExtensionFunctionType`; `None` for a user fn.
+                let toplevel_lambda_recvs: Option<Vec<bool>> = toplevel_partial
+                    .as_ref()
+                    .filter(|_| known_sig.is_none())
+                    .and_then(|partial| self.syms.libraries.toplevel_lambda_recvs(&fname, partial));
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
@@ -8141,7 +8148,17 @@ impl<'a> Checker<'a> {
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation =
                                     self.resolver().toplevel_is_inline(&fname);
-                                let t = self.check_lambda_with_types(a, &pts[i]);
+                                // A RECEIVER function-type param: bind `pts[i][0]` as the lambda's `this`.
+                                let is_recv = toplevel_lambda_recvs
+                                    .as_ref()
+                                    .and_then(|r| r.get(i))
+                                    .copied()
+                                    .unwrap_or(false);
+                                let t = if is_recv {
+                                    self.check_lambda_with_receiver(a, pts[i][0], &pts[i][1..])
+                                } else {
+                                    self.check_lambda_with_types(a, &pts[i])
+                                };
                                 self.allow_lambda_mutation = prev;
                                 return t;
                             }
