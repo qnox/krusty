@@ -9,7 +9,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Definitions of done
 
 - **Runtime correctness**: `box()=="OK"` under `-Xverify:all` on the codegen/box corpus (the `kotlin`
-  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 465).
+  repo's `compiler/testData/codegen/box`). Current gate: **1782 OK / 0 FAIL** (scanned 7351, Phase 466).
 - **Bytecode parity**: per-class `javap -c -p` normalized-equal vs kotlinc (`src/bin/bytediff.rs`).
   Normalization removes only semantics-preserving noise (source banner, instruction offsets,
   constant-pool index tokens). This is the harder bar the goal now demands.
@@ -73,6 +73,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
 ## Phase log
 
 (newest first — every entry = a committed+pushed phase, gate FAIL=0)
+
+- **Phase 466 — check primary-constructor parameter defaults → object-singleton defaults lower (gate 1782,
+  flat, FAIL=0).** A constructor parameter whose default is an OBJECT singleton (`val ctx: CoroutineContext
+  = EmptyCoroutineContext` — a classpath `object` read as `getstatic …INSTANCE`), rather than a simple
+  literal, could not be lowered: the checker never visited primary-ctor parameter defaults, so no
+  object-value reference was recorded, and the `super(<defaults>)` default-fill (Phase 464/465) bailed on a
+  non-literal default. The checker now type-checks each primary-ctor parameter default in a fresh scope
+  (mirroring `check_fun`'s default pass — same lambda-default handling for a function-typed parameter),
+  recording its sub-expression types and object-value references. The coroutine `EmptyContinuation`
+  (`open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) :
+  Continuation<Any?> { companion object : EmptyContinuation() … }`) now compiles AND runs (its self-ref
+  companion is built via the Phase 465 super-default-fill). Gate is FLAT: this is prerequisite
+  infrastructure for the `// WITH_COROUTINES` cluster, which the harness compiles together with an injected
+  `helpers` source (`CoroutineUtil.kt`) — that file still needs three things before the ~123-file
+  `EmptyContinuation` cluster counts: the `Continuation(context) { … }` stdlib factory function, an
+  anonymous `object : Continuation<T>` using the enclosing function's type parameter, and the captured
+  lambda-param invocation inside it. TDD: tests/object_default_ctor_arg_e2e.rs (subclass + self-referential
+  companion both fill an `EmptyCoroutineContext` base default and run). See [[coroutine-intrinsics-plan]].
 
 - **Phase 465 — `companion object : Base()` extends a base CLASS (gate 1781 → 1782, +1, FAIL=0).** A
   method-less or method-ful companion that declares a base class is now emitted extending that base, so the
