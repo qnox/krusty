@@ -803,7 +803,9 @@ fn emit_class(
         // A method with default-valued parameters gets a `<name>$default(self, params…, mask, marker)`
         // synthetic stub (the JVM realization of default arguments).
         if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
-            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies);
+            emit_default_stub(
+                ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, false,
+            );
         }
     }
     emit_bridges(c, &mut cw);
@@ -1732,6 +1734,12 @@ fn emit_interface_class(
             );
             // PUBLIC | ABSTRACT
         }
+        // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
+        // marker)` (the JVM realization of interface default args) — it applies the defaults then dispatches
+        // to the abstract method via `invokeinterface`.
+        if let Some(defaults) = ir.fn_param_defaults.get(&fid) {
+            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
+        }
     }
     if let Some(m) = class_meta {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -2140,6 +2148,7 @@ fn jvm_bound_descriptor(bound: &Ty) -> Option<String> {
 /// instance method with default-valued parameters: for each defaulted param, `if ((mask & (1<<i)) != 0)
 /// param = <default>;` then tail-call the real method. The default-value exprs reference `self` as value
 /// 0. This is the JVM realization of default arguments — the `param_defaults` *meaning* is in the IR.
+#[allow(clippy::too_many_arguments)]
 fn emit_default_stub(
     ir: &IrFile,
     fid: u32,
@@ -2148,6 +2157,7 @@ fn emit_default_stub(
     cw: &mut ClassWriter,
     defaults: &[Option<u32>],
     bodies: &dyn MethodBodies,
+    is_interface: bool,
 ) {
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
@@ -2205,9 +2215,16 @@ fn emit_default_stub(
         load(pty, pslot, &mut code);
     }
     let aw: i32 = real_params.iter().map(|t| slot_words(*t) as i32).sum();
-    let m =
-        e.cw.methodref(owner, &method_name, &method_descriptor(&real_params, ret));
-    code.invokevirtual(m, aw, slot_words(ret) as i32);
+    let desc = method_descriptor(&real_params, ret);
+    if is_interface {
+        // The default stub is a STATIC interface method; it dispatches to the real (abstract) member via
+        // `invokeinterface` on `$this`.
+        let m = e.cw.interface_methodref(owner, &method_name, &desc);
+        code.invokeinterface(m, aw, slot_words(ret) as i32);
+    } else {
+        let m = e.cw.methodref(owner, &method_name, &desc);
+        code.invokevirtual(m, aw, slot_words(ret) as i32);
+    }
     emit_return(ret, &mut code);
     code.ensure_locals(e.next_slot);
     code.link();
@@ -3076,11 +3093,16 @@ impl<'a> Emitter<'a> {
                     stub_params.push(Ty::Int);
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let m = self.cw.methodref(
-                        &owner,
-                        &format!("{name}$default"),
-                        &method_descriptor(&stub_params, ret),
-                    );
+                    let stub_desc = method_descriptor(&stub_params, ret);
+                    let stub_name = format!("{name}$default");
+                    // The `$default` stub of an INTERFACE method is a STATIC interface method — referenced
+                    // via an `InterfaceMethodref` constant (a plain `Methodref` is an
+                    // `IncompatibleClassChangeError`), still invoked with `invokestatic`.
+                    let m = if is_iface {
+                        self.cw.interface_methodref(&owner, &stub_name, &stub_desc)
+                    } else {
+                        self.cw.methodref(&owner, &stub_name, &stub_desc)
+                    };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                     return;
                 }

@@ -7011,11 +7011,32 @@ impl<'a> Checker<'a> {
                     // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
                     // overload is the same one hand-rolled lookup would pick. Collected owned so the
                     // borrow of `syms` ends before the mutating type-checks below.
-                    let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
+                    let members: Vec<_> = crate::module_symbols::ModuleSymbols::new(self.syms)
                         .functions(&name, Some(rt))
                         .overloads
                         .into_iter()
-                        .find(|o| o.kind == crate::libraries::FnKind::Member);
+                        .filter(|o| o.kind == crate::libraries::FnKind::Member)
+                        .collect();
+                    // The first Member overload is the most-derived override (for dispatch/return). For an
+                    // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface
+                    // method's default isn't redeclared on the override) — prefer an overload that records
+                    // defaults so the omitted args resolve, falling back to the override.
+                    let short = arg_names.is_some()
+                        || members
+                            .first()
+                            .is_some_and(|o| arg_tys.len() != o.callable.params.len());
+                    let module_member = if short {
+                        members
+                            .iter()
+                            .find(|o| {
+                                o.call_sig.required < o.callable.params.len()
+                                    && !o.call_sig.param_names.is_empty()
+                            })
+                            .or_else(|| members.first())
+                            .cloned()
+                    } else {
+                        members.first().cloned()
+                    };
                     if let Some(fi) = module_member {
                         let params = fi.callable.params.clone();
                         let cs = &fi.call_sig;

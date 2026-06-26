@@ -624,17 +624,46 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                 });
                 // Mark a method with default parameters now (pass 1) so a call lowered before this
                 // class's pass-2 body sees that it has defaults; the real default exprs are lowered in
-                // pass 2 and overwrite this marker. Interface defaults (kotlinc routes those through a
-                // `$DefaultImpls` class) and >31 parameters (kotlinc's multi-`int` mask) aren't modeled —
-                // leaving them unmarked makes an omitted-arg call bail, so the file is skipped, not wrong.
-                if m.params.iter().any(|p| p.default.is_some())
-                    && !c.is_interface()
-                    && m.params.len() <= 31
-                {
+                // pass 2 and overwrite this marker. (>31 parameters — kotlinc's multi-`int` mask — aren't
+                // modeled; leaving them unmarked makes an omitted-arg call bail, so the file is skipped.)
+                if m.params.iter().any(|p| p.default.is_some()) && m.params.len() <= 31 {
                     lo.ir.fn_param_defaults.insert(fid, Vec::new());
                     lo.ir
                         .fn_param_names
                         .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                    // An INTERFACE method is abstract (no body), so pass 2's body loop never fills its
+                    // default exprs — lower them HERE. Restrict to CONSTANT defaults (a literal needs no
+                    // param/`this` scope), so the `$default` stub is always valid; a non-constant interface
+                    // default isn't modeled — drop the marker so an omitted-arg call bails (skips), never
+                    // miscompiles. kotlinc realizes interface defaults via a static `<iface>.<name>$default`.
+                    if c.is_interface() {
+                        let mut defaults = Vec::new();
+                        let mut modelable = true;
+                        for (p, t) in m.params.iter().zip(&sig.params) {
+                            match p.default {
+                                None => defaults.push(None), // a required parameter
+                                Some(d) if is_const_literal(file, d) => {
+                                    match lo.lower_arg(d, &ty_to_ir(*t)) {
+                                        Some(e) => defaults.push(Some(e)),
+                                        None => {
+                                            modelable = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Some(_) => {
+                                    modelable = false; // a non-constant default isn't modeled
+                                    break;
+                                }
+                            }
+                        }
+                        if modelable {
+                            lo.ir.fn_param_defaults.insert(fid, defaults);
+                        } else {
+                            lo.ir.fn_param_defaults.remove(&fid);
+                            lo.ir.fn_param_names.remove(&fid);
+                        }
+                    }
                 }
                 // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
                 if m.is_suspend {
@@ -6782,6 +6811,51 @@ impl<'a> Lower<'a> {
             }
         }
         None
+    }
+
+    /// Find an interface method `name` (in `internal`'s transitive interface hierarchy) that declares
+    /// DEFAULT ARGUMENTS (a registered `fn_param_defaults` — i.e. a `$default` stub is emitted on that
+    /// interface). Used to resolve an OMITTED-argument call `impl.foo()` whose default is declared on a
+    /// super-interface and not redeclared on the override. Returns the INTERFACE's class id (so the call
+    /// targets `<iface>.foo$default`).
+    fn resolve_defaulted_iface_method(
+        &self,
+        internal: &str,
+        name: &str,
+    ) -> Option<(ClassId, u32, u32, Ty)> {
+        let mut stack = vec![internal.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        let mut found: Vec<(ClassId, u32, u32, Ty)> = Vec::new();
+        while let Some(cn) = stack.pop() {
+            if !seen.insert(cn.clone()) {
+                continue;
+            }
+            let Some(ci) = self.classes.get(&cn) else {
+                continue;
+            };
+            if let Some(sup) = &ci.super_internal {
+                stack.push(sup.clone());
+            }
+            for itf in &self.ir.classes[ci.id as usize].interfaces {
+                if let Some(ici) = self.classes.get(itf) {
+                    if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
+                        if self.ir.fn_param_defaults.contains_key(&fid)
+                            && !found.iter().any(|(_, _, f, _)| *f == fid)
+                        {
+                            found.push((ici.id, idx, fid, ret));
+                        }
+                    }
+                }
+                stack.push(itf.clone());
+            }
+        }
+        // Exactly one interface declares the default → use it. Multiple distinct ones (a diamond like
+        // `class C : A, B` where both `A` and `B` default the parameter) is an ambiguity whose Kotlin
+        // resolution isn't modeled — bail (the file is SKIPPED, never miscompiled).
+        match found.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
     }
 
     /// Whether a same-file interface's method is a DEFAULT method (declared with a body) — checked on
@@ -14543,7 +14617,15 @@ impl<'a> Lower<'a> {
                         .class_of(self.recv_ty(receiver))
                         .map(|ci| ci.internal.clone())
                     {
-                        if let Some((class, index, fid, _)) = self.resolve_method(&internal, &name)
+                        if let Some((class, index, fid, _)) = self
+                            .resolve_method(&internal, &name)
+                            .filter(|(_, _, fid, _)| {
+                                // Prefer the override unless it lacks defaults yet the call omits args —
+                                // then the default is inherited from a super-interface (resolved below).
+                                self.ir.fn_param_defaults.contains_key(fid)
+                                    || args.len() == self.ir.functions[*fid as usize].params.len()
+                            })
+                            .or_else(|| self.resolve_defaulted_iface_method(&internal, &name))
                         {
                             if self.ir.fn_param_defaults.contains_key(&fid) {
                                 let params = self.ir.functions[fid as usize].params.clone();
