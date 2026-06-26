@@ -35,6 +35,11 @@ pub struct Signature {
     /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
     /// `it` / parameter types. Parallel to `params`.
     pub lambda_param_types: Vec<Vec<Ty>>,
+    /// For each parameter: `true` when it is a RECEIVER function type `Recv.(A) -> R` (vs a plain
+    /// `(Recv, A) -> R`). A lambda passed to such a param binds `lambda_param_types[i][0]` as the
+    /// implicit `this` receiver (so a bare member/extension call inside resolves against it). Parallel
+    /// to `params`; empty = none are receivers.
+    pub lambda_recv: Vec<bool>,
     /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
     /// argument may capture a mutable local), instead of forming a closure.
     pub is_inline: bool,
@@ -891,6 +896,7 @@ pub fn collect_signatures_with_cp(
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         lambda_param_types,
+                        lambda_recv: f.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
@@ -1281,6 +1287,11 @@ pub fn collect_signatures_with_cp(
                                         .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
+                                    lambda_recv: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.ty.fun_has_receiver)
+                                        .collect(),
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
@@ -1302,6 +1313,7 @@ pub fn collect_signatures_with_cp(
                                     param_defaults: Vec::new(),
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
+                                    lambda_recv: Vec::new(),
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
@@ -1320,6 +1332,7 @@ pub fn collect_signatures_with_cp(
                                 param_defaults: vec![true; props.len()],
                                 param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
                                 lambda_param_types: Vec::new(),
+                                lambda_recv: Vec::new(),
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
@@ -1434,6 +1447,11 @@ pub fn collect_signatures_with_cp(
                                         .collect(),
                                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                                     lambda_param_types,
+                                    lambda_recv: m
+                                        .params
+                                        .iter()
+                                        .map(|p| p.ty.fun_has_receiver)
+                                        .collect(),
                                     is_inline: false,
                                     is_final: m.is_final,
                                     is_suspend: m.is_suspend,
@@ -1472,6 +1490,7 @@ pub fn collect_signatures_with_cp(
                                 param_defaults: vec![],
                                 param_names: vec![],
                                 lambda_param_types: vec![],
+                                lambda_recv: vec![],
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
@@ -2875,6 +2894,11 @@ pub struct TypeInfo {
     /// lowerer drives its receiver-lambda inlining off this table, so the decision lives once in the
     /// checker rather than being re-derived (and name-matched) in the backend.
     pub receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
+    /// A LAMBDA literal `ExprId` passed to a user function's RECEIVER function-type parameter
+    /// (`Recv.(A) -> R`) → its receiver `Ty`. Unlike `receiver_lambdas` (inlined `apply`/`with`, keyed on
+    /// the CALL), this lambda lowers to a real `FunctionN` closure whose FIRST parameter IS the receiver;
+    /// the backend binds that param as `this` so bare member/extension calls inside dispatch against it.
+    pub recv_lambda_tys: HashMap<ExprId, Ty>,
 }
 
 /// How to inline a receiver-lambda scope-function call (see [`TypeInfo::receiver_lambdas`]).
@@ -2944,6 +2968,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         boxed_vars: std::collections::HashSet::new(),
         plus_assign: std::collections::HashSet::new(),
         receiver_lambdas: HashMap::new(),
+        recv_lambda_tys: HashMap::new(),
         local_fun_captures: std::collections::HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         expr_depth: 0,
@@ -3442,6 +3467,7 @@ pub fn check_file(file: &File, syms: &SymbolTable, diags: &mut DiagSink) -> Type
         local_fun_captures: c.local_fun_captures,
         plus_assign: c.plus_assign,
         receiver_lambdas: c.receiver_lambdas,
+        recv_lambda_tys: c.recv_lambda_tys,
     }
 }
 
@@ -3480,6 +3506,7 @@ struct Checker<'a> {
     boxed_vars: std::collections::HashSet<String>,
     plus_assign: std::collections::HashSet<StmtId>,
     receiver_lambdas: HashMap<ExprId, ReceiverLambda>,
+    recv_lambda_tys: HashMap<ExprId, Ty>,
     local_fun_captures: std::collections::HashMap<StmtId, Vec<(String, Ty)>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
@@ -6115,6 +6142,22 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
+        // by the receiver's erased descriptor, exactly as a qualified `recv.name(args)` extension call
+        // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
+        if let Some(sig) = self
+            .syms
+            .ext_funs
+            .get(&(rt.descriptor(), name.to_string()))
+            .cloned()
+        {
+            if !sig.vararg && sig.params.len() == arg_tys.len() {
+                for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
+                    self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                }
+                return Some(sig.ret);
+            }
+        }
         // A stdlib/library EXTENSION on the receiver (`String.reversed()`, `String.uppercase()`):
         // resolved receiver-aware so the right overload is selected (`CharSequence.reversed`, not the
         // `Iterable.reversed` that a receiver-blind fallthrough would pick). Mirrors the qualified
@@ -6281,6 +6324,56 @@ impl<'a> Checker<'a> {
 
     /// When calling `f({ it.method() })` and `f`'s param is `(String) -> R`, this lets `it` have
     /// type `String` instead of the default `Object`.
+    /// Type-check a RECEIVER lambda `{ a -> … }` passed to a `Recv.(value params) -> R` parameter: its
+    /// implicit `this` is `recv` (a user receiver's properties resolve unqualified, and a bare member /
+    /// extension call inside resolves against it via the implicit-`this` probe), and its explicit
+    /// parameters bind `value_types`. Records the lambda expr → `recv` so the backend binds the closure's
+    /// first parameter as `this`. Returns the lambda's `Fun` type (the receiver folded back in as the
+    /// leading parameter, matching how `lambda_param_types` was built).
+    fn check_lambda_with_receiver(&mut self, e: ExprId, recv: Ty, value_types: &[Ty]) -> Ty {
+        if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
+            let bind_names: Vec<String> = if !params.is_empty() {
+                params.clone()
+            } else if !value_types.is_empty() || expr_uses_name(self.file, body, "it") {
+                vec!["it".to_string()]
+            } else {
+                vec![]
+            };
+            if !self.allow_lambda_mutation {
+                let outer_names: std::collections::HashSet<String> =
+                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                if !outer_names.is_empty() {
+                    self.record_captured_vars(body, &outer_names);
+                }
+            }
+            self.recv_lambda_tys.insert(e, recv);
+            let prev_this = self.this_ty;
+            self.this_ty = Some(recv);
+            self.push_scope();
+            if let Ty::Obj(internal, _) = recv {
+                if let Some(cs) = self.syms.class_by_internal(internal) {
+                    for (n, t, is_var) in cs.props.clone() {
+                        self.declare(&n, t, is_var);
+                    }
+                }
+            }
+            for (i, name) in bind_names.iter().enumerate() {
+                let pty = value_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                self.declare(name, pty, false);
+            }
+            let saved_field = self.field_ty.take();
+            let bret = self.expr(body);
+            self.field_ty = saved_field;
+            self.pop_scope();
+            self.this_ty = prev_this;
+            let mut pts = vec![recv];
+            pts.extend_from_slice(value_types);
+            let ty = Ty::fun(pts, bret);
+            return self.set(e, ty);
+        }
+        self.expr(e)
+    }
+
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
         if let Expr::Lambda { params, body } = self.file.expr(e).clone() {
             let bind_names: Vec<String> = if !params.is_empty() {
@@ -7894,7 +7987,15 @@ impl<'a> Checker<'a> {
                                 let pt = sig.lambda_param_types.get(i).cloned().unwrap_or_default();
                                 let prev = self.allow_lambda_mutation;
                                 self.allow_lambda_mutation = sig.is_inline;
-                                let t = self.check_lambda_with_types(a, &pt);
+                                // A RECEIVER function-type param (`Recv.(A) -> R`): bind `pt[0]` as the
+                                // lambda's implicit `this`; the rest are its value params.
+                                let t = if sig.lambda_recv.get(i).copied().unwrap_or(false)
+                                    && !pt.is_empty()
+                                {
+                                    self.check_lambda_with_receiver(a, pt[0], &pt[1..])
+                                } else {
+                                    self.check_lambda_with_types(a, &pt)
+                                };
                                 self.allow_lambda_mutation = prev;
                                 return t;
                             }
@@ -9132,6 +9233,7 @@ impl<'a> Checker<'a> {
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
+            lambda_recv: Vec::new(),
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,

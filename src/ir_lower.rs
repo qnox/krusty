@@ -4219,6 +4219,16 @@ impl<'a> Lower<'a> {
             return None;
         }
         let arity = sig.params.len();
+        // A RECEIVER lambda passed to a `Recv.(value…) -> R` user parameter: its FIRST `sig.params` entry
+        // is the receiver (the closure method's leading parameter), bound as the implicit `this` so a bare
+        // member/extension call inside dispatches against it. The user's EXPLICIT params are the remaining
+        // (value) parameters. `None` for an ordinary lambda.
+        let recv_ty = self.info.recv_lambda_tys.get(&e).copied();
+        let value_arity = if recv_ty.is_some() {
+            arity.saturating_sub(1)
+        } else {
+            arity
+        };
         // A lambda inside a class method could capture `this`/fields — not modeled yet.
         if self.cur_class.is_some() {
             return None;
@@ -4232,17 +4242,18 @@ impl<'a> Lower<'a> {
         if sig.ret == Ty::Nothing && !body_has_bare_return(self.afile, body) {
             return None;
         }
-        // Bound parameter names: explicit, or the implicit single `it` for a unary lambda.
+        // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. For a receiver
+        // lambda these are the VALUE parameters only (the receiver binds as `this`, separately).
         let bind_names: Vec<String> = if !params.is_empty() {
             params.to_vec()
-        } else if arity == 1 {
+        } else if value_arity == 1 {
             vec!["it".to_string()]
-        } else if arity == 0 {
+        } else if value_arity == 0 {
             vec![]
         } else {
             return None;
         };
-        if bind_names.len() != arity {
+        if bind_names.len() != value_arity {
             return None;
         }
         // Captured free variables: enclosing locals/parameters the body reads but the lambda doesn't
@@ -4273,7 +4284,17 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *ty));
         }
-        for (name, pty) in bind_names.iter().zip(sig.params.iter()) {
+        // For a receiver lambda, the FIRST closure parameter is the receiver — bind it as `this` (and the
+        // value parameters are `sig.params[1..]`). `cur_class` is already cleared (the guard above bails
+        // on a lambda inside a class method), so bare member/extension calls route through implicit-`this`.
+        let value_params: &[Ty] = if let Some(rty) = recv_ty {
+            let v = self.fresh_value();
+            self.scope.push(("this".to_string(), v, rty));
+            &sig.params[1..]
+        } else {
+            &sig.params
+        };
+        for (name, pty) in bind_names.iter().zip(value_params.iter()) {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *pty));
         }
@@ -8026,6 +8047,27 @@ impl<'a> Lower<'a> {
                     });
                     return Some(self.coerce_generic_read(call, e, m.ret));
                 }
+            }
+        }
+        // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
+        // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
+        // static impl). Mirrors a qualified `recv.name(args)` module-extension call.
+        if let Some(&fid) = self
+            .ext_fun_ids
+            .get(&(this_ty.descriptor(), name.to_string()))
+        {
+            let params = self.ir.functions[fid as usize].params.clone();
+            if params.len() == args.len() + 1 {
+                let recv = self.ir.add_expr(IrExpr::GetValue(this_v));
+                let mut a = vec![recv];
+                for (arg, pt) in args.iter().zip(&params[1..]) {
+                    a.push(self.lower_arg(*arg, pt)?);
+                }
+                return Some(self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Local(fid),
+                    dispatch_receiver: None,
+                    args: a,
+                }));
             }
         }
         // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
