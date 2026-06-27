@@ -212,7 +212,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
-            if let Some(s) = class_generic_sig(c) {
+            if let Some(s) = class_generic_sig(file, c) {
                 lo.ir.class_signatures.insert(internal.clone(), s);
             }
             // A field whose declared type is a bare type parameter (`val a: A`) gets a field `Signature`
@@ -672,7 +672,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     lo.ir.suspend_funs.push(fid);
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
-                if let Some(s) = fn_generic_sig(m) {
+                if let Some(s) = fn_generic_sig(file, m) {
                     lo.ir.signatures.insert(fid, s);
                 }
                 methods.insert(m.name.clone(), (mi as u32, fid, ret));
@@ -1200,7 +1200,7 @@ pub fn lower_file(file: &ast::File, info: &TypeInfo, syms: &SymbolTable) -> Opti
                     .insert((f.name.clone(), crate::resolve::erased_params_key(sig)), id);
                 // Emit a JVM generic `Signature` for a type-parameterized function (kotlinc does), so the
                 // bytecode matches for generics. `None` for non-generic / not-yet-modeled shapes.
-                if let Some(s) = fn_generic_sig(f) {
+                if let Some(s) = fn_generic_sig(file, f) {
                     lo.ir.signatures.insert(id, s);
                 }
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
@@ -15859,12 +15859,12 @@ fn data_array_param(t: &Ty) -> Option<&'static str> {
 /// Extract the BACKEND-AGNOSTIC generic-signature shape of a generic class (`class Box<T>`), or `None`
 /// for a non-generic class / one with explicit supertypes (whose generic args aren't modeled yet) / an
 /// unsupported bound. The `jvm` backend formats this into the class `Signature` attribute.
-fn class_generic_sig(c: &ast::ClassDecl) -> Option<crate::ir::IrGenericSig> {
+fn class_generic_sig(file: &ast::File, c: &ast::ClassDecl) -> Option<crate::ir::IrGenericSig> {
     if c.type_params.is_empty() || c.base_class.is_some() || !c.supertypes.is_empty() {
         return None;
     }
     Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(&c.type_params, &c.type_param_bounds)?,
+        type_params: type_param_bounds_ir(file, &c.type_params, &c.type_param_bounds)?,
         param_tparams: Vec::new(),
         ret_tparam: None,
     })
@@ -15899,7 +15899,7 @@ fn class_field_tparams(c: &ast::ClassDecl) -> Vec<(String, String)> {
 /// a non-generic function / an unmodeled shape (a type parameter inside a generic argument like
 /// `List<T>`, a vararg, an unsupported bound). Concrete parameter/return types are left to the backend
 /// (which reads them from the `IrFunction`); only the bare-type-parameter positions are recorded.
-fn fn_generic_sig(f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
+fn fn_generic_sig(file: &ast::File, f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
     if f.type_params.is_empty() {
         return None;
     }
@@ -15923,7 +15923,7 @@ fn fn_generic_sig(f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
         _ => None,
     };
     Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(tps, &f.type_param_bounds)?,
+        type_params: type_param_bounds_ir(file, tps, &f.type_param_bounds)?,
         param_tparams,
         ret_tparam,
     })
@@ -15933,6 +15933,7 @@ fn fn_generic_sig(f: &ast::FunDecl) -> Option<crate::ir::IrGenericSig> {
 /// `Any` bound). `None` if a bound is a non-`Any`, non-primitive type (not modeled yet → omit the whole
 /// signature). Backend-agnostic: the bound is a Kotlin type; the JVM backend maps a primitive to its wrapper.
 fn type_param_bounds_ir(
+    file: &ast::File,
     names: &[String],
     bounds: &[(String, ast::TypeRef)],
 ) -> Option<Vec<(String, Ty)>> {
@@ -15942,9 +15943,18 @@ fn type_param_bounds_ir(
         let bound = match bounds.iter().find(|(n, _)| n == tp) {
             None => any(),
             Some((_, b)) if b.name == "Any" && !b.nullable => any(),
-            Some((_, b)) => match Ty::from_name(&b.name).filter(|t| t.is_primitive()) {
-                Some(t) => ty_to_ir(t),
-                None => return None,
+            // A primitive bound (`T : Int`) is specialized; its Signature bound is the boxed wrapper.
+            Some((_, b)) if Ty::from_name(&b.name).is_some_and(|t| t.is_primitive()) => {
+                ty_to_ir(Ty::from_name(&b.name).unwrap())
+            }
+            // A PARAMETERIZED bound (`T : Comparable<T>`, `T : List<String>`) needs a nested generic
+            // signature we don't build here — suppress the whole signature rather than emit a wrong one.
+            Some((_, b)) if !b.targs.is_empty() || b.arg.is_some() => return None,
+            // A simple reference bound (`T : I`, `T : CharSequence`) → resolve to its class type; the
+            // JVM backend (`jvm_bound_descriptor`) emits it as `L<internal>;` (kotlinc does the same).
+            Some((_, b)) => match ty_to_ir(ty_of(file, b)) {
+                t @ Ty::Obj(_, _) => t,
+                _ => return None,
             },
         };
         out.push((tp.clone(), bound));

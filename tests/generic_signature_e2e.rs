@@ -160,3 +160,33 @@ fn primitive_bounded_type_param_signature_uses_wrapper() {
         Some("<T:Ljava/lang/Integer;>(TT;)TT;")
     );
 }
+
+#[test]
+fn reference_bounded_type_param_emits_class_signature() {
+    // A reference bound — a user interface `T : I` or a stdlib `T : CharSequence` — must appear in the
+    // class generic Signature as its erased descriptor; krusty previously emitted NO Signature at all
+    // (ir_lower dropped the bound). A PARAMETERIZED bound (`T : Comparable<T>`) is still suppressed.
+    let src = "interface I\n\
+        class Usr<T : I>(val n: Int)\n\
+        class Seq<T : CharSequence>(val n: Int)\n\
+        class Cmp<T : Comparable<T>>(val n: Int)\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    let class_sig = |name: &str| -> Option<String> {
+        cs.iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, b)| krusty::jvm::classreader::parse_class(b).ok())
+            .and_then(|ci| ci.signature)
+    };
+    assert_eq!(
+        class_sig("Usr").as_deref(),
+        Some("<T:LI;>Ljava/lang/Object;")
+    );
+    assert_eq!(
+        class_sig("Seq").as_deref(),
+        Some("<T:Ljava/lang/CharSequence;>Ljava/lang/Object;")
+    );
+    // Parameterized bound: conservatively suppressed (no wrong descriptor).
+    assert_eq!(class_sig("Cmp"), None);
+}
