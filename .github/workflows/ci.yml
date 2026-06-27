@@ -38,7 +38,7 @@ jobs:
       # (-> test-all) provisions both per supported version on a miss, so the differential + the
       # conformance gates actually run (they FAIL, not skip, without these).
       - name: cache kotlin toolchain + box corpus
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             .kotlinc
