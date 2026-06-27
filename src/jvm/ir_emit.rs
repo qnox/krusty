@@ -2327,7 +2327,17 @@ fn jvm_bound_descriptor(bound: &Ty) -> Option<String> {
     if ty.is_primitive() {
         return ty.nullable_boxed().map(|nb| nb.descriptor());
     }
-    None
+    // A reference bound — `T : Foo`, `T : CharSequence` (ir_lower already suppressed parameterized
+    // bounds) — emits its erased class descriptor `L<internal>;`, mapping a Kotlin built-in
+    // (`kotlin/CharSequence` → `java/lang/CharSequence`) the same way the emitter maps any owner.
+    match ty {
+        Ty::String => Some("Ljava/lang/String;".to_string()),
+        Ty::Obj(n, _) => Some(format!(
+            "L{};",
+            crate::jvm::jvm_class_map::to_jvm_internal(n)
+        )),
+        _ => None,
+    }
 }
 
 /// Emit the JVM `<name>$default(self, params…, mask: int, marker: Object)` synthetic stub for an
