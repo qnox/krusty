@@ -1092,7 +1092,7 @@ pub fn resolve_instance(
     args: &[Ty],
 ) -> Option<LibraryMember> {
     select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
-        let ret = nullable_return_type(o.callable.ret, o.ret_nullable);
+        let ret = selected_return_type(o.ret_class, o.ret_nullable, o.callable.ret);
         let mut member = LibraryMember::new(
             o.callable.name,
             o.callable.params,
@@ -1154,7 +1154,7 @@ pub fn resolve_instance_member(
     } else {
         o.callable.ret
     };
-    let ret = nullable_return_type(ret, o.ret_nullable);
+    let ret = selected_return_type(o.ret_class, o.ret_nullable, ret);
     Some(ResolvedMember { ret, member })
 }
 
@@ -1318,7 +1318,7 @@ mod tests {
         }
 
         fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
-            (internal == "kotlin/UInt").then(|| crate::libraries::LibraryType {
+            matches!(internal, "kotlin/UInt" | "demo/Box").then(|| crate::libraries::LibraryType {
                 is_public: true,
                 kind: TypeKind::Class,
                 supertypes: vec!["kotlin/Any".to_string()],
@@ -1329,7 +1329,7 @@ mod tests {
                 sam_method: None,
                 companion_object: None,
                 value_companion_fns: Vec::new(),
-                value_underlying: Some(Ty::Int),
+                value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
             })
         }
     }
@@ -1426,6 +1426,66 @@ mod tests {
         }
     }
 
+    fn member_nullable_string_info() -> FunctionInfo {
+        let receiver = Ty::obj("demo/Box");
+        let callable = LibraryCallable {
+            owner: "demo/Box".to_string(),
+            name: "maybe".to_string(),
+            params: vec![],
+            ret: Ty::String,
+            physical_ret: Ty::String,
+            descriptor: "()Ljava/lang/String;".to_string(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind: FnKind::Member,
+            receiver: Some(receiver),
+            ret_nullable: true,
+            ret_class: None,
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
+    fn member_metadata_class_info() -> FunctionInfo {
+        let receiver = Ty::obj("demo/Box");
+        let callable = LibraryCallable {
+            owner: "demo/Box".to_string(),
+            name: "names".to_string(),
+            params: vec![],
+            ret: Ty::obj("kotlin/Any"),
+            physical_ret: Ty::obj("kotlin/Any"),
+            descriptor: "()Ljava/lang/Object;".to_string(),
+            inline: InlineKind::None,
+            default_call: false,
+            vararg_elem: None,
+            signature: None,
+            origin: Origin::Library,
+        };
+        FunctionInfo {
+            kind: FnKind::Member,
+            receiver: Some(receiver),
+            ret_nullable: false,
+            ret_class: Some(Ty::obj_args("kotlin/collections/List", &[Ty::String])),
+            flags: FnFlags::default(),
+            callable,
+            public: true,
+            receiver_rank: 0,
+            overload_rank: 0,
+            generic_sig: None,
+            call_sig: CallSig::default(),
+        }
+    }
+
     #[test]
     fn top_level_default_callable_preserves_metadata_return_type() {
         let source = FakeSource {
@@ -1470,5 +1530,34 @@ mod tests {
             .expect("nullable extension callable should resolve");
         assert_eq!(call.ret, Ty::nullable(Ty::String));
         assert_eq!(call.physical_ret, Ty::String);
+    }
+
+    #[test]
+    fn instance_member_preserves_nullable_metadata_return() {
+        let source = FakeSource {
+            name: "maybe",
+            receiver: Some(Ty::obj("demo/Box")),
+            info: member_nullable_string_info(),
+        };
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[])
+            .expect("nullable member should resolve");
+        assert_eq!(resolved.ret, Ty::nullable(Ty::String));
+        assert_eq!(resolved.member.physical_ret, Ty::String);
+    }
+
+    #[test]
+    fn instance_member_preserves_metadata_return_class() {
+        let source = FakeSource {
+            name: "names",
+            receiver: Some(Ty::obj("demo/Box")),
+            info: member_metadata_class_info(),
+        };
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[])
+            .expect("member with metadata return class should resolve");
+        assert_eq!(
+            resolved.ret,
+            Ty::obj_args("kotlin/collections/List", &[Ty::String])
+        );
+        assert_eq!(resolved.member.physical_ret, Ty::obj("kotlin/Any"));
     }
 }

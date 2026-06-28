@@ -4546,18 +4546,18 @@ impl<'a> Parser<'a> {
                 self.file.add_expr(Expr::LongLit(v), span)
             }
             TokenKind::UIntLit => {
-                let v = parse_int_literal(self.text()); // suffix stripped inside
+                let v = parse_unsigned_literal_bits(self.text()); // suffix stripped inside
                 self.bump();
                 // A `U`-suffixed literal (no `L`) is `UInt` if it fits, else `ULong` (Kotlin's rule):
                 // e.g. `0xffff_ffff_ffffU` exceeds `UInt.MAX` so it's a `ULong`.
-                if v >= 0 && (v as u64) > u32::MAX as u64 {
-                    self.file.add_expr(Expr::ULongLit(v), span)
+                if v > u32::MAX as u64 {
+                    self.file.add_expr(Expr::ULongLit(v as i64), span)
                 } else {
-                    self.file.add_expr(Expr::UIntLit(v), span)
+                    self.file.add_expr(Expr::UIntLit(v as i64), span)
                 }
             }
             TokenKind::ULongLit => {
-                let v = parse_int_literal(self.text());
+                let v = parse_unsigned_literal_bits(self.text()) as i64;
                 self.bump();
                 self.file.add_expr(Expr::ULongLit(v), span)
             }
@@ -5253,7 +5253,7 @@ fn unescape_chunk(inner: &str) -> String {
 /// Parses into `u64` (so `0xFFFFFFFF`/`0xFFFFFFFFFFFFFFFF` fit) then reinterprets as `i64`.
 fn parse_int_literal(text: &str) -> i64 {
     // Strip trailing type suffixes (L, u, U, uL, UL) before parsing.
-    let text = text.trim_end_matches(|c: char| matches!(c, 'L' | 'l' | 'u' | 'U'));
+    let text = text.trim_end_matches(['L', 'l', 'u', 'U']);
     let t: String = text.chars().filter(|c| *c != '_').collect();
     let (radix, digits) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         (16, h)
@@ -5269,6 +5269,19 @@ fn parse_int_literal(text: &str) -> i64 {
             .map(|v| v as i64)
             .unwrap_or(0)
     }
+}
+
+fn parse_unsigned_literal_bits(text: &str) -> u64 {
+    let text = text.trim_end_matches(|c: char| matches!(c, 'L' | 'l' | 'u' | 'U'));
+    let t: String = text.chars().filter(|c| *c != '_').collect();
+    let (radix, digits) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (16, h)
+    } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (2, b)
+    } else {
+        (10, t.as_str())
+    };
+    u64::from_str_radix(digits, radix).unwrap_or(0)
 }
 
 fn unquote(raw: &str) -> String {

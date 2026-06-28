@@ -1328,6 +1328,9 @@ fun box(): String {
     if (Byte.MAX_VALUE.toInt() != 127) return "f4"
     if (Short.MIN_VALUE.toInt() != -32768) return "f5"
     if (Int.MAX_VALUE * 2L + 1 != 4294967295L) return "f6"
+    if (UInt.MIN_VALUE != 0u) return "f6a"
+    if (UInt.MAX_VALUE.toLong() != 4294967295L) return "f6b"
+    if (9223372036854775808uL.toString() != "9223372036854775808") return "f6c"
     // non-overflowing loops at the type boundary
     var c1 = 0
     for (i in M downTo M) c1++

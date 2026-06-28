@@ -100,6 +100,49 @@ impl JvmLibraries {
             .collect()
     }
 
+    fn metadata_static_companion_consts_for_type(
+        &self,
+        internal: &str,
+    ) -> std::collections::HashMap<String, LibraryConst> {
+        use crate::jvm::classreader::ConstVal;
+
+        let Some(ci) = self.cp.find(internal) else {
+            return std::collections::HashMap::new();
+        };
+        let companion_internal = format!("{internal}$Companion");
+        let Some(companion) = self.cp.find(&companion_internal) else {
+            return std::collections::HashMap::new();
+        };
+        let prop_rets = super::metadata::class_property_return_classes(&companion);
+        if prop_rets.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        ci.fields
+            .iter()
+            .filter_map(|f| {
+                let ret = prop_rets.get(&f.name)?;
+                let ty = metadata_return_ty(Some(ret))?;
+                let value = match f.const_value.as_ref()? {
+                    ConstVal::Int(v) => LibConst::Int(*v),
+                    ConstVal::Long(v) => LibConst::Long(*v),
+                    ConstVal::Float(v) => LibConst::Float(*v),
+                    ConstVal::Double(v) => LibConst::Double(*v),
+                    ConstVal::Str(_) => return None,
+                };
+                Some((f.name.clone(), LibraryConst { ty, value }))
+            })
+            .collect()
+    }
+
+    fn companion_consts_for_type(
+        &self,
+        internal: &str,
+    ) -> std::collections::HashMap<String, LibraryConst> {
+        let mut out = self.primitive_companion_consts_for_type(internal);
+        out.extend(self.metadata_static_companion_consts_for_type(internal));
+        out
+    }
+
     fn builtin_members_for_type(&self, internal: &str) -> Vec<LibraryMember> {
         let kotlin = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal)
             .unwrap_or(internal);
@@ -1005,7 +1048,7 @@ impl SymbolSource for JvmLibraries {
                 .chain(self.builtin_members_for_type(internal))
                 .collect(),
             companion,
-            companion_consts: self.primitive_companion_consts_for_type(&ci.this_class),
+            companion_consts: self.companion_consts_for_type(&ci.this_class),
             sam_method: self.sam_method_for_class(&ci.this_class),
             companion_object,
             value_companion_fns: self.value_companion_fns_for_class(&ci.this_class),
