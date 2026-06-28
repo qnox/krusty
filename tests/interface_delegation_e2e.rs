@@ -33,3 +33,25 @@ fun box(): String { val c = C(IA(), IB()); return if (c.a() + c.b() == \"ab\") \
         "OK"
     );
 }
+
+/// Delegation to an interface that EXTENDS another interface (`Second : First`, `C : Second by s`):
+/// the forwarders must cover `First`'s inherited methods too, not just `Second`'s own — otherwise the
+/// inherited method stays abstract (an `AbstractMethodError`).
+#[test]
+fn delegation_forwards_inherited_super_interface_methods() {
+    const SRC: &str = "interface First { fun foo(): Int }\n\
+interface Second : First { fun bar(): Int }\n\
+class Impl : Second { override fun foo() = 1; override fun bar() = 2 }\n\
+class Test(s: Second) : Second by s\n\
+fun box(): String {\n\
+    val t = Test(Impl())\n\
+    if (t.foo() != 1) return \"f1\"\n\
+    if (t.bar() != 2) return \"f2\"\n\
+    if (t !is First) return \"f3\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("delegation to a sub-interface forwards inherited methods"),
+        "OK"
+    );
+}
