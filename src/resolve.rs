@@ -3097,6 +3097,12 @@ pub enum ExprLowering {
         params: Vec<Ty>,
         ret: Ty,
     },
+    /// Kotlin `a(args)` operator call resolved as `a.invoke(args)` on a non-function receiver.
+    InvokeOperator {
+        receiver: ExprId,
+        receiver_ty: Ty,
+        params: Vec<Ty>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -3877,6 +3883,55 @@ impl<'a> Checker<'a> {
             );
         }
         sig.ret
+    }
+    fn record_invoke_operator(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let member = crate::module_symbols::ModuleSymbols::new(self.syms)
+            .functions(CALLABLE_INVOKE_OPERATOR, Some(receiver_ty))
+            .overloads
+            .into_iter()
+            .find(|o| o.kind == crate::libraries::FnKind::Member)
+            .map(|o| (o.callable.params, o.callable.ret))
+            .or_else(|| {
+                crate::call_resolver::resolve_instance_member(
+                    &*self.syms.libraries,
+                    receiver_ty,
+                    CALLABLE_INVOKE_OPERATOR,
+                    arg_tys,
+                )
+                .map(|m| (m.member.params, m.ret))
+            })?;
+        let (params, ret) = member;
+        if params.len() != arg_tys.len() {
+            self.diags.error(
+                span,
+                format!(
+                    "invoke operator expects {} args, got {}",
+                    params.len(),
+                    arg_tys.len()
+                ),
+            );
+        } else {
+            for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
+                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+            }
+            self.expr_lowers.insert(
+                call,
+                ExprLowering::InvokeOperator {
+                    receiver,
+                    receiver_ty,
+                    params,
+                },
+            );
+        }
+        Some(ret)
     }
     fn local_function_expr_count(&self) -> usize {
         self.expr_lowers
@@ -8178,6 +8233,13 @@ impl<'a> Checker<'a> {
                     if let Ty::Fun(s) = local.ty {
                         let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
                         return self.record_callable_invoke(call, callee, s, args, &arg_tys, span);
+                    }
+                    let receiver_ty = local.ty;
+                    let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr(*a)).collect();
+                    if let Some(ret) =
+                        self.record_invoke_operator(call, callee, receiver_ty, args, &arg_tys, span)
+                    {
+                        return ret;
                     }
                 }
                 // Calling a TOP-LEVEL property of function type: `val x: () -> Int = ...; x()` (e.g. a

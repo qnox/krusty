@@ -13414,6 +13414,66 @@ impl<'a> Lower<'a> {
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
                 Expr::Name(fname) => {
+                    if let Some(ExprLowering::InvokeOperator {
+                        receiver,
+                        receiver_ty,
+                        params,
+                    }) = self.info.expr_lowers.get(&e).cloned()
+                    {
+                        let rt = receiver_ty;
+                        if let Some((class, index, fid, mret)) = self
+                            .class_of(rt)
+                            .map(|ci| ci.internal.clone())
+                            .and_then(|i| self.resolve_method(&i, "invoke"))
+                        {
+                            if params.len() != args.len() {
+                                return None;
+                            }
+                            let recv = self.expr(receiver)?;
+                            let target_params = self.ir.functions[fid as usize].params.clone();
+                            let a = self.lower_args(&args, &target_params)?;
+                            let call = self.ir.add_expr(IrExpr::MethodCall {
+                                class,
+                                index,
+                                receiver: recv,
+                                args: a.into_iter().map(Some).collect(),
+                            });
+                            return Some(self.coerce_generic_read(call, e, mret));
+                        }
+                        if let Ty::Obj(internal, _) = rt {
+                            if let Some(resolved) = crate::call_resolver::resolve_instance_member(
+                                &*self.syms.libraries,
+                                rt,
+                                "invoke",
+                                &params,
+                            ) {
+                                let recv = self.expr(receiver)?;
+                                let ret = resolved.ret;
+                                let member = resolved.member;
+                                let physical_ret = member.physical_ret;
+                                let mut a = Vec::new();
+                                for (i, &arg) in args.iter().enumerate() {
+                                    match member.params.get(i) {
+                                        Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                                        None => a.push(self.expr(arg)?),
+                                    }
+                                }
+                                let owner = member.owner.unwrap_or_else(|| internal.to_string());
+                                let call = self.ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Virtual {
+                                        owner,
+                                        name: member.name,
+                                        descriptor: member.descriptor,
+                                        interface: member.is_interface,
+                                    },
+                                    dispatch_receiver: Some(recv),
+                                    args: a,
+                                });
+                                return Some(self.coerce_erased(call, ret, physical_ret));
+                            }
+                        }
+                        return None;
+                    }
                     // NAMED-ARGUMENT call to a CLASSPATH top-level function (`foo(b = …, a = …)`): reorder
                     // the arguments into parameter order (from the callee's `@Metadata` names) so the
                     // positional lowering below sees them positionally. Same-file/module functions have
